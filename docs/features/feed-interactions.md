@@ -14,7 +14,7 @@ and the counts on the original move as you act.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 23b3189e2b.
+Stamped 2026-11-01 at c6d5a3aabc.
 
 1. [app] Liking moves that post's count and a second tap takes it back — `docs/goal/ui/feed.md` § Interaction bar
    - `tests/e2e-unified/tests/test_feed.py::test_like_moves_its_own_count`
@@ -42,36 +42,46 @@ Stamped 2026-09-19 at 23b3189e2b.
    - `tests/e2e-unified/tests/test_room_restricted_reply.py::test_a_members_reply_to_a_room_post_opens_for_the_room_and_nobody_else`
 10. [app] Replying under a restricted post you cannot write for goes public only after you tick "Post my reply publicly" in the reply box, which first tells you the reply would be public; left unticked, the reply is refused with the reason — `docs/goal/ui/feed.md` § Encryption at rest
    - `tests/e2e-unified/tests/test_room_restricted_reply.py::test_an_outsiders_reply_to_a_room_post_is_refused_until_confirmed_public`
+11. [app] A post's reactions show as pills under its interaction bar, one per emoji with its count and your own highlighted; tapping a pill adds your reaction of that emoji or takes it back, and a repost row or a Bluesky post shows none — `docs/goal/ui/feed.md` § Layout & flow
+   - `tests/e2e-unified/tests/test_feed_reaction_pills.py::test_reaction_pill_paints_counts_and_toggles_my_own_reaction`
+12. [nest] Your nest tallies reactions per emoji from what it has indexed, counting each person once however many devices they used, and a like that arrives as a post — from the fediverse, nostr or an imported archive — counts once with a native tap by the same person; taking a reaction or a like back removes it — `docs/goal/ui/feed.md` § Layout & flow
+   - `tests/e2e-unified/tests/api/test_reaction_tally.py::test_reaction_tally_counts_distinct_actors_and_clears_on_delete`
+   - `tests/e2e-unified/tests/api/test_reaction_tally.py::test_upvote_post_and_door_like_count_once`
+   - `tests/e2e-unified/tests/api/test_reaction_tally.py::test_upvote_post_alone_counts_once_and_delete_reverses`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
 | windows | ✅ full | 0.1.2-dev+e82b932f.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+0683bd4d.dirty standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5-dev+0683bd4d.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_like_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_like_toggle_records_and_reverses_the_callers_like` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_feed.py::test_reply_creates_a_post_and_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_feed.py::test_repost_toggle_creates_and_removes_the_callers_repost` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_quote_creates_a_post_and_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_feed_quote_button_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_interaction_bar_has_quote_and_all_buttons` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_like_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_feed.py::test_like_toggle_records_and_reverses_the_callers_like` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_feed.py::test_reply_creates_a_post_and_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_feed.py::test_repost_toggle_creates_and_removes_the_callers_repost` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_quote_creates_a_post_and_moves_its_own_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_feed_quote_button_present` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_feed.py::test_interaction_bar_has_quote_and_all_buttons` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_engagement_counts.py::test_like_increments_like_count_idempotently` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_engagement_counts.py::test_two_actors_each_count_once` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_engagement_counts.py::test_reference_post_increments_target_count_idempotently` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_unified_interact.py::test_fauna_post_like_returns_ok` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_feed.py::test_a_repost_names_the_reposter_shows_the_original_and_opens_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_feed.py::test_a_count_shows_no_number_until_the_post_has_activity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_feed_restricted_reference.py::test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_still_works` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_a_members_reply_to_a_room_post_opens_for_the_room_and_nobody_else` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_an_outsiders_reply_to_a_room_post_is_refused_until_confirmed_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_feed.py::test_a_repost_names_the_reposter_shows_the_original_and_opens_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_feed.py::test_a_count_shows_no_number_until_the_post_has_activity` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_feed_restricted_reference.py::test_words_under_a_restricted_post_are_refused_and_a_bare_repost_or_quote_still_works` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_a_members_reply_to_a_room_post_opens_for_the_room_and_nobody_else` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_room_restricted_reply.py::test_an_outsiders_reply_to_a_room_post_is_refused_until_confirmed_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_feed_reaction_pills.py::test_reaction_pill_paints_counts_and_toggles_my_own_reaction` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_reaction_tally.py::test_reaction_tally_counts_distinct_actors_and_clears_on_delete` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_reaction_tally.py::test_upvote_post_and_door_like_count_once` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_reaction_tally.py::test_upvote_post_alone_counts_once_and_delete_reverses` | nest (linux): passed |
 <!-- features-render:end -->

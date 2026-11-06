@@ -40,9 +40,9 @@ keep the real copy and never receive the tombstone (§ Legal takedown →
 Latency-independent (convention 14): every wait is a named generous budget
 over a deadline poll.
 
-App arms: **tui** (the lead app), then **web**, **linux** and **android** (the
-badge's trickle-down); windows, macos and ios join
-with their legs, each adding its marker here. Every app paints the same queue
+App arms: **tui** (the lead app), then **web**, **linux**, **android**,
+**macos**, **ios** and **windows**, the last of the seven (the badge's
+trickle-down). Every app paints the same queue
 and appeal, which branch on no ``content_type`` (§ Implementation status
 today); their arms of the report and block surfaces are also witnessed by
 ``test_admin_block.py`` and ``test_legal_takedown_notice.py``.
@@ -66,7 +66,7 @@ from helpers.room_seats import (  # noqa: F401 — room_app/room_seats are pytes
     wait_snippet,
 )
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux, pytest.mark.android]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux, pytest.mark.android, pytest.mark.macos, pytest.mark.ios, pytest.mark.windows]
 
 # The console's + the queue's own wording (i18n, en.yaml) — the shared verdicts
 # every app renders (`fauna_client_moderation::{takedown,appeal,admin_block}`).

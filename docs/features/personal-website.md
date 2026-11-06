@@ -9,9 +9,11 @@ guide: docs/guides/who-can-see-what.md § Public posts and your profile
 ## What a user gets
 
 Publish a post to the open web from its menu and copy a link that loads for
-anyone; unpublish it from Settings. Opt into your own subdomain and your published
-posts serve there. A paywalled post gets a link that unlocks the full text for the
-holder; a nest with no serving domain says so instead of handing you a dead link.
+anyone; unpublish it from Settings. Opt into your own subdomain and your
+published posts serve there. A paywalled post gets a link that unlocks the full
+text for the holder once you have let your nest serve that tier's paywalled
+posts (**Settings → Nests**); a nest with no serving domain says so instead of
+handing you a dead link.
 
 ## Coverage contract
 
@@ -58,37 +60,37 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+db30f58d.dirty standalone |
 | windows | ✅ full | 0.1.2-dev+c04c2468 standalone |
-| macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+ede1a6ab standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_publishing_a_post_from_the_feed_overflow_menu` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_published_post_management_section` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_web_link_actually_serves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_paywall_link_serves_the_full_body` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_paywall_link_serves_the_full_body` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_user_subdomain_toggle_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_the_subdomain_url_row_names_the_host_the_nest_serves_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_the_overflow_copy_verb_is_dead_without_a_serving_origin` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_serves_via_host_header` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_round_trips` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_feed_projects_web_slug_for_published_posts_only` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_publish_list_is_caller_scoped` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_a_stranger_republish_is_refused_and_the_authors_web_slug_is_unaffected` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_per_actor` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_user_class` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_publish_list_joins_the_gated_tier` | nest (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_site_the_nest_took_dark_tells_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_an_unpublished_or_deleted_page_stays_gone_across_a_restart` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_a_blanked_site_comes_back_at_the_next_boot` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_a_verified_custom_domain_serves_the_site_and_stops_when_withdrawn` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_publishing_alone_gives_a_front_page_and_a_feed` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_no_user_site_answers_at_the_reserved_hosts_and_paths` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_serves_via_host_header` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_round_trips` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_feed_projects_web_slug_for_published_posts_only` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_publish_list_is_caller_scoped` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_a_stranger_republish_is_refused_and_the_authors_web_slug_is_unaffected` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_per_actor` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_subdomain_hosting.py::test_subdomain_opt_in_is_user_class` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_web_publish_projections.py::test_publish_list_joins_the_gated_tier` | nest (linux): passed, nest (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_site_the_nest_took_dark_tells_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_an_unpublished_or_deleted_page_stays_gone_across_a_restart` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_web_revoke_durability.py::test_a_blanked_site_comes_back_at_the_next_boot` | nest (linux): passed, nest (macos): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_a_verified_custom_domain_serves_the_site_and_stops_when_withdrawn` | nest (linux): passed, nest (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_publishing_alone_gives_a_front_page_and_a_feed` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_web_host_routing.py::test_no_user_site_answers_at_the_reserved_hosts_and_paths` | nest (linux): passed, nest (macos): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py::test_a_user_site_never_shadows_the_mounted_spa_at_app` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_web_served_headers.py::test_a_members_script_is_never_given_a_wider_scope` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

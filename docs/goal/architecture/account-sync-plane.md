@@ -89,7 +89,7 @@ nest path. What an account without a nest lacks is enumerated per kind,
 never as a mode: nest-arbitrated kinds have no arbiter (they stay
 desensitized exactly as they do offline — the `offline_class`
 machinery already expresses this), MLS conversations have no delivery
-service (the PQ-1 problem, [`../behavior/p2p.md`](../behavior/p2p.md)
+service (the PQ-1 problem, [`../behavior/p2p.md`](../behavior/p2p-shared-set.md)
 § Cross-user shared-set transfer → Offline share initiation — designed
 2026-08-17: the delivery seat becomes a re-pointable role a member
 device can hold; unbuilt, so still the blocker for nest-less
@@ -851,7 +851,7 @@ over a different transport** — one protocol, N transports — riding the exist
   § Wormability posture — the peer leg adds the same listener surface and
   must satisfy the same eight rules (per-rule compliance record:
   § Wormability walk below; the share leg's own record + build contract:
-  p2p.md § Cross-user shared-set transfer, first design pass 2026-08-17).
+  p2p-shared-set.md § Cross-user shared-set transfer, first design pass 2026-08-17).
 
 ### The admission seam — one engine, witness-shaped (W2.6 gate 1; ratified 2026-08-11, refutable until W2.6 code)
 
@@ -863,7 +863,7 @@ in code, ruled once for all three consumers:
   admitted scope set, validity bound)`. Witness evaluation lives outside the
   core, one verifier per witness kind, each owned where its mechanics live
   ([`../behavior/devices.md`](../behavior/devices.md) for
-  `DeviceAuthorization`; [`../behavior/p2p.md`](../behavior/p2p.md)
+  `DeviceAuthorization`; [`../behavior/p2p.md`](../behavior/p2p-shared-set.md)
   § Cross-user shared-set transfer for M2 membership; T13 for the custody
   grant). The core's only admission duty is scope enforcement: every pull or
   serve checks its scope against the verdict's set. A witness kind the core
@@ -1021,7 +1021,7 @@ is a member of a T20 recipient-set group scope, verdict scope = exactly that
 scope. Same verdict-shaped core, same key-binding rule; the witness *form*
 is designed (T20 resolved 2026-08-17 — § The audience ladder → The
 recipient-set scheme, membership-witness bullet). Consumer:
-[`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation.
+[`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation.
 Enumerations reading "three witnesses" elsewhere describe the *built* set.
 
 ### Wormability walk — the peer leg against the eight rules (W2.6 gate 2; ratified; refutable by the security review)
@@ -1138,7 +1138,7 @@ The rules are owned by [`../behavior/p2p.md`](../behavior/p2p.md)
    admission-refused attempts (the pre-auth DoS bound) and all witness
    kinds alike.
 
-**The folder change-row kinds against the eight rules (designed 2026-10-14; refutable at build time, as the walk above is by its reviewers).** The same-account nest-down folder transfer ([`../behavior/p2p.md`](../behavior/p2p.md) § Same-account nest-down folder transfer; the shapes: [`../behavior/p2p-shared-set-build.md`](../behavior/p2p-shared-set-build.md) § Build design — the same-account row leg) adds two pull kinds to this leg, `fauna.peer.sync.changes.list` and `fauna.peer.sync.manifests.get`. **(1) by construction** — parsed only on an admitted connection, and each door re-checks per request that the verdict is an own-account `DeviceAuthorization`, as the chunk door does. **(2) obligation** — the two kinds, their four envelope structs and the shared row struct join `KIND_PAYLOAD_COVERAGE` with corpus entries, and the allowlist pin grows to seven. **(3) obligation** — the allowlist grows by exactly these two kinds, both pulls: a row rides as signed content and a manifest as self-verifying bytes; no push or nudge kind is added for the leg's new latency need (the engine's tick and the registry's admission notify carry it). **(4) by construction** — a row's only proof is its writer's signature, judged by the receiving engine's own reader under its set nonce ([`../behavior/p2p.md`](../behavior/p2p.md) § Peer-served change-row provenance), accepted into the provisional overlay and never the sequenced log, a delete view-only, a manifest verified by its hash and a chunk by its store key; a compromised sibling — already a holder of the account's keys — can feed at most rows the nest confirms or supersedes when it returns. **(5) obligation** — the leg's row ingest and the provenance judge compile under `account-runtime` with no `p2p-share` (the one-ingest lift), so the store-safe witness's third column keeps its meaning; the listener is the same node, off with participation. **(6) by construction** — severance per request at both doors: a removed device is refused at its next pull and its channel dropped from the registry; what it pulled before removal it holds, the residual bodies already carry. **(7) by construction** — the same capability brake. **(8) by construction, with the serve bounds named** — the same metered plane; a page serves at most `MAX_ROWS_PER_PAGE` rows and a manifest reply at most `MAX_BODY_BYTES_PER_REPLY`, and the pull side walks one cursor per sibling per pass and drops a sibling whose page claims more without advancing.
+**The folder change-row kinds against the eight rules (designed 2026-10-14; refutable at build time, as the walk above is by its reviewers).** The same-account nest-down folder transfer ([`../behavior/p2p.md`](../behavior/p2p.md) § Same-account nest-down folder transfer; the shapes: [`../behavior/p2p-shared-set-build.md`](../behavior/p2p-shared-set-build.md) § Build design — the same-account row leg) adds two pull kinds to this leg, `fauna.peer.sync.changes.list` and `fauna.peer.sync.manifests.get`. **(1) by construction** — parsed only on an admitted connection, and each door re-checks per request that the verdict is an own-account `DeviceAuthorization`, as the chunk door does. **(2) obligation** — the two kinds, their four envelope structs and the shared row struct join `KIND_PAYLOAD_COVERAGE` with corpus entries, and the allowlist pin grows to seven. **(3) obligation** — the allowlist grows by exactly these two kinds, both pulls: a row rides as signed content and a manifest as self-verifying bytes; no push or nudge kind is added for the leg's new latency need (the engine's tick and the registry's admission notify carry it). **(4) by construction** — a row's only proof is its writer's signature, judged by the receiving engine's own reader under its set nonce ([`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Peer-served change-row provenance), accepted into the provisional overlay and never the sequenced log, a delete view-only, a manifest verified by its hash and a chunk by its store key; a compromised sibling — already a holder of the account's keys — can feed at most rows the nest confirms or supersedes when it returns. **(5) obligation** — the leg's row ingest and the provenance judge compile under `account-runtime` with no `p2p-share` (the one-ingest lift), so the store-safe witness's third column keeps its meaning; the listener is the same node, off with participation. **(6) by construction** — severance per request at both doors: a removed device is refused at its next pull and its channel dropped from the registry; what it pulled before removal it holds, the residual bodies already carry. **(7) by construction** — the same capability brake. **(8) by construction, with the serve bounds named** — the same metered plane; a page serves at most `MAX_ROWS_PER_PAGE` rows and a manifest reply at most `MAX_BODY_BYTES_PER_REPLY`, and the pull side walks one cursor per sibling per pass and drops a sibling whose page claims more without advancing.
 
 
 ## Implementation status today

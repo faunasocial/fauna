@@ -15,10 +15,16 @@ absences:
 
 ## What a user gets
 
-The Linux app has a page for direct device-to-device connections: start and
-stop the tunnel, copy this device's address and its addresses on the local network,
-and see and remove the devices it has talked to. On every other app the same
-peer-to-peer transfer runs behind the folders page with no page of its own.
+The Linux app has a page for looking into direct device-to-device connections:
+start and stop a test tunnel that carries none of your files, copy this device's
+address and its addresses on the local network, and see and remove the devices
+it has talked to. Your files never wait on that page: where your devices pass
+files to each other directly, they do it in the background, and each device's
+**Peer transfers** switch is on its card on the **Devices** page. The transfers
+themselves are described in [Files move straight between your own
+devices](device-to-device-file-transfer.md), and handing a folder to someone
+else in person is [Share a folder in person, with no nest in
+between](offline-sharing.md).
 
 ## Coverage contract
 
@@ -41,7 +47,7 @@ Stamped 2026-09-19 at f62a5e4e1c.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| linux | ✅ full | 0.1.5-dev+0cfdd6c6 standalone |
 | windows | — absent | |
 | macos | — absent | |
 | ios | — absent | |

@@ -1584,3 +1584,114 @@ async fn a_re_read_refreshes_the_open_record_and_a_revoke_closes_it() {
         "a record whose row is gone closes"
     );
 }
+
+/// `folder-deposit.md` ruling 3: a version's author line names the app whose
+/// writer key deposited it from the roster — "<app> via <owner>" — reads the
+/// generic wording for a key no roster row names (or before any read), and is
+/// the recorder alone on a version nobody deposited.
+#[tokio::test]
+async fn a_deposited_versions_author_names_the_app_by_its_writer_key() {
+    let (m, api, _) = machine();
+    let writer = [0x5d; 32];
+    let hex = hex::encode(writer);
+    let line = |t: LocalizedText| {
+        let mut args: Vec<_> = t.args.into_iter().collect();
+        args.sort();
+        (t.key, args)
+    };
+    let s = |v: &str| v.to_string();
+
+    assert_eq!(
+        line(m.version_author(s("alice"), Some(hex.clone()))),
+        (
+            s("media.version_author_deposited_unknown"),
+            vec![(s("author"), s("alice"))]
+        ),
+        "before a roster read nothing names the key"
+    );
+    api.set_principals(vec![PrincipalInfo {
+        writer_ed25519: Some(fauna_protocol::ByteBuf::from(writer.to_vec())),
+        ..principal(
+            1,
+            "https://uploader.example/client.json",
+            Some("Uploader"),
+            10,
+        )
+    }]);
+    m.refresh().await;
+    assert_eq!(
+        line(m.version_author(s("alice"), Some(hex))),
+        (
+            s("media.version_author_deposited"),
+            vec![(s("app"), s("Uploader")), (s("author"), s("alice"))]
+        )
+    );
+    assert_eq!(
+        line(m.version_author(s("alice"), Some(hex::encode([0x5e; 32])))).0,
+        "media.version_author_deposited_unknown",
+        "a key the roster does not name"
+    );
+    assert_eq!(
+        line(m.version_author(s("alice"), None)),
+        (s("media.version_author"), vec![(s("author"), s("alice"))])
+    );
+}
+
+/// `folder-deposit.md` ruling 3: a roster read made before the depositor's
+/// principal row existed — the approve's own re-read, which runs before the
+/// app redeems its code at `/oauth/token`, where the nest writes the row —
+/// must not leave the depositor unnamed for good. A depositor key the loaded
+/// roster cannot name asks for one more read, once per key, so a key no
+/// roster will ever name (a member's seat) costs one read, never a loop.
+#[tokio::test]
+async fn a_depositor_the_loaded_roster_cannot_name_asks_for_one_more_read() {
+    let (m, api, _) = machine();
+    let writer = [0x6a; 32];
+    let hex = hex::encode(writer);
+
+    assert!(
+        m.depositor_read_wanted(vec![hex.clone()]),
+        "a roster never read is read"
+    );
+    assert!(
+        !m.depositor_read_wanted(vec![hex.clone()]),
+        "the read is asked once, not again while it is in flight"
+    );
+    m.refresh().await;
+    assert!(
+        !m.depositor_read_wanted(vec![hex.clone()]),
+        "a key already asked for is not asked again"
+    );
+
+    // A later depositor, approved after the page was read: the roster is
+    // loaded and stale.
+    let later = [0x6b; 32];
+    let later_hex = hex::encode(later);
+    api.set_principals(vec![PrincipalInfo {
+        writer_ed25519: Some(fauna_protocol::ByteBuf::from(later.to_vec())),
+        ..principal(
+            2,
+            "https://notes.example/client.json",
+            Some("Example Notes"),
+            20,
+        )
+    }]);
+    assert!(
+        m.depositor_read_wanted(vec![later_hex.clone()]),
+        "a loaded roster that cannot name the key is read again"
+    );
+    m.refresh().await;
+    assert_eq!(
+        m.version_author("alice".into(), Some(later_hex.clone()))
+            .key,
+        "media.version_author_deposited"
+    );
+    assert!(
+        !m.depositor_read_wanted(vec![later_hex.clone()]),
+        "a key the roster names needs no read"
+    );
+    assert!(
+        !m.depositor_read_wanted(vec!["not hex".into()]),
+        "a malformed key is no reason to read"
+    );
+}

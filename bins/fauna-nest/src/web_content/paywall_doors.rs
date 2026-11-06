@@ -310,7 +310,7 @@ fn confirming_page() -> Response {
         StatusCode::ACCEPTED,
         "Confirming your payment",
         "<p>Your payment is being confirmed. This page refreshes on its own.</p>\
-         <p>If nothing changes after a few minutes, ask the creator for your access code.</p>",
+         <p>If nothing changes after a few minutes, ask the creator for your claim code.</p>",
         r#"<meta http-equiv="refresh" content="5">
   "#,
     )
@@ -329,7 +329,7 @@ fn code_page(code: &str, direct: Option<&str>) -> Response {
         StatusCode::OK,
         "Thank you",
         &format!(
-            r#"<p>Your access code:</p><p class="code">{}</p>
+            r#"<p>Your claim code:</p><p class="code">{}</p>
 <p>Keep this code. Enter it in the box on any paid page of this site to open it. When a link expires, enter the code again.</p>{direct}
 <div class="nav"><a href="/">Home</a></div>"#,
             escape(code)

@@ -38,6 +38,22 @@ def spa_serving_nest(request, nest_mode, tmp_path_factory, static_dir):
     cleanup()
 
 
+@pytest.fixture()
+def spa_serving_floor_nest(request, nest_mode, tmp_path_factory, static_dir):
+    """``spa_serving_nest`` over real HTTPS on its self-signed floor: the box a
+    browser reaches with no public certificate, its app and its API on one
+    origin (``tls-certificates.md`` § The four audiences, the web app's
+    same-origin row)."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "spa-serving-floor-nest",
+        static_dir=static_dir, serve_tls=True,
+    )
+    yield nest
+    cleanup()
+
+
 @pytest.mark.feature("nest-serves-the-app")
 def test_spa_js_modules_have_correct_content_type(spa_serving_nest, static_dir):
     """JS files referenced by index.html must be served as JavaScript, not HTML."""
@@ -119,6 +135,58 @@ def test_the_nest_served_app_drives_a_login_to_feed_journey(request, app, spa_se
         app.wait_for("feed-tab")
         assert app.is_visible("feed-tab"), (
             f"the nest-served app signed in but never rendered the feed. "
+            f"error element: {app.error_text()!r}"
+        )
+        assert app.driver.eval_js("location.origin") == nest_origin, (
+            "the signed-in page left the nest's origin"
+        )
+    finally:
+        restore()
+
+
+@pytest.mark.feature("connect-and-sign-in")
+def test_the_nest_served_app_signs_in_on_the_self_signed_floor(
+    request, app, spa_serving_floor_nest
+):
+    """Web's witness of a home nest with no public certificate: the page and its
+    API on the nest's own origin, over the floor.
+
+    Web makes no certificate decision of its own, so its door is the browser's:
+    the one interstitial for the host, whose bypass covers the same-origin
+    fetch and WebSocket (``tls-certificates.md`` § The four audiences). The
+    browser context's ``ignore_https_errors`` stands in for that one click and
+    nothing else. The page must therefore be the nest's, never
+    ``_serve_spa_proxy``: there the trust decision would be the harness's.
+    """
+    import ssl
+    import urllib.error
+    from urllib.parse import urlsplit
+
+    from conftest import _login_app_as, _make_user
+
+    nest = spa_serving_floor_nest
+    parts = urlsplit(nest["url"])
+    nest_origin = f"{parts.scheme}://{parts.netloc}"
+    assert parts.scheme == "https", f"a floor nest must serve https, got {nest['url']!r}"
+    with pytest.raises(urllib.error.URLError) as refused:
+        urllib.request.urlopen(f"{nest_origin}/app/", context=ssl.create_default_context())
+    assert isinstance(refused.value.reason, ssl.SSLCertVerificationError), (
+        "the nest must present a certificate no public CA vouches for, or this "
+        f"walks the wrong branch: {refused.value.reason!r}"
+    )
+
+    user = _make_user(nest)
+    restore = app.driver.serve_from(nest["url"])
+    try:
+        served = app.driver.eval_js("location.origin + location.pathname")
+        assert served.startswith(f"{nest_origin}/app/"), (
+            f"the page must be the nest's own /app/ ({nest_origin}/app/), got "
+            f"{served!r}: on any other origin the trust decision is not the browser's"
+        )
+        _login_app_as(app, request, nest, user, spa_url=nest_origin, verify_live_actor=True)
+        app.wait_for("feed-tab")
+        assert app.is_visible("feed-tab"), (
+            "the app signed in over the floor but never rendered the feed. "
             f"error element: {app.error_text()!r}"
         )
         assert app.driver.eval_js("location.origin") == nest_origin, (

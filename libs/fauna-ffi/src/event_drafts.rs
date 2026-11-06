@@ -73,6 +73,20 @@ impl From<FfiEventDrafts> for EventDrafts {
     }
 }
 
+/// The events rail's FILL rule across the boundary: what the app's live draft
+/// becomes when the launch restore lands — `restored` when the user has not
+/// authored into `live`, else `live` untouched
+/// ([`EventDrafts::fill`]; `events.md` § Persistence, *A restore FILLS*). Every
+/// app's glue calls this at the moment the restore arrives, since the restore
+/// can land minutes after launch, after the user has started an event. An app
+/// with no live draft passes an all-empty one.
+#[uniffi::export]
+pub fn fill_event_draft(live: FfiEventDrafts, restored: FfiEventDrafts) -> FfiEventDrafts {
+    let mut live = EventDrafts::from(live);
+    live.fill(restored.into());
+    live.into()
+}
+
 /// UniFFI handle for one actor's events-rail draft autosync — the events twin
 /// of [`crate::FfiDraftsSync`], pre-bound to `EVENTS_RAIL` and typed rather
 /// than raw bytes. Wraps the shared `DraftsSync` (launch gate + last-saved
@@ -113,6 +127,10 @@ impl FfiEventDraftsSync {
     /// A transport/seal *failure* errors WITHOUT lifting the `DraftsSync` save
     /// gate, so a later `save_drafts` stays a no-op for the session and can
     /// never clobber the user's unread draft; the next launch retries.
+    ///
+    /// A transport failure is retried for minutes first (`DraftsSync::load`),
+    /// so never await this on a path that holds a page back, and hand what it
+    /// returns to [`fill_event_draft`], never straight into the live draft.
     pub async fn restore_drafts(&self) -> Result<Option<FfiEventDrafts>, FfiError> {
         let bytes = match self.sync.load().await.map_err(general_err)? {
             Some(bytes) => bytes,

@@ -97,7 +97,7 @@ Stamped 2026-10-11 at 29b0959751.
     - `tests/e2e-unified/tests/test_mail_policy_effects.py::test_codes_the_admin_lists_as_temporary_are_retried_not_bounced`
     - `tests/e2e-unified/tests/test_mail_policy_effects.py::test_ipv6_off_delivers_over_ipv4_only`
 29. [nest] With backscatter suppression on, no bounce is sent for mail whose sender failed its checks; switched off, those bounces are sent — `docs/goal/behavior/mail-policy-config.md` § Outbound delivery
-    - (none)
+    - `tests/e2e-unified/tests/platform/docker/test_mail_deploy_forwarder_ndr.py::test_backscatter_suppression_withholds_the_bounce_for_a_failing_sender`
 30. [nest] Turning outbound TLS reports off stops the nest sending them to other domains — `docs/goal/behavior/mail-policy-config.md` § Outbound delivery
     - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_tlsrpt_switched_off_sends_no_report`
 31. [app] A numeric field saved with something that is not a number keeps the value already saved — `docs/goal/behavior/mail-policy-config.md` § What `0` means on an unsigned knob
@@ -133,7 +133,7 @@ Stamped 2026-10-11 at 29b0959751.
 43. [nest] No member can take a standard role address — postmaster, abuse, noc, security, or the two report addresses — as an address or as a handle, whatever the admin's reserved list holds, even when it is empty — `docs/goal/behavior/mail-aliases.md` § Reserved local-parts (uncircumventable)
     - `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_role_names_refused_as_alias_and_handle_with_the_list_empty`
 44. [nest] Turning outbound DMARC reports off stops the nest sending them to other domains — `docs/goal/behavior/dmarc-reporting.md` § Generation is on by default
-    - (none)
+    - `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_outbound_dmarc_reports_switched_off_sends_no_report`
 45. [app] The Mail page rotates the newsletter unsubscribe secret on a second press of its button: the first press only asks, and once rotated new issues carry new links while the links in mail already sent stop working — `docs/goal/behavior/mail-mass-mailing.md` § Secret rotation
     - `tests/e2e-unified/tests/test_admin_mail_secret_rotation.py::test_rotating_the_unsubscribe_secret_takes_a_second_press_and_retires_old_links`
 46. [app] The Mail page rotates the forwarding secret on a second press of its button: the first press only asks, and once rotated forwards leave under a new address while a bounce to mail forwarded before still reaches the member — `docs/goal/behavior/mail-forwarding.md` § SRS scheme
@@ -144,13 +144,13 @@ Stamped 2026-10-11 at 29b0959751.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| linux | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| windows | ⚠ partial | 0.1.2-dev+ab96a0f8.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios | ⚠ partial | 0.1.2-dev+8b423269 standalone |
+| web | ✅ full | 0.1.5-dev+0daa3736 docker |
+| linux | ✅ full | 0.1.5-dev+0daa3736 docker |
+| windows | ✅ full | 0.1.2-dev+ab96a0f8.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+0daa3736 docker |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+8b423269 standalone |
+| tui | ✅ full | 0.1.5-dev+0daa3736 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -180,41 +180,41 @@ Stamped 2026-10-11 at 29b0959751.
 | 5 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_warmup_status` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_admin_reads_diagnostic_run_history` | nest (linux): passed, nest (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_standing_baseline_toggle_and_state_text` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_out_of_order_spam_thresholds_show_the_nest_refusal` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_turning_mail_off_on_the_mail_page_stops_the_mail_server` | tui (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_junk_threshold_moves_scored_mail_and_reject_threshold_refuses_it` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_junk_threshold_moves_scored_mail_and_reject_threshold_refuses_it` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_no_mail_is_held_back_on_its_spam_score` | nest (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_out_of_order_spam_thresholds_show_the_nest_refusal` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_turning_mail_off_on_the_mail_page_stops_the_mail_server` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_junk_threshold_moves_scored_mail_and_reject_threshold_refuses_it` | nest (linux): passed, nest (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_junk_threshold_moves_scored_mail_and_reject_threshold_refuses_it` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_no_mail_is_held_back_on_its_spam_score` | nest (linux): passed, nest (macos): passed |
 | 12 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_perimeter_dns.py::test_server_on_an_admin_blocklist_is_refused_at_the_door` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_connection_rate_limit_turns_fast_server_away_and_zero_admits_all` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_connection_rate_limit_turns_fast_server_away_and_zero_admits_all` | nest (linux): passed, nest (macos): passed |
 | 14 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_perimeter_dns.py::test_identity_checks_refuse_a_mismatched_greeting_or_reverse_lookup` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_perimeter_dns.py::test_reject_on_no_reverse_name_refuses_a_server_without_one` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_size_cap_refuses_larger_mail_inbound_and_from_a_mail_app` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_greylisting_off_accepts_a_first_time_sender_on_its_first_try` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_plus_addressing_off_stops_tagged_mail_reaching_the_member` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_wildcard_prefixes_off_stops_mail_under_the_prefix_reaching_the_member` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_size_cap_refuses_larger_mail_inbound_and_from_a_mail_app` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_greylisting_off_accepts_a_first_time_sender_on_its_first_try` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_plus_addressing_off_stops_tagged_mail_reaching_the_member` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_wildcard_prefixes_off_stops_mail_under_the_prefix_reaching_the_member` | nest (linux): passed, nest (macos): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_admin_added_reserved_name_refused_then_freed_by_clearing` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_full_confidence_not_above_min_samples_refused_and_nothing_saved` | nest (linux): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_full_confidence_not_above_min_samples_refused_and_nothing_saved` | nest (linux): passed, nest (macos): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_mail_spam_history_retention.py::test_training_history_kept_for_the_days_the_admin_sets` | nest (linux): passed |
 | 23 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_admin_lowered_quota_552_but_role_address_bypasses` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_delete_nonempty_allowed_lets_a_mail_app_delete_a_folder_still_holding_mail` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_per_address_connection_cap_closes_extra_mail_app_connections_and_zero_lifts_it` | nest (linux): passed |
+| 24 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_delete_nonempty_allowed_lets_a_mail_app_delete_a_folder_still_holding_mail` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_per_address_connection_cap_closes_extra_mail_app_connections_and_zero_lifts_it` | nest (linux): passed, nest (macos): passed |
 | 26 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_perimeter_dns.py::test_log_only_or_a_check_switched_off_accepts_and_dkim_enforcement_refuses` | nest (linux): passed |
-| 27 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_retry_schedule_warning_and_give_up_times_decide_a_failing_message` | nest (linux): failed |
-| 27 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_bounce_repeat_window_decides_when_the_same_message_bounces_again` | nest (linux): passed |
-| 28 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_codes_the_admin_lists_as_temporary_are_retried_not_bounced` | nest (linux): passed |
-| 28 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_ipv6_off_delivers_over_ipv4_only` | nest (linux): passed |
-| 29 | nest | (none) | — |
+| 27 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_retry_schedule_warning_and_give_up_times_decide_a_failing_message` | nest (linux): passed, nest (macos): passed |
+| 27 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_admin_bounce_repeat_window_decides_when_the_same_message_bounces_again` | nest (linux): passed, nest (macos): passed |
+| 28 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_codes_the_admin_lists_as_temporary_are_retried_not_bounced` | nest (linux): passed, nest (macos): passed |
+| 28 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_ipv6_off_delivers_over_ipv4_only` | nest (linux): passed, nest (macos): passed |
+| 29 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_forwarder_ndr.py::test_backscatter_suppression_withholds_the_bounce_for_a_failing_sender` | nest (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_outbound_tlsrpt_switched_off_sends_no_report` | nest (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_non_numeric_entry_keeps_the_saved_value` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 32 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_allowances_set_to_zero_are_accepted_and_members_get_none` | nest (linux): passed |
-| 33 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_saving_other_spam_knobs_never_switches_standing_baseline_off` | nest (linux): passed |
-| 34 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_publishing_the_baseline_asks_first_and_says_whose_training_it_reflects` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 35 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_publish_result_says_how_many_could_not_be_included` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
-| 36 | nest | `tests/e2e-unified/tests/test_spam_baseline_standing.py::test_standing_publish_republishes_the_baseline_once_a_day_under_the_floors` | nest (linux): passed |
-| 37 | nest | `tests/e2e-unified/tests/test_spam_baseline_standing.py::test_baseline_state_shows_only_what_is_served_never_who_or_when_withdrawn` | nest (linux): passed |
-| 38 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_nest_runs_its_daily_blocklist_self_check_unasked` | nest (linux): passed |
-| 39 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_token_deterministic_across_secret_rotation` | nest (linux): passed |
+| 31 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_non_numeric_entry_keeps_the_saved_value` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/test_mail_policy_effects.py::test_allowances_set_to_zero_are_accepted_and_members_get_none` | nest (linux): passed, nest (macos): passed |
+| 33 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_saving_other_spam_knobs_never_switches_standing_baseline_off` | nest (linux): passed, nest (macos): passed |
+| 34 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_publishing_the_baseline_asks_first_and_says_whose_training_it_reflects` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 35 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_publish_result_says_how_many_could_not_be_included` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 36 | nest | `tests/e2e-unified/tests/test_spam_baseline_standing.py::test_standing_publish_republishes_the_baseline_once_a_day_under_the_floors` | nest (linux): passed, nest (macos): passed |
+| 37 | nest | `tests/e2e-unified/tests/test_spam_baseline_standing.py::test_baseline_state_shows_only_what_is_served_never_who_or_when_withdrawn` | nest (linux): passed, nest (macos): passed |
+| 38 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_nest_runs_its_daily_blocklist_self_check_unasked` | nest (linux): passed, nest (macos): passed |
+| 39 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_token_deterministic_across_secret_rotation` | nest (linux): passed, nest (macos): passed |
 | 40 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_srs_bounce_to_mail_forwarded_before_a_secret_rotation_still_reaches_the_forwarder` | nest (linux): passed |
 | 41 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_non_admin_denied_on_diagnostics` | nest (linux): passed |
 | 41 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_non_admin_denied_on_blocklist_self_check` | nest (linux): passed |
@@ -222,10 +222,10 @@ Stamped 2026-10-11 at 29b0959751.
 | 41 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_non_admin_denied_on_warmup_reset` | nest (linux): passed |
 | 41 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_non_admin_denied_on_blocklist_self_check_history` | nest (linux): passed |
 | 41 | nest | `tests/e2e-unified/tests/api/test_mail_deliverability.py::test_non_admin_denied_on_diagnostic_run_history` | nest (linux): passed |
-| 42 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_non_admin_denied_on_every_other_policy_group` | nest (linux): passed |
+| 42 | nest | `tests/e2e-unified/tests/test_mail_admin_policy.py::test_non_admin_denied_on_every_other_policy_group` | nest (linux): passed, nest (macos): passed |
 | 42 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_non_admin_denied_on_put_alias_policy` | nest (linux): passed |
 | 43 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_role_names_refused_as_alias_and_handle_with_the_list_empty` | nest (linux): passed |
-| 44 | nest | (none) | — |
-| 45 | app | `tests/e2e-unified/tests/test_admin_mail_secret_rotation.py::test_rotating_the_unsubscribe_secret_takes_a_second_press_and_retires_old_links` | web (linux): passed, tui (linux): passed |
-| 46 | app | `tests/e2e-unified/tests/test_admin_mail_secret_rotation.py::test_rotating_the_forwarding_secret_takes_a_second_press_and_keeps_old_bounces_home` | web (linux): passed, tui (linux): passed |
+| 44 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_outbound_dmarc_reports_switched_off_sends_no_report` | nest (linux): passed |
+| 45 | app | `tests/e2e-unified/tests/test_admin_mail_secret_rotation.py::test_rotating_the_unsubscribe_secret_takes_a_second_press_and_retires_old_links` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 46 | app | `tests/e2e-unified/tests/test_admin_mail_secret_rotation.py::test_rotating_the_forwarding_secret_takes_a_second_press_and_keeps_old_bounces_home` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

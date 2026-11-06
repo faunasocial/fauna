@@ -197,10 +197,6 @@ pub mod records {
 /// item 1 (their plane write is `fauna_sync_engine::preference_put`).
 pub const KIND_MODERATION: &str = records::MODERATION.name;
 
-/// The logical key of the singleton [`KIND_MODERATION`] item — one per account,
-/// like every preference sub-record.
-pub const MODERATION_KEY: &str = "self";
-
 /// Class-2 kind: the account's `sync_prefs` preference sub-record
 /// (`fauna_core::data::SyncPrefsConfig` — the user-global file-sync defaults).
 ///
@@ -225,8 +221,9 @@ pub const KIND_PERSONALIZATION: &str = records::PERSONALIZATION.name;
 pub const KIND_DELEGATION: &str = records::DELEGATION.name;
 
 /// The logical key every preference-cluster singleton uses — one item per
-/// account per kind, so the key is a constant ([`MODERATION_KEY`] spelled the
-/// same way for the same reason).
+/// account per kind, so the key is a constant. [`KIND_MODERATION`] is not one:
+/// it holds one row per muted term and one per hidden id
+/// (`fauna_core::moderation_rows`).
 pub const PREFERENCE_KEY: &str = "self";
 
 /// Class-2 kind: the fleet seen-set (charter § The replica boundary, R1) —
@@ -1018,9 +1015,10 @@ const POLICIES: &[(&str, MergePolicy, AudienceRung, SealingEpoch)] = &[
     // only because nothing ever sealed under the string.
     (
         KIND_MODERATION,
-        // Whole-record LWW, per the re-scoped W2.5: one kind per preference
-        // sub-record, each merging independently (no cross-record invariant
-        // spans the preference cluster).
+        // LWW per row: one row per muted term and one per hidden id
+        // (`fauna_core::moderation_rows`, the 2026-10-29 re-cut of the
+        // whole-record row W2.5 registered), so concurrent edits of
+        // different terms both survive.
         MergePolicy::LatestWins,
         // The charter's `UserConfig` disposition table places `moderation` in
         // the argued delegable set: secret-free, recreatable, legitimate grant
@@ -4719,7 +4717,6 @@ mod tests {
         assert_eq!(KIND_SYNC_PREFS, "fauna.state.sync-prefs");
         assert_eq!(KIND_PERSONALIZATION, "fauna.state.personalization");
         assert_eq!(KIND_DELEGATION, "fauna.state.delegation");
-        assert_eq!(MODERATION_KEY, "self");
         assert_eq!(PREFERENCE_KEY, "self");
     }
 
@@ -6436,6 +6433,59 @@ mod tests {
         );
     }
 
+    /// **The size pins for `fauna.state.moderation`'s two row families**
+    /// (`content-moderation-and-ranking.md` § Implementation status today →
+    /// *The moderation kind's rows*): the widest keyword row — a term at
+    /// `MUTED_KEYWORD_MAX_BYTES` — and the widest hidden row — an id at
+    /// `HIDDEN_CONTENT_ID_MAX_BYTES` — each seal under HALF the per-entry cap.
+    fn moderation_row_seal_len(key: &str, value: &[u8]) -> usize {
+        use fauna_core::account_entry_crypto::sealed_envelope_len;
+        let entry = stamped(KIND_MODERATION, key, value, i64::MAX, 0xff);
+        let generation_sealed = matches!(
+            sealing_epoch(KIND_MODERATION),
+            Some(SealingEpoch::GenerationTip)
+        );
+        sealed_envelope_len(&entry, generation_sealed).unwrap()
+    }
+
+    #[test]
+    fn an_oversized_muted_keyword_row_seals_under_half_the_entry_cap() {
+        use crate::account_state::MAX_STATE_ENTRY_BYTES;
+        use fauna_core::data::MutedKeyword;
+        use fauna_core::moderation_rows::MUTED_KEYWORD_MAX_BYTES;
+        // Multi-byte characters, so the term is at the byte cap with the most
+        // CBOR-encoded bytes a term at that cap can carry.
+        let term = "é".repeat(MUTED_KEYWORD_MAX_BYTES / 2);
+        assert_eq!(term.len(), MUTED_KEYWORD_MAX_BYTES);
+        let keyword = MutedKeyword {
+            keyword: term,
+            weight: i64::MIN,
+        };
+        let value = fauna_core::encoding::canonical_encode(&keyword).unwrap();
+        let len = moderation_row_seal_len(&keyword.plane_key(), &value);
+        assert!(
+            len <= MAX_STATE_ENTRY_BYTES / 2,
+            "the widest muted-keyword row seals to {len} bytes, over half the \
+             {MAX_STATE_ENTRY_BYTES}-byte cap"
+        );
+    }
+
+    #[test]
+    fn an_oversized_hidden_content_row_seals_under_half_the_entry_cap() {
+        use crate::account_state::MAX_STATE_ENTRY_BYTES;
+        use fauna_core::moderation_rows::{HIDDEN_CONTENT_ID_MAX_BYTES, HiddenContentMark};
+        let mark = HiddenContentMark {
+            id: "f".repeat(HIDDEN_CONTENT_ID_MAX_BYTES),
+        };
+        let value = fauna_core::encoding::canonical_encode(&mark).unwrap();
+        let len = moderation_row_seal_len(&mark.plane_key(), &value);
+        assert!(
+            len <= MAX_STATE_ENTRY_BYTES / 2,
+            "the widest hidden-content row seals to {len} bytes, over half the \
+             {MAX_STATE_ENTRY_BYTES}-byte cap"
+        );
+    }
+
     /// **Bytes are byte strings** (the *Bounded rows* rider): the secret rides
     /// as a CBOR byte string (major 2), never serde's default integer array.
     #[test]
@@ -6897,7 +6947,7 @@ mod tests {
             R::State(mail_state(Some(1), 10, |_| {})),
             R::State(mail_state(Some(2), 20, |_| {})),
             R::State(mail_state(Some(3), 20, |s| {
-                s.caldav_enabled = true;
+                s.retired_caldav_enabled = true;
             })),
             R::State(mail_state(Some(1), 15, |s| {
                 s.pending_rotation = Some(MailRotationSentinel {
@@ -6907,7 +6957,7 @@ mod tests {
             })),
             R::State(mail_state(Some(1), 12, |s| {
                 s.mail_enabled = Some(false);
-                s.carddav_enabled = true;
+                s.retired_carddav_enabled = true;
                 s.succession_burns = vec![a_mail_burn(7, 40), a_mail_burn(8, 60)];
             })),
         ]);
@@ -7006,7 +7056,6 @@ mod tests {
             s.succession_burns = vec![a_mail_burn(7, 50)];
         });
         let older = mail_state(Some(1), 10, |s| {
-            s.caldav_enabled = true;
             s.pending_rotation = Some(MailRotationSentinel {
                 new_msek: mail_key(2),
             });
@@ -7020,7 +7069,6 @@ mod tests {
         .unwrap();
         assert_eq!(joined.msek, Some(mail_key(2)));
         assert_eq!(joined.pending_rotation, None, "the newer sentinel wins");
-        assert!(!joined.caldav_enabled, "the newer flags win");
         assert_eq!(
             joined.mail_enabled,
             Some(true),
@@ -7035,7 +7083,7 @@ mod tests {
         let flags_only = mail_state(Some(1), 30, |s| {
             s.msek_at = fauna_core::data::Timestamp(10);
             s.pending_rotation_at = fauna_core::data::Timestamp(10);
-            s.caldav_enabled = true;
+            s.mail_enabled = Some(false);
         });
         let swapped = mail_state(Some(2), 20, |s| {
             s.pending_rotation = Some(MailRotationSentinel {
@@ -7058,7 +7106,11 @@ mod tests {
             Some(mail_key(2)),
             "the sentinel's own stamp decides"
         );
-        assert!(joined.caldav_enabled, "the flags' own stamp decides");
+        assert_eq!(
+            joined.mail_enabled,
+            Some(false),
+            "the flag's own stamp decides"
+        );
     }
 
     /// The monotone markers: a revoke and a burn each survive a concurrent
@@ -7130,7 +7182,7 @@ mod tests {
             MergeOutcome::KeepCurrent
         );
         let state = R::State(mail_state(Some(1), 20, |_| {}));
-        let stale = R::State(mail_state(Some(1), 10, |s| s.caldav_enabled = true));
+        let stale = R::State(mail_state(Some(1), 10, |s| s.mail_enabled = Some(false)));
         assert_eq!(
             apply_class2(
                 MergePolicy::CrdtPerField,
@@ -7273,8 +7325,8 @@ mod tests {
                 new_msek: mail_key(4),
             });
             s.mail_enabled = Some(true);
-            s.caldav_enabled = true;
-            s.carddav_enabled = true;
+            s.retired_caldav_enabled = true;
+            s.retired_carddav_enabled = true;
             s.succession_burns = (0..512u32)
                 .map(|i| {
                     let mut p = [0xff; 32];

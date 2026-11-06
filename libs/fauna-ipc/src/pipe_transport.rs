@@ -6,10 +6,14 @@
 //! Same length-prefixed canonical dag-cbor frame as everywhere else
 //! (`[u32 LE length][canonical dag-cbor payload]`, [`crate::frame_io`]).
 //!
-//! One binary serves a pipe with this module: the per-user sync agent
-//! (`bins/fauna-sync-agent`, `\\.\pipe\fauna-sync.<user-SID>`). The FaunaBridge
-//! service used to serve a second one (`\\.\pipe\fauna-bridge`) for a diagnostic
-//! tool no installer shipped; both were removed, so nothing on windows serves a
+//! Two servers bind a pipe with this module, both per-user: the sync agent
+//! (`bins/fauna-sync-agent`, `\\.\pipe\fauna-sync.<user-SID>`, through
+//! [`serve`]) and the conversations oracle's door
+//! (`\\.\pipe\fauna-oracle.<user-SID>.<fingerprint>`, through
+//! [`crate::oracle::OracleListener`] over [`PipeListener`]). Each takes its
+//! name under an [`InstanceLock`] first. The FaunaBridge service used to serve
+//! a machine-wide pipe (`\\.\pipe\fauna-bridge`) for a diagnostic tool no
+//! installer shipped; both were removed, so nothing on windows serves a
 //! machine-wide pipe any more.
 //!
 //! # The DACL is owner-only
@@ -146,6 +150,111 @@ impl Drop for PipeSecurity {
     }
 }
 
+/// A per-user pipe name this process has claimed: its first instance, created
+/// under the owner-only DACL ([`PipeSecurity::for_owner`]), waiting for a
+/// client — the windows twin of a bound `UnixListener`.
+///
+/// [`bind`](Self::bind) creates that first instance with
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second server on the same name fails
+/// the create rather than silently sharing it. That failure is returned, not
+/// swallowed: it is how a duplicate agent in a second logon session terminates
+/// instead of degrading (`sync-agent.md` § The agent is single-instance per
+/// user), and how a door whose name another account holds says so.
+pub struct PipeListener {
+    name: String,
+    name_wide: Vec<u16>,
+    security: Pin<Box<PipeSecurity>>,
+    /// The instance the next client connects to.
+    next: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+impl PipeListener {
+    /// Claim `pipe_name`: create its first instance. Needs a tokio runtime
+    /// (the instance registers with its reactor).
+    pub fn bind(pipe_name: &str) -> Result<Self> {
+        let security = PipeSecurity::for_owner()?;
+        let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let next = create_instance(pipe_name, &name_wide, &security, true)?;
+        Ok(Self {
+            name: pipe_name.to_string(),
+            name_wide,
+            security,
+            next,
+        })
+    }
+
+    /// The pipe name this listener holds.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Wait for the next client: answers its connected instance, with a fresh
+    /// one already listening behind it. Cancel-safe — a dropped call leaves the
+    /// listening instance in place.
+    pub async fn accept(&mut self) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        self.next.connect().await?;
+        let fresh = create_instance(&self.name, &self.name_wide, &self.security, false)?;
+        Ok(std::mem::replace(&mut self.next, fresh))
+    }
+}
+
+/// One instance of `pipe_name` under `security`; the name's first when `first`.
+fn create_instance(
+    pipe_name: &str,
+    name_wide: &[u16],
+    security: &PipeSecurity,
+    first: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows::Win32::Storage::FileSystem::*;
+    use windows::Win32::System::Pipes::*;
+
+    let mut flags = FILE_FLAG_OVERLAPPED.0 | PIPE_ACCESS_DUPLEX.0;
+    if first {
+        flags |= FILE_FLAG_FIRST_PIPE_INSTANCE.0;
+    }
+    let handle = unsafe {
+        CreateNamedPipeW(
+            windows::core::PCWSTR(name_wide.as_ptr()),
+            FILE_FLAGS_AND_ATTRIBUTES(flags),
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE,
+            PIPE_UNLIMITED_INSTANCES,
+            65536,
+            65536,
+            0,
+            Some(security.as_ptr()),
+        )
+    };
+    if handle.is_invalid() {
+        let os = std::io::Error::last_os_error();
+        // This error is the only witness the agent leaves before it exits, and
+        // the bare OS text ("Access is denied") names neither the pipe nor the
+        // reason — it reads like a permissions misconfiguration, which is the
+        // wrong diagnosis twice over. A refused FIRST_PIPE_INSTANCE create means
+        // the NAME IS TAKEN, and because `\\.\pipe\` is a machine-wide namespace
+        // the holder need not be a second copy of this server: any local
+        // account can create `\\.\pipe\fauna-sync.<our SID>` and thereby both
+        // keep this server down and answer the app in its place. The client
+        // half refuses such a server (`sync_pipe_client`'s
+        // `verify_pipe_server_is`), but that refusal is silent over here — so
+        // this line carries the hypothesis.
+        let hint = if first && os.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32) {
+            " — the name is already taken, either by another instance of \
+             this server or by another local account holding it"
+        } else {
+            ""
+        };
+        return Err(anyhow::anyhow!(
+            "CreateNamedPipeW failed for {pipe_name}: {os:?}{hint}"
+        ));
+    }
+    unsafe {
+        tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+            handle.0 as std::os::windows::io::RawHandle,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("NamedPipeServer::from_raw_handle: {e}"))
+}
+
 /// Serve `pipe_name` until `shutdown` flips to `true`.
 ///
 /// The direct analog of [`unix_transport::serve`](crate::unix_transport::serve),
@@ -158,11 +267,8 @@ impl Drop for PipeSecurity {
 /// keeps this crate free of either binary's state type — the caller passes a
 /// closure that calls its own `handle_request(&req, &state)`.
 ///
-/// The first `CreateNamedPipeW` carries `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a
-/// second server on the same name fails the create rather than silently sharing
-/// it. That failure is returned, not swallowed: it is how a duplicate agent in a
-/// second logon session terminates instead of degrading (`sync-agent.md` § The
-/// agent is single-instance per user).
+/// The name is claimed by [`PipeListener::bind`], whose first-instance refusal
+/// this returns.
 pub async fn serve<Req, Resp, Ev, H, F>(
     pipe_name: &str,
     handler: H,
@@ -179,79 +285,15 @@ where
     H: Fn(Req) -> F + Clone + Send + 'static,
     F: Future<Output = Resp> + Send + 'static,
 {
-    use windows::Win32::Storage::FileSystem::*;
-    use windows::Win32::System::Pipes::*;
-
     tracing::info!("named pipe server starting on {}", pipe_name);
-
-    let security = PipeSecurity::for_owner()?;
+    let mut listener = PipeListener::bind(pipe_name)?;
     tracing::info!("pipe security: DACL restricted to this process's token user");
 
-    let pipe_name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut first = true;
-
     loop {
-        let claiming_the_name = first;
-        let mut flags = FILE_FLAG_OVERLAPPED.0 | PIPE_ACCESS_DUPLEX.0;
-        if first {
-            flags |= FILE_FLAG_FIRST_PIPE_INSTANCE.0;
-            first = false;
-        }
-
-        let server = {
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    windows::core::PCWSTR(pipe_name_wide.as_ptr()),
-                    FILE_FLAGS_AND_ATTRIBUTES(flags),
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE,
-                    PIPE_UNLIMITED_INSTANCES,
-                    65536,
-                    65536,
-                    0,
-                    Some(security.as_ptr()),
-                )
-            };
-            if handle.is_invalid() {
-                let os = std::io::Error::last_os_error();
-                // This error is the only witness this process leaves before it
-                // exits, and the bare OS text ("Access is denied") names neither
-                // the pipe nor the reason — it reads like a permissions
-                // misconfiguration, which is the wrong diagnosis twice over.
-                // A refused FIRST_PIPE_INSTANCE create means the NAME IS TAKEN,
-                // and because `\\.\pipe\` is a machine-wide namespace the holder
-                // need not be a second copy of this agent: any local account can
-                // create `\\.\pipe\fauna-sync.<our SID>` and thereby both keep
-                // this agent down and answer the app in its place. The client
-                // half refuses such a server (`sync_pipe_client`'s
-                // `verify_pipe_server_is`), but that refusal is silent over
-                // here — so this line carries the hypothesis.
-                let hint = if claiming_the_name
-                    && os.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32)
-                {
-                    " — the name is already taken, either by another instance of \
-                     this agent or by another local account holding it"
-                } else {
-                    ""
-                };
-                return Err(anyhow::anyhow!(
-                    "CreateNamedPipeW failed for {pipe_name}: {os:?}{hint}"
-                ));
-            }
-            unsafe {
-                #[allow(unused_imports)]
-                use std::os::windows::io::FromRawHandle;
-                tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
-                    handle.0 as std::os::windows::io::RawHandle,
-                )
-            }
-            .map_err(|e| anyhow::anyhow!("NamedPipeServer::from_raw_handle: {e}"))?
-        };
-
         tokio::select! {
-            result = server.connect() => {
-                result?;
+            accepted = listener.accept() => {
                 tokio::spawn(crate::frame_io::handle_conn::<_, Req, Resp, Ev, H, F>(
-                    server,
+                    accepted?,
                     handler.clone(),
                     events.subscribe(),
                 ));
@@ -266,6 +308,142 @@ where
         }
     }
     Ok(())
+}
+
+/// The windows single-instance guard — the named-mutex twin of unix's
+/// kernel-arbitrated `unix_transport::InstanceLock` (flock-based). Two servers take one: the sync agent, keyed by
+/// [`crate::sync::mutex_name_for_pipe`] (`sync-agent.md` § The agent is
+/// single-instance per user), and the conversations oracle's door, keyed by
+/// [`crate::oracle::door_mutex_name`] (`conversations-oracle.md` § The
+/// custodian and the door: one app serves at a time).
+///
+/// For the agent: without it, a spawner racing a slow-binding agent (the
+/// convergence loop re-probes on every tick/poke) can start a second agent
+/// process whose only stop is [`PipeListener::bind`]'s
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE` rejecting the SECOND agent's pipe
+/// *creation* — a later, louder exit than never starting engines at all. This
+/// mutex makes the common same-session duplicate exit cleanly having touched
+/// nothing.
+///
+/// A named kernel mutex, scoped to the per-user pipe name exactly like the
+/// unix lock is scoped to the per-user socket path, is the natural windows
+/// idiom: `CreateMutexW` either creates a new object or opens the existing one
+/// (surfaced via `ERROR_ALREADY_EXISTS`), and the OS destroys it once the last
+/// handle to it closes — on a clean exit or a crash alike — so there is no
+/// stale-lock state to reason about, matching the unix flock's crash-safety.
+/// What is held is the object's *existence*, never its thread-affine
+/// ownership, so the lock may live on any thread.
+///
+/// ## Scope limit — `Local\` is per logon session, not per user
+///
+/// The mutex name lives in the `Local\` namespace, so it excludes duplicates
+/// only *within one logon session*. The pipe it guards is per-user
+/// **machine-wide**, so a second concurrent logon session of the same user
+/// (RDP + console — routine on Windows Pro/Server) acquires a different
+/// `Local\` object and passes this gate. That duplicate is instead stopped by
+/// the machine-global `FILE_FLAG_FIRST_PIPE_INSTANCE` create failing: the
+/// agent's run-loop tail turns it into termination (pinned by
+/// `pipe_transport_integration::
+/// duplicate_agent_in_second_logon_session_terminates_instead_of_degrading`),
+/// and a door's keeper reads it as a door it could not take this tick.
+/// `Global\` was considered and rejected: creating `Global\` objects needs
+/// `SeCreateGlobalPrivilege`, which the standard-user identity these servers
+/// run as does not hold.
+#[derive(Debug)]
+pub struct InstanceLock {
+    _handle: std::os::windows::io::OwnedHandle,
+}
+
+impl InstanceLock {
+    /// Take the named mutex `mutex_name` (`Local\…`, no further backslash).
+    ///
+    /// Returns `AddrInUse` when another live process — or another holder in
+    /// this one — already holds it, mirroring the unix `InstanceLock::acquire`
+    /// contract exactly (same error kind).
+    pub fn acquire(mutex_name: &str) -> std::io::Result<Self> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::core::PCWSTR;
+
+        let wide: Vec<u16> = mutex_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let handle = CreateMutexW(None, true, PCWSTR(wide.as_ptr()))
+                .map_err(|e| std::io::Error::other(format!("CreateMutexW {mutex_name}: {e}")))?;
+            // `CreateMutexW` returns Ok (a handle to the EXISTING object) even
+            // when one already existed — `ERROR_ALREADY_EXISTS` is the only
+            // signal that we did not just create it, so it must be read before
+            // any other Win32 call can overwrite the thread's last-error slot.
+            let existed = GetLastError() == ERROR_ALREADY_EXISTS;
+            let handle = OwnedHandle::from_raw_handle(handle.0);
+            if existed {
+                drop(handle);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("another instance holds {mutex_name}"),
+                ));
+            }
+            Ok(Self { _handle: handle })
+        }
+    }
+}
+
+#[cfg(test)]
+mod instance_lock_tests {
+    use super::InstanceLock;
+
+    /// tier_1: the single-instance guard. A second acquirer must fail while
+    /// the first holds the lock — the named-mutex twin of the unix flock
+    /// test (`unix_transport::instance_lock_excludes_second_acquirer_until_released`)
+    /// — and must succeed once the first releases (drop == handle close, so a
+    /// crashed holder never leaves a stale lock: the OS reclaims the named
+    /// kernel object once the last handle to it closes).
+    ///
+    /// A name keyed on this process's PID keeps concurrent `cargo test` runs on
+    /// the same machine from colliding on the same named mutex.
+    #[test]
+    fn instance_lock_excludes_second_acquirer_until_released() {
+        let name = crate::sync::mutex_name_for_pipe(&format!(
+            r"\\.\pipe\fauna-sync-test.{}",
+            std::process::id()
+        ));
+
+        let first = InstanceLock::acquire(&name).expect("first acquire must succeed");
+        let err = InstanceLock::acquire(&name)
+            .expect_err("second acquire must fail while the first instance is live");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "duplicate → AddrInUse: {err}"
+        );
+
+        drop(first);
+        InstanceLock::acquire(&name)
+            .expect("acquire after release must succeed (crash leaves no stale lock)");
+    }
+
+    /// The lock is held by the object's existence, not by the creating
+    /// thread's ownership: a lock taken on one thread still excludes after
+    /// that thread ends — which a door kept on a tokio worker relies on.
+    #[test]
+    fn the_lock_outlives_the_thread_that_took_it() {
+        let name = format!(r"Local\FaunaIpcLockTest.{}.thread", std::process::id());
+        let first = std::thread::spawn({
+            let name = name.clone();
+            move || InstanceLock::acquire(&name).expect("acquire on a worker")
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            InstanceLock::acquire(&name).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        drop(first);
+        InstanceLock::acquire(&name).expect("free once dropped");
+    }
 }
 
 #[cfg(test)]

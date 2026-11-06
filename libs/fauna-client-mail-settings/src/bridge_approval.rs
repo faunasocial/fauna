@@ -88,7 +88,7 @@ impl From<ServiceUserInfo> for PendingBridgeView {
 pub struct ApprovedBridgeView {
     /// Lowercase hex of the bridge's Ed25519 pubkey
     /// (`admin-bridges-approved-pubkey-hex`) — this **is** the `bridge_actor_id`
-    /// the [`BridgeApprovalAction::Rotate`] action hex-decodes for
+    /// the [`BridgeConfirm::Rotate`] act hex-decodes for
     /// `revoke_service_user`.
     pub pubkey_hex: String,
     /// Enrolled role (`"mta"` / `"mda"`) — rendered at
@@ -237,26 +237,20 @@ pub enum BridgeApprovalAction {
     /// the nest validates it against the pending row. Idempotent on an already-
     /// approved bridge; a revoked bridge is refused (must re-enroll).
     Approve { pubkey_hex: String, role: String },
-    /// Reject a pending bridge (`→ revoked`; the row is kept so a re-connect
-    /// from the same pubkey rejects immediately rather than re-pending).
-    /// Idempotent, with NO confirm: a renderer arms
-    /// [`BridgeConfirm::Reject`] and dispatches [`Self::Confirm`] instead. This
-    /// direct form stays only for the apps that still hold the rejection
-    /// dialog in their own renderer, and goes when they move to the arm.
-    Reject { pubkey_hex: String },
-    /// Rotate an **approved** bridge's service-user key (`mail-bridge-lifecycle.md`
-    /// § Service-user re-keying, step 3). Dispatches `revoke_service_user(pubkey)`:
-    /// the running bridge detects the revoke and exits, the supervisor restarts
-    /// it, and on a mail-enabled box the fresh key auto-approves — with NO
-    /// confirm: a renderer arms [`BridgeConfirm::Rotate`] (the
-    /// `admin-bridges-rotate-confirm` dialog; no DKIM warning for any role: the
-    /// nest holds every DKIM key) and dispatches [`Self::Confirm`]. This direct
-    /// form stays only for the apps that still hold the dialog in their own
-    /// renderer. `pubkey_hex` is the approved card's `admin-bridges-approved-pubkey-hex`.
-    Rotate { pubkey_hex: String },
     /// The open dialog's confirm button: disarm and run the armed act
     /// ([`BridgeApprovalSnapshot::armed`]). Nothing armed is an error — the
-    /// dialog was already dismissed — and reaches no nest.
+    /// dialog was already dismissed — and reaches no nest. The two acts, each
+    /// opened by [`BridgeApprovalMachine::arm`]:
+    ///
+    /// - [`BridgeConfirm::Reject`] rejects a pending bridge (`→ revoked`; the
+    ///   row is kept so a re-connect from the same pubkey rejects immediately
+    ///   rather than re-pending). Idempotent.
+    /// - [`BridgeConfirm::Rotate`] rotates an **approved** bridge's
+    ///   service-user key (`mail-bridge-lifecycle.md` § Service-user
+    ///   re-keying, step 3): `revoke_service_user(pubkey)`; the running bridge
+    ///   detects the revoke and exits, the supervisor restarts it, and on a
+    ///   mail-enabled box the fresh key auto-approves. No DKIM warning for any
+    ///   role: the nest holds every DKIM key.
     Confirm,
     /// Flip the deployment-wide `mail.enabled` toggle (§ Default-off on first
     /// claim). `true` materializes the flag file + brings the bridge services
@@ -498,8 +492,6 @@ impl BridgeApprovalMachine {
                 BridgeApprovalAction::Approve { pubkey_hex, role } => {
                     self.approve(pubkey_hex, role).await
                 }
-                BridgeApprovalAction::Reject { pubkey_hex } => self.reject(pubkey_hex).await,
-                BridgeApprovalAction::Rotate { pubkey_hex } => self.rotate(pubkey_hex).await,
                 BridgeApprovalAction::Confirm => match armed {
                     Some(BridgeConfirm::Reject { pubkey_hex }) => self.reject(pubkey_hex).await,
                     Some(BridgeConfirm::Rotate { pubkey_hex }) => self.rotate(pubkey_hex).await,
@@ -750,9 +742,8 @@ mod tests {
         m.hydrate().await.unwrap();
         let pubkey_hex = m.snapshot().pending[0].pubkey_hex.clone();
 
-        m.dispatch(BridgeApprovalAction::Reject { pubkey_hex })
-            .await
-            .unwrap();
+        m.arm(BridgeConfirm::Reject { pubkey_hex });
+        m.dispatch(BridgeApprovalAction::Confirm).await.unwrap();
 
         assert!(
             m.snapshot().pending.is_empty(),
@@ -859,9 +850,8 @@ mod tests {
         m.hydrate().await.unwrap();
         let pubkey_hex = m.snapshot().approved[0].pubkey_hex.clone();
 
-        m.dispatch(BridgeApprovalAction::Rotate { pubkey_hex })
-            .await
-            .unwrap();
+        m.arm(BridgeConfirm::Rotate { pubkey_hex });
+        m.dispatch(BridgeApprovalAction::Confirm).await.unwrap();
 
         // The bridge is now `revoked`, so it leaves the approved roster (and the
         // pending feed — a re-enroll would resurface it fresh on a mail-enabled box).
@@ -876,12 +866,10 @@ mod tests {
     async fn rotate_unknown_pubkey_surfaces_nest_error() {
         let m = machine_with(vec![approved_bridge(0x88, "mda")]);
         let unknown = hex::encode([0x99u8; 32]);
-        let err = m
-            .dispatch(BridgeApprovalAction::Rotate {
-                pubkey_hex: unknown,
-            })
-            .await
-            .unwrap_err();
+        m.arm(BridgeConfirm::Rotate {
+            pubkey_hex: unknown,
+        });
+        let err = m.dispatch(BridgeApprovalAction::Confirm).await.unwrap_err();
         assert!(matches!(err, DispatchError::Nest(_)));
         let snap = m.snapshot();
         assert!(

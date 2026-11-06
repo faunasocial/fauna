@@ -2000,7 +2000,11 @@ fn reconcile_with_folder_indexes(
 /// Fetch one reserved set's ledger from the destination, open it under the
 /// owner's key and decode it — the same walk [`open_sampled_record`] runs, with
 /// the bytes kept.
-async fn open_ledger(
+///
+/// The one ledger reader: the audit's inclusion arm and the nest-held
+/// pull-back's preflight and ledger-named walk
+/// (`fauna_client_sync::reseed_pull`) both open a holder's ledger through it.
+pub async fn open_ledger(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     item: &CustodyItem,
@@ -4366,11 +4370,11 @@ mod tests {
         ) -> Result<fauna_protocol::backup::GenerationRestoreReply, String> {
             panic!("the audit never restores")
         }
-        async fn writer_grant_succeed(
+        async fn writer_grant_carry(
             &self,
             writer_nest_id: String,
             succeeds: String,
-        ) -> Result<(), String> {
+        ) -> Result<crate::seat_carry::SeatHandover, String> {
             self.handovers
                 .lock()
                 .unwrap()
@@ -4379,7 +4383,7 @@ mod tests {
                 writer_nest_id,
                 ..Default::default()
             }];
-            Ok(())
+            Ok(crate::seat_carry::SeatHandover::Moved)
         }
     }
 

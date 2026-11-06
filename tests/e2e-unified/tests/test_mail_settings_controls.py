@@ -27,7 +27,7 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, require_surface
 from helpers.mail_dedicated_nest import ADMIN_LOCAL_PART
 from helpers.mail_wire import _connect_smtp_starttls, _imap_auth_plain, _imaps_connect
 from helpers.rpc_hold import (
@@ -101,8 +101,9 @@ def _enable_on_dedicated_nest(app, handle, request) -> str:
     assert mail.wait_for_credential_count_at_least(1, timeout=mail.ENABLE_SETTLE_S), (
         f"enabling mail mints the first password; error: {mail.page_error_text(timeout=2.0)!r}"
     )
-    assert mail.wait_for_enabled_status(timeout=15.0), (
-        f"mail must read enabled; status={mail.status_text()!r}"
+    assert mail.wait_for_enabled_status(timeout=mail.ENABLE_SETTLE_S), (
+        f"mail must read enabled; status={mail.status_text()!r}, "
+        f"error={mail.page_error_text(timeout=2.0)!r}"
     )
     handle.rebind_after_enable()
     return rt._alias_admin_to_address(handle.nest, handle.domain)
@@ -124,6 +125,7 @@ def _page_state(app) -> str:
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs(
     dedicated_actor_app, nest_instance
 ):
@@ -166,6 +168,7 @@ def test_status_line_reads_off_then_up_to_date_and_syncing_while_a_change_runs(
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it(
     dedicated_actor_app, nest_instance
 ):
@@ -218,12 +221,9 @@ def test_an_interrupted_rotation_is_shown_and_one_tap_finishes_it(
 
 # ── outcome 12 ─────────────────────────────────────────────────────────────
 
-# The apps whose rotate-keys form renders the per-password
-# `mail-rotate-keys-exclude-item` checkboxes (and dispatches what is ticked).
-_EXCLUDE_BUILT_APPS = frozenset({"tui", "linux", "macos", "ios", "web", "windows"})
-
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_a_password_marked_compromised_at_rotation_stops_working(
     app, dedicated_mail_nest, request
 ):
@@ -232,13 +232,6 @@ def test_a_password_marked_compromised_at_rotation_stops_working(
     longer logs a mail app in and leaves the list, while the password they
     did not mark keeps working under the new key (mail-credentials.md § Hard
     revoke → Compromised-credential handling)."""
-    if app_name(app.driver) not in _EXCLUDE_BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="mail-rotate-keys-exclude-item",
-            detail="marking passwords compromised at rotation is built on tui first",
-            tracked="",
-        )
     handle = dedicated_mail_nest
     admin_addr = _enable_on_dedicated_nest(app, handle, request)
     mail = app.mail_settings
@@ -273,6 +266,7 @@ def test_a_password_marked_compromised_at_rotation_stops_working(
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_turning_email_off_keeps_the_calendar_signed_in(app, dedicated_mail_nest, request):
     """Outcome 17: with the calendar on, turning email off keeps the calendar
     app signed in with the same password — CalDAV still authenticates after the
@@ -304,6 +298,7 @@ def test_turning_email_off_keeps_the_calendar_signed_in(app, dedicated_mail_nest
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_turning_your_own_mail_off_leaves_another_users_mail_working(
     dedicated_actor_app, nest_instance, mail_bridge_mda, seal_helper_binary
 ):
@@ -344,6 +339,7 @@ def test_turning_your_own_mail_off_leaves_another_users_mail_working(
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_a_refused_change_says_why_and_can_be_tried_again(
     dedicated_actor_app, nest_instance
 ):
@@ -384,6 +380,7 @@ def test_a_refused_change_says_why_and_can_be_tried_again(
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes(
     dedicated_actor_app, nest_instance
 ):
@@ -425,43 +422,69 @@ def test_a_brief_drop_while_turning_mail_on_is_retried_and_finishes(
 
 # ── outcome 21 ─────────────────────────────────────────────────────────────
 
-# The apps `conftest.py::_alice_extra_seat` (web: `_alice_web_twin_seat`) can launch a second seat of one
-# identity on (a fresh, empty state root, a distinct device id).
-_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows", "web"})
 
-
+@pytest.mark.android
 @pytest.mark.feature("turn-on-mail")
 def test_mail_setup_and_passwords_follow_you_to_a_second_device(
-    dedicated_actor_app, nest_instance, request
+    dedicated_actor_app, nest_instance, request, android_other_device_seat
 ):
     """Outcome 21: mail turned on and an app password added on one device show
     on the person's other device without setting mail up again — the second
-    device, logged in as the same identity from an empty state root, opens the
-    page reading mail on, with both passwords listed under their names
-    (mail-credentials.md § Goal; § MSEK lifecycle → *Persistence*: the mail
-    custody is synced across every Fauna app the user owns)."""
+    device, logged in as the same identity, opens the page reading mail on,
+    with both passwords listed under their names (mail-credentials.md § Goal;
+    § MSEK lifecycle → *Persistence*: the mail custody is synced across every
+    Fauna app the user owns).
+
+    The roles are swapped on android: its other device is the desktop-class tui
+    seat (`android_other_device_seat`), so that seat of the same identity enables mail and mints the two
+    passwords, and android (the app under test, already signed in) is the
+    device that reads them without setting mail up. On every other app the app
+    under test enables and mints, and a second seat of that app reads."""
     from conftest import _alice_extra_seat, _alice_web_twin_seat
 
     app, actor = dedicated_actor_app
     name = app_name(app.driver)
-    if name not in _SECOND_SEAT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="a second seat of one identity in the e2e harness",
-            detail="conftest.py::_alice_extra_seat launches tui, linux, macos and windows seats only",
-            tracked="",
-        )
-    mail = app.mail_settings
-    mail.navigate()
-    mail.enable_mail("Default")
-    assert mail.wait_for_enabled_status(timeout=mail.ENABLE_SETTLE_S), (
-        f"mail must turn on on the first device; {_page_state(app)}"
-    )
-    mail.add_credential("Phone")
-    assert mail.wait_for_credential_count_at_least(2, timeout=mail.ENABLE_SETTLE_S), (
-        f"the second password must be listed on the first device; {_page_state(app)}"
-    )
+    require_surface(app.driver, "second-seat-same-identity")
 
+    def _enable_and_mint(device):
+        mail = device.mail_settings
+        mail.navigate()
+        mail.enable_mail("Default")
+        assert mail.wait_for_enabled_status(timeout=mail.ENABLE_SETTLE_S), (
+            f"mail must turn on on the first device; {_page_state(device)}"
+        )
+        mail.add_credential("Phone")
+        assert mail.wait_for_credential_count_at_least(2, timeout=mail.ENABLE_SETTLE_S), (
+            f"the second password must be listed on the first device; {_page_state(device)}"
+        )
+
+    def _assert_reads_it_all(device):
+        mail_b = device.mail_settings
+        mail_b.navigate()
+        assert mail_b.wait_for_enabled_status(timeout=mail_b.ENABLE_SETTLE_S), (
+            f"the second device must read mail on without setting it up; "
+            f"{_page_state(device)}"
+        )
+        assert _wait(
+            lambda: {_row_named(mail_b, "Default") is not None,
+                     _row_named(mail_b, "Phone") is not None} == {True},
+            mail_b.ENABLE_SETTLE_S,
+        ), (
+            f"both passwords must be listed on the second device; "
+            f"{_page_state(device)} count={mail_b.credential_count()}"
+        )
+
+    if name == "android":
+        # Declared fixture, so the tui binary is built by the prebuild hoist,
+        # outside this test's own budget (it tears the seat down itself).
+        writer, _writer_driver = android_other_device_seat(
+            "mail-second-device", identity=actor,
+        )
+        _enable_and_mint(writer)
+        _assert_reads_it_all(app)
+        return
+
+    _enable_and_mint(app)
     if name == "web":
         seat = _alice_web_twin_seat(
             app.driver, request, actor, screenshot_tag="mail-second-device",
@@ -472,20 +495,7 @@ def test_mail_setup_and_passwords_follow_you_to_a_second_device(
         )
     device_b, _driver_b = next(seat)
     try:
-        mail_b = device_b.mail_settings
-        mail_b.navigate()
-        assert mail_b.wait_for_enabled_status(timeout=mail_b.ENABLE_SETTLE_S), (
-            f"the second device must read mail on without setting it up; "
-            f"{_page_state(device_b)}"
-        )
-        assert _wait(
-            lambda: {_row_named(mail_b, "Default") is not None,
-                     _row_named(mail_b, "Phone") is not None} == {True},
-            mail_b.ENABLE_SETTLE_S,
-        ), (
-            f"both passwords must be listed on the second device; "
-            f"{_page_state(device_b)} count={mail_b.credential_count()}"
-        )
+        _assert_reads_it_all(device_b)
     finally:
         seat.close()
 
@@ -493,6 +503,7 @@ def test_mail_setup_and_passwords_follow_you_to_a_second_device(
 # ── outcome 10 ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.android
 @pytest.mark.feature("turn-on-mail")
 def test_credential_row_shows_name_kind_created_and_a_copyable_login(logged_in_app):
     """Outcome 10: each app password is listed with its name, its kind, when it
@@ -536,6 +547,7 @@ def test_credential_row_shows_name_kind_created_and_a_copyable_login(logged_in_a
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_revoking_one_password_leaves_the_others_working(app, dedicated_mail_nest, request):
     """Outcome 13: revoking one app password cuts off only the mail apps using
     it — its login is refused over IMAP, while the other password still logs
@@ -571,6 +583,7 @@ def test_revoking_one_password_leaves_the_others_working(app, dedicated_mail_nes
 
 @pytest.mark.feature("turn-on-mail")
 @pytest.mark.real_conversations
+@pytest.mark.android
 def test_serving_off_closes_mail_apps_but_the_app_still_shows_mail(
     app, dedicated_mail_nest, request
 ):

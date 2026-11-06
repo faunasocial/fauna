@@ -19,15 +19,17 @@
 //! value into a [`LiveGroupRoster`]. The admit path reads memory. Nothing a
 //! witness carries ever reaches the authority line.
 //!
-//! # What this door admits into — nothing serves a group scope yet
+//! # What this door admits into
 //!
 //! Wiring the door makes a node's admit exchange VERIFY a group witness and
-//! record the verdict on the connection. No share data arm consumes a group
-//! verdict today (every arm is M2/folder-family), so admission is the whole
-//! effect. The data arm that will — a group serve path — owes the per-request
-//! live re-consult of [`GroupRosterState::is_entry_removed`] that
-//! `fauna_peer_share::admission::verdict_admits_group` documents; this
-//! module's snapshot is what that consult will read.
+//! record the verdict — and the entry it verified as — on the connection. The
+//! share server's group-family arms consume it: the group plane's feed
+//! (`fauna.sync.changes.list` for a `group:` scope) and the group family of
+//! the manifest and chunk doors (`p2p-shared-set-build.md` § Build design —
+//! the group set, decision 6). Each re-consults
+//! [`GroupRosterState::is_entry_removed`] per request, reading this module's
+//! snapshot, so a removal the pump has read severs an open connection at its
+//! next request.
 
 use std::sync::{Arc, RwLock};
 

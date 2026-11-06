@@ -37,6 +37,8 @@
 
 use std::sync::Mutex;
 
+use fauna_core::blob_seal::SealStamp;
+
 #[cfg(feature = "p2p-share")]
 use fauna_peer_share::server::ShareStore;
 use fauna_protocol::peer_row::LocalShareChange;
@@ -351,8 +353,11 @@ where
 #[derive(Debug, PartialEq, Eq)]
 pub enum MaterializeVerdict {
     /// Fetch and write: the path is locally absent, or clean at its tracked
-    /// state (overwriting a CLEAN synced file loses nothing this replica
-    /// authored — the old version stays nest-fetchable).
+    /// state. On a folder set overwriting a CLEAN synced file loses nothing
+    /// this replica authored — the old version stays nest-fetchable. A group
+    /// set has no nest, so there the caller first asks
+    /// [`superseded_own_edit`] and, when the head is this replica's own
+    /// lifted edit, retains it before writing (decision 9).
     Write,
     /// The tracked head already IS the peer row's manifest — stamp the
     /// overlay materialized, fetch nothing.
@@ -380,7 +385,17 @@ pub fn judge_materialization(
     peer_manifest: &fauna_core::data::ContentHash,
 ) -> MaterializeVerdict {
     use crate::db::SyncState;
-    match (&local.entry, &local.disk) {
+    // A settled tombstone is no row: a path deleted here and recreated by
+    // another author is judged as a fresh path — written when the disk is
+    // empty, nothing local to lose; skipped when bytes the scan has not
+    // accounted sit there. Read before the manifest compare, which a
+    // tombstone keeps: a recreate of the deleted bytes is no `AlreadyCurrent`.
+    // (A pending local delete, `LocallyDeleted`, stays a skip below.)
+    let entry = local
+        .entry
+        .as_ref()
+        .filter(|e| e.state != SyncState::Deleted);
+    match (entry, &local.disk) {
         // Fresh path: nothing local to lose.
         (None, None) => MaterializeVerdict::Write,
         // Untracked bytes at the path — the scan has not accounted them, so
@@ -416,6 +431,59 @@ pub fn judge_materialization(
     }
 }
 
+/// Decision 9's trigger (`p2p-shared-set-build.md` § Build design — the group
+/// set): on a group set, a converged landing — a put [`judge_materialization`]
+/// answered [`MaterializeVerdict::Write`], or a delete — over a path whose
+/// tracked head THIS replica authored and lifted is the one moment the
+/// superseded edit's bytes are known to exist anywhere, so its author retains
+/// them before the landing overwrites them. Answers the manifest to retain
+/// them under when every conjunct holds: the path's newest own row
+/// (`own_head`) is sequenced — lifted, its writer seq handed back — is not a
+/// delete and names the entry's tracked manifest, and the disk is clean at
+/// that head (`Synced`, its bytes the tracked local hash). Anything else is a
+/// head some other author materialized (and retains for itself), or a state
+/// the judge already declines. Pure — every arm is tier_1-checkable without
+/// an engine; the family is the caller's: a folder set never asks (its nest
+/// retains every loser).
+///
+/// Decision 10 refines the hit, never the trigger: `winner_base` is the base
+/// the winning row's signed core names, and when it IS the own head's
+/// manifest the winner was written over this very edit — an ordinary
+/// supersede ([`SupersededOwnEdit::base_matched`]), still retained but never
+/// listed for review. Absent or different is a concurrent loss.
+pub fn superseded_own_edit(
+    local: &LocalPathState,
+    own_head: Option<&crate::db::OwnChangeRow>,
+    winner_base: Option<&[u8; 32]>,
+) -> Option<SupersededOwnEdit> {
+    let entry = local.entry.as_ref()?;
+    let own = own_head?;
+    let manifest = entry.manifest_hash?;
+    let clean = entry.state == crate::db::SyncState::Synced
+        && local.disk.is_some()
+        && entry.local_hash == local.disk;
+    let lifted_own_head = own.seq.is_some()
+        && own.change_type != "delete"
+        && own
+            .manifest_hash
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case(&hex::encode(manifest.digest())));
+    (clean && lifted_own_head).then(|| SupersededOwnEdit {
+        manifest,
+        base_matched: winner_base.is_some_and(|b| *b == manifest.digest()),
+    })
+}
+
+/// [`superseded_own_edit`]'s hit: the own head to retain, and whether the
+/// winner named it as its base (decision 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupersededOwnEdit {
+    /// The own head's manifest — the retained version's key.
+    pub manifest: fauna_core::data::ContentHash,
+    /// The winner's base is this head: retained as `superseded`, unlisted.
+    pub base_matched: bool,
+}
+
 /// The serve-side byte half's chunk index — a bounded memo of recently served
 /// manifests' chunk coordinates, so `chunk_body` can re-derive one chunk from
 /// a plaintext **range** read (never a whole-file buffer).
@@ -449,8 +517,9 @@ pub struct MemoManifest {
     pub manifest_hash: [u8; 32],
     /// Relative path whose seal produced the manifest (the range source).
     pub path: String,
-    /// The M2 generation the chunks sealed under.
-    pub content_key_version: Option<u64>,
+    /// The content key the chunks sealed under — a folder version or a
+    /// group generation id.
+    pub content_stamp: Option<SealStamp>,
     /// store key → coordinates, one per sealed chunk.
     chunks: std::collections::HashMap<[u8; 32], ChunkCoords>,
 }
@@ -469,7 +538,7 @@ pub struct ChunkCoords {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoChunkHit {
     pub path: String,
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<SealStamp>,
     pub coords: ChunkCoords,
 }
 
@@ -532,7 +601,7 @@ impl ShareServeMemo {
         self.entries.iter().rev().find_map(|m| {
             m.chunks.get(store_key).map(|c| MemoChunkHit {
                 path: m.path.clone(),
-                content_key_version: m.content_key_version,
+                content_stamp: m.content_stamp,
                 coords: c.clone(),
             })
         })
@@ -549,7 +618,7 @@ impl ShareServeMemo {
 pub fn memo_manifest_from(
     manifest_hash: [u8; 32],
     path: &str,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     manifest: &fauna_core::chunk::ChunkManifest,
 ) -> Option<MemoManifest> {
     manifest.stored_hashes.as_ref()?;
@@ -569,7 +638,7 @@ pub fn memo_manifest_from(
     Some(MemoManifest {
         manifest_hash,
         path: path.to_string(),
-        content_key_version,
+        content_stamp,
         chunks,
     })
 }
@@ -582,7 +651,7 @@ pub const SHARE_RESEAL_IN_MEMORY_MAX: u64 = 256 * 1024 * 1024;
 
 /// Decode + index one served manifest into `memo` (best-effort — an
 /// undecodable or unsealed manifest, or one no held generation of
-/// `content_key_version` opens, simply leaves its chunks unservable). The
+/// `content_stamp` opens, simply leaves its chunks unservable). The
 /// served bytes name no plaintext chunk hash (`ChunkManifest::sealed_hashes`),
 /// and re-deriving a chunk needs it, so the manifest is opened under every
 /// same-version candidate of `content_keys` first. Shared by the engine's
@@ -591,25 +660,26 @@ pub fn index_share_manifest(
     memo: &Mutex<ShareServeMemo>,
     manifest_hash: [u8; 32],
     path: &str,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     bytes: &[u8],
-    content_keys: Option<&fauna_core::folder_keys::FolderContentKeys>,
+    content_keys: Option<&fauna_core::folder_keys::SetContentKeys>,
 ) {
     let Ok(manifest) =
         fauna_core::encoding::canonical_decode::<fauna_core::chunk::ChunkManifest>(bytes)
     else {
         return;
     };
-    let (Some(version), Some(keys)) = (content_key_version, content_keys) else {
+    let (Some(stamp), Some(keys)) = (content_stamp, content_keys) else {
         return;
     };
     let Some(opened) = keys
-        .keys_for(version)
+        .keys_for_stamp(stamp)
+        .iter()
         .find_map(|root| manifest.clone().unseal_hashes(root).ok())
     else {
         return;
     };
-    index_opened_share_manifest(memo, manifest_hash, path, content_key_version, &opened);
+    index_opened_share_manifest(memo, manifest_hash, path, content_stamp, &opened);
 }
 
 /// Index a manifest whose plaintext view is already in hand — a re-derived
@@ -618,10 +688,10 @@ pub fn index_opened_share_manifest(
     memo: &Mutex<ShareServeMemo>,
     manifest_hash: [u8; 32],
     path: &str,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     manifest: &fauna_core::chunk::ChunkManifest,
 ) {
-    if let Some(m) = memo_manifest_from(manifest_hash, path, content_key_version, manifest) {
+    if let Some(m) = memo_manifest_from(manifest_hash, path, content_stamp, manifest) {
         memo.lock().expect("share serve memo poisoned").index(m);
     }
 }
@@ -693,7 +763,7 @@ pub async fn rederive_manifest_from_disk(
     body: &dyn crate::share_body::BodySource,
     path: &str,
     secret: [u8; 32],
-    version: u64,
+    stamp: SealStamp,
     target: &fauna_core::data::ContentHash,
 ) -> anyhow::Result<Option<crate::seal::SealedBlob>> {
     let size = match body.body_len(path).await {
@@ -712,7 +782,7 @@ pub async fn rederive_manifest_from_disk(
     let Some(bytes) = body.read_range(path, 0, size).await else {
         return Ok(None);
     };
-    let sealed = crate::seal::seal_blob(&bytes, Some((secret, Some(version))))?;
+    let sealed = crate::seal::seal_blob(&bytes, Some((secret, Some(stamp))))?;
     if sealed.manifest_hash != *target {
         return Ok(None); // disk drifted from the recorded head
     }
@@ -738,7 +808,7 @@ pub async fn rederive_manifest_from_disk(
 pub struct ShareServeSource {
     rows: SyncDbShareStore,
     body: std::sync::Arc<dyn crate::share_body::BodySource>,
-    content_keys: fauna_core::folder_keys::FolderContentKeys,
+    content_keys: fauna_core::folder_keys::SetContentKeys,
     memo: Mutex<ShareServeMemo>,
 }
 
@@ -751,12 +821,12 @@ impl ShareServeSource {
         set_id: [u8; 32],
         db: SyncDb,
         body: std::sync::Arc<dyn crate::share_body::BodySource>,
-        content_keys: fauna_core::folder_keys::FolderContentKeys,
+        content_keys: impl Into<fauna_core::folder_keys::SetContentKeys>,
     ) -> Self {
         Self {
             rows: SyncDbShareStore::new(set_id, db),
             body,
-            content_keys,
+            content_keys: content_keys.into(),
             memo: Mutex::new(ShareServeMemo::default()),
         }
     }
@@ -795,7 +865,7 @@ impl ShareStore for ShareServeSource {
                     &self.memo,
                     *manifest_hash,
                     &retained.path,
-                    retained.content_key_version,
+                    retained.content_stamp,
                     &retained.bytes,
                     Some(&self.content_keys),
                 );
@@ -816,15 +886,15 @@ impl ShareStore for ShareServeSource {
             db.entries_by_manifest(&target)?
         };
         for entry in entries {
-            let Some(version) = entry.content_key_version else {
+            let Some(stamp) = entry.content_stamp else {
                 continue;
             };
             // Every same-version candidate: the re-seal is checked against
             // `target`, so the first that reproduces it is the sealing generation.
             let mut resealed = None;
-            for secret in self.content_keys.keys_for(version).copied() {
+            for secret in self.content_keys.keys_for_stamp(stamp) {
                 resealed =
-                    rederive_manifest_from_disk(&*self.body, &entry.path, secret, version, &target)
+                    rederive_manifest_from_disk(&*self.body, &entry.path, secret, stamp, &target)
                         .await?;
                 if resealed.is_some() {
                     break;
@@ -835,12 +905,9 @@ impl ShareStore for ShareServeSource {
             };
             {
                 let db = self.rows.db.lock().expect("share-store db mutex poisoned");
-                if let Err(e) = db.retain_manifest(
-                    &hex_hash,
-                    &sealed.manifest_bytes,
-                    &entry.path,
-                    Some(version),
-                ) {
+                if let Err(e) =
+                    db.retain_manifest(&hex_hash, &sealed.manifest_bytes, &entry.path, Some(stamp))
+                {
                     tracing::warn!(error = %e, "backfill manifest retention failed");
                 }
             }
@@ -848,7 +915,7 @@ impl ShareStore for ShareServeSource {
                 &self.memo,
                 *manifest_hash,
                 &entry.path,
-                Some(version),
+                Some(stamp),
                 &sealed.manifest,
             );
             crate::share_serve_tally::record_manifest_served(&entry.path);
@@ -870,14 +937,14 @@ impl ShareStore for ShareServeSource {
         else {
             return Ok(None);
         };
-        let Some(version) = hit.content_key_version else {
+        let Some(stamp) = hit.content_stamp else {
             return Ok(None);
         };
         let body = chunk_body_from_hit(
             &*self.body,
             &self.memo,
             &hit,
-            self.content_keys.keys_for(version).copied(),
+            self.content_keys.keys_for_stamp(stamp),
             store_key,
         )
         .await?;
@@ -901,10 +968,10 @@ impl ShareStore for ShareServeSource {
         let Some(hit) = memo.chunk(store_key) else {
             return Ok(false);
         };
-        let Some(version) = hit.content_key_version else {
+        let Some(stamp) = hit.content_stamp else {
             return Ok(false);
         };
-        Ok(self.content_keys.keys_for(version).next().is_some())
+        Ok(!self.content_keys.keys_for_stamp(stamp).is_empty())
     }
 }
 
@@ -1036,6 +1103,15 @@ pub enum PeerPageOrigin {
     /// The same-account leg: a sibling device of this account, admitted by its
     /// `DeviceAuthorization` verdict.
     Sibling { device_hex: String },
+    /// A group set's fold (`p2p-shared-set-build.md` § Build design — the
+    /// group set, decision 7): the app's share plane hands over the paths its
+    /// walk merged out of the scope's `fauna.group.file` entries. Its rows are
+    /// **converged, not provisional** — the plane's writer check already ran
+    /// at the walk and again in the fold (decisions 4 and 5), so the engine
+    /// writes no overlay row, retires nothing on arrival (nothing arrives
+    /// later), keeps no pull cursor (the plane's per-writer frontier is the
+    /// cursor, decision 6) and applies a delete.
+    Group { scope: [u8; 32] },
 }
 
 impl PeerPageOrigin {
@@ -1046,7 +1122,16 @@ impl PeerPageOrigin {
         match self {
             Self::Share { peer_actor_hex } => peer_actor_hex.to_ascii_lowercase(),
             Self::Sibling { device_hex } => format!("device:{}", device_hex.to_ascii_lowercase()),
+            // Never read for a pull cursor (a group origin keeps none) — the
+            // scope's wire form, so the key space stays apart if one is asked.
+            Self::Group { scope } => fauna_core::folder_keys::FolderRef::Group(*scope).to_wire(),
         }
+    }
+
+    /// Whether this page is a group set's converged fold
+    /// ([`Self::Group`]) rather than a provisional peer page.
+    pub fn is_converged(&self) -> bool {
+        matches!(self, Self::Group { .. })
     }
 
     /// The actor the channel proved — what an exempt-class row's stamp is
@@ -1056,6 +1141,11 @@ impl PeerPageOrigin {
         match self {
             Self::Share { peer_actor_hex } => peer_actor_hex.to_ascii_lowercase(),
             Self::Sibling { .. } => own_actor_hex.to_ascii_lowercase(),
+            // No channel proves a group row: the plane's writer check does,
+            // and the engine admits it by the author that check verified
+            // (`SyncEngine`'s group admission). This account's own hex keeps
+            // a stampless row from ever reading as another's.
+            Self::Group { .. } => own_actor_hex.to_ascii_lowercase(),
         }
     }
 
@@ -1068,6 +1158,8 @@ impl PeerPageOrigin {
                 db.cached_share_writer(peer_actor_hex).unwrap_or(false)
             }
             Self::Sibling { .. } => true,
+            // The fold handed over only rows the plane's writer check passed.
+            Self::Group { .. } => true,
         }
     }
 }
@@ -1099,6 +1191,13 @@ pub struct PeerIngestReport {
     /// A wanted body was not landed because that would take the device's
     /// free space under the storage floor (an on-demand replica only).
     pub storage_limited: bool,
+    /// Converged deletes the engine applied to the disk — a group set's fold
+    /// only ([`PeerPageOrigin::Group`]); a provisional delete is view-only.
+    pub deleted: usize,
+    /// This replica's own superseded edits a group set's fold retained and
+    /// recorded before landing the plane's winner over them (decision 9,
+    /// [`superseded_own_edit`]).
+    pub retained: usize,
 }
 
 #[cfg(all(test, feature = "p2p-share"))]
@@ -1120,7 +1219,7 @@ pub(crate) mod tests {
             size_bytes: 9000,
             change_type: "create".to_string(),
             created_at: 1_700_000_000_000,
-            content_key_version: Some(2),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(2)),
             thumbnail_hash: None,
             derived_through: Some(11),
             is_resolution: Some(false),
@@ -1129,6 +1228,8 @@ pub(crate) mod tests {
             signature: Some(vec![0x51; 64]),
             signer_key: Some(vec![0x4B; 32]),
             signer_cert: None,
+            base_manifest: None,
+            deposited_by: None,
         }
     }
 
@@ -1628,6 +1729,117 @@ pub(crate) mod tests {
         db.get_entry("p").unwrap().unwrap()
     }
 
+    /// Decision 9's trigger, every conjunct pinned: only a clean head this
+    /// replica authored and lifted is retained before a group landing.
+    #[test]
+    fn only_a_clean_lifted_own_head_is_retained_before_a_group_landing() {
+        let own_m = h(2);
+        let own = |seq: Option<i64>, change_type: &str, manifest: &ContentHash| OwnChangeRow {
+            seq,
+            path: "p".to_string(),
+            manifest_hash: Some(hex::encode(manifest.digest())),
+            change_type: change_type.to_string(),
+            ..retained(1)
+        };
+        let clean = || LocalPathState {
+            entry: Some(entry_with(SyncState::Synced, Some(h(1)), Some(own_m))),
+            disk: Some(h(1)),
+        };
+
+        // The head is this replica's lifted put, clean on disk: retain it.
+        assert_eq!(
+            superseded_own_edit(&clean(), Some(&own(Some(7), "modify", &own_m)), None),
+            Some(SupersededOwnEdit {
+                manifest: own_m,
+                base_matched: false
+            })
+        );
+        // Decision 10: the winner names this very head as its base — an
+        // ordinary supersede, still retained; another base, or none, is a
+        // concurrent loss.
+        assert_eq!(
+            superseded_own_edit(
+                &clean(),
+                Some(&own(Some(7), "modify", &own_m)),
+                Some(&own_m.digest())
+            ),
+            Some(SupersededOwnEdit {
+                manifest: own_m,
+                base_matched: true
+            })
+        );
+        assert_eq!(
+            superseded_own_edit(
+                &clean(),
+                Some(&own(Some(7), "modify", &own_m)),
+                Some(&h(9).digest())
+            ),
+            Some(SupersededOwnEdit {
+                manifest: own_m,
+                base_matched: false
+            })
+        );
+        // A matched base never widens the trigger: no lifted own head, no
+        // retention, whatever the winner names.
+        assert_eq!(
+            superseded_own_edit(&clean(), None, Some(&own_m.digest())),
+            None
+        );
+        assert_eq!(
+            superseded_own_edit(
+                &clean(),
+                Some(&own(None, "modify", &own_m)),
+                Some(&own_m.digest())
+            ),
+            None
+        );
+        // No own row: the head is one some other author materialized.
+        assert_eq!(superseded_own_edit(&clean(), None, None), None);
+        // The own row names another manifest: this replica since landed
+        // someone else's version over it.
+        assert_eq!(
+            superseded_own_edit(&clean(), Some(&own(Some(7), "modify", &h(9))), None),
+            None
+        );
+        // Not lifted yet (the ingest skips such a path before asking).
+        assert_eq!(
+            superseded_own_edit(&clean(), Some(&own(None, "modify", &own_m)), None),
+            None
+        );
+        // The own head is a delete: there are no bytes of it to keep.
+        assert_eq!(
+            superseded_own_edit(&clean(), Some(&own(Some(7), "delete", &own_m)), None),
+            None
+        );
+        // The disk drifted from the tracked head, or the row is not settled:
+        // not the version the own row names.
+        let drifted = LocalPathState {
+            disk: Some(h(3)),
+            ..clean()
+        };
+        assert_eq!(
+            superseded_own_edit(&drifted, Some(&own(Some(7), "modify", &own_m)), None),
+            None
+        );
+        let uploading = LocalPathState {
+            entry: Some(entry_with(SyncState::Uploading, Some(h(1)), Some(own_m))),
+            disk: Some(h(1)),
+        };
+        assert_eq!(
+            superseded_own_edit(&uploading, Some(&own(Some(7), "modify", &own_m)), None),
+            None
+        );
+        // Nothing tracked: nothing of this replica's at stake.
+        let fresh = LocalPathState {
+            entry: None,
+            disk: None,
+        };
+        assert_eq!(
+            superseded_own_edit(&fresh, Some(&own(Some(7), "modify", &own_m)), None),
+            None
+        );
+    }
+
     /// Every arm of the judge, pinned: the provisional plane writes only
     /// where nothing local can be lost, and skips every ambiguous state.
     #[test]
@@ -1734,6 +1946,47 @@ pub(crate) mod tests {
             ),
             MaterializeVerdict::Skip("tracked file missing on disk")
         ));
+        // A settled tombstone with the disk empty: a recreate by another
+        // author — nothing local to lose, written; even when the peer's
+        // manifest is the deleted head's own (the tombstone keeps it).
+        for manifest in [Some(h(2)), Some(peer_m)] {
+            assert_eq!(
+                judge(
+                    &LocalPathState {
+                        entry: Some(entry_with(SyncState::Deleted, Some(h(1)), manifest)),
+                        disk: None
+                    },
+                    &peer_m
+                ),
+                MaterializeVerdict::Write
+            );
+        }
+        // A settled tombstone with bytes on disk: untracked novelty — never.
+        assert!(matches!(
+            judge(
+                &LocalPathState {
+                    entry: Some(entry_with(SyncState::Deleted, Some(h(1)), Some(h(2)))),
+                    disk: Some(h(3))
+                },
+                &peer_m
+            ),
+            MaterializeVerdict::Skip("untracked local file present")
+        ));
+        // A pending local delete is unpublished novelty: never resurrected.
+        assert!(matches!(
+            judge(
+                &LocalPathState {
+                    entry: Some(entry_with(
+                        SyncState::LocallyDeleted,
+                        Some(h(1)),
+                        Some(h(2))
+                    )),
+                    disk: None
+                },
+                &peer_m
+            ),
+            MaterializeVerdict::Skip("path not clean-synced locally")
+        ));
     }
 
     // ---- the serve memo (slice E byte half) ----
@@ -1755,14 +2008,22 @@ pub(crate) mod tests {
     /// PLAINTEXT hash as the range read's integrity anchor.
     #[test]
     fn memo_offsets_are_prefix_sums_keyed_by_store_key() {
-        let m = memo_manifest_from([0xAA; 32], "a/b.mp4", Some(4), &hand_manifest(true))
-            .expect("a sealed manifest indexes");
+        let m = memo_manifest_from(
+            [0xAA; 32],
+            "a/b.mp4",
+            Some(fauna_core::blob_seal::SealStamp::Version(4)),
+            &hand_manifest(true),
+        )
+        .expect("a sealed manifest indexes");
         let mut memo = ShareServeMemo::default();
         memo.index(m);
 
         let second = memo.chunk(&h(0x52).digest()).expect("resolves");
         assert_eq!(second.path, "a/b.mp4");
-        assert_eq!(second.content_key_version, Some(4));
+        assert_eq!(
+            second.content_stamp,
+            Some(fauna_core::blob_seal::SealStamp::Version(4))
+        );
         assert_eq!(second.coords.offset, 5);
         assert_eq!(second.coords.len, 7);
         assert_eq!(second.coords.plain_hash, h(2));
@@ -1795,7 +2056,15 @@ pub(crate) mod tests {
                 h(0x70 + i as u8),
                 h(0x80 + i as u8),
             ]);
-            memo.index(memo_manifest_from([i as u8; 32], &format!("f{i}"), Some(1), &m).unwrap());
+            memo.index(
+                memo_manifest_from(
+                    [i as u8; 32],
+                    &format!("f{i}"),
+                    Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                    &m,
+                )
+                .unwrap(),
+            );
         }
         assert_eq!(
             memo.chunk(&h(0x60).digest()),
@@ -1817,7 +2086,11 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bytes: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
         std::fs::write(dir.path().join("clip.mp4"), &bytes).unwrap();
-        let sealed = crate::seal::seal_blob(&bytes, Some((KEY, Some(1)))).unwrap();
+        let sealed = crate::seal::seal_blob(
+            &bytes,
+            Some((KEY, Some(fauna_core::blob_seal::SealStamp::Version(1)))),
+        )
+        .unwrap();
 
         let db_path = dir.path().join("fs-state.db");
         // Connection A — "the agent": retains the row + the manifest and STAYS
@@ -1834,7 +2107,7 @@ pub(crate) mod tests {
                 &hex::encode(sealed.manifest_hash.digest()),
                 &sealed.manifest_bytes,
                 "clip.mp4",
-                Some(1),
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
             )
             .unwrap();
 
@@ -1892,7 +2165,11 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bytes: Vec<u8> = (0..40_000u32).map(|i| (i % 239) as u8).collect();
         std::fs::write(dir.path().join("clip.mp4"), &bytes).unwrap();
-        let sealed = crate::seal::seal_blob(&bytes, Some((loser, Some(2)))).unwrap();
+        let sealed = crate::seal::seal_blob(
+            &bytes,
+            Some((loser, Some(fauna_core::blob_seal::SealStamp::Version(2)))),
+        )
+        .unwrap();
 
         let db_path = dir.path().join("fs-state.db");
         let writer = SyncDb::open(&db_path).unwrap();
@@ -1909,7 +2186,7 @@ pub(crate) mod tests {
                 0,
                 bytes.len() as i64,
                 1,
-                Some(2),
+                Some(fauna_core::blob_seal::SealStamp::Version(2)),
             )
             .unwrap();
 

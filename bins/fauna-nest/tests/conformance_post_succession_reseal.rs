@@ -45,12 +45,10 @@ use fauna_nest::db::CacheDb;
 use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
 use fauna_nest::token_store::TokenStore;
-use fauna_nest_http::{BearerSource, StaticBearer};
 use fauna_sync_engine::adaptive::AdaptiveConcurrency;
 use fauna_sync_engine::db::{SyncDb, SyncState};
 use fauna_sync_engine::engine::SyncEngine;
 use fauna_sync_engine::ignore::IgnoreMatcher;
-use fauna_sync_engine::nest_client::SyncClient;
 use fauna_sync_engine::transfer::TransferPool;
 
 mod common;
@@ -569,28 +567,29 @@ async fn a_stale_reissue_does_not_bury_a_peers_newer_edit() {
     assert_eq!(bytes, newer);
 }
 
-/// A successor's inherited **thumbnail** moves off the retired root with its
-/// file, and the nest's head names the moved blob.
+/// A successor's inherited **thumbnail** is re-sealed off the retired root
+/// with its file, and the nest's head names the re-sealed manifest.
 ///
-/// The record-gated half of the thumbnail MOVE (`identity-succession.md`
-/// § Implementation status today, the raw-AEAD Library plane bullets). The
-/// `fauna-sync-engine` unit tests pin its byte plane, but two of its properties
-/// are only observable where a change record actually lands, and both matter:
-/// the **nest's head** must name the moved thumbnail (a head still naming the
-/// predecessor-sealed blob leaves every other device fetching a copy that goes
-/// dark the moment `sync-agent.md` bound (3) drops the retired keys), and the
-/// row's **cached pointer** must follow it (a stale cache sends the next pass
-/// chasing the pre-move blob). Both stamps sit behind the record's success arm,
-/// which an unconnected `NestClient` can never reach.
+/// A thumbnail rests as its file rests (`media.md` § Encryption at rest → *A
+/// thumbnail rests as its file rests*, bound (2)): a manifest under the file's
+/// root, re-sealed by the same windowed pass. The `fauna-sync-engine` unit
+/// tests pin its byte plane, but two of its properties are only observable
+/// where a change record actually lands, and both matter: the **nest's head**
+/// must name the re-sealed thumbnail (a head still naming the
+/// predecessor-sealed manifest leaves every other device fetching a copy that
+/// goes dark the moment `sync-agent.md` bound (3) drops the retired keys), and
+/// the row's **cached pointer** must follow it (a stale cache sends the next
+/// pass chasing the pre-re-seal manifest). Both stamps sit behind the record's
+/// success arm, which an unconnected `NestClient` can never reach.
 ///
-/// ⚠ The thumbnail is seeded as a Library blob under the retired key rather than
-/// produced by an image upload, deliberately: what is under test is the *move*,
-/// whose input is an already-sealed thumbnail and whose trigger is "this build
-/// regenerated nothing". Driving it through the thumbnailer would make the test
-/// depend on the `process_media` feature being compiled in — the very condition
-/// the move exists to survive.
+/// ⚠ The thumbnail is seeded as a manifest under the retired root rather than
+/// produced by an image upload, deliberately: what is under test is the
+/// *re-seal*, whose input is an already-sealed thumbnail and whose trigger is
+/// "this pass holds no whole plaintext to re-render from". Driving it through
+/// the thumbnailer would make the test depend on the `process_media` feature
+/// being compiled in.
 #[tokio::test]
-async fn a_successors_inherited_thumbnail_moves_with_its_file() {
+async fn a_successors_inherited_thumbnail_is_resealed_with_its_file() {
     let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
     let (url, token) = start_test_nest(owner).await;
 
@@ -601,7 +600,6 @@ async fn a_successors_inherited_thumbnail_moves_with_its_file() {
     let thumb_pixels: Vec<u8> = (0..2_048u32).map(|i| (i % 193) as u8).collect();
 
     let pred_key = BackupKey::derive(&PREDECESSOR_SEED);
-    let succ_key = BackupKey::derive(&SUCCESSOR_SEED);
 
     // ── The predecessor's corpus + its thumbnail, both under the retired key ──
     let pred_watch = tempfile::tempdir().unwrap();
@@ -625,26 +623,15 @@ async fn a_successors_inherited_thumbnail_moves_with_its_file() {
     );
     let pred_head = nest_head_manifest(Arc::clone(&pred_ctl), rel).await;
 
-    // The thumbnail the predecessor's build recorded, sealed under its bare key.
-    let blob_client = SyncClient::new(
-        Arc::new(fauna_client::AuthClient::with_bearer_source(
-            url.clone(),
-            ActorKeypair::from_secret(OWNER_SECRET),
-            Arc::new(StaticBearer(token.clone())) as Arc<dyn BearerSource>,
-            reqwest::Client::new(),
-        )),
-        &PREDECESSOR_DEVICE,
+    // The thumbnail the predecessor's build recorded: a manifest sealed under
+    // its own root, as its file is.
+    let pred_thumb_hex = hex::encode(
+        pred_engine
+            .upload_bytes(thumb_pixels.clone(), "photos/with-thumb.thumb", FOLDER)
+            .await
+            .expect("seed the predecessor's thumbnail manifest")
+            .digest(),
     );
-    let sealed_thumb = fauna_media::pipeline::seal_rendered_thumbnail(
-        &thumb_pixels,
-        &fauna_media::audience::Audience::Library {
-            backup_key: pred_key.clone(),
-        },
-    );
-    let pred_thumb_hex = blob_client
-        .upload_blob_multipart(&sealed_thumb.sidecar.to_dag_cbor(), &sealed_thumb.bytes)
-        .await
-        .expect("seed the predecessor's thumbnail blob");
 
     // ── The successor: new seed, EMPTY watch dir, nothing materialized ──
     let succ_watch = tempfile::tempdir().unwrap();
@@ -697,25 +684,23 @@ async fn a_successors_inherited_thumbnail_moves_with_its_file() {
         );
     assert_ne!(
         new_thumb_hex, pred_thumb_hex,
-        "the head must name the MOVED thumbnail; naming the predecessor-sealed one \
-         leaves every other device fetching a blob that goes dark at bound (3)"
+        "the head must name the RE-SEALED thumbnail; naming the predecessor-sealed one \
+         leaves every other device fetching a manifest that goes dark at bound (3)"
     );
-    let moved = blob_client
-        .download_blob(&manifest_hash_of(&new_thumb_hex))
-        .await
-        .expect("the moved thumbnail is fetchable by the hash the head names");
     assert_eq!(
-        fauna_core::crypto::decrypt_backup_chunk(&succ_key, &moved)
-            .expect("…and opens under the SUCCESSOR's bare key alone"),
+        succ_engine
+            .download_file_bytes_by_manifest(manifest_hash_of(&new_thumb_hex), None, rel)
+            .await
+            .expect("the re-sealed thumbnail opens by the hash the head names"),
         thumb_pixels,
-        "…carrying the original pixels — a move, not a re-render"
+        "…carrying the original pixels — a re-seal, not a re-render"
     );
-    assert!(
-        fauna_core::crypto::decrypt_backup_chunk(&pred_key, &moved).is_err(),
-        "the retired root must no longer open it, or the seed stays load-bearing"
-    );
+    pred_engine
+        .download_file_bytes_by_manifest(manifest_hash_of(&new_thumb_hex), None, rel)
+        .await
+        .expect_err("the retired root must no longer open it, or the seed stays load-bearing");
 
-    // ── …and the row's cached pointer followed the move ──
+    // ── …and the row's cached pointer followed the re-seal ──
     assert_eq!(
         succ_engine
             .db()
@@ -724,7 +709,7 @@ async fn a_successors_inherited_thumbnail_moves_with_its_file() {
             .unwrap()
             .thumbnail_hash,
         Some(new_thumb_hex),
-        "a stale cache would send the next pass chasing the pre-move blob"
+        "a stale cache would send the next pass chasing the pre-re-seal manifest"
     );
 }
 

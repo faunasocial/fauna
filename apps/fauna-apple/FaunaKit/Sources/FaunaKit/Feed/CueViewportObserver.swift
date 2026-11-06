@@ -96,7 +96,10 @@ public final class CueViewportObserver {
 
     // MARK: - Geometry intake (called from the SwiftUI preference plumbing)
 
-    func updateFrames(_ frames: [String: CGRect]) { self.frames = frames }
+    func updateFrames(_ frames: [String: CGRect]) {
+        self.frames = frames
+        framesDelivered &+= 1
+    }
     func updateViewport(_ rect: CGRect) { self.viewport = rect }
 
     // MARK: - Lifecycle
@@ -118,15 +121,11 @@ public final class CueViewportObserver {
     /// (`account-scoping.md` § The scoping taxonomy, the in-flight landing
     /// rules, `:208-236`).
     func run(feedVM: FeedVM, onError: @escaping (Int, String) -> Void) async {
-        guard let manager = feedVM.manager else { return }
-        // apple's feed (`FeedListView` on iOS, `MacFeedDetailView` on macOS) is
-        // a deliberately non-virtualizing eager `ScrollView { VStack }` — every
-        // post-card view stays realized regardless of scroll position, so a row
-        // that merely could not be measured this sample is mid-layout, never
-        // disposed. `.holdUnmeasured` is the matching leave model (linux's GTK
-        // `ListBox` and windows' non-virtualizing `StackPanel` use the same one;
-        // android's virtualizing `LazyColumn` is the one app on `.absenceIsLeave`).
-        let tracker = FfiCueTracker(leaveModel: .holdUnmeasured)
+        // The auth's ONE tracker (`FeedVM.cueTracker()`), never this mount's
+        // own: what it holds — the frozen test clock included — outlives a
+        // trip off the page. The teardown drain below empties it, so a
+        // re-mount still starts with nothing tracked.
+        guard let manager = feedVM.manager, let tracker = feedVM.cueTracker() else { return }
         await run(feedVM: feedVM, calls: .live(manager: manager, tracker: tracker),
                   hydrated: Self.hydratedGenerations, onError: onError)
     }
@@ -141,6 +140,23 @@ public final class CueViewportObserver {
         let generation = feedVM.managerGeneration
         self.calls = calls
         Self.current = self
+        self.sampleNow = { [weak self, weak feedVM] in
+            guard let self, let feedVM else { return [] }
+            return self.sample(feedVM: feedVM, calls: calls)
+        }
+        self.recordNow = { [weak self] observations in
+            await self?.record(observations, to: calls, generation: generation, onError: onError)
+        }
+        // A `.task(id:)` restart starts the next run before this one has
+        // unwound, so only the newest run's doors are cleared on its way out.
+        runs &+= 1
+        let thisRun = runs
+        defer {
+            if runs == thisRun {
+                sampleNow = nil
+                recordNow = nil
+            }
+        }
 
         await Self.hydrateIfNeeded(feedVM: feedVM, calls: calls, hydrated: hydrated, onError: onError)
 
@@ -176,7 +192,14 @@ public final class CueViewportObserver {
     /// the value `onError`'s caller actually guards against.
     private func tick(feedVM: FeedVM, calls: CueCaptureCalls, generation: Int,
                       onError: @escaping (Int, String) -> Void) async {
-        guard viewport.height > 0 else { return }   // not laid out yet — measure nothing
+        let observations = sample(feedVM: feedVM, calls: calls)
+        await record(observations, to: calls, generation: generation, onError: onError)
+    }
+
+    /// The geometry read of one sample, handed to the shared tracker; returns
+    /// the exposures it says have finished.
+    private func sample(feedVM: FeedVM, calls: CueCaptureCalls) -> [CueObservation] {
+        guard viewport.height > 0 else { return [] }   // not laid out yet — measure nothing
 
         // The FULL loaded window (not just arranged rows) — it resolves is-media
         // at first sighting AND answers "did this post leave the feed entirely",
@@ -184,12 +207,49 @@ public final class CueViewportObserver {
         let postsWindow = Self.postsWindow(feedVM.posts)
         let rows = Self.buildRows(frames: frames, postsWindow: postsWindow)
 
-        let observations = calls.sample(
+        return calls.sample(
             rows, Array(postsWindow.keys),
             Double(viewport.minY), Double(viewport.maxY),
             Self.monoNowMs(), Self.wallNowMs())
-        await Self.emit(observations, to: calls, generation: generation, onError: onError)
     }
+
+    /// The last record in flight — every `record` chains behind it, so the
+    /// tick's and the test steps' records reach the engine one batch at a
+    /// time, in the order their samples were taken.
+    private var recording: Task<Void, Never>?
+
+    /// Hand `observations` to the engine behind every earlier batch, resolving
+    /// once this batch — and so every batch before it — is recorded, the
+    /// engine's train and any put included. That is what makes a test step's
+    /// ack a record barrier even when the sampling tick, not the step, took
+    /// the sample that ended an exposure.
+    private func record(_ observations: [CueObservation], to calls: CueCaptureCalls,
+                        generation: Int, onError: @escaping (Int, String) -> Void) async {
+        let previous = recording
+        let batch = Task { @MainActor in
+            await previous?.value
+            await Self.emit(observations, to: calls, generation: generation, onError: onError)
+        }
+        recording = batch
+        await batch.value
+    }
+
+    // MARK: - Test-step doors (the e2e cue-clock commands)
+
+    /// One sample of the mounted list, taken now — `nil` while no feed is
+    /// mounted. The cue-clock commands (`FeedCueClockTestCommand`) land each
+    /// step with a sample of their own, as linux's `feed::viewport::test_clock`
+    /// and android's `CueCapture.sample` do.
+    private(set) var sampleNow: (() -> [CueObservation])?
+    /// `record` over the running loop's calls — see `sampleNow`.
+    private(set) var recordNow: (([CueObservation]) async -> Void)?
+
+    /// Bumped on every card-frame delivery, so a step can wait for the layout
+    /// a scroll caused to reach this observer before it samples.
+    private(set) var framesDelivered = 0
+
+    /// How many runs this observer has started — see `run`'s door clearing.
+    private var runs = 0
 
     /// The measurement half of a sample, split out as a pure function over
     /// primitives so the omit-unarranged-rows rule below is unit-asserted
@@ -209,7 +269,7 @@ public final class CueViewportObserver {
         frames.map { postId, frame in
             CueRow(postId: postId, top: Double(frame.minY), height: Double(frame.height),
                    isMedia: postsWindow[postId] ?? false,
-                   // No playback surface on apple yet — see `emit`'s comment.
+                   // The tracker holds the player's peak itself — see `emit`'s comment.
                    mediaPlayedPm: nil)
         }
     }
@@ -288,11 +348,12 @@ public final class CueViewportObserver {
     /// `endedBy` (how the exposure ended, which a `skip` requires to be a
     /// scroll) included.
     ///
-    /// No playback surface on apple yet — the feed renders media as
-    /// `AsyncImage` stills, with no AVPlayer anywhere, so `mediaPlayedPm` is
-    /// always `nil` at the probe (`buildRows`) and the media `watch-complete`
-    /// gate is unreachable here, exactly as on linux/android/windows. This is
-    /// the argument that becomes real the moment apple gains inline video.
+    /// The media arm: a card's inline player notes each position it reports
+    /// straight into the shared tracker (`PostCardBody.notePlayed` →
+    /// `FfiCueTracker.notePlayed`), which keeps the peak and takes it for the
+    /// post's media row at the next sample — so `mediaPlayedPm` is always
+    /// `nil` at the probe (`buildRows`) and apple keeps no unread maximum of
+    /// its own (`CueRow::media_played_pm`'s contract, the tracker-held form).
     ///
     /// `generation` is the same account-switch guard `hydrateIfNeeded` applies
     /// to its own `onError` call — `recordObservation` is exactly the FFI
@@ -318,14 +379,14 @@ public final class CueViewportObserver {
     /// other is linux); this call site is unchanged by the migration, only its
     /// destination (`FfiCueTracker.sample`'s `monoNowMs`, not this file's own
     /// arithmetic).
-    private static func monoNowMs() -> UInt64 {
+    static func monoNowMs() -> UInt64 {
         UInt64(DispatchTime.now().uptimeNanoseconds / 1_000_000)
     }
 
     /// The **wall** clock stamping `CueObservation.observedAtMs` — what drives
     /// the shared engine's put-debounce cadence and is compared against
     /// previously stored observations across sessions and devices.
-    private static func wallNowMs() -> UInt64 {
+    static func wallNowMs() -> UInt64 {
         UInt64(max(0, Date().timeIntervalSince1970 * 1000))
     }
 }

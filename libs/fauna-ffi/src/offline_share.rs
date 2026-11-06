@@ -615,18 +615,24 @@ pub struct FfiPendingGroupShare {
     pub short_id: String,
 }
 
-/// One shared set this device holds the machinery for. No `scope_id` field:
-/// nothing on this row is addressable yet — a group set has no per-row
-/// gesture in v1.
+/// One shared set this device holds the machinery for — the FFI twin of
+/// [`fauna_sync_engine::offline_share::GroupScopeView`].
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiGroupScope {
-    /// The short scope id — the set's only name in v1.
+    /// The short scope id — the label of a set with no recorded name.
     pub short_id: String,
     /// How many verified members the roster carries.
     pub member_count: u32,
     /// `Some(who)` when someone else minted the scope — the recipient's
     /// "Shared by ‹them›" reading. `None` on the initiator's own set.
     pub shared_by: Option<String>,
+    /// The set's recorded name, folded under the name's writer check; `None`
+    /// for a nameless set, which is labelled by [`Self::short_id`].
+    pub name: Option<String>,
+    /// The set's `FolderRef::Group` wire form (`group:<64-hex>`) — what a
+    /// location binds under through the agent's `AddLocation`, and the
+    /// binding's set label (`GroupScopeView::folder_id`).
+    pub folder_id: String,
 }
 
 /// Both halves of the folders page's group surface, read in one pass because
@@ -676,9 +682,11 @@ pub async fn offline_share_load_group_shares(
             .scopes
             .into_iter()
             .map(|s| FfiGroupScope {
+                folder_id: s.folder_id(),
                 short_id: s.short_id,
                 member_count: u32::try_from(s.member_count).unwrap_or(u32::MAX),
                 shared_by: s.shared_by,
+                name: s.name,
             })
             .collect(),
     })
@@ -715,7 +723,7 @@ mod tests {
             "same actor, same slot"
         );
         // The refusal door is a `test-helpers` export, so this arm compiles only
-        // with that feature on; a default-feature `cargo test -p fauna-ffi --lib`
+        // with that feature on; a default-feature `cargo test -p fauna-ffi-core --lib`
         // (the crate alone, no sibling unifying the feature in) still builds and
         // runs the rest of the pin instead of failing at E0425.
         #[cfg(feature = "test-helpers")]

@@ -40,8 +40,8 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Versioning.
         // versionName must equal [workspace.package] version in the root
         // Cargo.toml (product-version.md; version-lockstep merge gate).
-        versionCode = 105
-        versionName = "0.1.5"
+        versionCode = 106
+        versionName = "0.1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -247,6 +247,14 @@ android {
     // types with a feed and no payments, `storeSafe` and `storeNoPayments`, and
     // never by `kids`, whose bindings carry no feed.
     sourceSets {
+        // The find/actuate half of the UiAutomator bridge, shared with the
+        // out-of-process store driver (`:store-driver`), which reaches a
+        // Play-signed install through `UiAutomation` alone
+        // (feature-catalog.md § Implementation status today, how the Android
+        // store install is driven). Lifted, never copied.
+        getByName("androidTest") {
+            java.srcDir("../automation-shared/java")
+        }
         getByName("debug") {
             java.srcDir("src/noKids/java")
             java.srcDir("src/payments/java")

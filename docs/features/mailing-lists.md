@@ -89,54 +89,54 @@ Stamped 2026-09-23 at 039e9619ca.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+42006402.dirty standalone |
-| linux | ✅ full | 0.1.2-dev+42006402.dirty standalone |
+| web | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| linux | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+73d24d4b standalone |
-| ios | ⚠ partial | 0.1.2-dev+73d24d4b standalone |
-| android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+b7384d11 standalone |
+| tui | ✅ full | 0.1.5-dev+b7384d11 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_page_reachable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_add_via_sheet_lands_on_the_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_open_members_scopes_the_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_batch_import_lands_every_valid_address` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_delete_cascades_on_the_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_page_reachable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_nothing_selected_falls_back_to_first_list` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_unsubscribed_member_excluded_from_send` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_one_click_unsubscribe_via_https` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_one_click_unsubscribe_via_mailto` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_resub_undoes_unsubscribe` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_send_cap_rejects_oversize` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_day_cap_tempfails` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_token_deterministic_across_secret_rotation` | nest (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_page_reachable` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_add_via_sheet_lands_on_the_nest` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_open_members_scopes_the_page` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_batch_import_lands_every_valid_address` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_lists_delete_cascades_on_the_nest` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_page_reachable` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_nothing_selected_falls_back_to_first_list` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_unsubscribed_member_excluded_from_send` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_one_click_unsubscribe_via_https` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_one_click_unsubscribe_via_mailto` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_resub_undoes_unsubscribe` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_send_cap_rejects_oversize` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_day_cap_tempfails` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_token_deterministic_across_secret_rotation` | nest (linux): passed, nest (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_row_shows_member_count_last_send_and_todays_meter` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_edit_sheet_changes_a_lists_details` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_add_sheet_sets_description_links_and_per_send_cap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_delete_confirm_says_the_members_go_too` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_lists.py::test_mail_list_members_add_and_unsubscribe_round_trip` — requires `mail-lists` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_resubscribe_from_the_members_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_import_tally_says_how_many_were_skipped` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_sending_to_a_list_from_the_app_warns_reaches_every_member_once_and_shows_one_sent_entry` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_mail_list_compose.py::test_the_compose_form_warns_near_todays_list_limit_and_explains_an_over_limit_send` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_an_off_server_archive_link_asks_once_before_saving` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_member_on_local_domain_refused_pointing_at_aliases` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_address_taken_or_reserved_refused` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_mail_to_a_list_address_is_refused` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_sending_as_the_list_from_a_mail_app_is_refused` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_help_link_opens_a_subscribe_unsubscribe_page` | nest (linux): passed |
-| 22 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_unsubscribe_get_is_read_only_and_expired_link_says_so` | nest (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_bare_unsubscribe_address_refused_with_explanation` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_unsubscribe_is_sticky_through_readd_and_import` | nest (linux): passed |
-| 26 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_actor_rate_cap_not_consumed_by_list_send` | nest (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_lists_controls.py::test_an_off_server_archive_link_asks_once_before_saving` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_member_on_local_domain_refused_pointing_at_aliases` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_address_taken_or_reserved_refused` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_mail_to_a_list_address_is_refused` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_sending_as_the_list_from_a_mail_app_is_refused` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed, nest (macos): passed |
+| 21 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_help_link_opens_a_subscribe_unsubscribe_page` | nest (linux): passed, nest (macos): passed |
+| 22 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_send_stamps_rfc8058_headers` | nest (linux): passed, nest (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_unsubscribe_get_is_read_only_and_expired_link_says_so` | nest (linux): passed, nest (macos): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_bare_unsubscribe_address_refused_with_explanation` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_unsubscribe_is_sticky_through_readd_and_import` | nest (linux): passed, nest (macos): passed |
+| 26 | nest | `tests/e2e-unified/tests/api/test_mail_lists_send.py::test_list_per_actor_rate_cap_not_consumed_by_list_send` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

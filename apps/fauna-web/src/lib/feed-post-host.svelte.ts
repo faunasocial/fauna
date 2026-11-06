@@ -406,6 +406,9 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
         await manager?.trainPost(postId, factor, verb);
       }
     } catch (e: unknown) {
+      // The manager already reported the refusal as its own page error
+      // (`feed.error_train` on the snapshot, painted on `error-message` by the
+      // refresh below); this is the log line only.
       logMessage('warn', LOG, `train failed: ${e}`);
     } finally {
       refreshFeed();
@@ -497,7 +500,7 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
 
   // ── The interaction bar (feed.md § User actions). `reply` opens the compose
   //    dialog instead of firing immediately (`manager.reply` needs typed text).
-  async function handleInteract(postId: string, action: string): Promise<void> {
+  async function handleInteract(postId: string, action: string, emoji?: string): Promise<void> {
     const manager = deps.manager();
     if (!manager) { deps.setError(t.common.still_loading); return; }
     if (action === 'reply') {
@@ -515,6 +518,10 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
       // on a native post.
       if (action === 'like') {
         await manager.like(postId);
+      } else if (action === 'react') {
+        // `post-reaction-pill` — the manager's TOGGLE off the group's
+        // `viewer_react_id`; a bridged target is refused (surfaced below).
+        await manager.react(postId, emoji ?? '');
       } else if (action === 'quote') {
         await manager.quote(postId, '');
       } else if (action === 'repost') {
@@ -685,6 +692,7 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
   const previewResolving = new Set<string>();
   const unlockOfferResolving = new Set<string>();
   const tipsResolving = new Set<string>();
+  const authorFaceResolving = new Set<string>();
 
   /// Every cache above is ACTOR-SCOPED and must die with the actor: they are
   /// keyed by post id alone, and each doubles as a fire-once guard. A page
@@ -700,6 +708,7 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
     previewResolving.clear();
     unlockOfferResolving.clear();
     tipsResolving.clear();
+    authorFaceResolving.clear();
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -790,6 +799,20 @@ export function createFeedPostHost(deps: FeedPostHostDeps) {
         refreshFeed();
         const after = landed(id);
         if (after && after.tips != null) tipsResolving.delete(id);
+      });
+    }
+    // The remote author's byline (feed.md § The read model → *The remote
+    // author's byline*): a rendered post homed on another nest whose author
+    // shows no face yet. The manager writes a face on EVERY outcome (an empty
+    // one when the author shows none), so the guard closes and the card's label
+    // reads the id; the card itself changes nowhere — `author_display` already
+    // feeds `peerDisplayLabel`.
+    if (p.home_nest_url && !p.author_display && !authorFaceResolving.has(id)) {
+      authorFaceResolving.add(id);
+      void manager.resolveAuthorFace(id).then(() => {
+        refreshFeed();
+        const after = landed(id);
+        if (after && after.author_display != null) authorFaceResolving.delete(id);
       });
     }
   }

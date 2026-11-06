@@ -283,7 +283,7 @@ def _mint_hosted_identity(app, request, directory, nest, tmp_path_factory, metho
 def test_directory_feeders_alarm_via_session_start_sweep(
     sweep_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
 ):
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest
     from drivers.port_util import untrack_process
 
@@ -310,9 +310,7 @@ def test_directory_feeders_alarm_via_session_start_sweep(
     driver = None
     spa_proxy_server = None
     try:
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         driver, spa_proxy_server = launch_app_with_directory(sweep_app, request, nest, directory)
         session = {
             "authenticated": True,
@@ -443,7 +441,8 @@ def test_custody_alarm_reaches_a_fresh_sign_in_before_the_runtime_assembles(
     The tamper lands while the app sits on the feed page, so neither the
     settings machine nor the running loop can raise the alarm first — only the
     new session's loop can, and the wake is never pressed."""
-    from common.auth import open_registration, register_handled_actor
+    from common.auth import open_registration
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest
     from drivers.port_util import untrack_process
 
@@ -457,9 +456,7 @@ def test_custody_alarm_reaches_a_fresh_sign_in_before_the_runtime_assembles(
     driver = None
     spa_proxy_server = None
     try:
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         driver, spa_proxy_server = launch_app_with_directory(sweep_app, request, nest, directory)
         session = {
             "authenticated": True,
@@ -511,7 +508,7 @@ def test_custody_alarm_reaches_a_fresh_sign_in_before_the_runtime_assembles(
         directory.close()
 
 
-@pytest.mark.parametrize("sweep_app", _apps("tui"))
+@pytest.mark.parametrize("sweep_app", _apps(*SWEEP_APPS))
 @pytest.mark.feature("critical-alerts")
 def test_did_web_identity_never_triggers_handle_binding_alarm(
     sweep_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
@@ -519,10 +516,10 @@ def test_did_web_identity_never_triggers_handle_binding_alarm(
     """`plan_handle_binding` gates the feeder on `id.method == "plc"`
     (`fauna-client-alert-sweep/src/lib.rs`) — a did:web identity has no PLC
     directory log to audit at all (its custody IS domain custody), so the
-    sweep must silently skip it rather than alarm. tui only: the claim is
-    about the SWEEP's gate, identical on every app since it is shared Rust —
-    the per-app UI proof already exists for feeder #3's plc path above."""
-    from common.auth import register_handled_actor
+    sweep must silently skip it rather than alarm. Runs on every sweep app:
+    the gate is shared Rust, but each app's banner is the observable, and the
+    catalog counts this witness for every app marker the file carries."""
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest
     from drivers.port_util import untrack_process
 
@@ -549,9 +546,7 @@ def test_did_web_identity_never_triggers_handle_binding_alarm(
     driver = None
     spa_proxy_server = None
     try:
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         driver, spa_proxy_server = launch_app_with_directory(sweep_app, request, nest, directory)
         session = {
             "authenticated": True,

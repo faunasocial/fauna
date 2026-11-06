@@ -47,7 +47,14 @@ use crate::state::SyncServiceState;
 /// seam, not an env-var redirect). `tokio` channels are kept alive via the returned
 /// receivers' senders inside the state; the dropped receiver halves are fine (no
 /// consumer needed here).
+///
+/// The paths are scoped to a test account, as a provision scopes them: the
+/// binding store is an account's, and an agent with none refuses a binding
+/// write (`pipe_server::require_an_account`). No capability is set, so no
+/// engine or cfapi root starts. The scope is shared with every clone of
+/// `paths`, so the caller's copy resolves the same files.
 fn state(paths: SyncPaths) -> Arc<SyncServiceState> {
+    paths.set_actor_scope(Some(hex::encode([0x7eu8; 32])));
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
     SyncServiceState::new(SyncConfig::default(), shutdown_tx, event_tx, paths)
@@ -135,9 +142,10 @@ async fn get_file_status_reports_overlay_state_from_real_per_folder_db() {
 
     // 2. The add/bind/mode round-trip persisted via the `--data-dir` override:
     //    config.toml physically landed under the temp root (not the machine
-    //    default), and reloading it confirms the bound on-demand folder survived.
+    //    default) — in the account's own store — and reloading it confirms the
+    //    bound on-demand folder survived.
     assert!(
-        tmp.path().join("config.toml").is_file(),
+        paths.config_path().is_file() && paths.config_path().starts_with(tmp.path()),
         "config.toml must be written under the --data-dir override root"
     );
     let persisted = paths.load_config().expect("reload persisted config");

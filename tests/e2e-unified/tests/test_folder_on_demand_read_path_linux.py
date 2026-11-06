@@ -1,6 +1,7 @@
 """tier_3 — a linux on-demand folder is served to OTHER processes at its own path.
 
-The linux leg of `docs/features/files-on-demand.md` beyond the switch itself
+The linux host's leg — the linux app, and tui there — of
+`docs/features/files-on-demand.md` beyond the switch itself
 (`test_folder_location_mode_toggle.py`): once the user turns a bound folder
 on-demand on the Folders page, the per-user `fauna-sync-agent` mounts a FUSE
 root over that directory (on-demand-files-linux.md § Linux FUSE binding — mount-over:
@@ -56,11 +57,12 @@ from helpers.folder_content import (
     bind_location_under_set,
     mountable_location,
     on_demand_mount_stands,
+    require_fuse_host,
     upload_count,
 )
 from helpers.fuse_mount import run_through_mount
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.linux]
+pytestmark = pytest.mark.tier_3
 
 # A ceiling, not an expectation: the agent mounts (or unmounts) after it has
 # answered the flip, restarting the folder's engine in between.
@@ -92,7 +94,14 @@ def _run(app, folder, *argv: str) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["linux"], indirect=True)
+@pytest.mark.parametrize(
+    "folder_share_owner_app",
+    [
+        pytest.param("tui", marks=pytest.mark.tui),
+        pytest.param("linux", marks=pytest.mark.linux),
+    ],
+    indirect=True,
+)
 @pytest.mark.real_conversations
 @pytest.mark.feature("files-on-demand")
 def test_on_demand_folder_is_read_and_written_through_its_mount(
@@ -101,6 +110,7 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
     """Turning a bound folder on-demand serves it, at its own path, to every
     other process — and turning it off leaves an ordinary directory behind."""
     app, _nest, _owner = folder_share_owner_app
+    require_fuse_host(app.driver)
     loc = app.sync_locations
 
     set_name = f"ondemand-{secrets.token_hex(4)}"

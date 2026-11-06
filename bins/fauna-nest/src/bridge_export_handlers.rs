@@ -46,7 +46,7 @@ use fauna_protocol::bridge_routing::{
 use fauna_protocol::decode_strict as decode;
 
 use crate::bridge_imap_handlers::{
-    emit_bootstrap_create_records, require_local_mail_serving, split_flags,
+    emit_bootstrap_create_records, require_local_mail_store, split_flags,
 };
 use crate::bridge_routing_handlers::{encode_reply, internal, malformed, not_found, require_class};
 use crate::db::mail_export::{
@@ -317,7 +317,7 @@ fn list_own_mailboxes_handler() -> crate::rpc_router::RpcHandler {
             // The caller IS the target — there is no second actor to resolve.
             // That asymmetry with the MDA's `list_mailboxes` is the whole
             // reason this is a separate kind (`mail-export.md` § Wire shapes).
-            require_local_mail_serving(&state, &actor_id).await?;
+            require_local_mail_store(&state, &actor_id).await?;
             let newly_seeded = state
                 .db
                 .ensure_bridge_imap_mailboxes(&actor_id)
@@ -411,7 +411,7 @@ fn start_export_session_handler() -> crate::rpc_router::RpcHandler {
                 }
             };
             require_counter_in_range("total_count", req.total_count)?;
-            require_local_mail_serving(&state, &actor_id).await?;
+            require_local_mail_store(&state, &actor_id).await?;
             let ceilings = export_ceilings(&state).await?;
             let session_id = uuid::Uuid::new_v4().to_string();
             // § Reclaim rule 1 — row before file: the row carrying `blob_path`
@@ -514,7 +514,7 @@ fn fetch_export_chunk_ciphertext_handler() -> crate::rpc_router::RpcHandler {
                     req.session_id, row.state
                 )));
             }
-            require_local_mail_serving(&state, &actor_id).await?;
+            require_local_mail_store(&state, &actor_id).await?;
 
             let limit = match req.max_messages {
                 0 => MAX_EXPORT_FETCH_MESSAGES,
@@ -1253,7 +1253,7 @@ mod tests {
         });
         let state = Arc::new(AppState { config, ..base });
         // The dispatch gate classes an actor `User` only when a `users` row
-        // exists; `require_local_mail_serving` additionally needs the actor to
+        // exists; `require_local_mail_store` additionally needs the actor to
         // be a local mail-serving one. Fixture setup, not the action under test.
         state.db.create_user(&USER, "free", "test").await.unwrap();
         state.db.create_user(&OTHER, "free", "other").await.unwrap();

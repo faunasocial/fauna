@@ -6,7 +6,6 @@ goal: docs/goal/behavior/share-links.md § Flows
 guide: docs/guides/app-tour.md § Media
 absences:
   web (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
-  ios (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
   android (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
   tui (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
 ---
@@ -14,11 +13,11 @@ absences:
 ## What a user gets
 
 Make a link to a file and send it to anyone: they open it in an ordinary
-browser, with no account. A file in a folder you have made public is served
-as it is; a private file of your own stays sealed on your nest, and the link
-itself carries the key that opens it. Each link expires after
-the time you choose, and you can see every link you have made and revoke any
-of them, after which it stops working for everyone.
+browser, with no account. A file in a folder you have made public is served as
+it is; a file in a folder only you can open, and not served over WebDAV, stays
+encrypted on your nest, and the link itself carries the key that opens it. Each
+link expires after the time you choose, and you can see every link you have made
+and revoke any of them, after which it stops working for everyone.
 
 ## Coverage contract
 
@@ -27,7 +26,7 @@ Stamped 2026-10-21 at 77c610862e.
 1. [app] A file in a public folder offers a link; the link appears only once it is registered, a stranger opens it over plain HTTP, it is listed as active with its name, and revoking it from the list stops it working — `docs/goal/behavior/share-links.md` § Flows
    - `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link`
 2. [nest] A link's file name rests sealed on the nest, and a link registered without its sealed name is refused — `docs/goal/behavior/share-links.md` § The filename rests sealed
-   - (none)
+   - `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_links_name_rests_sealed_and_a_link_without_its_sealed_name_is_refused`
 3. [app] When you make a link you choose how long it lasts — a day, a week, a month or a year, a week unless you choose otherwise — and never forever — `docs/goal/behavior/share-links.md` § Expiry
    - `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly`
 4. [nest] A link stops working for everyone once the time you chose has passed — `docs/goal/behavior/share-links.md` § What a link is
@@ -61,7 +60,7 @@ Stamped 2026-10-21 at 77c610862e.
     - `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link`
     - `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens`
 18. [app] A file in a folder you share with named people offers no share link, unless the folder is public — `docs/goal/behavior/share-links.md` § The private-file extension
-    - (none)
+    - `tests/e2e-unified/tests/test_share_links_private.py::test_a_folder_shared_with_named_people_offers_no_link_unless_public`
 19. [app] Making a link to a private file tells you that the link itself is the key: anyone who gets hold of it opens the file until it expires or you revoke it — `docs/goal/behavior/share-links.md` § The private-file extension
     - `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key`
 20. [app] Someone with no account opens a private file's link in an ordinary browser and gets the file, checked to be exactly the one you linked — `docs/goal/behavior/share-links.md` § The private-file extension
@@ -83,64 +82,72 @@ Stamped 2026-10-21 at 77c610862e.
 28. [app] Choosing Share on a file in a public synced folder from the computer's file manager opens the app on that file, ready to make a link — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
+    - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow`
 29. [app] The file manager offers Share on a file only when that file can carry a link — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
+    - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made`
 30. [app] Choosing Share on a shared folder from the file manager opens that folder's member sharing in the app, and a sub-folder inside it offers no Share — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
     - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
+    - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow`
+    - `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+7739afc6.dirty standalone |
-| linux | ⚠ partial | 0.1.2-dev+7739afc6.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+9a58388f.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+39cf14cf standalone |
-| ios |  no run recorded | |
-| android | ⚠ partial | 0.1.2-dev+7739afc6.dirty standalone |
-| tui | ⚠ partial | 0.1.2-dev+7739afc6.dirty standalone |
+| web | ✅ full | 0.1.5-dev+a1c8b519 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| windows | ⚠ partial | 0.1.5-dev+97d945a3 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| android | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 2 | nest | (none) | — |
-| 3 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | tui (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_stops_for_everyone_once_its_time_has_passed` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_share_links.py::test_a_link_whose_time_has_run_out_stays_listed_marked_expired` | tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_share_links.py::test_a_link_the_nest_did_not_record_is_never_shown_and_create_tries_again` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_keeps_opening_the_file_as_it_was_after_it_is_edited_and_moved` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_stops_once_its_version_is_no_longer_kept` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_the_nest_could_never_serve_is_refused_when_it_is_made` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_to_a_file_removed_under_a_legal_order_answers_unavailable_for_legal_reasons` | nest (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_share_links.py::test_links_made_before_taking_the_account_back_still_work_and_can_be_revoked` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens` | tui (linux): passed |
-| 18 | app | (none) | — |
-| 19 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_links_name_rests_sealed_and_a_link_without_its_sealed_name_is_refused` | nest (linux): passed, nest (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_stops_for_everyone_once_its_time_has_passed` | nest (linux): passed, nest (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_share_links.py::test_a_link_whose_time_has_run_out_stays_listed_marked_expired` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_share_links.py::test_four_lengths_a_week_by_default_shown_in_the_list_and_copied_exactly` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_share_links.py::test_a_link_the_nest_did_not_record_is_never_shown_and_create_tries_again` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_keeps_opening_the_file_as_it_was_after_it_is_edited_and_moved` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_stops_once_its_version_is_no_longer_kept` | nest (linux): passed, nest (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_the_nest_could_never_serve_is_refused_when_it_is_made` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_share_links_nest_promises.py::test_a_link_to_a_file_removed_under_a_legal_order_answers_unavailable_for_legal_reasons` | nest (linux): passed, nest (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_share_links.py::test_links_made_before_taking_the_account_back_still_work_and_can_be_revoked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, android (linux): error, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens` | tui (linux): passed, tui (macos): passed |
+| 18 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_folder_shared_with_named_people_offers_no_link_unless_public` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, android (linux): error, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
-| 25 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 25 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 26 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
 | 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
-| 28 | app | absent by design on web, ios, android, tui | — |
+| 28 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow` | macos (macos): passed, ios (macos): passed |
+| 28 | app | absent by design on web, android, tui | — |
 | 29 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
-| 29 | app | absent by design on web, ios, android, tui | — |
+| 29 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made` | macos (macos): passed, ios (macos): passed |
+| 29 | app | absent by design on web, android, tui | — |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
 | 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
-| 30 | app | absent by design on web, ios, android, tui | — |
+| 30 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_share_action_routes_open_the_create_surface_and_the_member_share_flow` | macos (macos): passed, ios (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/test_apple_share_action_routes.py::test_the_provider_items_carry_share_only_where_a_link_or_member_share_can_be_made` | macos (macos): passed, ios (macos): passed |
+| 30 | app | absent by design on web, android, tui | — |
 <!-- features-render:end -->

@@ -183,7 +183,24 @@ class ContactsVM @Inject constructor(
             } catch (_: Exception) {
                 // keep the last known roster
             }
+            // Phase two's archive links re-read with the roster (best-effort,
+            // the previous views kept on a failed read).
+            api.refreshArchiveLinks()
         }
+    }
+
+    /** Every row's phase-two archive-link affordances (`archive-import.md`
+     *  § Linking and merging, ruling 8) — the shared views, worded per row. */
+    val archiveLinkPainter = api.archiveLinkPainter
+
+    /** `contact-archive-link-yes` / `-no` — once, either way. */
+    fun answerArchiveLink(contact: String, platform: String, yes: Boolean) {
+        viewModelScope.launch { api.answerArchiveLink(contact, platform, yes) }
+    }
+
+    /** `contact-archive-unlink`. */
+    fun unlinkArchiveLink(contact: String, platform: String) {
+        viewModelScope.launch { api.unlinkArchiveLink(contact, platform) }
     }
 
     fun findUser(input: String) {

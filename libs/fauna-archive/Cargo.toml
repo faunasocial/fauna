@@ -45,6 +45,8 @@ thiserror = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
+# The counting allocator the memory-bound tests install.
+fauna-alloc-probe = { path = "../fauna-alloc-probe" }
 tempfile = { workspace = true }
 # Self-dev-dependency: turns `test-helpers` on for this package's own test
 # targets, so `tests/common/mod.rs` can re-export `fauna_archive::testing`

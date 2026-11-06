@@ -873,6 +873,10 @@ fn send_handler() -> RpcHandler {
             // The sender's own send switch (`mail-policy-config.md` § Tier 3)
             // — first, so a refused send writes nothing, not even a Sent copy.
             crate::bridge_routing_handlers::refuse_if_send_disabled(&state, &actor_id).await?;
+            // "Disable mail" stops sending (`mail-credentials.md` § Trigger
+            // taxonomy, the Disable-mail row): the app's own compose sends as
+            // the actor, so it reads the mail-off flag too, before any write.
+            crate::bridge_routing_handlers::ensure_actor_mail_enabled(&state, &actor_id).await?;
 
             // Product-ceiling pre-check — the typed first-party sibling of the
             // SMTP perimeter's `552 5.3.4` (`smtp-server.md` § Message size
@@ -1357,9 +1361,33 @@ fn send_handler() -> RpcHandler {
 // `list_messages_handler`'s `limit+1` page-detection sentinel; the
 // returned `sealed_envelope` is exactly the canonical `MailRecordEnvelope`
 // bytes `read_envelopes_bulk` returns (the client opens it client-side —
-// the nest holds no opening key). Unlike `list_messages_handler` this does
-// NOT emit bootstrap placement records: that is MDA-side placement-journal
-// maintenance, irrelevant to a read.
+// the nest holds no opening key). It seeds the caller's standard mailboxes on
+// a first read, and seeding journals their `Create` records exactly as the MDA
+// side does ([`seed_own_mailboxes`]).
+
+/// Seed the caller's six standard mailboxes and journal a `Create` placement
+/// record for each one this call created — the one seeding step of every
+/// app-side mail door (the inbox / sent read, the flag delta, the spam
+/// disposition).
+///
+/// The journal must hold a `Create` for every mailbox the database holds: a
+/// mailbox seeded here without one stays unknown to the placement manifest for
+/// good (later seeding calls find it present and journal nothing), its
+/// arrivals' `Append`s fold against no mailbox, and a mail snapshot then
+/// restores its placements with no UID counter behind them. An app reads its
+/// inbox before its first mail arrives, so this is the ordinary order, not a
+/// corner.
+async fn seed_own_mailboxes(
+    state: &Arc<AppState>,
+    actor_id: &[u8; 32],
+) -> Result<(), fauna_protocol::RpcError> {
+    let newly_seeded = state
+        .db
+        .ensure_bridge_imap_mailboxes(actor_id)
+        .await
+        .map_err(internal)?;
+    crate::bridge_imap_handlers::emit_bootstrap_create_records(state, actor_id, newly_seeded).await
+}
 
 /// Page-size cap for the mailbox-fetch feeds. Mail bodies are large, so a
 /// page is far smaller than `channel.fetch`'s 500. A request `limit` of 0
@@ -1391,12 +1419,9 @@ fn mailbox_fetch_handler(mailbox: &'static str, permission: &'static str) -> Rpc
 
             // Idempotent — seed the caller's own standard mailboxes so a
             // never-received-mail actor reads an empty mailbox rather than
-            // erroring. No bootstrap placement records (read path).
-            state
-                .db
-                .ensure_bridge_imap_mailboxes(&actor_id)
-                .await
-                .map_err(internal)?;
+            // erroring. Seeding is a write, so its `Create` records are
+            // journalled like every other seeding door's.
+            seed_own_mailboxes(&state, &actor_id).await?;
 
             // The mailbox HIGHESTMODSEQ — the client's `flag_changes` baseline
             // (`mail-app-surface.md` § Read state). Read BEFORE the rows, so a
@@ -1693,11 +1718,7 @@ fn apply_spam_disposition_handler() -> RpcHandler {
 
             // Idempotent — seed the caller's own standard mailboxes so a
             // never-received-mail actor is a clean no-op rather than an error.
-            state
-                .db
-                .ensure_bridge_imap_mailboxes(&actor_id)
-                .await
-                .map_err(internal)?;
+            seed_own_mailboxes(&state, &actor_id).await?;
 
             // (1) Watermark every scored UID in the caller's INBOX with the
             // shared `$FaunaSpamScored` keyword — BEFORE the move, so moved
@@ -1885,11 +1906,7 @@ fn flag_changes_handler() -> RpcHandler {
             .await?;
             // Seed the standard mailboxes so a never-mailed actor reads an
             // empty delta over a real HIGHESTMODSEQ rather than a zero.
-            state
-                .db
-                .ensure_bridge_imap_mailboxes(&actor_id)
-                .await
-                .map_err(internal)?;
+            seed_own_mailboxes(&state, &actor_id).await?;
             let limit = match req.limit {
                 0 => FLAG_CHANGES_DEFAULT_LIMIT,
                 n => n.min(FLAG_CHANGES_MAX_LIMIT),
@@ -2621,6 +2638,77 @@ mod tests {
         actor
     }
 
+    /// **An app's first mail read journals the mailboxes it seeds.** The
+    /// inbox / sent read, the flag delta and the spam disposition each seed
+    /// the caller's six standard mailboxes. Seeding without the matching
+    /// `Create` placement records left the journal blind to them: every later
+    /// arrival found them seeded and journalled no `Create` either, its
+    /// `Append` folded against a mailbox the manifest never had, and a mail
+    /// snapshot restored the account's placements with no INBOX counter —
+    /// the next arrival collided with UID 1 and every inbound mail to that
+    /// account was put off with a 451 for good. An app reads its inbox
+    /// before any mail arrives, so this is the ordinary order.
+    /// Mutation pinned: dropping the `emit_bootstrap_create_records` call
+    /// from any of the four read doors.
+    #[tokio::test]
+    async fn every_mail_read_door_journals_the_mailboxes_it_seeds() {
+        type Door = (&'static str, fn() -> RpcHandler, Vec<u8>);
+        let doors: Vec<Door> = vec![
+            (
+                "inbox fetch",
+                inbox_fetch_handler,
+                fauna_protocol::encode_canonical(&InboxFetchRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+            (
+                "sent fetch",
+                sent_fetch_handler,
+                fauna_protocol::encode_canonical(&InboxFetchRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+            (
+                "flag changes",
+                flag_changes_handler,
+                fauna_protocol::encode_canonical(&FlagChangesRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+            (
+                "apply spam disposition",
+                apply_spam_disposition_handler,
+                fauna_protocol::encode_canonical(&ApplySpamDispositionRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+        ];
+        for (i, (door, handler, payload)) in doors.into_iter().enumerate() {
+            let state = send_fixture("example.com").await;
+            let reader = [0xC0u8 + i as u8; 32];
+            state.db.create_user(&reader, "free", "t").await.unwrap();
+
+            handler()(state.clone(), reader, bytes::Bytes::from(payload))
+                .await
+                .unwrap_or_else(|e| panic!("{door}: the read must succeed: {e:?}"));
+
+            let manifest = state
+                .mail_placement
+                .current_manifest(&reader)
+                .await
+                .expect("placement manifest");
+            let mut journalled: Vec<&str> =
+                manifest.mailboxes.iter().map(|m| m.name.as_str()).collect();
+            journalled.sort_unstable();
+            let mut seeded: Vec<&str> = crate::db::bridge_imap::STANDARD_MAILBOXES.to_vec();
+            seeded.sort_unstable();
+            assert_eq!(
+                journalled, seeded,
+                "{door}: every mailbox the read seeded must be in the placement journal"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn send_delivers_to_an_in_domain_exact_recipient() {
         // The case that has always worked — kept as the control, so the
@@ -2990,6 +3078,73 @@ mod tests {
             .await
             .expect("send handler ok");
         fauna_protocol::decode_strict(&bytes).expect("decodes")
+    }
+
+    /// "Disable mail" stops the app's own compose too (`mail-credentials.md`
+    /// § Trigger taxonomy, the Disable-mail row): the send is refused with
+    /// `mail_disabled_by_user` before anything is written — no in-domain
+    /// delivery, no outbound row, no Sent copy — and sends again once mail is
+    /// back on. Mutation pinned: dropping the `ensure_actor_mail_enabled` call
+    /// from `send_handler`.
+    #[tokio::test]
+    async fn an_app_send_is_refused_and_writes_nothing_while_mail_is_off() {
+        let state = send_fixture("example.com").await;
+        let recipient = seed_local_recipient(&state, "example.com", "test").await;
+        let sender = seed_sender(&state).await;
+        crate::test_support::seed_recipient_seal_key(
+            &state.db,
+            &sender,
+            &crate::test_support::FIXTURE_MSEK,
+        )
+        .await;
+        let raw: &[u8] =
+            b"From: sender@example.com\r\nTo: test@example.com, friend@example.org\r\n\
+            Subject: hi\r\nMessage-ID: <off@example.com>\r\n\r\nbody\r\n";
+        let payload = || {
+            let req = fauna_protocol::email::SendEmailRequest {
+                recipients: vec!["test@example.com".into(), "friend@example.org".into()],
+                raw_rfc5322: raw.to_vec(),
+                extra: Default::default(),
+            };
+            bytes::Bytes::from(fauna_protocol::encode_canonical(&req).unwrap().to_vec())
+        };
+
+        state
+            .db
+            .set_actor_mail_enabled(&sender, false)
+            .await
+            .unwrap();
+        let err = send_handler()(state.clone(), sender, payload())
+            .await
+            .expect_err("mail off refuses the send");
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+        let inbox = state
+            .db
+            .query_bridge_imap_messages(&recipient, "INBOX", None, None, None, None)
+            .await
+            .unwrap();
+        assert!(inbox.is_empty(), "no in-domain delivery");
+        assert!(
+            state
+                .db
+                .fetch_all_outbound_for_test()
+                .await
+                .unwrap()
+                .is_empty(),
+            "no outbound row"
+        );
+        assert!(sent_page(&state, sender).await.is_empty(), "no Sent copy");
+
+        state
+            .db
+            .set_actor_mail_enabled(&sender, true)
+            .await
+            .unwrap();
+        let bytes = send_handler()(state.clone(), sender, payload())
+            .await
+            .expect("sends once mail is back on");
+        let reply: SendEmailReply = fauna_protocol::decode_strict(&bytes).unwrap();
+        assert_eq!((reply.local_delivered, reply.remote_queued), (1, 1));
     }
 
     #[tokio::test]

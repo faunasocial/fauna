@@ -29,8 +29,10 @@ face of the same set, not a second one.
      `media-item-detail-download-button` hands back the same bytes.
 
 Each test names its own apps (the feature catalog reads the marks statically,
-`scripts/features_scan.py`). The outcome-8 leg is marked web only, because it
-has been run green only there; a phone gains its mark when a run there is green.
+`scripts/features_scan.py`). The outcome-8 leg is marked web, ios and android:
+web and ios have been run green; android's mark rests on its Media download seam
+(`media-item-detail-download-button`, `AndroidDriver.download_dir()`) and has
+not yet been run on a device.
 
 Serving and unserving go through the app's own `folder-webdav-toggle`, as
 `test_webdav_mount_behaviours.py` does; the WebDAV side is the RFC-4918 client
@@ -236,6 +238,8 @@ def test_serving_a_folder_the_app_already_filled_reaches_its_files(
     assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"
 
 
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("files-in-standard-apps")
 def test_a_mount_written_file_still_opens_in_the_app_after_unserving(

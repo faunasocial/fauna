@@ -87,6 +87,26 @@ public class StoreChangeNoticeTests : IDisposable
         Assert.Equal(1, resynced);
     }
 
+    /// <summary>A level another device changed is a change too: the same terms
+    /// at a different level repaint the open page's picker.</summary>
+    [Fact]
+    public async Task MutedWords_ANoticeRepaintsAnotherDevicesLevel()
+    {
+        var rpc = new MockNestRpcClient { NextMutedKeywords = new[] { "spam" } };
+        var vm = new MutedWordsViewModel(rpc);
+        await vm.LoadAsync();
+        var resynced = 0;
+        vm.StoreResynced += () => resynced++;
+        vm.WatchStore();
+
+        rpc.NextMutedKeywordWeights["spam"] = -500;
+        rpc.RaiseStoreChanged();
+        await vm.WhenStoreResyncedAsync();
+
+        Assert.Equal(new[] { new MutedWordRow("spam", "show-less") }, vm.Rows);
+        Assert.Equal(1, resynced);
+    }
+
     [Fact]
     public async Task MutedWords_AnUnchangedAnswerPaintsNothing()
     {

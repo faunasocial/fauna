@@ -122,6 +122,15 @@ def dns_matrix_for(nest, domain: str) -> list[dict]:
     return row.get("records", [])
 
 
+def dns_matrix_domain_count(nest) -> int:
+    """How many domains the whole ``fauna.dns.list_records`` matrix lists — the
+    number an app's matrix-load log line reports (``fauna_client_dns``'s
+    ``MATRIX_LOAD_LOG_LINE``)."""
+    with admin_client(nest) as client:
+        reply = client.call("fauna.dns.list_records", {"domain": None})
+    return len(reply.get("domains", []))
+
+
 def dns_verdicts_for(nest, domain: str) -> dict:
     """``domain``'s live public-DNS verdicts over ``fauna.dns.verify_records``,
     keyed ``(name, record_type)`` → the wire status (``ok`` / ``missing`` /
@@ -171,18 +180,63 @@ def invite_code_age_band(nest, code: str):
     return row.get("age_band")
 
 
-def admit_adult(nest, handle: str) -> dict:
-    """Direct-admit an ordinary (unsupervised) account over
-    ``fauna.admin.users.create`` — fixture setup for a test that needs a
-    guardian to pick (the picker offers every non-suspended account). Returns
-    ``{"signing_key", "actor_id_hex"}``. Costs no anonymous submit; the
-    direct-admission UI is `test_admin_users_admit.py`'s subject, not this one."""
+def admit_adult(nest, handle: str, *, domain: str | None = None, token: bool = False) -> dict:
+    """Direct-admit an ordinary (unsupervised) account under ``handle`` over the
+    admin-authenticated ``fauna.admin.users.create`` -- the third
+    account-creation path (``public-mode.md`` § Registration & Identity: the
+    ceremony, the admin claim, or an admin admitting a user directly).
+
+    **The seat-seeding door for every account whose admission is not under
+    test** (``testing.md`` § Default app and nest mode, the shipped-limit fit
+    rule): it spends neither the anonymous ``fauna.account.register`` budget
+    nor the ``invite_request.submit`` one. Under ``--nest docker`` every
+    anonymous call arrives from the docker gateway address, so a per-source
+    budget is a budget per RUN, and a module seeding its seats through the
+    anonymous register door sheds ``gate=register`` there. Keep that door
+    (``common.auth.register_handled_actor``) only for a test whose subject IS
+    self-service registration.
+
+    It cannot mint a WARD: supervision is set at admission and this helper
+    admits unsupervised -- ``admit_ward_directly`` is the supervised arm.
+    ``label=handle`` restores the production shape (``create_user_with_handle``
+    defaults a handle-registered user's label to its handle), so the account is
+    distinct in every admin picker.
+
+    ``domain`` (optional) is the handle domain the caller would have signed an
+    anonymous register over. It is checked against the nest's own resolved
+    domains (``fauna.nest.info``'s ``registration.handle_domain`` and identity
+    ``domain``, read once per nest over the admin connection), so a caller
+    relying on ``<handle>@<domain>`` fails here exactly where the anonymous
+    register would have refused the signature. The handle itself is stored bare
+    and globally unique on both doors.
+
+    ``token=True`` also mints and holds the account's bearer
+    (``common.auth.mint_and_hold_token``), so the dict is shaped like
+    ``register_handled_actor``'s -- a drop-in for seat seeding.
+
+    Returns ``{"signing_key", "actor_id_hex", "actor_id_bytes", "handle",
+    "registered_domain"}`` plus ``"token"`` when asked. ``registered_domain`` is
+    the deployment's identity domain (what ``RegisterReply.domain`` carries),
+    read only when ``domain`` or ``token`` is passed, else ``None``. The
+    direct-admission UI is `test_admin_users_admit.py`'s subject, not this
+    helper's."""
     from nacl.signing import SigningKey
 
-    from common.auth import register_user
+    from common.auth import mint_and_hold_token, register_user
 
+    resolved = None
+    if domain is not None or token:
+        resolved = _nest_identity_domains(nest)
+        if domain is not None:
+            assert domain in (resolved["handle_domain"], resolved["domain"]), (
+                f"admit_adult({handle!r}, domain={domain!r}): the nest's resolved "
+                f"handle domain is {resolved['handle_domain']!r} (identity "
+                f"{resolved['domain']!r}); an anonymous register signed over "
+                f"{domain!r} would have been refused as signature_failed"
+            )
     sk = SigningKey.generate()
-    actor_hex = bytes(sk.verify_key).hex()
+    actor_bytes = bytes(sk.verify_key)
+    actor_hex = actor_bytes.hex()
     register_user(
         nest["port"],
         actor_hex,
@@ -191,7 +245,39 @@ def admit_adult(nest, handle: str) -> dict:
         handle=handle,
         label=handle,
     )
-    return {"signing_key": sk, "actor_id_hex": actor_hex}
+    out = {
+        "signing_key": sk,
+        "actor_id_hex": actor_hex,
+        "actor_id_bytes": actor_bytes,
+        "handle": handle,
+        "registered_domain": resolved["domain"] if resolved else None,
+    }
+    if token:
+        out["token"] = mint_and_hold_token(nest["url"].rstrip("/"), sk)
+    return out
+
+
+_IDENTITY_DOMAINS: dict = {}
+
+
+def _nest_identity_domains(nest) -> dict:
+    """``{"domain", "handle_domain"}`` of ``nest`` from ``fauna.nest.info``, read
+    over the admin's cached authenticated connection (an authenticated caller's
+    throttle bucket is its actor, never the docker gateway's address) and
+    cached per (base url, admin actor) -- one read per nest, so seat seeding
+    adds no per-seat directory read. A test that renames the primary domain
+    keeps the anonymous register door, which reads the live reply."""
+    from common.auth import _authed_call
+
+    admin_sk = nest["admin"]["signing_key"]
+    key = (nest["url"].rstrip("/"), bytes(admin_sk.verify_key).hex())
+    if key not in _IDENTITY_DOMAINS:
+        info = _authed_call(nest["url"].rstrip("/"), admin_sk, "fauna.nest.info", {})
+        _IDENTITY_DOMAINS[key] = {
+            "domain": info.get("domain"),
+            "handle_domain": (info.get("registration") or {}).get("handle_domain"),
+        }
+    return _IDENTITY_DOMAINS[key]
 
 
 def admit_ward_directly(nest, guardian_hex: str, handle: str) -> dict:

@@ -21,7 +21,16 @@ import SwiftUI
 /// (`identity-succession.md` § The RecoveryKey — *Custody*).
 public struct RecoveryKitSection: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
+    /// iOS's app state, for the Settings stack's re-seed generation; `nil` on
+    /// macOS, whose shell never re-seeds a push.
+    @Environment(AppState.self) private var appState: AppState?
+    /// `AppState.settingsReseedGeneration` as this section appeared: a
+    /// different value at `onDisappear` means the stack remounted the page.
+    @State private var appearedAtReseed: Int?
     @State private var vm = RecoveryKitVM()
+    /// The ephemeral member-review pass's roster — the permanent page's own view
+    /// model, since the two surfaces are one id family over one roster.
+    @State private var reviewVM = MemberReviewVM()
     /// Whether this section is currently in the view tree.
     ///
     /// ⚠ Load-bearing, not bookkeeping: an account switch can leave TWO of these
@@ -61,6 +70,7 @@ public struct RecoveryKitSection: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             sweepChrome
+            memberReviewPass
             aftermathProgressLines
 
             automationText(Ids.recoveryKitStatus, statusLine)
@@ -92,7 +102,9 @@ public struct RecoveryKitSection: View {
             stolenAction
             letGoAction
 
-            if let error = vm.errorText {
+            // One `error-message`: a partial Remove in the pass says how far it
+            // got here, where the row it left standing is.
+            if let error = reviewVM.errorMessage ?? vm.errorText {
                 ErrorBanner(message: error)
             }
         }
@@ -113,8 +125,13 @@ public struct RecoveryKitSection: View {
         // One key covers both, and `.task(id:)` cancels the in-flight pass on
         // change rather than racing it.
         .task(id: hydrateKey) { await hydrate() }
+        // The roster is raised behind the aftermath's `__config` stage, usually
+        // after this section hydrated, and only the client's cache says so.
+        .task(id: client?.memberReviewRoster) { await refreshMemberReviewPass() }
+        .onStoreChange { await refreshMemberReviewPass() }
         .onAppear {
             onScreen = true
+            appearedAtReseed = appState?.settingsReseedGeneration
             StolenCeremonyHold.shared.accountAppeared()
         }
         .onDisappear {
@@ -131,6 +148,16 @@ public struct RecoveryKitSection: View {
             logMessage(level: .info, target: "fauna.app",
                        message: "[succession-kit] section disappeared "
                                 + "(held=\(vm.mintedSecretHex?.count ?? 0) hex) → clearing")
+            // Torn down by the stack's own re-seed, not left by the user: a
+            // successor kit here goes to the next live section rather than the
+            // only copy being wiped (`RecoveryKitVM.handOnUnseenSuccessorKit`).
+            if let appState, let seen = appearedAtReseed,
+               appState.settingsReseedGeneration != seen,
+               vm.handOnUnseenSuccessorKit() {
+                logMessage(level: .warn, target: "fauna.app",
+                           message: "[succession-kit] kit left the screen unseen "
+                                    + "— handing it to the next live section")
+            }
             vm.clearHeldSecrets()
         }
     }
@@ -192,6 +219,7 @@ public struct RecoveryKitSection: View {
                             + "owedTo=\(SuccessionHandoff.successorActorIdHex ?? "-")")
         if let previous = hydratedActor, previous != (sessionActorIdHex ?? "-") {
             vm.resetForIdentityChange()
+            reviewVM.reset()
         }
         hydratedActor = sessionActorIdHex ?? "-"
         if let client { vm.configure(api: client.api) }
@@ -201,6 +229,7 @@ public struct RecoveryKitSection: View {
         // idempotent — it only ever changes via `record` or a successful
         // `retrySweep()`, both of which this mirror must reflect.
         vm.sweepView = SuccessionHandoff.sweep
+        vm.memberReviewDeferred = SuccessionHandoff.memberReviewDeferred
         await vm.loadStatus()
         await vm.loadDeadGenerations()
 
@@ -238,6 +267,18 @@ public struct RecoveryKitSection: View {
         logMessage(level: .info, target: "fauna.app",
                    message: "[succession-kit] hydrate done: on-screen="
                             + "\(vm.mintedSecretHex?.count ?? 0) hex")
+        // Last: a relaunch adoption's owed sweep, discharged above, opens the pass.
+        await refreshMemberReviewPass()
+    }
+
+    /// Read the pass's roster, only while the pass can render at all: an ordinary
+    /// session never ran a sweep and owes this section no roster read.
+    private func refreshMemberReviewPass() async {
+        guard vm.memberReviewPassOpen, let client else { return }
+        reviewVM.configure(api: client.api, onRosterChanged: { [weak client] in
+            await client?.reloadMemberReviewRoster()
+        })
+        await reviewVM.refresh()
     }
 
     // MARK: - Post-succession sweep
@@ -287,6 +328,31 @@ public struct RecoveryKitSection: View {
                     Task { await vm.retrySweep() }
                 }
             }
+        }
+    }
+
+    // MARK: - Ephemeral member review
+
+    /// The ephemeral review pass, directly under the sweep lines that report the
+    /// roster it works through (`settings.md` § Recovery kit → *The ephemeral
+    /// member-review pass*). What is local to this surface is the gate and the
+    /// defer button; the row is `MemberReviewRowView`, the permanent page's own.
+    /// The defer renders only alongside rows, because it is the *rest* it defers.
+    /// It carries no `.faunaGate`: it is purely local.
+    @ViewBuilder private var memberReviewPass: some View {
+        if vm.memberReviewPassOpen, !reviewVM.rows.isEmpty {
+            Text(L.settings.recoveryKit.reviewIntro)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(reviewVM.rows) { row in
+                MemberReviewRowView(row: row, vm: reviewVM)
+            }
+
+            Button(L.settings.recoveryKit.reviewDefer) { vm.deferMemberReview() }
+                .accessibilityIdentifier(Ids.memberReviewDeferButton)
+                .automationActivate(Ids.memberReviewDeferButton) { vm.deferMemberReview() }
         }
     }
 

@@ -118,6 +118,32 @@ impl From<fauna_protocol::feed::AuthorDisplay> for FfiAuthorDisplay {
     }
 }
 
+/// FFI mirror of [`fauna_protocol::feed::PostReactionGroup`] — one emoji's
+/// share of a post's reaction tally (`feed.md` § Layout & flow → *Reaction
+/// posts count and paint*, ruling 2), minus the wire `extra` map; the
+/// `FfiAuthorDisplay` pattern, since this face builds without `fauna-feed`
+/// (whose `PostReactionGroup` the feed manager's snapshot carries). Additive
+/// Record; consume-safe.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiPostReactionGroup {
+    pub emoji: String,
+    /// Distinct actors with a live `React` post of this emoji on the post.
+    pub count: i64,
+    /// The connection actor's own live `React` post of this emoji — presence =
+    /// "reacted by me"; the value is what the toggle deletes.
+    pub viewer_react_id: Option<String>,
+}
+
+impl From<fauna_protocol::feed::PostReactionGroup> for FfiPostReactionGroup {
+    fn from(g: fauna_protocol::feed::PostReactionGroup) -> Self {
+        Self {
+            emoji: g.emoji,
+            count: g.count,
+            viewer_react_id: g.viewer_react_id,
+        }
+    }
+}
+
 /// FFI mirror of [`fauna_protocol::feed::FeedPostItem`].
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct FfiFeedPostItem {
@@ -158,6 +184,10 @@ pub struct FfiFeedPostItem {
     pub viewer_liked: bool,
     /// A bridged author's face; `None` for a native author. Additive Record field, consume-safe.
     pub author_display: Option<FfiAuthorDisplay>,
+    /// The per-emoji reaction tally beside the four counts, in the nest's
+    /// first-added order; empty on a `bluesky` row and from an older nest.
+    /// Additive Record field, consume-safe.
+    pub reactions: Vec<FfiPostReactionGroup>,
 }
 
 impl From<FeedPostItem> for FfiFeedPostItem {
@@ -181,6 +211,7 @@ impl From<FeedPostItem> for FfiFeedPostItem {
             viewer_repost_id: p.viewer_repost_id,
             viewer_liked: p.viewer_liked,
             author_display: p.author_display.map(Into::into),
+            reactions: p.reactions.into_iter().map(Into::into).collect(),
         }
     }
 }

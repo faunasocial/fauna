@@ -78,9 +78,11 @@ public struct AdminDnsView: View {
                     ErrorBanner(message: error)
                 }
 
+                removeConfirmSection
                 renameBanner
                 renameSheetSection
 
+                certIssuanceErrorLines
                 domainList
                 removedDomainsSection
                 credentialsSection
@@ -91,6 +93,19 @@ public struct AdminDnsView: View {
         .task(id: reloadToken) {
             guard let client else { return }
             await vm.configure(api: client.api)
+        }
+        // The open page's background re-check (`dns-management.md` § Manual +
+        // live verification — the slow cadence): the task lives exactly as long
+        // as the page is on screen, and its first fire is a full period out
+        // (opening the page already verifies once). Cadence and tick are the
+        // shared crate's (`recordRecheckSecs`, `backgroundRecheck`); this owns
+        // only the timer.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Int64(recordRecheckSecs())))
+                guard !Task.isCancelled else { break }
+                await vm.backgroundRecheck()
+            }
         }
     }
 
@@ -129,12 +144,14 @@ public struct AdminDnsView: View {
                 // (`mail-multidomain.md` § Removing a local domain). The
                 // nest, not this client, is authority on whether the add is
                 // actually first — `addingFirstDomain` is a UX hint off the
-                // already-fetched domain list. Untagged chrome (no ui.yaml
-                // id), mirroring tui's `ADD_DOMAIN_PRIMARY_WARNING`.
+                // already-fetched domain list.
                 if vm.local?.addingFirstDomain == true {
                     Text(L.admin.dns.addDomainPrimaryWarning)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(Ids.adminDnsAddDomainPrimaryWarning)
+                        .automationValue(Ids.adminDnsAddDomainPrimaryWarning,
+                                         text: { L.admin.dns.addDomainPrimaryWarning })
                 }
                 HStack {
                     Button(L.admin.dns.addDomainSubmit) { submitAddDomain() }
@@ -157,6 +174,10 @@ public struct AdminDnsView: View {
                         addDomainText = ""
                     }
                     .accessibilityIdentifier(Ids.adminDnsAddDomainCancelButton)
+                    .automationActivate(Ids.adminDnsAddDomainCancelButton) {
+                        showAddDomain = false
+                        addDomainText = ""
+                    }
                 }
             }
         } else {
@@ -174,6 +195,76 @@ public struct AdminDnsView: View {
             if vm.errorMessage == nil {
                 addDomainText = ""
                 showAddDomain = false
+            }
+        }
+    }
+
+    // MARK: - Remove confirm
+
+    /// The shared remove confirm (`mail-multidomain.md` § Removing a local
+    /// domain): painted while `LocalDomainsSnapshot.remove_confirm_domain` is
+    /// set, titled and worded by the shared `remove_confirm_title/_body`. Inline
+    /// (not a system sheet) like the rename reveals — see the `@State` note above.
+    /// Only the confirm removes; cancel clears the shared arm.
+    @ViewBuilder
+    private var removeConfirmSection: some View {
+        if let domain = vm.removeConfirmDomain {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(renderLocalizedText(removeConfirmTitle(domain: domain))).font(.headline)
+                Text(renderLocalizedText(removeConfirmBody(domain: domain)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button(L.admin.dns.removeConfirm, role: .destructive) {
+                        Task { await vm.confirmRemoveDomain() }
+                    }
+                    .disabled(vm.isBusy)
+                    .accessibilityIdentifier(Ids.adminDnsDomainRemoveConfirmButton)
+                    .automationActivate(Ids.adminDnsDomainRemoveConfirmButton,
+                                        isEnabled: { !vm.isBusy }) {
+                        Task { await vm.confirmRemoveDomain() }
+                    }
+                    .faunaGate("fauna.bridges.remove_local_domain")
+                    Button(L.common.cancel, role: .cancel) { vm.cancelRemoveDomain() }
+                        .accessibilityIdentifier(Ids.adminDnsDomainRemoveCancelButton)
+                        .automationActivate(Ids.adminDnsDomainRemoveCancelButton) {
+                            vm.cancelRemoveDomain()
+                        }
+                }
+            }
+            .padding(12)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(Ids.adminDnsDomainRemoveConfirmModal)
+            .automationValue(Ids.adminDnsDomainRemoveConfirmModal,
+                             text: {
+                                renderLocalizedText(removeConfirmTitle(domain: domain))
+                                    + "\n" + renderLocalizedText(removeConfirmBody(domain: domain))
+                             })
+        }
+    }
+
+    // MARK: - Failing certificate orders
+
+    /// One deployment-level line per failing nest-placed ACME order, above the
+    /// per-domain rows; absent when no order is failing. The wording is the shared
+    /// `cert_issuance_error_line` (never this view's own), the date the shared local `YYYY-MM-DD`
+    /// render (`formatUnixLocalDate`). Plain `Text(verbatim:)` — the CA's detail is
+    /// untrusted third-party text, never markdown (`tls-certificates.md` § Keeping
+    /// the cert alive, *The admin sees why issuance is failing*).
+    @ViewBuilder
+    private var certIssuanceErrorLines: some View {
+        let errors = vm.dns?.certIssuanceErrors ?? []
+        if !errors.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(errors.enumerated()), id: \.offset) { _, row in
+                    let line = FaunaFFISwift.certIssuanceErrorLine(
+                        e: row, date: formatUnixLocalDate(secs: row.failedAtUnix))
+                    Text(verbatim: line)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier(Ids.adminDnsCertIssuanceError)
+                        .automationValue(Ids.adminDnsCertIssuanceError, text: { line })
+                }
             }
         }
     }
@@ -242,10 +333,11 @@ public struct AdminDnsView: View {
                 .font(.headline)
                 .textSelection(.enabled)
             if isPrimary {
-                Text(L.admin.dns.primaryBadge)
+                // `automationText` registers the in-process read `count` uses on iOS;
+                // a bare `.accessibilityIdentifier` is invisible to that registry.
+                automationText(Ids.adminDnsDomainPrimaryBadge, L.admin.dns.primaryBadge)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .accessibilityIdentifier(Ids.adminDnsDomainPrimaryBadge)
             }
             Spacer()
             if hasDns {
@@ -268,8 +360,10 @@ public struct AdminDnsView: View {
                 }
             }
             // Present on every active row; disabled on the primary (cannot be removed).
+            // Arms the shared confirm (synchronous, no nest); the removal itself
+            // is the modal's confirm button.
             Button(L.admin.dns.remove, role: .destructive) {
-                Task { await vm.removeDomain(name) }
+                vm.armRemoveDomain(name)
             }
             .controlSize(.small)
             .disabled(vm.isBusy || isPrimary || !hasLocal)
@@ -278,7 +372,7 @@ public struct AdminDnsView: View {
                 Ids.adminDnsDomainRemoveButton,
                 isEnabled: { !vm.isBusy && !isPrimary && hasLocal }
             ) {
-                Task { await vm.removeDomain(name) }
+                vm.armRemoveDomain(name)
             }
             .faunaGate("fauna.bridges.remove_local_domain")
             renamePromoteAffordance(name: name, isPrimary: isPrimary)
@@ -383,6 +477,16 @@ public struct AdminDnsView: View {
                     return L.admin.dns.catchAllNone
                 }
                 return vm.actorLabel(id)
+            },
+            // Every painted option text (the Picker's own rows, in order), so
+            // the picker-label collision witness can assert the whole set is
+            // injective (drivers/base.py `option_texts`).
+            options: {
+                var texts = [L.admin.dns.catchAllNone] + vm.actors.map { vm.actorLabel($0.actorId) }
+                if let id = d.catchAllActorId, !vm.actors.contains(where: { $0.actorId == id }) {
+                    texts.append(vm.actorLabel(id))
+                }
+                return texts
             },
             isEnabled: { !vm.isBusy }
         ) { displayText in
@@ -494,6 +598,14 @@ public struct AdminDnsView: View {
                     .roleAddressOverrides.first { $0.role == role }?.actorId
                 guard let liveId else { return L.admin.dns.roleAddressAdminDefault }
                 return vm.actorLabel(liveId)
+            },
+            // Every painted option text, as on the catch-all picker above.
+            options: {
+                var texts = [L.admin.dns.roleAddressAdminDefault] + vm.actors.map { vm.actorLabel($0.actorId) }
+                if let id = currentId, !vm.actors.contains(where: { $0.actorId == id }) {
+                    texts.append(vm.actorLabel(id))
+                }
+                return texts
             },
             isEnabled: { !vm.isBusy }
         ) { displayText in
@@ -937,10 +1049,9 @@ public struct AdminDnsView: View {
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(verdictColor(record.verdict))
                 Spacer()
-                Button(L.admin.dns.copy) { Pasteboard.copy(record.expected) }
-                    .controlSize(.small)
-                    .accessibilityIdentifier(Ids.adminDnsRecordCopyButton)
-                    .automationActivate(Ids.adminDnsRecordCopyButton) { Pasteboard.copy(record.expected) }
+                // The shared CopyButton, so the `copied` attribute reports what
+                // this row put on the clipboard.
+                CopyButton(Ids.adminDnsRecordCopyButton, text: record.expected, title: L.admin.dns.copy)
             }
             // Reverse DNS is set at the admin's server/VPS provider, never
             // zone-published (dns-management.md § Records covered) — the one

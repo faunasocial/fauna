@@ -17,7 +17,6 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
@@ -25,22 +24,6 @@ pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
 def _unique(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
-
-
-def _require_built(app, element_id: str) -> None:
-    # Built on all 7 apps: tui led (2026-09-26), macOS and iOS lifted through
-    # FaunaKit, windows and android off the UniFFI helper, linux off the Rust
-    # method and web off the wasm snapshot's derived `empty_state`. The gate
-    # stays for an app this checkout has not built.
-    if app_name(app.driver) not in (
-        "tui", "macos", "ios", "windows", "android", "linux", "web",
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface=element_id,
-            detail="the empty-state copy is not yet carried on the approved id",
-            tracked="docs/goal/ui/feed.md § Implementation status today",
-        )
 
 
 def _open_the_chronological_feed(feed) -> None:
@@ -63,7 +46,6 @@ def test_a_feed_with_no_posts_says_so(logged_in_app):
     """A loaded feed holding no posts paints ``feed-empty-state`` with the
     no-posts copy — and never while posts are on screen."""
     app = logged_in_app
-    _require_built(app, "feed-empty-state")
     feed = app.feed
     feed.navigate()
     _open_the_chronological_feed(feed)
@@ -107,7 +89,6 @@ def test_a_search_with_no_matches_says_so(logged_in_app):
     the no-matching-posts copy — never the generic ``feed-empty-state`` — and
     clearing the search takes it away again."""
     app = logged_in_app
-    _require_built(app, "feed-no-results")
     feed = app.feed
     feed.navigate()
     _open_the_chronological_feed(feed)

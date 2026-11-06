@@ -289,6 +289,31 @@ pub enum AgeNonceError {
     IdentityMismatch { reason: String },
 }
 
+/// The nest's self-description as the joining surfaces read it before sign-in
+/// (`nest-rules.md` § Acceptance at joining): the identity the connection
+/// proved, the domain it names, and its signed rules. Raw — the machine
+/// verifies the rules through `fauna_client_policy::NestRulesBook` before any
+/// app sees a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestRulesAnswer {
+    /// 64-char lowercase hex of the identity the connection proved
+    /// (`nest_trust::read_login_binding`), never the reply's own say-so.
+    pub nest_id: String,
+    pub domain: String,
+    pub content_policy: Option<fauna_protocol::content_policy::SignedContentPolicy>,
+}
+
+/// Why the joining surfaces have no rules to show. Never surfaced as text: the
+/// surfaces then paint nothing, and the read is retried on the next entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NestRulesError {
+    /// Network / connection error.
+    Transient { cause: String },
+    /// The box proved no identity, or its self-description named another —
+    /// rules signed by a key the connection did not prove are not this nest's.
+    IdentityMismatch { reason: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub ok: bool,
@@ -299,6 +324,12 @@ pub enum RegisterError {
     /// Any non-2xx / network failure. The wizard treats register as
     /// "succeeded or didn't"; the cause carries the diagnostic.
     Failed { cause: String },
+    /// The nest received the register and refused it. `code` is the wire
+    /// code, for the caller to route a refusal it has its own sentence for;
+    /// `message` is the refusal already resolved through the shared client
+    /// string table (`RpcError::localized`) — what the user reads, never the
+    /// wire code.
+    Refused { code: String, message: String },
     /// The connect-stage first-contact trust graduation failed
     /// (`security.md` § Pre-claim surfacing). Terminal, never retryable.
     IdentityMismatch { reason: String },

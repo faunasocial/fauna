@@ -261,6 +261,15 @@ class WebSettingsActions:
         )
         return self.row_index_for(slug)
 
+    def _nest_refusals(self) -> list[str]:
+        """The app log's last web refusals: the page paints every one of them as
+        the same generic line (convention 6)."""
+        read = getattr(self.driver, "app_stderr_text", None)
+        if read is None:
+            return []
+        lines = read().splitlines()
+        return [ln[-220:] for ln in lines if 'kind="fauna.web' in ln][-4:]
+
     def _copied(self, button_id: str, index: int) -> str:
         value = wait_until(
             lambda: self.driver.get_attr(button_id, "copied", scope=f"{self.ROW}[{index}]")
@@ -268,6 +277,7 @@ class WebSettingsActions:
             self.MUTATION_BUDGET_S,
             diagnose=lambda: (
                 f"{button_id}[{index}] never reported what it copied; "
+                f"nest refusals: {self._nest_refusals()}; "
                 f"error={self.driver.get_text('error-message') if self.driver.is_visible('error-message') else None!r}"
             ),
         )

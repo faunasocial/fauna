@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use fauna_client_region::{
     DeclaredRegion, PolicyState, RegionPlaceholder, RegionPlane, RegionSource, RegionVerb,
-    declared_from_posix_locale, effective_registry,
+    effective_registry,
 };
 use fauna_core::content_category::ContentLabelEntry;
 use fauna_core::obligation::ComposedVerdict;
@@ -43,11 +43,7 @@ pub const VERDICT_ATTR: &str = "verdict";
 /// — or, in a test-capable build, the e2e override every app reads
 /// (`fauna_client_region::source::E2E_DECLARED_ENV`).
 pub fn declared_region() -> Option<DeclaredRegion> {
-    let leaf = declared_from_posix_locale(
-        std::env::var("LC_ALL").ok().as_deref(),
-        std::env::var("LANG").ok().as_deref(),
-    );
-    fauna_client_region::source::with_e2e_override(leaf, RegionSource::SystemLocale)
+    fauna_client_region::source::declared_from_process_locale()
 }
 
 fn now_secs() -> u64 {
@@ -264,14 +260,24 @@ pub fn region_verdict(verdict: &ComposedVerdict) -> Option<RegionPlaceholder> {
 /// frame naming the region and its authority, the authority's name, and its
 /// reason verbatim; a `collapse` adds the reveal. `scope` is the item's own
 /// container (`post-card[i]` on the feed), or `None` for a flat surface.
+///
+/// `sealed_note` adds the sealed-item sentence (`region.sealed_note`) on its
+/// own line after the frame, inside `region-blocked-notice` — pass the shared
+/// decision (`fauna_core::obligation::ContentPolicyState::region_sealed_note`),
+/// which is `false` for everything but an end-to-end conversation's bubble.
 pub fn placeholder(
     p: &RegionPlaceholder,
     reveal: Gesture,
     scope: Option<(&str, usize)>,
+    sealed_note: bool,
 ) -> Vec<Element> {
+    let notice = if sealed_note {
+        format!("{}\n{}", notice_text(p), r::SEALED_NOTE)
+    } else {
+        notice_text(p)
+    };
     let mut els = vec![
-        Element::label(ids::REGION_BLOCKED_NOTICE, notice_text(p))
-            .attr(VERDICT_ATTR, p.verb.as_str()),
+        Element::label(ids::REGION_BLOCKED_NOTICE, notice).attr(VERDICT_ATTR, p.verb.as_str()),
         Element::label(ids::REGION_BLOCKED_AUTHORITY, p.authority_name.as_str()),
         Element::label(ids::REGION_BLOCKED_REASON, p.reason.as_str()),
     ];
@@ -398,5 +404,44 @@ fn source_text(source: RegionSource) -> &'static str {
         RegionSource::SystemRegion => r::SOURCE_SYSTEM_REGION,
         RegionSource::SystemLocale => r::SOURCE_SYSTEM_LOCALE,
         RegionSource::BrowserLocale => r::SOURCE_BROWSER_LOCALE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn withheld(verb: RegionVerb) -> RegionPlaceholder {
+        RegionPlaceholder {
+            verb,
+            region: RegionCode::parse("XZ").expect("well-formed test code"),
+            authority_name: "Synthetic Test Authority".into(),
+            reason: "Withheld under the Synthetic Act.".into(),
+        }
+    }
+
+    fn notice(els: &[Element]) -> &str {
+        els.iter()
+            .find(|e| e.id == ids::REGION_BLOCKED_NOTICE)
+            .map(|e| e.text.as_str())
+            .expect("the placeholder paints its notice")
+    }
+
+    #[test]
+    fn a_sealed_placeholder_carries_the_sealed_note_after_the_frame() {
+        // region-blocking.md § Implementation status today: the sentence sits
+        // inside `region-blocked-notice`, after the frame, on a sealed bubble —
+        // and nowhere the shared decision says no (a feed card, a community or
+        // transport-only room, a Notify-counted item).
+        for verb in [RegionVerb::Block, RegionVerb::Collapse] {
+            let p = withheld(verb);
+            let sealed = placeholder(&p, Gesture::RetrySignOutResidue, None, true);
+            assert_eq!(
+                notice(&sealed),
+                format!("{}\n{}", notice_text(&p), r::SEALED_NOTE)
+            );
+            let open = placeholder(&p, Gesture::RetrySignOutResidue, None, false);
+            assert_eq!(notice(&open), notice_text(&p));
+        }
     }
 }

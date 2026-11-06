@@ -1386,6 +1386,7 @@ func TestSubmissionDataMapsPermanentEnqueueRefusalsTo5xx(t *testing.T) {
 		{"list sender", wsrpc.CodeListSubmissionRequiresSendRPC, 550, gosmtp.EnhancedCode{5, 7, 1}},
 		{"From: not owned by the submitter", wsrpc.CodeSenderNotOwned, 550, gosmtp.EnhancedCode{5, 7, 1}},
 		{"submitter not proven by its token", wsrpc.CodeSubmitterNotProven, 550, gosmtp.EnhancedCode{5, 7, 1}},
+		{"submitter turned mail off", wsrpc.CodeMailDisabledByUser, 550, gosmtp.EnhancedCode{5, 7, 1}},
 		{"malformed request", wsrpc.CodeProtocolMalformed, 554, gosmtp.EnhancedCode{5, 6, 0}},
 		{"nest internal error", "fauna.bridges.internal", 451, gosmtp.EnhancedCode{4, 5, 0}},
 	}

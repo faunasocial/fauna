@@ -2,6 +2,8 @@ package com.fauna.app.core.feed
 
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.FfiPostBlobHome
+import com.fauna.ffi.FfiPostBlobHostsInterface
 import com.fauna.ffi.FfiRangedNestReaderInterface
 import java.io.File
 import kotlinx.coroutines.runBlocking
@@ -95,6 +97,33 @@ class InlineVideoPlaybackTest {
         val streamed = media as InlineVideoPlayback.Media.Streamed
         assertSame(reader, streamed.reader)
         assertEquals("/api/v1/blob/aa", streamed.source)
+    }
+
+    /** Bytes the app holds publish the shared `held_video_source` spelling for their
+     *  arm (render-model.md § D6c → *Inline playback*, the held-bytes `source` ruling):
+     *  a foreign-homed plain clip is `home:`, never `sealed:` — it is not sealed. */
+    @Test
+    fun `held bytes publish their arm and hash as the source`() = runBlocking<Unit> {
+        val home = FfiPostBlobHome(url = "https://home.example", nestActorId = null)
+        val hosts = mock(FfiPostBlobHostsInterface::class.java)
+        val manager = mock(FfiFeedManager::class.java)
+        val bytes = byteArrayOf(1, 2, 3)
+        // Stubbed by value: `get` / `openMediaBytes` are suspend funs (PostMediaOpenTest's note).
+        whenever(hosts.get(home, "aa")).thenReturn(bytes)
+        whenever(hosts.get(null, "bb")).thenReturn(bytes)
+        whenever(manager.openMediaBytes("aa", bytes)).thenReturn(bytes)
+        whenever(manager.openMediaBytes("bb", bytes)).thenReturn(bytes)
+        val plain = RenderBlock.Video(hash = "aa", alt = "")
+        whenever(manager.playbackSource(plain)).thenReturn(PlaybackSource.Url(url = "/api/v1/blob/aa"))
+        val sealed = RenderBlock.Video(hash = "bb", alt = "")
+        whenever(manager.playbackSource(sealed)).thenReturn(PlaybackSource.Sealed(hash = "bb"))
+        val dir = java.nio.file.Files.createTempDirectory("inline-video").toFile()
+
+        val fromHome = InlineVideoPlayback.resolve(manager, hosts, home, plain, "https://n", dir)
+        assertEquals("home:aa", (fromHome as InlineVideoPlayback.Media.Opened).source)
+        val opened = InlineVideoPlayback.resolve(manager, hosts, null, sealed, "https://n", dir)
+        assertEquals("sealed:bb", (opened as InlineVideoPlayback.Media.Opened).source)
+        dir.deleteRecursively()
     }
 
     @Test

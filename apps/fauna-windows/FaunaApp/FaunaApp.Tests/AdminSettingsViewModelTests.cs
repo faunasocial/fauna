@@ -88,6 +88,45 @@ public class AdminSettingsViewModelTests
         Assert.NotNull(vm.ErrorMessage);
     }
 
+    [Fact]
+    public async Task DeleteTier_CallsDeleteByName_ThenRefetches()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextAdminTiers = new[] { MockNestRpcClient.MakeAdminTier("free") },
+        };
+        var vm = new AdminSettingsViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        var row = Assert.Single(vm.Tiers);
+
+        await vm.DeleteTierAsync(row);
+
+        // The row's name keys the removal; success re-reads tiers.list (load + reload).
+        Assert.Equal("free", rpc.LastTierDelete);
+        Assert.Equal(2, rpc.Calls.Count(c => c == "AdminTiersList"));
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task DeleteTier_Refusal_ShowsOnErrorMessage_AndKeepsRow()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextAdminTiers = new[] { MockNestRpcClient.MakeAdminTier("free") },
+        };
+        var vm = new AdminSettingsViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        var row = Assert.Single(vm.Tiers);
+
+        rpc.NextError = "still in use";
+        await vm.DeleteTierAsync(row);
+
+        Assert.NotNull(vm.ErrorMessage);
+        // Non-optimistic: no refetch, the row stays.
+        Assert.Equal(1, rpc.Calls.Count(c => c == "AdminTiersList"));
+        Assert.Single(vm.Tiers);
+    }
+
     private static void FillAddForm(AdminSettingsViewModel vm, string name = "  gold ")
     {
         vm.AddTierName = name;

@@ -165,6 +165,13 @@ internal partial class OnboardingViewModel : ObservableObject
         // this declaration and OnboardingPage's RecoveryKit arm land together, or
         // the wizard strands on a step with no view.
         _m.SetRendersRecoveryKit(true);
+        // A desktop app keeps a door key where SSH keys live: a door run writes it
+        // to %USERPROFILE%\.ssh — the directory the Windows OpenSSH client reads,
+        // `config` included — with a `Host` entry (`installers/vps.md` § The SSH
+        // door → *The key*), as tui and linux pass their `~/.ssh`.
+        if (SshDoorKeyDir is { } sshDoorKeyDir) _m.SetSshDoorKeyDir(sshDoorKeyDir);
+
+        SelfhostedCommandResolver = ResolveSelfhostedCommandFromMachineAsync;
 
         // The observer impl is expected to be INotifyPropertyChanged; cast and
         // forward. (The Windows impl, NotifyObserver, satisfies this.) If a
@@ -190,6 +197,11 @@ internal partial class OnboardingViewModel : ObservableObject
                 if (step == OnboardingStep.NestRecovery && _lastObservedStep != OnboardingStep.NestRecovery)
                 {
                     FetchRecoveryBoxes();
+                }
+                if (step == OnboardingStep.RecoverSelfhostedInstructions
+                    && _lastObservedStep != OnboardingStep.RecoverSelfhostedInstructions)
+                {
+                    _ = ResolveSelfhostedCommandAsync();
                 }
                 _lastObservedStep = step;
                 OnPropertyChanged(string.Empty);
@@ -499,18 +511,24 @@ internal partial class OnboardingViewModel : ObservableObject
     /// neither leave a half-account nor shadow the active one. The mode rule
     /// lives in shared Rust, not in an app-side <c>if (append)</c>
     /// (long-term-store.md § Downgrade mirror + abandoned-append recovery).
-    /// Failure surfaces log-only, the cross-app convention for a failed store
-    /// write; the wizard has already advanced either way.</summary>
-    private void CommitConfirmedIdentity(string secret, string arm)
+    /// A failed write is a loud error, not a silent advance (long-term-store.md
+    /// § Save-failure handling): the raw exception goes to the log only, and the
+    /// machine's <c>IdentityCommitFailed</c> returns the wizard to the confirm
+    /// screen with the fixed <c>persist_identity</c> line on <c>error-message</c>.
+    /// Returns whether the commit landed, so a caller does not paint over the error.</summary>
+    private bool CommitConfirmedIdentity(string secret, string arm)
     {
         try
         {
             _registry.ConfirmIdentity(secret, IsAppendMode);
+            return true;
         }
         catch (Exception ex)
         {
             ShellLog.Error("OnboardingViewModel",
                 $"[onboarding] persist_confirmed_identity ({arm}) failed: {ex.GetType().Name}: {ex.Message}");
+            _m.IdentityCommitFailed(Strings.Get("onboarding/session_error/persist_identity"));
+            return false;
         }
     }
 
@@ -653,12 +671,122 @@ internal partial class OnboardingViewModel : ObservableObject
             // before complete-login resumes at handle_entry.
             case RecoveryEntryOutcome.Restored:
             case RecoveryEntryOutcome.RestoredPredecessorsLost:
-                if (_m.EffectiveSecret() is { Length: > 0 } secret)
-                    CommitConfirmedIdentity(secret, "restored");
+                if (_m.EffectiveSecret() is { Length: > 0 } secret
+                    && !CommitConfirmedIdentity(secret, "restored"))
+                    return; // the commit error is on the confirm screen; no outcome line over it
                 break;
         }
         if (FaunaOnboardingMachineMethods.RecoveryEntryOutcomeMessage(outcome) is { } message)
             _m.SetErrorMessage(Strings.Resolve(message));
+    }
+
+    // ── The signed-out lock door (ui/sessions.md § The signed-out door) ──
+    // Reached from identity_choice's emergency-lockout-entry-button: lock an
+    // account for the nest's fixed 24 hours from a device the owner will not sign
+    // in on. The ceremony — the identity-secret parse, the LOCK check, the nest
+    // resolution from the handle, the anonymous lock — is the machine's
+    // SubmitEmergencyLockout; what every outcome SAYS is its one table
+    // (EmergencyLockoutOutcomeMessage). PERSISTS NOTHING: the three fields live
+    // in this view model only, the secret goes to the machine for one call, and a
+    // landed lock drops all three. tui: wizard/emergency_lockout_entry.rs;
+    // android: EmergencyLockoutEntryScreen; FaunaKit: EmergencyLockoutEntryView.
+
+    /// <summary>The door opens empty — nothing typed on an earlier visit
+    /// survives it.</summary>
+    [RelayCommand]
+    private void BeginEmergencyLockoutEntry()
+    {
+        LockoutSecret = "";
+        LockoutAccount = "";
+        LockoutWord = "";
+        _m.BeginEmergencyLockoutEntry();
+    }
+
+    /// <summary>Two-way bound to <c>paste-secret-field</c> — the identity secret
+    /// (64-hex or a <c>fauna://identity</c> URI), raw; the machine parses it.</summary>
+    public string LockoutSecret
+    {
+        get => _lockoutSecret;
+        set
+        {
+            if (_lockoutSecret == value) return;
+            _lockoutSecret = value;
+            OnPropertyChanged();
+        }
+    }
+    private string _lockoutSecret = "";
+
+    /// <summary>Two-way bound to <c>recovery-entry-account-field</c> — the handle
+    /// that locates the nest, needed when the secret names none.</summary>
+    public string LockoutAccount
+    {
+        get => _lockoutAccount;
+        set
+        {
+            if (_lockoutAccount == value) return;
+            _lockoutAccount = value;
+            OnPropertyChanged();
+        }
+    }
+    private string _lockoutAccount = "";
+
+    /// <summary>Two-way bound to <c>sessions-lockout-confirm-field</c>.</summary>
+    public string LockoutWord
+    {
+        get => _lockoutWord;
+        set
+        {
+            if (_lockoutWord == value) return;
+            _lockoutWord = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(LockoutArmed));
+        }
+    }
+    private string _lockoutWord = "";
+
+    /// <summary><c>sessions-lockout-button</c>'s enablement: the literal word,
+    /// never localized or case-folded — the shared constant, read once. The
+    /// machine re-checks it in the action arm.</summary>
+    public bool LockoutArmed =>
+        string.Equals(_lockoutWord, LockoutConfirmWord.Value, StringComparison.Ordinal);
+
+    private static readonly Lazy<string> LockoutConfirmWord =
+        new(() => uniffi.fauna_ffi.FaunaFfiMethods.SessionsLockoutConfirmWord());
+
+    /// <summary><c>sessions-lockout-button</c> on <c>emergency_lockout_entry</c>.
+    /// The typed account rides the machine's one account field (the recovery
+    /// entry's stash-then-forward shape); a landed lock returns the machine to
+    /// <c>identity_choice</c>, every refusal stays on the step.</summary>
+    [RelayCommand]
+    private async Task SubmitEmergencyLockoutAsync()
+    {
+        var typed = _lockoutAccount.Trim();
+        if (typed.Length > 0) _m.SetCurrentHandle(typed);
+        // No ConfigureAwait(false): the settle below mutates the machine the UI
+        // observes (the WinUI off-thread-COMException rule).
+        var outcome = await _m.SubmitEmergencyLockout(_lockoutSecret, _lockoutWord);
+        SettleEmergencyLockout(outcome);
+    }
+
+    /// <summary>Fold the door's outcome back into the wizard. A landed lock's
+    /// confirmation speaks on <c>identity_choice</c>'s <c>error-message</c> — the
+    /// unlock time through the shared <c>format_unix_local</c> (the machine cannot
+    /// render it) and that nothing was saved here — and everything typed is
+    /// dropped. <c>internal</c> for the unit test.</summary>
+    internal void SettleEmergencyLockout(EmergencyLockoutOutcome outcome)
+    {
+        ShellLog.Info("Onboarding", $"emergency lockout settled: {outcome.GetType().Name} at step {_m.Step()}");
+        var unlockTime = outcome is EmergencyLockoutOutcome.Locked locked
+            ? uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocal(locked.@lockedUntil)
+            : "";
+        if (outcome is EmergencyLockoutOutcome.Locked)
+        {
+            LockoutSecret = "";
+            LockoutAccount = "";
+            LockoutWord = "";
+        }
+        _m.SetErrorMessage(Strings.Resolve(
+            FaunaOnboardingMachineMethods.EmergencyLockoutOutcomeMessage(outcome, unlockTime)));
     }
 
     /// <summary>
@@ -995,6 +1123,23 @@ internal partial class OnboardingViewModel : ObservableObject
 
     public bool HandleCheckContinueEnabled => _m.HandleCheckSnapshot().@continueEnabled;
     public bool HandleControlCheckboxVisible => _m.HandleCheckSnapshot().@controlCheckboxVisible;
+
+    /// <summary>The by-continuing notice shows only while Continue signs in —
+    /// the shared snapshot's rule, not re-derived here.</summary>
+    public bool HandleTermsNoticeVisible => _m.HandleCheckSnapshot().@termsNoticeVisible;
+
+    /// <summary>
+    /// The nest's rules for this step's joining surface (<c>onboarding-nest-rules</c>,
+    /// <c>nest-rules.md</c> § Acceptance at joining) — the shared machine's
+    /// <c>joining_nest_rules</c>, which already decided whether the page shows them:
+    /// on <c>invite_request</c>, and on <c>handle_entry</c> exactly while
+    /// <see cref="HandleTermsNoticeVisible"/>; only once its verified pre-sign-in
+    /// read has landed (that landing ticks the observer); never for an applied empty
+    /// document. <c>internal</c> because the summary is a UniFFI-internal record —
+    /// both pages paint it in code-behind (<c>Controls/JoiningNestRules</c>).
+    /// </summary>
+    internal uniffi.fauna_client_policy.NestRulesSummary? JoiningNestRules
+        => _m.JoiningNestRules(RegionPlaneHost.UiLang);
 
     public bool HandleControlCheckboxChecked
     {
@@ -1820,6 +1965,34 @@ internal partial class OnboardingViewModel : ObservableObject
     /// Called from the view's codebehind. Per onboarding.md §5.</summary>
     public void SetProvisionMailMode(bool enabled) => _m.SetProvisionMailMode(enabled);
 
+    /// <summary>Snapshot state of <c>vps-config-ssh-door-toggle</c> — whether the
+    /// box is provisioned with a key-only sshd that admits the admin's own
+    /// address. <b>Default OFF</b> for every box (the shared getter). Read by the
+    /// view's door re-sync, as <see cref="ProvisionMailModeEnabled"/> is.
+    /// onboarding-provisioning.md § 5.</summary>
+    public bool ProvisionSshDoorEnabled => _m.ProvisionSshDoorEnabled();
+
+    /// <summary>CheckBox toggle → the door choice in the shared machine, which
+    /// carries it into the box's cloud-init and mints the key at the run.</summary>
+    public void SetProvisionSshDoor(bool enabled) => _m.SetProvisionSshDoor(enabled);
+
+    /// <summary><c>vps-config-ssh-door-warning</c> shows only while the door is
+    /// on — the warning that the door reduces the server's security.</summary>
+    public bool SshDoorWarningVisible => ProvisionSshDoorEnabled;
+
+    /// <summary>Where this desktop app keeps SSH keys: <c>%USERPROFILE%\.ssh</c>,
+    /// the directory the Windows OpenSSH client reads. Passed to the machine at
+    /// construction; <c>null</c> when the OS names no profile, and then the key
+    /// waits in the machine instead (as on an app with no <c>~/.ssh</c>).</summary>
+    internal static string? SshDoorKeyDir
+    {
+        get
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return string.IsNullOrEmpty(profile) ? null : System.IO.Path.Combine(profile, ".ssh");
+        }
+    }
+
     /// <summary>The update channel the box will be provisioned on (Stable until
     /// the user picks another). The shared getter is the only source — the view
     /// re-reads it each tick and caches nothing. onboarding-provisioning.md §5.</summary>
@@ -1829,10 +2002,14 @@ internal partial class OnboardingViewModel : ObservableObject
     /// feeds it into the cloud-init image tag.</summary>
     public void SetProvisionUpdateChannel(UpdateChannel channel) => _m.SetProvisionUpdateChannel(channel);
 
-    /// <summary>The i18n key of a channel's one-line description at the running
-    /// product version (the shared compat-line wording), for the view to look up.</summary>
-    public static string UpdateChannelDescriptionKey(UpdateChannel channel)
-        => FaunaOnboardingMachineMethods.UpdateChannelDescriptionKey(channel);
+    /// <summary>The i18n key of a channel row's one-line description, for the view
+    /// to look up: the no-build wording when the machine's registry reading has no
+    /// build on the channel, else the compat-line wording at the product version.
+    /// The shared row getter chooses it; the reading lands after the page is
+    /// built, so the view re-reads it each tick. onboarding-provisioning.md §5
+    /// (<i>What exists decides the default</i>, decision (2)).</summary>
+    public string UpdateChannelDescriptionKeyForRow(UpdateChannel channel)
+        => _m.UpdateChannelDescriptionKeyForRow(channel);
 
     /// <summary>
     /// Curated server-type options for the selected provider, RAM-gated by
@@ -2193,6 +2370,51 @@ internal partial class OnboardingViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// <c>provisioning-ssh-door-command</c>: "" (hidden) until a door run
+    /// SUCCEEDED, then the door's command with the one admitted address, the
+    /// key's path and its fingerprint — only on the device that ran the wizard,
+    /// the key being this device's (onboarding-provisioning.md § 5). Mirrors
+    /// linux's <c>nest_provisioning.rs</c> and tui.
+    /// </summary>
+    public string ProvisioningSshDoorCommandText
+    {
+        get
+        {
+            if (ProvisioningSnapshot.@overall is not OverallStatus.Succeeded) return "";
+            return _m.SshDoorReadout() is { } door ? SshDoorCommandText(door) : "";
+        }
+    }
+
+    /// <summary>
+    /// The door's line, by the template linux, tui and macos pick: the path form
+    /// where this device wrote the key, else the no-path form; the address the
+    /// claim reply echoed, else the "address you set the server up from"
+    /// wording. Filled by NAME (<c>Strings.Resolve</c>), so a
+    /// translation may order the placeholders as it likes.
+    /// </summary>
+    internal static string SshDoorCommandText(SshDoorReadout door)
+    {
+        var args = new Dictionary<string, string>
+        {
+            ["command"] = door.@command,
+            ["address"] = door.@admittedFrom
+                ?? Strings.Get("onboarding/nest_provisioning/ssh_door_address_unknown"),
+            ["fingerprint"] = door.@fingerprint,
+        };
+        string key;
+        if (door.@keyPath is { } path)
+        {
+            args["path"] = path;
+            key = "onboarding.nest_provisioning.ssh_door_command_template";
+        }
+        else
+        {
+            key = "onboarding.nest_provisioning.ssh_door_command_no_path_template";
+        }
+        return Strings.Resolve(new LocalizedText(key, args));
+    }
+
     /// <summary>Page-level error: prefer snapshot.final_error, fall back
     /// to the machine's general ErrorMessage. Mirrors Linux
     /// nest_provisioning.rs:336-349.</summary>
@@ -2372,21 +2594,18 @@ internal partial class OnboardingViewModel : ObservableObject
     public string InviteCodeStatusText
         => Strings.Resolve(_m.InviteRequestSnapshot().@oobMessage);
 
-    /// <summary>The guardian's handle if the verified OOB code carries a supervised
-    /// designation (family-safety.md § Wire &amp; data shape); <c>null</c> when the
-    /// code hasn't verified Valid yet, or is an ordinary code.</summary>
-    private string? InviteCodeSupervisedByHandle
-        => _m.InviteRequestSnapshot().@outOfBandCodeState is OobCodeState.Valid v ? v.@supervisedBy : null;
+    /// <summary>Drives <c>invite-code-supervised-notice</c> — shown exactly when the
+    /// shared onboarding machine derives <c>supervisedNotice</c> (a Valid OOB code
+    /// that names a guardian; account-age-band.md § App surface → Age-band surfaces).</summary>
+    public bool ShowInviteCodeSupervisedNotice
+        => _m.InviteRequestSnapshot().@supervisedNotice is not null;
 
-    /// <summary>Drives <c>invite-code-supervised-notice</c> — shown before
-    /// redemption when the checked code carries a supervised designation.</summary>
-    public bool ShowInviteCodeSupervisedNotice => InviteCodeSupervisedByHandle is not null;
-
-    /// <summary>"This account will be supervised by {guardian}" — resolved here
-    /// (named-placeholder substitution is per-app, i18n_placeholder_named_not_numeric).</summary>
+    /// <summary>"This account will be supervised by {guardian}" (plus the age band
+    /// when the code carries one) — the shared machine's <c>supervisedNotice</c>,
+    /// rendered with the nested resolver because <c>{band}</c> is itself a key.</summary>
     public string InviteCodeSupervisedNoticeText
-        => InviteCodeSupervisedByHandle is { } handle
-            ? Strings.Get("family/supervised_notice_onboarding").Replace("{guardian}", handle)
+        => _m.InviteRequestSnapshot().@supervisedNotice is { } notice
+            ? Strings.ResolveNested(notice)
             : "";
 
     [RelayCommand]
@@ -2395,13 +2614,25 @@ internal partial class OnboardingViewModel : ObservableObject
         try
         {
             var step = await _m.WizardSubmitInviteRequest();
+            // One line per return, so a submit that reached PendingReview but never
+            // reached the registry tells "the await never resumed" (no line) apart
+            // from "the writer skipped or failed" (this line, then the writer's own).
+            ShellLog.Info("OnboardingViewModel",
+                $"[onboarding] invite_request.submit returned at step {step}; persisting the pending-invite slot");
             // "The only write moment" (onboarding.md § 3 Persistence callouts).
             // This journey has no wizard exit to hang the write on any more, so
             // the slot is written here and the poll takes over.
             PersistPendingInviteSlot();
             if (step is OnboardingStep.Done) HandleWizardOutcome();
         }
-        catch (OnboardingException) { /* observer surfaces ErrorMessage */ }
+        catch (OnboardingException ex)
+        {
+            // The observer still surfaces ErrorMessage; the log line is what tells
+            // a red "registry never saw the submit" apart from a writer failure —
+            // this exit skips the persist below without a word otherwise.
+            ShellLog.Warn("OnboardingViewModel",
+                $"[onboarding] invite_request.submit threw before the persist: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     [RelayCommand]
@@ -2466,7 +2697,15 @@ internal partial class OnboardingViewModel : ObservableObject
     private void PersistPendingInviteSlot()
     {
         var slot = _m.PendingInviteSlot();
-        if (slot is null) return;
+        if (slot is null)
+        {
+            // Not in PendingReview: a refused or failed submit lands the snapshot in
+            // `Error` and returns normally (the machine never throws for it), so
+            // without this line the persist's skip is invisible in the log.
+            ShellLog.Warn("OnboardingViewModel",
+                $"[onboarding] no pending-invite slot at the submit return; invite state: {_m.InviteRequestSnapshot().@state}");
+            return;
+        }
         // The identity comes from the MACHINE — in append mode it exists
         // nowhere else yet (moment 1 wrote nothing).
         var secretHex = _m.EffectiveSecret();
@@ -2481,6 +2720,8 @@ internal partial class OnboardingViewModel : ObservableObject
             // The real per-actor slot (onboarding.md § Long-term store contract).
             var actorId = _registry.PersistPendingInvite(
                 secretHex, slot.@nestUrl, slot.@handle, slot.@requestId, slot.@statusJson);
+            ShellLog.Info("OnboardingViewModel",
+                $"[onboarding] pending invite persisted for {actorId[..Math.Min(12, actorId.Length)]}; adoption handler {(OnPendingInvitePersisted is null ? "absent" : "present")}");
             OnPendingInvitePersisted?.Invoke(actorId);
         }
         catch (Exception ex)
@@ -2829,8 +3070,8 @@ internal partial class OnboardingViewModel : ObservableObject
         PushRecoveryBoxes(await FaunaApp.Core.Helpers.DeploymentSeedCustody.ReadRecoverableBoxesAsync(nestUrl, ownerSecret));
     }
 
-    /// <summary>Push a non-empty box list into the machine (indexed
-    /// <c>recover-box-item-{i}</c> rows, via <see cref="RecoveryBoxItems"/>);
+    /// <summary>Push a non-empty box list into the machine (the
+    /// <c>recover-box-item</c> rows, via <see cref="RecoveryBoxItems"/>);
     /// an empty read is silently dropped so it can never clobber a list
     /// already on screen.</summary>
     private void PushRecoveryBoxes(FfiDeploymentSeedEntry[] boxes)
@@ -2839,8 +3080,8 @@ internal partial class OnboardingViewModel : ObservableObject
         _m.SetRecoveryBoxes(boxes.Select(b => b.nestActorId).ToArray());
     }
 
-    /// <summary>The custodied boxes offered on nest_recovery, projected into
-    /// dash-indexed <c>recover-box-item-{i}</c> item VMs carrying the current
+    /// <summary>The custodied boxes offered on nest_recovery, projected in
+    /// order into <c>recover-box-item</c> row VMs carrying the current
     /// selection flag. Read live so <c>Bindings.Update()</c> on each observer
     /// tick reflects a new selection / a fresh seed.</summary>
     public IReadOnlyList<RecoveryBoxItemViewModel> RecoveryBoxItems
@@ -2864,14 +3105,67 @@ internal partial class OnboardingViewModel : ObservableObject
     /// disabled-until-selected gating).</summary>
     public bool RecoveryMethodButtonsEnabled => _m.RecoverySelectedNestId() is not null;
 
-    /// <summary>Text for <c>recover-selfhosted-command</c> — a PLACEHOLDER until
-    /// the C2 reachable-nest command render lands (box-recovery.md §
-    /// Implementation status of step 4, "self-hosted recovery command … C2
-    /// partial"); mirrors linux's <c>SELFHOSTED_COMMAND_PENDING</c> + web's
-    /// placeholder fallback. This is the single seam a future C2 leg swaps for
-    /// the resolved command.</summary>
+    /// <summary>The resolved <c>FAUNA_DEPLOYMENT_SEED=…</c> line for the selected
+    /// box, or <c>null</c> while it is unresolved (not yet answered, or no
+    /// custodied seed matches).</summary>
+    private string? _selfhostedCommand;
+
+    /// <summary>Resolves the self-hosted recovery line for a box (hex
+    /// <c>nest_actor_id</c>); <c>null</c> when none resolves. The default asks the
+    /// shared Rust render through
+    /// <see cref="FaunaApp.Core.Helpers.DeploymentSeedCustody.ResolveSelfhostedCommandAsync"/>
+    /// — the reachable nest when one is resolved, else the device's own store. A
+    /// seam so the VM's resolved/unresolved states are testable without a store.</summary>
+    internal Func<string, Task<string?>> SelfhostedCommandResolver { get; set; }
+
+    private async Task<string?> ResolveSelfhostedCommandFromMachineAsync(string nestActorId)
+    {
+        var secretHex = _m.EffectiveSecret();
+        if (string.IsNullOrEmpty(secretHex)) return null;
+        byte[] ownerSecret;
+        try { ownerSecret = Convert.FromHexString(secretHex); }
+        catch (FormatException) { return null; }
+        return await FaunaApp.Core.Helpers.DeploymentSeedCustody.ResolveSelfhostedCommandAsync(
+            _m.NestUrl(), ownerSecret, nestActorId);
+    }
+
+    /// <summary>Resolve the line for the selected box on entering
+    /// recover_selfhosted_instructions (box-recovery.md § Recovery UI (step 4),
+    /// "Self-hosted command render"). The line is cleared first, so a box
+    /// change never shows the previous box's seed; an unresolved line keeps the
+    /// pending text and the copy button disabled. No <c>ConfigureAwait(false)</c>
+    /// — continuations stay on the UI context (WinUI off-thread rule).</summary>
+    internal async Task ResolveSelfhostedCommandAsync()
+    {
+        _selfhostedCommand = null;
+        OnPropertyChanged(string.Empty);
+        var nestActorId = _m.RecoverySelectedNestId();
+        if (nestActorId is null) return;
+        string? line;
+        try { line = await SelfhostedCommandResolver(nestActorId); }
+        catch (Exception ex)
+        {
+            FaunaApp.Core.Logs.ShellLog.Warn("OnboardingViewModel",
+                $"self-hosted recovery command not resolved: {ex.GetType().Name}: {ex.Message}");
+            line = null;
+        }
+        // Drop a stale answer when the selection moved while it was in flight.
+        if (_m.RecoverySelectedNestId() != nestActorId) return;
+        _selfhostedCommand = line;
+        OnPropertyChanged(string.Empty);
+    }
+
+    /// <summary>Text for <c>recover-selfhosted-command</c>: the resolved line, or
+    /// the pending text only while it is unresolved.</summary>
     public string RecoverSelfhostedCommand
-        => Strings.Get("onboarding/recovery/selfhosted_command_pending");
+        => _selfhostedCommand ?? Strings.Get("onboarding/recovery/selfhosted_command_pending");
+
+    /// <summary>Enablement of <c>recover-selfhosted-copy-button</c> — there is
+    /// nothing to copy until the line resolves.</summary>
+    public bool RecoverSelfhostedCopyEnabled => _selfhostedCommand is not null;
+
+    /// <summary>The resolved line to copy, or <c>null</c> while unresolved.</summary>
+    public string? RecoverSelfhostedCommandToCopy => _selfhostedCommand;
 
     /// <summary>Entry from <c>recover-lost-box-button</c> on identity_choice:
     /// routes through identity_import with recovery intent, then to
@@ -2957,10 +3251,10 @@ public sealed class ServerTypeItemViewModel
 
 /// <summary>
 /// Wraps a custodied box's <c>nest_actor_id</c> for the <c>recover-box-list</c>
-/// on nest_recovery. Carries the per-position AutomationId
-/// (<c>recover-box-item-{i}</c> — DASH form, matching the e2e's
-/// <c>recover-box-item-0</c> and web/linux's <c>recover-box-item-{i}</c>, unlike
-/// vps's bracket form), a shortened display id, and the selection flag.
+/// on nest_recovery: its position, a shortened display id, and the selection
+/// flag. Every row paints the one repeated <c>recover-box-item</c> id (the
+/// XAML binds the generated constant; a driver picks row n by index —
+/// e2e-conventions.md convention 1), so the id is not carried here.
 ///
 /// Public because the WinUI XAML compiler can't resolve <c>x:DataType</c>
 /// against <c>internal</c> types even with <c>InternalsVisibleTo</c>; the
@@ -2970,7 +3264,6 @@ public sealed class RecoveryBoxItemViewModel
 {
     public string Id { get; }
     public int Index { get; }
-    public string BoxItemId => $"recover-box-item-{Index}";
     public string ShortId { get; }
     public bool IsSelected { get; }
 

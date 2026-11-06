@@ -58,6 +58,10 @@ public struct LinkedNestsView: View {
                 if let queue = vm.forwardQueue, ForwardQueueBlockView.isVisible(queue) {
                     ForwardQueueBlockView(status: queue, vm: vm)
                 }
+                // Restore from a custodian nest (page-level): after the forward
+                // queue, before the nest rows, on every signed-in visit — the
+                // cold device has no custody rows, and it is who the button is for.
+                CustodyRestoreBlockView(vm: vm)
                 listSection
                 if let error = vm.errorMessage {
                     ErrorBanner(message: error)
@@ -180,6 +184,74 @@ public struct LinkedNestsView: View {
             // mirroring the linux render.
             if vm.errorMessage == nil { showingAddForm = false }
         }
+    }
+}
+
+// MARK: - Restore from a custodian nest (page-level block, after the forward queue)
+
+/// The page-level restore block (`nests-custody-restore-*`, `nests.md` § Trust
+/// facet — restore from a custodian nest): the reveal, the inline form (the
+/// `nests-add-*` shape) and the last restore's notice — tui's
+/// `push_custody_restore`, android's `CustodyRestoreBlock`. The shell holds no
+/// dial, handshake or walk logic; the restore dials the custodian, never this
+/// session's own nest, so no own-nest wire kind gates the submit.
+struct CustodyRestoreBlockView: View {
+    let vm: LinkedNestsVM
+
+    @State private var formOpen = false
+    @State private var input = ""
+
+    private var canSubmit: Bool {
+        !input.trimmingCharacters(in: .whitespaces).isEmpty && vm.restoreNotice != .running
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(L.nests.custodyRestoreButton) { formOpen = true }
+                .accessibilityIdentifier(Ids.nestsCustodyRestoreButton)
+                .automationActivate(Ids.nestsCustodyRestoreButton) { formOpen = true }
+            if formOpen {
+                TextField(L.nests.custodyRestoreInputLabel, text: $input)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier(Ids.nestsCustodyRestoreInput)
+                    .automationField(Ids.nestsCustodyRestoreInput, text: $input)
+                    .onSubmit { submit() }
+                HStack {
+                    Button(L.nests.custodyRestoreSubmit) { submit() }
+                        .disabled(!canSubmit)
+                        .accessibilityIdentifier(Ids.nestsCustodyRestoreSubmitButton)
+                        .automationActivate(Ids.nestsCustodyRestoreSubmitButton, isEnabled: { canSubmit }) { submit() }
+                    Button(L.nests.custodyRestoreCancel, role: .cancel) { cancel() }
+                        .accessibilityIdentifier(Ids.nestsCustodyRestoreCancelButton)
+                        .automationActivate(Ids.nestsCustodyRestoreCancelButton) { cancel() }
+                }
+                .controlSize(.small)
+            }
+            if let notice = vm.restoreNotice {
+                automationText(Ids.nestsCustodyRestoreNotice, notice.text)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+        }
+        // A restore that reached the custodian closes the form; every failure
+        // keeps it open with the address kept.
+        .onChange(of: vm.restoreNotice) { _, notice in
+            if notice?.closesForm == true {
+                formOpen = false
+                input = ""
+            }
+        }
+    }
+
+    private func submit() {
+        guard canSubmit else { return }
+        let url = input
+        Task { await vm.restoreFromCustodian(url) }
+    }
+
+    private func cancel() {
+        formOpen = false
+        input = ""
     }
 }
 
@@ -374,7 +446,23 @@ private struct NestTrustFacetView: View {
                 // uploads your messages is plainly trusted, and rendering "not
                 // trusted to read anything" directly above "Backs up your messages
                 // for you" would state the opposite of the row beneath it.
-                if row.trustGrants.isEmpty && row.trustBackups.isEmpty {
+                // A roster that could not be read is not an empty one
+                // (`nests.md:125`): on the home row the status says the nest
+                // could not be asked, and it takes `nest-trust-empty`'s place
+                // below. Omitted-holder grants still list through the catch-all.
+                if row.isHome {
+                    automationText(
+                        Ids.nestTrustHoldersStatus,
+                        trustHoldersStatusText(unreachable: row.trustHoldersUnreachable)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                if showsTrustEmptyState(
+                    grants: row.trustGrants.count,
+                    backups: row.trustBackups.count,
+                    holdersUnreachable: row.trustHoldersUnreachable
+                ) {
                     automationText(Ids.nestTrustEmpty, L.nests.notTrusted)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -923,6 +1011,16 @@ struct CustodyNestItemRow: View {
                     .disabled(!Self.isRevocable(row))
                     .accessibilityIdentifier(Ids.nestTrustCustodyRevokeButton)
                     .automationActivate(Ids.nestTrustCustodyRevokeButton, isEnabled: { Self.isRevocable(row) }) { revoke() }
+                // The warm explicit restore gesture (`nests.md` § Trust facet —
+                // restore from a custodian nest): the same command as the
+                // page-level form, the row's own address pre-filled.
+                if let url = row.custodianNestUrl {
+                    Button(L.nests.custodyRestoreRowButton) { restore(url) }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.nestTrustCustodyRestoreButton)
+                        .automationActivate(Ids.nestTrustCustodyRestoreButton) { restore(url) }
+                }
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(Ids.nestTrustCustodyItem)
@@ -938,6 +1036,10 @@ struct CustodyNestItemRow: View {
 
     private func revoke() {
         Task { await vm.revokeCustody(grantId: row.grantId, holder: row.custodianKey) }
+    }
+
+    private func restore(_ url: String) {
+        Task { await vm.restoreFromCustodian(url) }
     }
 }
 
@@ -1014,6 +1116,22 @@ private func historyLine(_ h: TrustHistoryRow) -> String {
     case .renew: return L.nests.historyRenewed(scope: scope, when: when)
     case .revoke: return L.nests.historyRevoked(scope: scope, when: when)
     }
+}
+
+/// The `nest-trust-holders-status` text (`nests.md:125`): the "could not ask this
+/// nest" copy when the content-processor roster could not be read this refresh,
+/// EMPTY otherwise — the element stays registered either way (the leaf set does
+/// not vary), like `nest-trust-generation-notice`.
+func trustHoldersStatusText(unreachable: Bool) -> String {
+    unreachable ? L.nests.holdersStatusUnreachable : ""
+}
+
+/// Whether `nest-trust-empty` ("not trusted to read anything") renders: only when
+/// the nest holds no grants and no backup rows (a backup row plainly trusts it,
+/// `nests.md:99`) AND the roster was actually read — a failed read is not an
+/// empty roster (`nests.md:125`).
+func showsTrustEmptyState(grants: Int, backups: Int, holdersUnreachable: Bool) -> Bool {
+    grants == 0 && backups == 0 && !holdersUnreachable
 }
 
 /// The `nest-trust-generation-notice` text for the page's last restore action

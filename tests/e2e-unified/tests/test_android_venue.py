@@ -439,7 +439,8 @@ def test_a_dead_tunnel_reads_down_and_names_the_tunnel(probe_adb):
     answer, _ = probe_adb
     answer("", rc=1)
     up, line = android_venue.probe_venue()
-    assert not up and line.startswith("venue DOWN") and "tunnel" in line
+    assert not up and line.startswith("emulator down") and "tunnel" in line
+    assert "not installed" in line
 
 
 def test_a_live_tunnel_with_no_ready_device_reads_down_and_names_the_emulator(probe_adb):
@@ -453,14 +454,20 @@ def test_a_ready_device_reads_up_and_names_it(probe_adb):
     answer, _ = probe_adb
     answer("List of devices attached\nemulator-5554\tdevice\n")
     assert android_venue.probe_venue() == (
-        True, f"venue UP: {android_venue.ADB_SERVER_SPEC} serves emulator-5554",
+        True, f"emulator up: {android_venue.ADB_SERVER_SPEC} serves emulator-5554",
     )
 
 
 def test_no_adb_at_all_reads_unknown_never_raises(tmp_path, monkeypatch):
+    # Off PATH is not enough: `adb_argv` falls back to `$ANDROID_HOME/
+    # platform-tools`, `$ANDROID_SDK_ROOT` and `~/android-sdk`, all present on
+    # the primary dev VM — so every lookup is pointed at an empty directory.
     monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
     up, line = android_venue.probe_venue()
-    assert not up and line.startswith("venue UNKNOWN")
+    assert not up and line.startswith("emulator unknown")
 
 
 @pytest.mark.parametrize("recipe, argument", [

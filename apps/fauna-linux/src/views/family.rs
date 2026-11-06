@@ -519,6 +519,18 @@ fn build_page_widgets() -> (adw::PreferencesPage, Widgets) {
     set_test_attr(&content_notify, "state", "off");
     policy_group.add(&content_notify);
 
+    // The honest bound on content categories, stated on the editor surface
+    // (`family-client-enforcement.md` § Content policy → *Where it binds*):
+    // the apps do not detect adult content or ads yet, so a limit on them
+    // waits for a label. Static text — the same sentence on every app.
+    let content_hint = gtk::Label::new(Some(S::POLICY_CONTENT_HINT));
+    content_hint.add_css_class("dim-label");
+    content_hint.set_wrap(true);
+    content_hint.set_xalign(0.0);
+    content_hint.set_margin_top(4);
+    set_test_id(&content_hint, ids::FAMILY_POLICY_CONTENT_HINT);
+    policy_group.add(&content_hint);
+
     // ── Screen time (family-safety.md § Screen time, Slice E) ──
     // The usage WINDOW is the hours the ward may use the account (so "no device
     // after 21:00" is the window 07:00–21:00), and it may wrap midnight. Both

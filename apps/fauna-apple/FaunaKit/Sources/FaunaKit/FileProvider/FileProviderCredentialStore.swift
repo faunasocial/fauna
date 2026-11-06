@@ -71,6 +71,7 @@ public enum FileProviderCredentialStore {
         static let bearer = "bearer"
         static let writerSecret = "writer_secret"
         static let deviceAuthorization = "device_authorization"
+        static let generationKeys = "generation_keys"
     }
 
     // MARK: App-group container
@@ -218,10 +219,27 @@ public enum FileProviderCredentialStore {
             Account.nestURL, Account.actorId, Account.deviceId,
             Account.deviceLabel, Account.backupKey, Account.predecessorActorIds,
             Account.predecessorKeys, Account.bearer,
-            Account.writerSecret, Account.deviceAuthorization,
+            Account.writerSecret, Account.deviceAuthorization, Account.generationKeys,
         ] {
             delete(account)
         }
+    }
+
+    // MARK: Retained generation keys (the custody item)
+
+    static func loadGenerationKeysItem() -> Data? { loadData(Account.generationKeys) }
+
+    /// `nil` clears the item (the Keychain is never asked to hold zero bytes).
+    static func saveGenerationKeysItem(_ data: Data?) {
+        if let data { save(Account.generationKeys, data) } else { delete(Account.generationKeys) }
+    }
+
+    /// The app's mirror of the machine slot's retained keys
+    /// (`machineRetainedGenerationKeys`) into the extension's custody item —
+    /// at provisioning and on every slot write. Additive: it never drops an
+    /// entry the extension recorded itself.
+    public static func mirrorGenerationKeys(_ keys: [FfiRetainedGenerationKey]) {
+        KeychainRetainedKeyCustody().record(keys)
     }
 
     // MARK: Keychain primitives
@@ -303,5 +321,105 @@ public final class KeychainChangeSignerProvider: FfiChangeSignerProvider, @unche
 
     public func currentSigner() -> FfiChangeSignerCarriage? {
         read()
+    }
+}
+
+/// The extension's **retained generation-key custody** (decision 1′ of
+/// `on-demand-files-shared-sets.md`): the generations this device holds with no
+/// wrap on the plane reaching it, which the extension cannot read from the
+/// machine slot — the app mirrors them into the `generation_keys` app-group
+/// Keychain item (`FileProviderCredentialStore.mirrorGenerationKeys`), and the
+/// extension records beside them every generation it unwraps itself. One item
+/// holds the whole map; a generation key has one value (the mint's commitment
+/// checks it at every use), so two writers never conflict on an entry and
+/// `put` of a held generation keeps the held key. Stateless: each call is a
+/// fresh read. `read`/`write` are the tests' seam (`write(nil)` clears the item).
+public final class KeychainRetainedKeyCustody: FfiRetainedKeyCustody, @unchecked Sendable {
+    /// Serializes the read-merge-write across the app's mirror and the
+    /// extension's puts within one process; across processes the last writer
+    /// wins and a lost entry is re-put at the next slot write or unwrap.
+    private static let lock = NSLock()
+
+    private let read: @Sendable () -> Data?
+    private let write: @Sendable (Data?) -> Void
+
+    public convenience init() {
+        self.init(
+            read: { FileProviderCredentialStore.loadGenerationKeysItem() },
+            write: { FileProviderCredentialStore.saveGenerationKeysItem($0) })
+    }
+
+    init(read: @escaping @Sendable () -> Data?, write: @escaping @Sendable (Data?) -> Void) {
+        self.read = read
+        self.write = write
+    }
+
+    public func get(generation: Data) -> Data? {
+        Self.lock.withLock { Self.decode(read())[generation] }
+    }
+
+    public func put(generation: Data, key: Data) {
+        record([FfiRetainedGenerationKey(generation: generation, key: key)])
+    }
+
+    public func remove(generation: Data) {
+        Self.lock.withLock {
+            var map = Self.decode(read())
+            guard map.removeValue(forKey: generation) != nil else { return }
+            write(map.isEmpty ? nil : Self.encode(map))
+        }
+    }
+
+    /// Record every entry in one read-merge-write; a generation already held
+    /// keeps its key.
+    func record(_ entries: [FfiRetainedGenerationKey]) {
+        Self.lock.withLock {
+            var map = Self.decode(read())
+            var changed = false
+            for entry in entries where !entry.generation.isEmpty && !entry.key.isEmpty {
+                if map[entry.generation] == nil {
+                    map[entry.generation] = entry.key
+                    changed = true
+                }
+            }
+            if changed { write(Self.encode(map)) }
+        }
+    }
+
+    /// The item's bytes: per entry `[generation length: u8][generation][key length: u8][key]`,
+    /// sorted by generation so equal maps encode equal.
+    static func encode(_ map: [Data: Data]) -> Data {
+        var out = Data()
+        for generation in map.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            guard let key = map[generation], generation.count <= 255, key.count <= 255 else {
+                continue
+            }
+            out.append(UInt8(generation.count))
+            out.append(generation)
+            out.append(UInt8(key.count))
+            out.append(key)
+        }
+        return out
+    }
+
+    /// The map the bytes hold; a missing or malformed item is the empty map
+    /// (custody unreadable — the host then keys through the plane's wraps alone).
+    static func decode(_ data: Data?) -> [Data: Data] {
+        guard let data else { return [:] }
+        let bytes = [UInt8](data)
+        var map: [Data: Data] = [:]
+        var i = 0
+        func field() -> Data? {
+            guard i < bytes.count else { return nil }
+            let n = Int(bytes[i])
+            guard n > 0, i + 1 + n <= bytes.count else { return nil }
+            defer { i += 1 + n }
+            return Data(bytes[i + 1..<i + 1 + n])
+        }
+        while i < bytes.count {
+            guard let generation = field(), let key = field() else { return [:] }
+            map[generation] = key
+        }
+        return map
     }
 }

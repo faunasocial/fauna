@@ -30,14 +30,28 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from actions import ActionLayer
 from common.accounts import single_account_seed
 from drivers import create_driver
-from helpers.prev_build import expected_incompatible_reasons
+from helpers import real_rail_control
+from helpers.prev_build import expected_incompatible_reasons, prev_build_undrivable_reason
+
+
+def xfail_if_prev_build_undrivable(request, client: str) -> None:
+    """Mark the running cell a strict xfail when it drives a pinned build of `client`
+    that the harness cannot drive yet (`prev_build.PREV_BUILD_DRIVABLE_FROM`).
+
+    Applied per parameter, at run time, because the grids are parametrized by client and
+    only one leg is affected. Strict for the reason `expected_incompatible` is: while the
+    window is open the cell must fail, so a pass reads red and says the table is stale.
+    """
+    reason = prev_build_undrivable_reason(client)
+    if reason:
+        request.applymarker(pytest.mark.xfail(True, reason=reason, strict=True))
 
 def expected_incompatible(cell: str) -> pytest.MarkDecorator:
     """The strict xfail a cross-version cell carries while the pin PREDATES a ratified
@@ -72,18 +86,26 @@ def expected_incompatible(cell: str) -> pytest.MarkDecorator:
 #: linux is the reference leg; macos is the apple leg; windows joined 2026-07-15
 #: (`version-compatibility.md` § Dim 6 — "the apple and windows legs follow the same
 #: pattern on their own machines"). A client joins this tuple once
-#: `helpers/prev_build.py` can build it.
-SKEW_CLIENTS = ("linux", "macos", "windows")
+#: `helpers/prev_build.py` can build it. tui joined 2026-10-31: the lead app, and the one
+#: leg that collects on every machine (`prev_build.py` § One client per machine). ios
+#: joined the same day, on macOS: two concurrent apps take two simulators (`launch_build`)
+#: and a persistent HOME is the simulator's kept container (`state_home_config`). web joined
+#: 2026-11-01, on Linux: its "binary" is a built SPA tree (`prev_build.py`'s `web-app/`, HEAD's
+#: `static_dir`), served by the harness's SPA proxy over whichever nest a cell dials
+#: (`_web_dial`), and a persistent HOME is one BrowserContext on one origin (`_WebHome`).
+SKEW_CLIENTS = ("linux", "macos", "windows", "tui", "ios", "web")
 
 #: Clients whose real conversations rail is a launch-time env gate rather than a
 #: post-launch test-agent command. See the module doc.
 #:
-#: windows joined 2026-07-15: `ConversationsManagerHost.RegisterRealManager` (the
-#: manager the `data.conv_real_backend_active` poll observes) only runs when
+#: windows joined 2026-07-15: `ConversationsManagerHost.MarkRealRailsRegistered` (the
+#: readiness flag the `data.conv_real_backend_active` poll observes) and
+#: `StartReceiveLoop` (which runs the MLS replica restore) only run when
 #: `FAUNA_E2E_REAL_CONVERSATIONS` is set at launch (`App.xaml.cs::BuildE2eConvSessionAsync`)
-#: — the windows `set_state` login always builds the real `ConversationsSession` (mirrors
-#: linux), but registers it as the ACTIVE manager only under this gate, exactly like
-#: apple's `applySessionPatch`. `set_state`'s session handling (`App.xaml.cs`, the
+#: — the windows `set_state` login always builds the real `ConversationsSession` over
+#: `ConversationsManagerHost.Instance` (mirrors linux), but starts its receive loop and
+#: marks the real rails ready only under this gate, exactly like apple's
+#: `applySessionPatch`. `set_state`'s session handling (`App.xaml.cs`, the
 #: `"session"` command branch) also calls `store.SaveSecret`/`SaveCachedHandle`/
 #: `SaveDeviceId` — the same `ISecretStore` `seed_credentials` pre-seeding writes into
 #: under e2e (`FAUNA_E2E_CREDENTIAL_DIR`) — so windows' identity persists exactly the way
@@ -95,18 +117,19 @@ _ENV_GATED_REAL_CONVERSATIONS = ("macos", "ios", "windows")
 #: command that drives a REAL MLS send (resolve the recipient, bootstrap the group,
 #: deliver the Welcome, post the Application envelope).
 #:
-#: Implemented by linux (`apps/fauna-linux/src/main.rs`), web
+#: Implemented by linux (`apps/fauna-linux/src/lib.rs`), web
 #: (`apps/fauna-web/src/lib/conversations.ts`), windows (`FaunaApp/Testing/TestAgent.cs`)
 #: and — since 2026-07-14 — **both apple agents** (`Fauna-macOS/App/FaunaMacApp.swift`,
 #: `Fauna-iOS/App/FaunaApp.swift`), which drive the same shared-Rust manager methods the
 #: GUI's on-Enter handler does. Adding `macos` here turns the skew DM leg on and, via
-#: `AT_REST_CLIENTS` below, admits apple to the at-rest grid.
+#: `AT_REST_CLIENTS` below, admits apple to the at-rest grid. tui's agent carries it too
+#: (`apps/fauna-tui/src/automation.rs`).
 #:
 #: ⚠ The apple agents also no longer ignore a command they do not implement: an unknown
 #: command now surfaces on `error-message` instead of vanishing. The old silence is what
 #: made a missing send look like at-rest data loss (an empty `list_threads()`), and it
 #: cost two sessions.
-SUPPORTS_REAL_SEND = ("linux", "web", "windows", "macos")
+SUPPORTS_REAL_SEND = ("linux", "web", "windows", "macos", "tui", "ios")
 
 
 def supports_real_send(client: str) -> bool:
@@ -135,8 +158,9 @@ def supports_real_send(client: str) -> bool:
 #: both apple agents' `conversations_real_resolve_send_new`, landed 2026-07-14, and the
 #: durable e2e credential dir from 2026-07-13) — per the standing instruction that the
 #: session advancing the pin past those commits flips this. First re-run of the skew +
-#: at-rest grids on a Mac after this flip verifies the two apple legs light up.
-PREV_BUILD_SUPPORTS_REAL_SEND = ("linux", "web", "windows", "macos")
+#: at-rest grids on a Mac after this flip verifies the two apple legs light up. `tui`
+#: and `ios` joined with their legs 2026-10-31: the pin carries the command.
+PREV_BUILD_SUPPORTS_REAL_SEND = ("linux", "web", "windows", "macos", "tui", "ios")
 
 
 #: The apps whose HEAD→**previous-nest** cell drives the DM leg — i.e. those whose DM is
@@ -156,18 +180,34 @@ PREV_BUILD_SUPPORTS_REAL_SEND = ("linux", "web", "windows", "macos")
 #: run. The flakiness *was* the gap; the transition closed it. (The DM leg is the deepest wire
 #: chain a client drives, so this is the leg most worth having under assertion.)
 #:
-#: ⚠ Only `macos` was re-measured — `ios` is not in `SKEW_CLIENTS`, so the grid never drives
-#: it here. If the pinned nest ever *regresses* this cell for apple, the symptom is a
+#: ⚠ If the pinned nest ever *regresses* this cell for apple, the symptom is a
 #: `threads=[]` `pytest.fail` in `test_head_client_journey_against_previous_nest[macos]`.
-DM_STABLE_AGAINST_PINNED_NEST = ("linux", "macos")
-
+#:
+#: **windows was added 2026-10-28.** It was never excluded for a recorded reason — it had
+#: simply never been measured (its cell passed on the feed post alone). Measured on Windows
+#: against the pinned nest: the HEAD windows app's DM leg ran **7 consecutive times,
+#: all green** (one full-file run plus six cell-1 runs).
+#:
+#: **tui was added 2026-10-31**, with its leg and on the same measurement. Measured on Linux
+#: against the pinned nest: the HEAD tui app's DM leg ran **7 consecutive
+#: times, all green** (seven cell-1 runs).
+#:
+#: **ios was added 2026-11-01**, with its leg. Measured on macOS against the pinned nest: the HEAD ios app's DM leg ran **7 consecutive times, all green** (one
+#: full-file run plus six cell-1 runs), each pair on two simulators.
+#:
+#: **web was added 2026-11-01**, with its leg. Measured on Linux against the pinned nest: a first 7-run measurement went 4 of 7, every red at the journey's first
+#: step (the sender's `feed-view` absent) rather than at DM delivery, and cell 2 showed the
+#: same red without this tuple. It was the seeded web launch's landing, fixed in
+#: `launch_build` (the launch goes to the feed); after it the HEAD web app's DM leg ran
+#: **7 consecutive times, all green**.
+DM_STABLE_AGAINST_PINNED_NEST = ("linux", "macos", "windows", "tui", "ios", "web")
 
 def dm_stable_against_pinned_nest(client: str) -> bool:
     """Is this client's DM leg STABLE against the PINNED nest?
 
     See `DM_STABLE_AGAINST_PINNED_NEST`. NOT the same question as `supports_real_send`:
-    apple can send (green against a HEAD nest) but its DM against the *pinned* nest was
-    measured flaky, so it drives the feed post there instead.
+    a client whose agent can send may still have a DM against the *pinned* nest that was
+    measured flaky (apple, before 2026-07-15), so it drives the feed post there instead.
     """
     return client in DM_STABLE_AGAINST_PINNED_NEST
 
@@ -210,7 +250,20 @@ def prev_build_supports_real_send(client: str) -> bool:
 #: 2026-07-15 and joined 2026-10-09, on the pin of 2026-10-05. The other half
 #: of its isolation, the `%LOCALAPPDATA%` ancestor the unified account store hangs off,
 #: is harness-side (`drivers/windows.py`), so every build honors it whatever its age.
-PREV_BUILD_SUPPORTS_HOME_ISOLATION = ("linux", "macos", "windows")
+#:
+#: tui is a member by the harness alone: the driver derives its XDG world and, on darwin
+#: and windows, the HOME and `%LOCALAPPDATA%` the account store hangs off, so every build
+#: honors them whatever its age (`state_home_config`).
+#:
+#: ios is a member by the simulator: the app's whole world is its data container, which a
+#: launch keeps by skipping the uninstall (`keep_container`), so no build has to honor
+#: anything; its credentials ride `FAUNA_E2E_CREDENTIAL_DIR`, which macOS's note above
+#: dates long before the pin.
+#:
+#: web is a member by the harness alone: its whole world is the BrowserContext, which
+#: every launch creates fresh, so the "HOME" `launch_on_home` keeps is that context on one
+#: origin (`_WebHome`) and no build has to honor anything.
+PREV_BUILD_SUPPORTS_HOME_ISOLATION = ("linux", "macos", "windows", "tui", "ios", "web")
 
 
 def prev_build_supports_home_isolation(client: str) -> bool:
@@ -261,6 +314,18 @@ def prev_build_supports_home_isolation(client: str) -> bool:
 #:
 #: windows was held out 2026-07-15 to 2026-10-09 by `PREV_BUILD_SUPPORTS_HOME_ISOLATION`,
 #: NOT by send capability — a genuinely different gate; see that tuple's doc.
+#:
+#: **web's leg asserts a different store, and says so** (2026-11-01). Web keeps no `mls.db`:
+#: its MLS engine is in memory and its persistence is the sealed `__mls` replica on the nest
+#: (`version-compatibility.md` § Dimension 1, the MLS-state row: "Web keeps MLS in-memory,
+#: persisted as the nest-side replica blob instead"). So on web the cells are not about a
+#: browser-local MLS file, and must not be read as one. What they do assert is web's own
+#: at-rest pair, both user-irrecoverable: the identity and account store in the origin's
+#: storage (a no-seed launch reaching `authenticated` can only have read the other build's
+#: slots) and the replica, which only that identity's `BackupKey` opens — the head build
+#: decrypting the pinned build's conversation reads a replica the pinned build sealed, under a
+#: key it derived from the identity the pinned build left in the browser. The vacuity guard is
+#: the replica, not a file (`at_rest_state_missing`).
 AT_REST_CLIENTS = tuple(
     c for c in SKEW_CLIENTS
     if prev_build_supports_real_send(c) and prev_build_supports_home_isolation(c)
@@ -297,12 +362,27 @@ def enable_real_conversations(app, client: str) -> None:
     app.conversations.enable_real_faunamls()
 
 
+def await_real_rail_before_send(app, client: str) -> None:
+    """Hold a seeded launch's first send until its real session is up.
+
+    On the env-gated apps that session builds after `authenticated` flips, and a send
+    landing first goes to the mock rail, which paints an `Smtp` thread. Sends only: a
+    reader polls its thread anyway, and a pinned build that signed itself in from its
+    store predates the stamp the witness reads.
+    """
+    if client in _ENV_GATED_REAL_CONVERSATIONS:
+        real_rail_control.witness_real_rail(
+            app.driver, context="the real rail before a skew send"
+        )
+
+
 #: Where each app keeps the MLS state store — the user-irrecoverable file the at-rest
 #: grid is really about (group secrets + signing key; the nest side is ciphertext, so if
 #: this is lost the conversation is gone). Relative to the persistent HOME.
 #: windows' HOME stands in for `%LOCALAPPDATA%` and its data dir is laid out under it as
 #: `<home>\\Fauna` (`state_home_config` below), production's own layout — so the path
-#: carries the `Fauna` segment the real profile has.
+#: carries the `Fauna` segment the real profile has. ios's HOME is its app data container
+#: (`driver.app_data_container()`), so its path reads as macOS's does.
 #:
 #: ⚠ These are the **PINNED (pre-scoping) build's** paths, which is exactly what the one
 #: consumer needs: the upgrade cell's vacuity guard, asserting that the PINNED build wrote
@@ -313,7 +393,9 @@ def enable_real_conversations(app, client: str) -> None:
 MLS_DB_RELPATH = {
     "linux": "config/fauna/mls_state.db",
     "macos": "Library/Application Support/Fauna/conv-mls.db",
+    "ios": "Library/Application Support/Fauna/conv-mls.db",
     "windows": "Fauna/mls.db",
+    "tui": "config/fauna-tui/mls_state.db",
 }
 
 #: Clients whose HEAD build has completed its account-scoping leg: the MLS store moved
@@ -328,7 +410,7 @@ MLS_DB_RELPATH = {
 #: history rather than the newer build's. That is the accepted, uniform consequence of
 #: per-account placement — the contract it must not break is "destroy nothing", which
 #: phases 1+3 assert.
-HEAD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows")
+HEAD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows", "tui", "ios")
 
 
 def head_mls_store_is_account_scoped(client: str) -> bool:
@@ -368,8 +450,10 @@ def head_mls_store_is_account_scoped(client: str) -> bool:
 #: flat path, failed in every whole-suite linux sweep as "the previous build wrote no
 #: MLS state". windows was listed when its at-rest leg was first enabled (2026-10-09):
 #: its scoping leg landed 2026-07-23, long before the pin of
-#: 2026-10-05.
-PREV_BUILD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows")
+#: 2026-10-05. tui's store was already per-account at the pin of
+#: 2026-10-21 when its leg joined, and so was ios's, which shares
+#: macOS's `AccountStateDir.swift`.
+PREV_BUILD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows", "tui", "ios")
 
 
 def prev_build_mls_store_is_account_scoped(client: str) -> bool:
@@ -392,6 +476,7 @@ SCOPED_MLS_DB_NAME = {
     "tui": "mls_state.db",
     "android": "mls.db",
     "macos": "mls.db",
+    "ios": "mls.db",
     "windows": "mls.db",
 }
 
@@ -402,12 +487,153 @@ def scoped_mls_db_relpath(client: str, actor_id_hex: str) -> str:
     `<base>/<actor-id-hex>/<SCOPED_MLS_DB_NAME[client]>`, where the flat dir is
     `MLS_DB_RELPATH[client]`'s parent — `AccountStateDir.swift` on apple,
     `AccountStateDir.cs` on windows, and `account_scope.rs` over the shared
-    `actor_state_dir` on linux. Only meaningful for
+    `actor_state_dir` on linux and tui. Only meaningful for
     a client where `head_mls_store_is_account_scoped` (HEAD) or
     `prev_build_mls_store_is_account_scoped` (the pinned previous build) is true.
     """
     flat_dir = PurePosixPath(MLS_DB_RELPATH[client]).parent
     return str(flat_dir / actor_id_hex.lower() / SCOPED_MLS_DB_NAME[client])
+
+
+def at_rest_state_missing(client: str, root, actor: dict, nest: dict) -> str | None:
+    """Why the PINNED build left no at-rest MLS state for HEAD to open, or ``None`` when
+    it did — the upgrade cell's vacuity guard, without which its assertion proves nothing.
+
+    A native client's state is its store file under the HOME (`root`, where the last
+    launch put it): per-account once the pinned build is scoped, flat before. web's is the
+    sealed `provider` replica on the nest (`AT_REST_CLIENTS`' web paragraph), read as the
+    actor over the wire: the owner alone can `fauna.mls.get` it, and the nest never opens it.
+    """
+    if client == "web":
+        from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+        with WsRpcAdminClient(
+            nest["url"], actor_id=actor["actor_id_bytes"], signing_key=bytes(actor["signing_key"]),
+        ) as owner:
+            blob = owner.call("fauna.mls.get", {"path": "provider"}).get("blob")
+        if blob:
+            return None
+        return (
+            "the previous web build sealed no `provider` MLS replica on the nest "
+            f"(fauna.mls.get answered {blob!r}) — the upgrade assertion would be vacuous"
+        )
+    if prev_build_mls_store_is_account_scoped(client):
+        path = Path(root) / scoped_mls_db_relpath(client, actor["actor_id_hex"])
+    else:
+        path = Path(root) / MLS_DB_RELPATH[client]
+    if path.exists() and path.stat().st_size > 0:
+        return None
+    return f"the previous build wrote no MLS state at {path} — the upgrade assertion would be vacuous"
+
+
+def head_app_path(client: str, request) -> str:
+    """HEAD's build of `client`: its launch path, or for web the built SPA tree the
+    `static_dir` fixture names (web launches from a URL; the tree is what a cell's proxy
+    serves, `_web_dial`)."""
+    if client == "web":
+        return request.getfixturevalue("static_dir")
+    from helpers.app_launch import app_launch_config
+
+    return app_launch_config(client, request)["app_path"]
+
+
+def _web_dial(request, tree, nest: dict):
+    """``(the nest as the page dials it, the page URL, the proxy server)`` for a web app
+    built as `tree` against `nest`.
+
+    A browser reaches a nest only through an SPA proxy (`conftest._serve_spa_proxy`: the raw
+    nest sends no CORS header), and that proxy is also what serves the build — so one
+    function stands in for both of a native launch's inputs, the binary and the nest URL.
+    Every URL the app reads (the session's `node_url`, the trust seed's key) is the dialled
+    one. A callable `tree` is the `_WebHome` seam (one origin, its build swapped). The server is
+    shut down when `request` finishes.
+    """
+    from conftest import _serve_spa_proxy
+
+    url, server = _serve_spa_proxy(tree, nest["url"])
+    request.addfinalizer(server.shutdown)
+    return {**nest, "url": url}, url + "/app/", server
+
+
+def _apply_web_launch_twins(driver, *, suppress_push: bool) -> None:
+    """web's post-launch twins of `client_env`: the SPA has no process env, so the poll
+    backstop and the push suppression are thrown through its e2e hooks instead
+    (`drivers/web.py::set_conv_poll_secs`, `set_conv_push_suppressed`; both present at the
+    pin). The fake-DNS gate has no web twin and needs none: the SPA dials the proxy."""
+    driver.set_conv_poll_secs(int(client_env("web")["FAUNA_CONV_POLL_SECS"]))
+    if suppress_push:
+        driver.set_conv_push_suppressed(True)
+
+
+def assert_web_build_served(driver, tree) -> None:
+    """The page running now was loaded from `tree` — the web twin of the nest build-stamp
+    guard (`test_the_two_nests_are_genuinely_different_builds`).
+
+    The SPA carries no commit stamp, and a proxy serving the wrong tree would quietly turn
+    a skew cell into HEAD against HEAD. So the guard reads what the page actually fetched:
+    every content-hashed `_app/immutable/` chunk it loaded must exist in `tree`, and there
+    must be at least one. Unchanged chunks keep their hash across builds, but the entry
+    and every chunk whose source moved do not, so a page from the other tree loads at least
+    one name this tree lacks and fails here.
+    """
+    loaded = driver.eval_js(
+        "performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)"
+        ".filter(p => p.includes('/_app/immutable/'))"
+    ) or []
+    root = Path(str(tree))
+    chunks = sorted({p.split("/app/", 1)[-1] for p in loaded})
+    foreign = [c for c in chunks if not (root / c).is_file()]
+    assert chunks and not foreign, (
+        f"the web page was not served from {root}: loaded {len(chunks)} immutable chunk(s), "
+        f"{len(foreign)} absent from that tree (first: {foreign[:3]}) — the cell would be "
+        "testing some other build"
+    )
+
+
+class _WebHome:
+    """One web "HOME": a BrowserContext on one origin, opened by build after build.
+
+    A web app upgrades in place when the origin starts serving a new tree, and what it keeps
+    is the origin's storage. So the HOME is the context of ONE driver behind ONE proxy whose
+    tree swaps (`_serve_spa_proxy`'s callable `static_dir`, served `no-store`); a phase ends
+    by closing the page and keeping the context (`end_phase` → `quit_app`), and the next
+    phase points the proxy at its build and relaunches a page in that context
+    (`hard_reload`). The driver is torn down for real when the test finishes.
+    """
+
+    _by_home: dict[str, "_WebHome"] = {}
+
+    def __init__(self, request, nest: dict, tree):
+        self.tree = [str(tree)]
+        self.dialled, self.page_url, _server = _web_dial(
+            request, lambda: self.tree[0], nest)
+        self.driver = create_driver("web")
+        request.addfinalizer(self.driver.teardown)
+
+    @classmethod
+    def open(cls, request, home, nest: dict, tree, *, seed: bool):
+        key = str(home)
+        if seed:
+            cls._by_home[key] = cls(request, nest, tree)
+            request.addfinalizer(lambda: cls._by_home.pop(key, None))
+            return cls._by_home[key], True
+        web_home = cls._by_home.get(key)
+        if web_home is None:
+            pytest.fail(f"no web HOME was opened at {home} — the first launch passes seed=True")
+        web_home.tree[0] = str(tree)
+        return web_home, False
+
+
+def end_phase(client: str, driver) -> None:
+    """End one phase of a `launch_on_home` HOME: the process exits and its data stays.
+
+    A native app's data is its directory, so its driver is torn down. web's data is the
+    BrowserContext, which a teardown would close; the page closes instead and the context
+    stays for the next build (`_WebHome`)."""
+    if client == "web":
+        driver.quit_app()
+    else:
+        driver.teardown()
 
 
 def hex_device_id(label: str) -> str:
@@ -417,7 +643,7 @@ def hex_device_id(label: str) -> str:
     (`hex::encode(device_id())`), and the shared upload/key-package gestures
     hex-DECODE it — so a readable placeholder like ``"prev-client-alice"`` fails
     `invalid device_id hex` on any client that reads it (`helpers/e2e_session.py`
-    documents the same trap for `E2E_LOGIN_DEVICE_ID`). linux tolerated the readable
+    documents the same trap for `e2e_login_device_id`). linux tolerated the readable
     string, which is exactly why it survived the reference implementation; on apple it
     silently cost the whole real-MLS rail — no key packages published, so `list_threads()`
     stayed EMPTY and every DM assertion failed as if the conversation had been lost.
@@ -462,11 +688,19 @@ def state_home_config(client: str, *, home, creds, keyring_app: str) -> dict:
     `%LOCALAPPDATA%\\Fauna\\sync`, which only the ancestor reaches; a `data_dir` alone
     left every build on a fresh account store. Credentials ride its existing file-backed
     store (`FAUNA_E2E_CREDENTIAL_DIR`, the same seam a normal windows e2e login already
-    uses — see `drivers/windows.py`). Same concept, three spellings; the mapping is
-    confined to this function so no test file ever branches on it.
+    uses — see `drivers/windows.py`). tui is linux's spelling on every platform, plus
+    `home` for darwin, where the unified account store hangs off the relocated HOME
+    rather than the XDG world (`drivers/tui.py::_account_store_root`; the key is read
+    only there, and windows derives its `%LOCALAPPDATA%` from `xdg_base`). ios has no root
+    to relocate: the simulator's data container is the app's HOME, per (device, bundle id),
+    so what pins it is NOT uninstalling it, which `launch_on_home` decides per launch
+    (`keep_container`). `home` is unused there. Same concept, five spellings; the mapping
+    is confined to this function so no test file ever branches on it.
     """
     if client == "macos":
         return {"home": str(home), "credential_dir": str(creds)}
+    if client == "ios":
+        return {"credential_dir": str(creds)}
     if client == "windows":
         return {
             "local_appdata": str(home),
@@ -474,11 +708,25 @@ def state_home_config(client: str, *, home, creds, keyring_app: str) -> dict:
             "credential_dir": str(creds),
             "keyring_app": keyring_app,
         }
+    if client == "tui":
+        return {
+            "xdg_base": str(home),
+            "home": str(home),
+            "keyring_app": keyring_app,
+            "credential_dir": str(creds),
+        }
     return {
         "xdg_base": str(home),
         "keyring_app": keyring_app,
         "credential_dir": str(creds),
     }
+
+
+def driver_home(driver) -> Path | None:
+    """The HOME this launch actually used, where the driver places it rather than the
+    caller (the ios simulator's data container); ``None`` where the caller's own."""
+    container = getattr(driver, "app_data_container", None)
+    return Path(container()) if container and container() else None
 
 
 def launch_on_home(
@@ -511,17 +759,49 @@ def launch_on_home(
     launch and lets the app persist it into the pinned credential dir (the same durability
     the crash-recovery journeys ride on). Both end with the same thing on disk: an identity
     a later build has to hydrate with no re-onboarding.
+
+    On ios the first launch is also what empties the HOME: its container outlives the
+    pytest `home` directory, so `seed=True` uninstalls and every later launch keeps it.
     """
     from conftest import _apply_r14_trust_env
 
     environment = client_env(client)
+    if client == "web":
+        # The HOME is one context on one origin (`_WebHome`). The first phase launches it,
+        # its identity seeded as linux's is (the same logical-key map, into the origin's
+        # storage); a later phase swaps the build that origin serves and opens a page on
+        # what the earlier build left. The trust seed is written once, at the first
+        # launch, and stays in the origin: both builds read its keyed grammar
+        # (`prev_build.reads_keyed_trust_seed` — the pin postdates it).
+        web_home, first = _WebHome.open(request, home, nest, app_path, seed=seed)
+        driver = web_home.driver
+        if first:
+            _apply_r14_trust_env(environment, web_home.dialled, request,
+                                 build_commit=build_commit)
+            driver.launch({
+                "url": web_home.page_url,
+                "environment": environment,
+                "seed_credentials": single_account_seed(
+                    user["signing_key"].encode().hex(),
+                    nest_url=web_home.dialled["url"],
+                    device_id=hex_device_id(device_id),
+                ),
+            })
+        else:
+            driver.hard_reload()
+        assert_web_build_served(driver, app_path)
+        _apply_web_launch_twins(driver, suppress_push=False)
+        return driver, ActionLayer(driver)
     _apply_r14_trust_env(environment, nest, request, build_commit=build_commit)
     config = {
         "url": nest["url"],
         "app_path": str(app_path),
         "environment": environment,
+        **_seat_keys(client, request),
         **state_home_config(client, home=home, creds=creds, keyring_app=keyring_app),
     }
+    if client == "ios":
+        config["keep_container"] = not seed
     seed_via_set_state = seed and client in _ENV_GATED_REAL_CONVERSATIONS
     if seed and not seed_via_set_state:
         # The account-registry shape (`fauna/index` + per-actor slots) — the only
@@ -539,6 +819,23 @@ def launch_on_home(
     return driver, ActionLayer(driver)
 
 
+def _seat_keys(client: str, request, second_seat=None) -> dict:
+    """The launch keys naming which simulator an ios app runs on; empty elsewhere, where
+    every process is its own seat.
+
+    `second_seat` is conftest's `ios_second_seat` for the SECOND concurrently-live app:
+    one simulator holds one install of a bundle id, and a launch there would tear the
+    first app down."""
+    if client != "ios":
+        return {}
+    if second_seat is None:
+        return {"udid": request.getfixturevalue("ios_setup")["udid"]}
+    udid = second_seat()
+    if not udid:
+        pytest.fail("no second iOS simulator could be created for the second app")
+    return {"udid": udid}
+
+
 def launch_build(
     client: str,
     app_path,
@@ -550,6 +847,7 @@ def launch_build(
     request,
     build_commit: str | None,
     suppress_push: bool = False,
+    second_seat=None,
 ):
     """A GUI app of `client`, from the binary at `app_path`, against `nest`.
 
@@ -565,17 +863,34 @@ def launch_build(
     the wire, which is the login surface these suites test. `device_id` is load-bearing on
     apple — its test agents gate client construction on it, and omitting it yields an
     authenticated *shell* with no `FaunaClient` behind it (every nest-backed gesture then
-    silently no-ops).
+    silently no-ops). A second concurrent app passes `second_seat` (`_seat_keys`).
     """
     from conftest import _apply_r14_trust_env
 
     environment = client_env(client, suppress_push=suppress_push)
+    url = nest["url"]
+    if client == "web":
+        # web's build is a tree its own proxy serves, and that proxy is the nest the page
+        # dials (`_web_dial`).
+        nest, url, _server = _web_dial(request, app_path, nest)
     _apply_r14_trust_env(environment, nest, request, build_commit=build_commit)
     driver = create_driver(client)
     driver.launch({
-        "url": nest["url"],
+        "url": url,
         "app_path": str(app_path),
         "environment": environment,
+        **_seat_keys(client, request, second_seat),
     })
     driver.set_state(_session_patch(nest, user, handle, device_id))
+    if client == "web":
+        assert_web_build_served(driver, app_path)
+        _apply_web_launch_twins(driver, suppress_push=suppress_push)
+        # A seeded web launch lands where the SPA's own boot routes it once the session
+        # hydrates, which can overtake the patch's `nav` (measured 2026-11-01: the sender's
+        # `feed-view` absent in 5 of 14 two-seat runs, at the journey's first step). So the
+        # launch goes to the feed through the tab bar once signed in, as the mixed-nests
+        # cell does for every leg — reaching the tab bar at all is the signed-in shell.
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=60)
+        driver.navigate_to("feed")
     return driver, ActionLayer(driver)

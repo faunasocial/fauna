@@ -538,7 +538,11 @@ async fn bound_engine_seals_chunks_under_group_content_key() {
 
     // (1) The bound engine round-trips under generation 1 (version stamp 1).
     let bytes = bound
-        .download_file_bytes_by_manifest(manifest_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            manifest_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("download_file_bytes_by_manifest (bound)");
     assert_eq!(
@@ -614,7 +618,11 @@ async fn bound_engine_with_backup_key_still_seals_under_content_key() {
     // (1) The bound engine round-trips under generation 1 — proving it sealed under
     // the content key (the version stamp is present), not the owner backup_key.
     let bytes = bound
-        .download_file_bytes_by_manifest(manifest_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            manifest_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("download_file_bytes_by_manifest (bound + backup_key)");
     assert_eq!(
@@ -739,7 +747,11 @@ async fn bound_engine_chunk_upload_round_trips_through_verifying_store() {
         .expect("upload_file must have POSTed a manifest");
 
     let bytes = bound
-        .download_file_bytes_by_manifest(manifest_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            manifest_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("round-trip through an F9-verifying chunk store");
     assert_eq!(
@@ -1135,7 +1147,11 @@ async fn bound_engine_rotation_gen1_readable_gen2_fail_closed() {
 
     // (1) gen-1 content (version 1) is still readable — history-on-join.
     let bytes_a = removed_member
-        .download_file_bytes_by_manifest(manifest_a, Some(1), rel_a)
+        .download_file_bytes_by_manifest(
+            manifest_a,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel_a,
+        )
         .await
         .expect("gen-1-only member must still read gen-1 content");
     assert_eq!(bytes_a, content_a);
@@ -1143,7 +1159,11 @@ async fn bound_engine_rotation_gen1_readable_gen2_fail_closed() {
     // (2) gen-2 content (version 2) FAILS CLOSED — `key_for(2)` is `None` for a
     // gen-1-only holder, and the read must error rather than fall through.
     let post_removal = removed_member
-        .download_file_bytes_by_manifest(manifest_b, Some(2), rel_b)
+        .download_file_bytes_by_manifest(
+            manifest_b,
+            Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            rel_b,
+        )
         .await;
     assert!(
         post_removal.is_err(),
@@ -1165,14 +1185,22 @@ async fn bound_engine_rotation_gen1_readable_gen2_fail_closed() {
     );
     assert_eq!(
         owner_reader
-            .download_file_bytes_by_manifest(manifest_a, Some(1), rel_a)
+            .download_file_bytes_by_manifest(
+                manifest_a,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                rel_a
+            )
             .await
             .expect("owner reads gen-1"),
         content_a
     );
     assert_eq!(
         owner_reader
-            .download_file_bytes_by_manifest(manifest_b, Some(2), rel_b)
+            .download_file_bytes_by_manifest(
+                manifest_b,
+                Some(fauna_core::blob_seal::SealStamp::Version(2)),
+                rel_b
+            )
             .await
             .expect("owner reads gen-2"),
         content_b
@@ -1357,7 +1385,11 @@ async fn reseal_pending_reseals_prebind_file_so_member_decrypts() {
         Some(FolderContentKeys::genesis(key1, 1_000)),
     );
     let bytes = member
-        .download_file_bytes_by_manifest(manifest, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            manifest,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("member decrypts the re-sealed pre-bind file under generation 1");
     assert_eq!(
@@ -1430,7 +1462,11 @@ async fn bound_engine_refuses_to_open_chunk_with_no_version_stamp() {
     // manifest is broken.
     assert_eq!(
         member
-            .download_file_bytes_by_manifest(manifest, Some(1), rel)
+            .download_file_bytes_by_manifest(
+                manifest,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                rel
+            )
             .await
             .expect("reads fine with the correct generation stamp"),
         content,
@@ -1554,7 +1590,11 @@ async fn served_unshared_reseal_then_mda_decrypts_via_webdav_keys_blob() {
         Some(mda_keys),
     );
     let bytes = mda
-        .download_file_bytes_by_manifest(manifest, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            manifest,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("MDA decrypts the historical file under the blob-recovered key");
     assert_eq!(
@@ -2378,7 +2418,9 @@ async fn reseal_predecessor_sealed_also_converges_a_served_era_content_key_seale
             1,
             original.len() as i64,
             1,
-            Some(served_generation.current_version()),
+            Some(fauna_core::blob_seal::SealStamp::Version(
+                served_generation.current_version(),
+            )),
         )
         .expect("seed entry");
     engine.stamp_own_head_for_test(rel);
@@ -2789,7 +2831,11 @@ async fn sealed_manifest_round_trips_content_key_root() {
 
     let sealed_hash = uploaded_sealed_manifest(&store, &root);
     let bytes = bound
-        .download_file_bytes_by_manifest(sealed_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            sealed_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("a bound holder of generation 1 must open the sealed manifest");
     assert_eq!(bytes, original);
@@ -2834,7 +2880,11 @@ async fn sealed_manifest_fails_closed_without_root() {
         None,
     );
     let err = keyless
-        .download_file_bytes_by_manifest(sealed_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            sealed_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect_err("a keyless holder must fail closed on a sealed manifest");
     let msg = format!("{err:#}");
@@ -2946,7 +2996,11 @@ async fn same_version_merge_shadowed_key_still_opens() {
         Some(merged),
     );
     let bytes = reader
-        .download_file_bytes_by_manifest(manifest_hash, Some(2), rel)
+        .download_file_bytes_by_manifest(
+            manifest_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(2)),
+            rel,
+        )
         .await
         .expect("merged-custody reader must reach the shadowed same-version key");
     assert_eq!(bytes, original);
@@ -3858,26 +3912,13 @@ async fn build_restore_engine_restores_a_sealed_snapshot() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// The post-succession re-seal's failure containment and its thumbnail move
+// The post-succession re-seal's failure containment and its thumbnail re-seal
 //
 // ⚠ These assert the BYTE plane. Every engine test in this module runs an
 // unconnected `NestClient`, so `changes.record` never lands and the sentinel —
 // deliberately gated on the RECORD — stays unmarked. The marking half belongs
 // to the tier_3 journey, exactly as the chunk plane's split already is.
 // ─────────────────────────────────────────────────────────────────────
-
-/// Seal `plaintext` as a thumbnail rests — framed `encrypt_backup_chunk` under
-/// the bare key — store it in the mock's BLOB store, and return its hash.
-fn store_library_blob(
-    store: &crate::test_support::BlobStore,
-    plaintext: &[u8],
-    key: &BackupKey,
-) -> ContentHash {
-    let sealed = fauna_core::crypto::encrypt_backup_chunk(key, plaintext).expect("seal");
-    let hex = blake3::hash(&sealed).to_hex().to_string();
-    store.blobs.lock().unwrap().insert(hex.clone(), sealed);
-    ContentHash::from_digest_raw(fauna_core::hex32::decode(&hex).expect("hex32"))
-}
 
 /// A manifest the nest cannot serve is contained to its entry: the pass
 /// survives, nothing is POSTed, and the entry stays owed.
@@ -3921,31 +3962,47 @@ async fn post_succession_reseal_leaves_an_unservable_manifest_owed() {
     );
 }
 
-// ── The recorded thumbnail MOVES with its file ────────────────────────
+// ── The recorded thumbnail is RE-SEALED with its file ─────────────────
 //
-// The last piece of the raw-AEAD Library plane's write half
-// (`identity-succession.md` § Implementation status today). Recording `None`
-// over a head that names a thumbnail DROPS the pointer: the blob stays at rest
-// under the root the aftermath is about to retire, referenced by nothing. It
-// does not block the drain (the entry still records and still marks) — it
-// silently costs the user a tile. So: open the existing thumbnail and re-seal
-// those same pixels, which needs no thumbnailer at all.
+// A thumbnail rests as its file rests (`media.md` § Encryption at rest → *A
+// thumbnail rests as its file rests*, bound (2)): a manifest under the file's
+// root, which the re-seal moves exactly as it moves the file — the same
+// windowed re-seal, the same signer bound. Recording `None` over a head that
+// names a thumbnail would DROP the pointer and silently cost the user a tile,
+// and the nest-sourced leg holds no whole plaintext to re-render from — so the
+// recorded thumbnail manifest is re-sealed, which needs no thumbnailer at all.
 //
 // ⚠ These assert the BYTE plane, like every sibling above: the record cannot
 // land on an unconnected `NestClient`.
 // ─────────────────────────────────────────────────────────────────────
 
-/// A recorded thumbnail this build cannot regenerate is MOVED onto the current
-/// root, not dropped.
+/// Open `manifest` through the shared walk under `owner`'s root alone.
+async fn open_under(
+    engine: &SyncEngine,
+    manifest: ContentHash,
+    owner: &BackupKey,
+) -> anyhow::Result<Vec<u8>> {
+    fauna_core::file_download::download_file_bytes_by_manifest(
+        &engine.blob_fetcher(),
+        &fauna_core::file_download::FileDownloadKeys::owner(owner.clone()),
+        manifest,
+        None,
+        "media/thumb.bin",
+    )
+    .await
+}
+
+/// A recorded thumbnail this build cannot regenerate is RE-SEALED onto the
+/// current root with its file, not dropped.
 ///
-/// ⚠ Non-vacuity: the assertion is not "a blob was POSTed" but "a blob was
-/// POSTed that opens under the SUCCESSOR key and carries the ORIGINAL thumbnail
-/// pixels" — which a pass that re-uploaded the inherited ciphertext, or that
-/// invented a thumbnail, would both fail. Deleting the move (returning `None`
-/// from `thumbnail_hash_for_reseal`) turns it red at the first assert: nothing is POSTed to the blob store at all, because the chunk
-/// plane's own bytes go to `/chunks`.
+/// ⚠ Non-vacuity: the assertion is not "a manifest was posted" but "the last
+/// manifest posted opens under the SUCCESSOR's root alone and carries the
+/// ORIGINAL thumbnail pixels" — which a pass that re-posted the inherited
+/// manifest, or invented a thumbnail, would both fail. Deleting the re-seal
+/// (returning `None` from `thumbnail_hash_for_reseal`) turns it red: the last
+/// manifest posted is then the file's own.
 #[tokio::test]
-async fn post_succession_reseal_moves_a_recorded_thumbnail_it_cannot_regenerate() {
+async fn post_succession_reseal_reseals_a_recorded_thumbnail_with_its_file() {
     let server = MockServer::start().await;
     let store = MockNest::new().with_blob_plane().mount(&server).await;
 
@@ -3961,20 +4018,20 @@ async fn post_succession_reseal_moves_a_recorded_thumbnail_it_cannot_regenerate(
     engine.set_predecessor_backup_keys(vec![predecessor.clone().into()]);
 
     // A file the predecessor recorded WITH a thumbnail, never materialized here
-    // (the fresh-device successor shape), so the re-seal sources it from the
-    // nest and re-thumbnails from the plaintext it fetches.
+    // (the fresh-device successor shape), so the re-seal sources both from the
+    // nest.
     let original: Vec<u8> = (0..40_000u32).map(|i| (i % 241) as u8).collect();
     let thumb_pixels: Vec<u8> = (0..1_200u32).map(|i| (i % 97) as u8).collect();
     let rel = "media/inherited-with-thumb.bin";
 
     let pred_manifest =
         store_sealed_fixture(&store, &original, &predecessor.convergent_chunk_root());
-    let thumb_hash = store_library_blob(&store, &thumb_pixels, &predecessor);
-    let thumb_hex = hex::encode(thumb_hash.digest());
+    let pred_thumb =
+        store_sealed_fixture(&store, &thumb_pixels, &predecessor.convergent_chunk_root());
     seed_synced_entry(&engine, rel, &original, pred_manifest);
     engine
         .db()
-        .set_thumbnail_hash(rel, Some(&thumb_hex))
+        .set_thumbnail_hash(rel, Some(&hex::encode(pred_thumb.digest())))
         .expect("seed the recorded head's thumbnail pointer");
 
     engine
@@ -3982,53 +4039,39 @@ async fn post_succession_reseal_moves_a_recorded_thumbnail_it_cannot_regenerate(
         .await
         .expect("re-seal pass");
 
-    let moved = store
-        .last_blob_hash
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the thumbnail move must have POSTed a re-sealed thumbnail blob");
-    assert_ne!(
-        moved, thumb_hex,
-        "a re-seal under a different root changes the ciphertext, so it changes the hash"
-    );
-    let stored = store.blobs.lock().unwrap().get(&moved).cloned().unwrap();
     assert_eq!(
-        fauna_core::crypto::decrypt_backup_chunk(&successor, &stored)
-            .expect("the moved thumbnail must open under the SUCCESSOR's bare key"),
+        store.blob_posts(),
+        0,
+        "a thumbnail is never a blob-store blob"
+    );
+    let resealed = store.expect_last_manifest_hash();
+    assert_ne!(
+        resealed, pred_thumb,
+        "a re-seal under a different root changes the store keys, so the manifest"
+    );
+    assert_eq!(
+        open_under(&engine, resealed, &successor)
+            .await
+            .expect("the re-sealed thumbnail must open under the SUCCESSOR's root alone"),
         thumb_pixels,
-        "…and carry the ORIGINAL thumbnail pixels — a move, not a re-render"
+        "…and carry the ORIGINAL thumbnail pixels — a re-seal, not a re-render"
     );
-    assert!(
-        fauna_core::crypto::decrypt_backup_chunk(&predecessor, &stored).is_err(),
-        "the retired root must no longer open it, or the seed stays load-bearing"
-    );
-    // ⚠ The row's cached pointer following the move is NOT assertable here, and
-    // deliberately so: that stamp sits behind the change record's success arm —
-    // the same gate the `current_root_sealed` sentinel sits behind, for the same
-    // reason (an unrecorded move must not update the row's view of a head the
-    // nest never accepted). Every test in this module runs an unconnected
-    // `NestClient`, so the record cannot land and the stamp cannot run. Its
-    // coverage is the tier_3 journey
-    // (`bins/fauna-nest/tests/conformance_post_succession_reseal.rs`), against a
-    // real nest. Asserting it here would mean moving the stamp out from behind
-    // the record — buying a green line at the cost of the property.
-    let _ = moved;
+    open_under(&engine, resealed, &predecessor)
+        .await
+        .expect_err("the retired root must no longer open it, or the seed stays load-bearing");
+    // ⚠ The row's cached pointer following the re-seal is NOT assertable here,
+    // and deliberately so: that stamp sits behind the change record's success
+    // arm — the same gate the `current_root_sealed` sentinel sits behind, for
+    // the same reason. Every test in this module runs an unconnected
+    // `NestClient`, so the record cannot land. Its coverage is the tier_3
+    // journey (`bins/fauna-nest/tests/conformance_post_succession_reseal.rs`).
 }
 
-/// A substituted thumbnail blob is never re-sealed or re-recorded.
-///
-/// The same anchor argument as the primary plane: the backup-chunk frame carries
-/// no AAD, so a tag proves only *sealed-under-some-root-we-hold*,
-/// never *these bytes*. Without the address check a malicious nest serves any
-/// blob it holds under a retired root and this pass re-seals it under the
-/// CURRENT key and re-records it as the user's own thumbnail — the picture they
-/// actually look at.
-///
-/// ⚠ Non-vacuity, verified by mutation: the substituted blob IS validly sealed
-/// under a root this device holds, so deleting the address check in
-/// `move_recorded_thumbnail` turns this red — the pass adopts the attacker's
-/// pixels.
+/// A substituted thumbnail manifest is never re-sealed or re-recorded: the
+/// walk fetches the manifest by the hash the head names and checks the served
+/// bytes against it before anything opens, so a nest serving another
+/// thumbnail — validly sealed under a root this device holds — under that
+/// hash gets nothing re-sealed, while the file's own re-seal still runs.
 #[tokio::test]
 async fn post_succession_reseal_rejects_a_substituted_thumbnail() {
     let server = MockServer::start().await;
@@ -4050,24 +4093,23 @@ async fn post_succession_reseal_rejects_a_substituted_thumbnail() {
     let other_thumb: Vec<u8> = (0..1_000u32).map(|i| (i % 71) as u8).collect();
     let rel = "media/substituted-thumb.bin";
 
-    let pred_manifest =
-        store_sealed_fixture(&store, &original, &predecessor.convergent_chunk_root());
-    // The row names `wanted_thumb`'s hash, but the nest serves a DIFFERENT
-    // thumbnail — validly sealed under the retired root, so the candidate loop
-    // alone would accept it.
-    let thumb_hash = store_library_blob(&store, &wanted_thumb, &predecessor);
-    let thumb_hex = hex::encode(thumb_hash.digest());
-    let substituted =
-        fauna_core::crypto::encrypt_backup_chunk(&predecessor, &other_thumb).expect("seal other");
-    store
-        .blobs
+    let root = predecessor.convergent_chunk_root();
+    let pred_manifest = store_sealed_fixture(&store, &original, &root);
+    let wanted = store_sealed_fixture(&store, &wanted_thumb, &root);
+    let other = store_sealed_fixture(&store, &other_thumb, &root);
+    // The row names `wanted`, but the nest serves `other`'s manifest under it.
+    let other_bytes = store
+        .manifests
         .lock()
         .unwrap()
-        .insert(thumb_hex.clone(), substituted);
+        .get(&hex::encode(other.digest()))
+        .cloned()
+        .unwrap();
+    store.seed_manifest(wanted, other_bytes);
     seed_synced_entry(&engine, rel, &original, pred_manifest);
     engine
         .db()
-        .set_thumbnail_hash(rel, Some(&thumb_hex))
+        .set_thumbnail_hash(rel, Some(&hex::encode(wanted.digest())))
         .expect("seed the recorded head's thumbnail pointer");
 
     engine
@@ -4075,26 +4117,28 @@ async fn post_succession_reseal_rejects_a_substituted_thumbnail() {
         .await
         .expect("a rejected thumbnail is contained — the file's own re-seal still runs");
 
-    assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "nothing may be re-sealed from a thumbnail that failed its content address"
-    );
     // ⚠ The file's own bytes MUST still have moved: a bad thumbnail is not a
     // reason to strand the corpus this pass exists to free.
-    assert!(
-        store.last_manifest_hash.lock().unwrap().is_some(),
-        "the file's own re-seal proceeds — the thumbnail is best-effort, the corpus is not"
+    let posted = store.posted_manifests.lock().unwrap().clone();
+    assert_eq!(
+        posted.len(),
+        1,
+        "the file's own re-seal proceeds, and nothing is re-sealed from a thumbnail \
+         that failed its content address"
+    );
+    assert_eq!(
+        open_under(&engine, posted[0], &successor).await.unwrap(),
+        original,
+        "the one manifest posted is the file's"
     );
 }
 
-/// A thumbnail already under the successor's own key keeps its pointer and is
-/// NOT re-uploaded.
-///
-/// The steady state after one pass. Re-sealing an already-current thumbnail
-/// would burn a blob per file to produce equivalent ciphertext, turning a
-/// one-time repair into a permanent re-upload of every thumbnail in the library.
+/// A thumbnail already under the successor's own root re-seals onto the very
+/// same manifest: the seal is deterministic and the chunks dedup, so the
+/// steady state after one pass records the hash it already had and stores no
+/// new ciphertext.
 #[tokio::test]
-async fn post_succession_reseal_keeps_an_already_current_thumbnail_unmoved() {
+async fn post_succession_reseal_keeps_an_already_current_thumbnail_unchanged() {
     let server = MockServer::start().await;
     let store = MockNest::new().with_blob_plane().mount(&server).await;
 
@@ -4114,15 +4158,14 @@ async fn post_succession_reseal_keeps_an_already_current_thumbnail_unmoved() {
     let rel = "media/current-thumb.bin";
 
     // Chunks under the retired root (so the file is owed), thumbnail already
-    // under the successor's own key (so only it is current).
+    // under the successor's own root (so only it is current).
     let pred_manifest =
         store_sealed_fixture(&store, &original, &predecessor.convergent_chunk_root());
-    let thumb_hash = store_library_blob(&store, &thumb_pixels, &successor);
-    let thumb_hex = hex::encode(thumb_hash.digest());
+    let thumb = store_sealed_fixture(&store, &thumb_pixels, &successor.convergent_chunk_root());
     seed_synced_entry(&engine, rel, &original, pred_manifest);
     engine
         .db()
-        .set_thumbnail_hash(rel, Some(&thumb_hex))
+        .set_thumbnail_hash(rel, Some(&hex::encode(thumb.digest())))
         .expect("seed the recorded head's thumbnail pointer");
 
     engine
@@ -4130,31 +4173,21 @@ async fn post_succession_reseal_keeps_an_already_current_thumbnail_unmoved() {
         .await
         .expect("re-seal pass");
 
-    assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "an already-current thumbnail must not be re-uploaded"
-    );
     assert_eq!(
-        engine.db().get_entry(rel).unwrap().unwrap().thumbnail_hash,
-        Some(thumb_hex),
-        "and its pointer is kept exactly as recorded"
+        store.expect_last_manifest_hash(),
+        thumb,
+        "an already-current thumbnail re-seals onto its own manifest"
     );
 }
 
-/// A head that never named a thumbnail is never even LOOKED UP — the
-/// discriminator this leg turns on.
+/// A head that never named a thumbnail never costs a thumbnail fetch — the
+/// recorded pointer is the discriminator.
 ///
-/// Only the recorded head says whether the file has a thumbnail to move.
-///
-/// ⚠ **Assert the FETCH, not the outcome — the outcome is vacuous here, and was
-/// caught being so.** The first version of this test asserted "no blob was
-/// POSTed", which stays green with the discriminator deleted: a move driven off
-/// a hash the head never named simply 404s and returns `None`, POSTing nothing.
-/// The mechanism's real content is that a thumbnail-less entry costs **no
-/// round-trip at all** — otherwise every text file in a corpus buys a `GET
-/// /blob` per pass — so that is what this counts. Same family as the
-/// findings: an assertion that would have held with the mechanism removed is an
-/// assertion about the fixture.
+/// ⚠ **Assert the FETCH, not the outcome**: "no thumbnail posted" stays green
+/// with the discriminator deleted (a re-seal off a hash the head never named
+/// simply fails its fetch). The mechanism's real content is that a
+/// thumbnail-less entry costs **no round-trip at all** — otherwise every text
+/// file in a corpus buys a manifest GET per pass — so that is what this counts.
 #[tokio::test]
 async fn post_succession_reseal_never_looks_up_a_thumbnail_the_head_never_had() {
     let server = MockServer::start().await;
@@ -4183,27 +4216,25 @@ async fn post_succession_reseal_never_looks_up_a_thumbnail_the_head_never_had() 
         .await
         .expect("re-seal pass");
 
-    let blob_gets = server
-        .received_requests()
-        .await
-        .expect("the mock records its requests")
-        .iter()
-        .filter(|r| {
-            r.method == wiremock::http::Method::GET && r.url.path().starts_with("/api/v1/blob/")
-        })
-        .count();
+    let posted = store.posted_manifests.lock().unwrap().clone();
     assert_eq!(
-        blob_gets, 0,
-        "a head naming no thumbnail must cost NO blob round-trip — the recorded \
-         pointer is the discriminator, not a 404"
+        posted.len(),
+        1,
+        "nothing is invented and posted, while the file's own re-seal is unaffected"
     );
+    // The file's own manifests — the recorded head, and its re-sealed copy the
+    // verify leg reads back — are the only ones fetched.
+    let file_manifests = [
+        hex::encode(pred_manifest.digest()),
+        hex::encode(posted[0].digest()),
+    ];
     assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "and nothing is invented and POSTed"
-    );
-    assert!(
-        store.last_manifest_hash.lock().unwrap().is_some(),
-        "while the file's own re-seal is unaffected"
+        store
+            .fetched_manifests()
+            .iter()
+            .all(|m| file_manifests.contains(m)),
+        "a head naming no thumbnail must cost NO thumbnail round-trip — only the \
+         file's own manifests are fetched"
     );
 }
 
@@ -4828,7 +4859,11 @@ async fn converge_corpus_reseals_a_bound_folder_after_a_public_window() {
         "flipped back = sealed under the content key again"
     );
     let bytes = engine
-        .download_file_bytes_by_manifest(sealed_manifest_hash, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            sealed_manifest_hash,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("the bound engine round-trips its own re-seal");
     assert_eq!(bytes, original);
@@ -4889,7 +4924,14 @@ async fn a_metadata_only_seat_posts_the_manifest_but_no_chunk_bytes() {
         "the manifest IS metadata and must still post"
     );
     let entry = engine.db().get_entry(rel).unwrap().expect("row recorded");
-    assert_eq!(entry.state, SyncState::Synced, "metadata records as always");
+    assert_eq!(
+        entry.local_hash,
+        Some(ContentHash::of_raw(&original)),
+        "metadata records as always"
+    );
+    // This module's nest client is unconnected, so the change record fails
+    // and the edit stays pending for the next pass to record.
+    assert_eq!(entry.state, SyncState::LocallyModified);
 
     // The disarmed twin: the same engine shape with the flag off uploads
     // bytes — the gate is the residency flag, nothing else.
@@ -5314,7 +5356,11 @@ async fn an_owners_pass_reseals_an_unstamped_placeholder_from_the_nest_so_a_memb
     let member_watch = tempfile::tempdir().unwrap();
     let member = bound_engine_for(&server.uri(), member_watch.path(), None, key1, false);
     let bytes = member
-        .download_file_bytes_by_manifest(resealed, Some(1), rel)
+        .download_file_bytes_by_manifest(
+            resealed,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            rel,
+        )
         .await
         .expect("a member holding generation 1 decrypts the re-sealed pre-bind file");
     assert_eq!(bytes, original);
@@ -5403,7 +5449,7 @@ async fn an_anchorless_seats_pass_leaves_an_unstamped_head_another_writer_signed
         "nothing was re-sealed"
     );
     let row = member.db().get_entry(rel).unwrap().expect("row kept");
-    assert_eq!(row.content_key_version, None, "the row stays unstamped");
+    assert_eq!(row.content_stamp, None, "the row stays unstamped");
 }
 
 /// The twin: the same row on a member seat that HOLDS an anchor (its reader
@@ -5586,7 +5632,11 @@ async fn the_one_file_step_continues_past_a_row_that_will_not_open() {
     let member = bound_engine_for(&server.uri(), member_watch.path(), None, key1, false);
     assert_eq!(
         member
-            .download_file_bytes_by_manifest(resealed, Some(1), "b/fine.bin")
+            .download_file_bytes_by_manifest(
+                resealed,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                "b/fine.bin"
+            )
             .await
             .unwrap(),
         good

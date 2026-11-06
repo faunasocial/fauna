@@ -67,7 +67,7 @@ pub type LinuxAgentProvisioner =
 
 /// The device label every linux-registered sync device shows in the nest's
 /// device list — moved here from the retired in-app `LinuxSyncSpec`.
-const DEVICE_LABEL: &str = "fauna-linux";
+pub(crate) const DEVICE_LABEL: &str = "fauna-linux";
 
 thread_local! {
     /// The live agent surface, installed at post-auth on the GTK main thread.
@@ -556,6 +556,7 @@ pub fn install(fauna_client: &Rc<FaunaClient>) {
             device_id,
             device_label: DEVICE_LABEL.to_string(),
             nest_url,
+            reach_registry: Some(crate::account_registry()),
         },
         Arc::new(SystemdAgentSpawner::new()),
         bearer_source,
@@ -611,22 +612,7 @@ pub fn install(fauna_client: &Rc<FaunaClient>) {
 /// the prior art). Once per process — an account switch re-installs this
 /// surface, the app stays open — against the endpoint the provisioner resolves.
 fn hold_app_attachment() {
-    static ATTACHMENT: std::sync::OnceLock<Option<fauna_client_sync::attachment::AppAttachment>> =
-        std::sync::OnceLock::new();
-    ATTACHMENT.get_or_init(|| {
-        fauna_ipc::endpoint::AgentEndpoint::default_for_user()
-            .inspect_err(|e| tracing::warn!("agent attachment: no endpoint: {e}"))
-            .ok()
-            .map(|endpoint| {
-                fauna_client_sync::attachment::attach_app(
-                    endpoint,
-                    fauna_client_sync::attachment::AttachingApp {
-                        app: "linux".into(),
-                        notification_identity: None,
-                    },
-                )
-            })
-    });
+    fauna_client_sync::attachment::hold_app_attachment("linux");
 }
 
 /// Snapshot the provisioner + its tokio runtime handle, if installed — the
@@ -952,15 +938,22 @@ pub fn refresh_engine_holds() {
     let Some((provisioner, rt)) = provisioner_and_runtime() else {
         return;
     };
+    // The group sets' review lists ride the same tick (`group-set.md` § Build
+    // design — the group set, decision 9): a row appears when the fold lands a
+    // peer's save over this seat's edit, inside the agent, so it too needs a
+    // watch. The sets are read off the model here, on the GTK thread.
+    let sets = group_sets();
     crate::async_helper::spawn_with_snapshot(
         &rt,
         move || async move {
             (
                 provisioner.list_engines().await,
                 provisioner.list_locations().await,
+                provisioner.read_set_conflicts(sets).await,
             )
         },
-        move |(engines, locations)| {
+        move |(engines, locations, set_conflicts)| {
+            let conflicts_moved = set_conflicts.is_some_and(fold_set_conflicts);
             // An unreachable agent yields no rows, which folds to "no live
             // engine stands behind a count" — the honest reading, and exactly
             // the derived-never-stored contract.
@@ -984,8 +977,82 @@ pub fn refresh_engine_holds() {
                 *agent.last_rendered.borrow_mut() = rendered;
                 changed
             });
-            if changed {
+            if changed || conflicts_moved {
                 rerender_folders_page();
+            }
+        },
+    );
+}
+
+/// The group sets this device binds a folder under — the sets whose review
+/// lists the status tick reads. Empty before [`install`].
+fn group_sets() -> Vec<String> {
+    AGENT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|agent| agent.model.borrow().group_sets())
+            .unwrap_or_default()
+    })
+}
+
+/// Fold a reading of the group sets' review lists onto the model; `true` when
+/// what the page shows moved.
+fn fold_set_conflicts(readings: fauna_client_sync::agent::SetConflicts) -> bool {
+    AGENT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|agent| agent.model.borrow_mut().fold_set_conflicts(readings))
+    })
+}
+
+/// The group sets' review lists as the status tick last read them, keyed by the
+/// set's `FolderRef` wire form (`GroupScopeView::folder_id`). Empty before
+/// [`install`] and on a set with nothing to review.
+pub fn set_conflicts() -> fauna_client_sync::agent::SetConflicts {
+    AGENT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|agent| agent.model.borrow().set_conflicts().clone())
+            .unwrap_or_default()
+    })
+}
+
+/// `conflict-resolve-button` on a group set's review row — *use the other
+/// version* over the agent's `RestoreRetainedVersion`, keyed by the set and
+/// the row's local id, never the devices machine's conflict id (which holds no
+/// such row; `group-set.md` § Build design — the group set, decision 9).
+/// **Not optimistic:** on success the lists are re-read at once so the used
+/// row goes without waiting for the tick; a refusal writes nothing agent-side,
+/// the row stands, and `on_refused` receives the reason for `error-message`.
+pub fn restore_retained_version(
+    folder_id: String,
+    conflict_id: i64,
+    on_refused: impl FnOnce(String) + 'static,
+) {
+    let Some((provisioner, rt)) = provisioner_and_runtime() else {
+        return;
+    };
+    let sets = group_sets();
+    crate::async_helper::spawn_with_snapshot(
+        &rt,
+        move || async move {
+            match provisioner
+                .restore_retained_version(folder_id, conflict_id)
+                .await
+            {
+                Ok(()) => Ok(provisioner.read_set_conflicts(sets).await),
+                Err(e) => Err(e.to_string()),
+            }
+        },
+        move |result| match result {
+            Ok(readings) => {
+                if readings.is_some_and(fold_set_conflicts) {
+                    rerender_folders_page();
+                }
+            }
+            Err(reason) => {
+                tracing::warn!("restore_retained_version refused (the row stands): {reason}");
+                on_refused(reason);
             }
         },
     );

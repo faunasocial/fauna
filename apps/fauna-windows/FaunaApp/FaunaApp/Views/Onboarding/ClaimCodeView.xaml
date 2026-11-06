@@ -53,6 +53,8 @@
                            TextWrapping="Wrap"
                            Opacity="0.85" />
 
+                <controls:TermsNotice />
+
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ClaimCodeBackButton}"
                         Command="{Binding ClaimCodeBackCommand}"
                         Margin="0,16,0,0"

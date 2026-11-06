@@ -15,7 +15,7 @@ reloading. Each item says whether it is synced.
 
 ## Coverage contract
 
-Stamped 2026-09-19 at 8ac16765e4.
+Stamped 2026-11-01 at a6047fbd8b.
 
 1. [app] The browser shows all your files across folders, narrows to one folder, and says when a folder is empty — `docs/goal/ui/media.md` § Default view: cross-set all-media
    - `tests/e2e-unified/tests/test_media.py::test_media_explorer_chrome`
@@ -25,6 +25,7 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set`
    - `tests/e2e-unified/tests/test_media.py::test_upload_into_a_freshly_created_empty_folder`
    - `tests/e2e-unified/tests/test_media.py::test_media_upload_no_set_error`
+   - `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves`
 3. [app] Deleting a file, with one confirmation, removes it from the browser and from your disk; cancelling changes nothing — `docs/goal/ui/media.md` § User actions
    - `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_item`
    - `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_file_from_disk`
@@ -53,19 +54,21 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected`
 13. [app] Uploading into a folder whose contents stay on your devices is refused with the reason shown, and nothing is uploaded — `docs/goal/ui/media.md` § User actions
    - `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason`
+14. [app] The browse offers a sort direction, ascending by default, that reverses the order of whichever sort key is active — `docs/goal/ui/media.md` § Layout & flow
+   - `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| windows | ⚠ partial | 0.1.5-dev+1e755069 standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+1e755069 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+e3bf6a64 standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -75,21 +78,23 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_into_selected_set` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_freshly_created_empty_folder` | tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_no_set_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_reaches_the_folder_this_device_serves` | tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_item` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_removes_the_file_from_disk` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_media.py::test_media_delete_cancel_is_a_no_op` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_media.py::test_file_version_history_and_restore` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_media.py::test_media_page_shows_a_file_recorded_while_it_is_open` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_media_sync_state_badge.py::test_media_item_shows_synced_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_media_sync_state_badge.py::test_media_item_shows_synced_badge` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_media_sync_state_badge.py::test_apple_media_item_shows_its_engine_sync_state` | linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 6 | app | `tests/e2e-unified/tests/test_media_sync_state_badge.py::test_macos_media_item_of_an_agent_bound_set_shows_synced` | — |
+| 6 | app | `tests/e2e-unified/tests/test_media_sync_state_badge.py::test_macos_media_item_of_an_agent_bound_set_shows_synced` | macos (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_media_seed.py::test_cross_set_media_seed_lists_and_filters` | nest (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_media.py::test_media_browse_switches_list_and_grid_and_sorts_by_name_size_and_date` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_media.py::test_media_item_shows_its_picture_or_a_placeholder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_version_prune_recovery.py::test_version_prune_soft_prunes_and_the_ui_recovers` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_media.py::test_media_upload_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state` | web (linux): failed, linux (linux): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason` | tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_media_source_status.py::test_media_item_in_a_full_folder_is_reachable_with_no_seat_connected` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_media.py::test_upload_into_a_metadata_only_folder_is_refused_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_media.py::test_media_sort_direction_select_reverses_the_active_sort_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

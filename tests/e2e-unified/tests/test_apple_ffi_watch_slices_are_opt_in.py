@@ -69,7 +69,7 @@ def _recipe_body(name: str) -> str:
     body = m.group(1)
     lines = [line for line in body.splitlines() if line.strip()]
     if lines:
-        delegate = re.match(r"^\s*(?:\{\{slot_build\}\}|\{\{slot_e2e\}\})?\s*just\s+(_\S+)\s*$", lines[-1])
+        delegate = re.match(r"^\s*(?:\{\{slot_build(?:_ffi|_swift|_crate)?\}\}|\{\{slot_e2e\}\})?\s*just\s+(_\S+)\s*$", lines[-1])
         if delegate:
             prefix = "\n".join(lines[:-1])
             return (prefix + "\n" if prefix else "") + _recipe_body(delegate.group(1))

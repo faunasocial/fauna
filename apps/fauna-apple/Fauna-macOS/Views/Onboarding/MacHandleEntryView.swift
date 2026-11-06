@@ -79,6 +79,7 @@ struct MacHandleEntryView: View {
             // shared `terms_notice_visible` (true iff `AlreadyOnNest`); the
             // other nest outcomes lead on to a page carrying its own notice.
             if snap.termsNoticeVisible {
+                JoiningNestRules(summary: vm.joiningNestRules)
                 TermsNotice()
             }
 

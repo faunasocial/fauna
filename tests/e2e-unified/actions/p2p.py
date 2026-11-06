@@ -227,7 +227,7 @@ class P2PActions:
     def seed_contact(self, actor_id_hex: str, display_name: str) -> None:
         """Seed a P2P contact directly on the local PeerDb via the
         `p2p_seed_contact_for_test` command — linux only (`handle_p2p_seed_contact_for_test`,
-        `apps/fauna-linux/src/main.rs`). `actor_id_hex` must be exactly 64 hex
+        `apps/fauna-linux/src/lib.rs`). `actor_id_hex` must be exactly 64 hex
         chars (32 bytes)."""
         self.driver.call_command(
             "p2p_seed_contact_for_test",

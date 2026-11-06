@@ -52,32 +52,22 @@ macro_rules! dispatch_capturing_error {
 pub struct MailSettingsSnapshot {
     /// True iff **email** (SMTP submission + IMAP) is enabled for this actor
     /// (`MailConfig::is_mail_enabled` — keys on the `mail_enabled` flag, **not**
-    /// merely on `msek.is_some()`). A CalDAV-only actor holds the shared MSEK but
-    /// reads `enabled: false` here, with [`Self::caldav_enabled`] `true`.
+    /// merely on `msek.is_some()`). A DAV-only actor holds the shared MSEK but
+    /// reads `enabled: false` here.
     pub enabled: bool,
-    /// True iff **CalDAV** (calendar) is enabled for this actor
-    /// (`MailConfig::caldav_enabled`). Independent of [`Self::enabled`] — both
-    /// ride the one shared MSEK + `default` credential
-    /// (`caldav-server.md` § Independent enablement, § Authentication: "no
-    /// separate CalDAV credential"). The per-app mail-settings page renders the
-    /// shared **credential management** section (add / list / reveal / rotate),
-    /// the serve-here toggle, and the connection-detail block whenever the mailbox
-    /// is provisioned — i.e. `enabled || caldav_enabled` — so a CalDAV-only
-    /// deployment (email off) can still obtain + manage its bridge password (the
-    /// independent-enablement UX gap this field closes). The credential is the
-    /// same one email AUTHs under, so nothing here is CalDAV-specific except which
-    /// connection-detail lines (IMAP/SMTP vs CalDAV URL) the MUA-instructions block
-    /// shows.
+    /// True iff the **deployment** serves CalDAV — `fauna.setup.status`'s
+    /// `caldav_enabled`, the nest's mail fallback applied, hydrated in the
+    /// same read as [`Self::mail_unavailable_here`] (unread ⇒ `false`; ruled
+    /// 2026-10-26, retiring the per-account flag — `mail-credentials.md`
+    /// § Trigger taxonomy, *The calendar-only credential*). Independent of
+    /// [`Self::enabled`]: one shared MSEK + `default` credential serves both
+    /// (`caldav-server.md` § Authentication — "no separate CalDAV
+    /// credential"). Gates the MUA block's CalDAV connection rows, and with
+    /// [`Self::carddav_enabled`] the DAV arm of
+    /// [`Self::credential_management_reachable`].
     pub caldav_enabled: bool,
-    /// True iff **CardDAV** (contacts / address book) is enabled for this actor
-    /// (`MailConfig::carddav_enabled`) — the contacts sibling of
-    /// [`Self::caldav_enabled`], riding the same shared MSEK + `default`
-    /// credential (`carddav-server.md` § Independent enablement). Joins the
-    /// credential-section render predicate: the page shows credential
-    /// management whenever the mailbox is provisioned — i.e.
-    /// `enabled || caldav_enabled || carddav_enabled` — so an
-    /// address-book-only deployment can still obtain + manage its bridge
-    /// password.
+    /// True iff the **deployment** serves CardDAV — `fauna.setup.status`'s
+    /// `carddav_enabled`; the contacts sibling of [`Self::caldav_enabled`].
     pub carddav_enabled: bool,
     /// True iff this actor serves **≥1 folder over WebDAV** — the per-actor
     /// WebDAV state (`webdav-server.md` § Independent enablement pt 1 + §
@@ -101,9 +91,15 @@ pub struct MailSettingsSnapshot {
     /// empty), so the row appears with the first served set.
     pub serves_webdav_set: bool,
     /// The **credential-management reachability predicate**, computed once in
-    /// shared Rust (priority #2/#4) instead of re-derived by each of the 6
-    /// clients: `enabled || caldav_enabled || carddav_enabled ||
-    /// serves_webdav_set`. Drives the credential-management section (keys
+    /// shared Rust (priority #2/#4) instead of re-derived by each of the 7
+    /// apps: `enabled || a live credential exists || serves_webdav_set ||
+    /// ((caldav_enabled || carddav_enabled) && !deployment mail enabled)` —
+    /// the live-credential arm because turning mail off keeps the
+    /// credentials, and a credential the user holds stays revocable and
+    /// rotatable; the DAV arm because on a deployment serving calendar or
+    /// contacts without mail, Add credential is a bare account's only way to
+    /// its first (`mail-settings.md` § Credential-management
+    /// reachability). Drives the credential-management section (keys
     /// explainer, credentials list, add / reveal / rotate), the serve-here
     /// toggle, and the MUA-instructions block — every surface that exists
     /// because the actor has, or needs, the one shared MSEK + `default` bridge

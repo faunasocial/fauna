@@ -45,7 +45,6 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
 from helpers.caldav_client import CalDAVClient, build_vevent
 
 # Reuse the dedicated-nest admin-inject + enable-mail preamble (priority #2 — the
@@ -76,6 +75,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.web,
     pytest.mark.tui,
+    pytest.mark.android,
 ]
 
 # The PLAIN mail credential the client mints and the external CalDAV client
@@ -130,8 +130,8 @@ def test_external_caldav_calendar_and_event_appear_while_on_page(
     (2026-06-13), windows (2026-06-24), macOS + iOS (2026-07-15), and the
     `fauna.calendar.changed` push on web (2026-07-17 — web has NO poll, so on
     web this test is the push's end-to-end proof: nothing else can make a
-    mounted page move; transport.md § Push events). android's leg stays
-    host-emulator-gated.
+    mounted page move; transport.md § Push events). android rides the same
+    push (`EventsVM.refreshFromPush`, off `ApiClient.calendarChangedTick`).
 
     Web now renders the no-selection union of every owned calendar's events
     (events.md dated history 2026-07-15 — converged onto windows/apple, the
@@ -142,18 +142,6 @@ def test_external_caldav_calendar_and_event_appear_while_on_page(
     SECOND external event and asserts it too appears with zero further
     interaction (the push-armed `refreshEvents` re-querying the union).
     """
-    if not (app.driver.is_linux() or app.driver.is_windows() or app.driver.is_macos()
-            or app.driver.is_ios() or app.driver.is_web() or app.driver.is_tui()):
-        skip_unbuilt(
-            app.driver,
-            surface="the while-on-page calendar refresh push (fauna.calendar."
-            "changed → refreshEvents)",
-            detail="landed on linux/windows/macos/ios/web/tui; android's push "
-            "wiring landed but e2e is host-emulator-gated, so android is the "
-            "one remaining cross-app follow-on",
-            tracked="caldav-server.md",
-        )
-
     handle = dedicated_mail_nest
     handle.assert_mta_running()
     nest = handle.nest

@@ -90,6 +90,28 @@ def box_not_ready(exc: BaseException) -> str | None:
     return None
 
 
+class LiveBoxAwaitsClaim(Exception):
+    """The admin probe met a box holding no identity for the seed, on a run that
+    came to claim it (`claim_pending`): not environment, the run's own start.
+    Raised by `reaching_the_live_box` in place of the not-ready skip; the
+    provider and `preflight_admin` catch it and let the run's UI claim go on."""
+
+
+def claim_pending() -> bool:
+    """Whether this run came to CLAIM its live box: it declared the box
+    disposable (`--live-box disposable`, `testing.md` § The shared-box rule →
+    *The disposable-box declaration*) AND carries the box's claim code
+    (``FAUNA_LIVE_CLAIM_CODE``). Both halves, because the code alone is ambient
+    — an exported code must never make a shared box claimable by a run."""
+    import os
+
+    from helpers import nest_mode as nest_mode_mod
+
+    return nest_mode_mod.run_mode().disposable_box and bool(
+        os.environ.get("FAUNA_LIVE_CLAIM_CODE", "").strip()
+    )
+
+
 @contextmanager
 def reaching_the_live_box(what: str, *, admin_probe: bool = False):
     """Run a first contact with the box; on live, an unreachable box skips as
@@ -99,8 +121,10 @@ def reaching_the_live_box(what: str, *, admin_probe: bool = False):
     seed (`_LiveProvider._admin`, `preflight_admin`). Only there is
     `fauna.auth.not_registered` a fact about the BOX rather than a feature — the
     preflight that keeps "the box is not set up" from being recorded as a product
-    failure. Every other typed answer, and the same answer anywhere else, stays a
-    recorded `error`/`failed`."""
+    failure — and on a run that came to claim the box (`claim_pending`) it is not
+    even that: it raises `LiveBoxAwaitsClaim`, so the run's own UI claim branch
+    is reached instead of the whole run skipping. Every other typed answer, and
+    the same answer anywhere else, stays a recorded `error`/`failed`."""
     from helpers import nest_mode as nest_mode_mod
 
     if not nest_mode_mod.run_mode().is_live:
@@ -113,6 +137,11 @@ def reaching_the_live_box(what: str, *, admin_probe: bool = False):
 
         if admin_probe:
             not_ready = box_not_ready(exc)
+            if not_ready and claim_pending():
+                raise LiveBoxAwaitsClaim(
+                    f"{not_ready}, and this run declared it disposable with "
+                    f"FAUNA_LIVE_CLAIM_CODE set — it awaits this run's claim"
+                ) from exc
             if not_ready:
                 skip_environment(
                     f"the live box is not ready while {what}: {not_ready} — "
@@ -136,17 +165,24 @@ def admin_probe_what(url: str, source: str | None) -> str:
     return f"probing {url} with the admin seed from {source or 'an unnamed source'}"
 
 
-def preflight_admin(url: str, secret_hex: str, source: str | None = None) -> None:
+def preflight_admin(url: str, secret_hex: str, source: str | None = None) -> bool:
     """Prove the box is up, claimed and knows the admin seed — a signed handshake —
     BEFORE a live test asserts anything about a feature. Skips as environment when
-    the box is down or not set up; returns when ready (so a failure after it is a
-    real product signal about a box that is demonstrably claimed). `source` names
-    where the seed came from, for the skip text (`admin_probe_what`)."""
-    from common.auth import mint_token_via_handshake
+    the box is down or not set up; returns True when ready (so a failure after it
+    is a real product signal about a box that is demonstrably claimed), False when
+    the box awaits this run's claim (`claim_pending`) — the caller then claims it
+    with ``FAUNA_LIVE_CLAIM_CODE`` through the UI. `source` names where the seed
+    came from, for the skip text (`admin_probe_what`)."""
+    from common import auth
     from nacl.signing import SigningKey
 
-    with reaching_the_live_box(admin_probe_what(url, source), admin_probe=True):
-        mint_token_via_handshake(url, SigningKey(bytes.fromhex(secret_hex.strip())))
+    try:
+        with reaching_the_live_box(admin_probe_what(url, source), admin_probe=True):
+            auth.mint_token_via_handshake(url, SigningKey(bytes.fromhex(secret_hex.strip())))
+    except LiveBoxAwaitsClaim as awaits:
+        print(f"[live] {url}: {awaits}", flush=True)
+        return False
+    return True
 
 
 # ── Which box a live MODULE drives, and with which seed ─────────────────────

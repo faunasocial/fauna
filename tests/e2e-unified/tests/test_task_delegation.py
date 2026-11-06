@@ -28,7 +28,7 @@ import pytest
 
 from actions.task_delegation import AUTOMATIC, THIS_DEVICE
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, require_surface
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -192,15 +192,12 @@ def _offered(td, row: int, app) -> list[str]:
     surface debt, tallied as such (convention 7) and failing under
     ``--strict-app``.
     """
+    require_surface(app.driver, "picker-options-attr")
     keys = td.option_keys(row)
-    if keys is None:
-        skip_unbuilt(
-            app.driver,
-            surface="the `options` attr on task-delegation-assignment-picker",
-            detail="the bridge must report every option a picker paints "
-            "(`drivers/base.py::option_texts`)",
-            tracked="",
-        )
+    assert keys is not None, (
+        "the bridge serves no `options` attr on task-delegation-assignment-picker "
+        "for an app whose registry entry lists `picker-options-attr`"
+    )
     return keys
 
 
@@ -319,13 +316,18 @@ def test_the_index_row_names_this_device_as_builder_of_record(logged_in_app):
 
 
 @pytest.mark.web
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("task-delegation")
 def test_web_names_the_other_device_building_the_index(logged_in_app, nest_instance, test_user):
-    """The web column's leg of "a device that is building the index is named as
-    doing so": web never builds the index (``participants.md`` § The assignment
-    picker — it is a viewer and ships no runner), so the builder is always
-    ANOTHER of the user's devices, and what web owes is naming it on the row
-    (§ UI surfaces — the page shows each kind's current runner).
+    """The viewer columns' leg of "a device that is building the index is named
+    as doing so" — web's, iOS's and android's (the name is web's, kept so its
+    ledger record stays addressable): none of them builds the index
+    (``participants.md`` § The assignment picker — a viewer ships no runner; web
+    additionally cannot host tantivy), so the builder is always ANOTHER of the
+    user's devices, and what a viewer owes is naming it on the row (§ UI
+    surfaces — the page shows each kind's current runner). The android witness
+    has not been run yet — it needs the android venue.
 
     The builder here is a stand-in device holding the ``index`` lease through
     the same ``fauna.delegation.heartbeat`` a builder seat sends for the
@@ -379,7 +381,7 @@ def test_web_names_the_other_device_building_the_index(logged_in_app, nest_insta
         f"({builder[:8]}…); it reads {runner!r}. error={logged_in_app.error_text()!r}"
     )
     assert runner != RUNNER_THIS_DEVICE, (
-        "web never builds the index, so its row must never claim this device"
+        "a viewer never builds the index, so its row must never claim this device"
     )
 
 

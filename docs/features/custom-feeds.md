@@ -42,19 +42,23 @@ Stamped 2026-10-01 at d8cb0887cb.
    - `tests/e2e-unified/tests/test_trained_topics.py::test_the_factor_picker_offers_a_trained_topic_by_its_name`
 9. [app] You can weigh how many people watched a post to the end, or skipped it, into a feed of your own — `docs/goal/behavior/engagement-cues.md` § Layer B
    - `tests/e2e-unified/tests/test_feed_creation.py::test_watched_to_the_end_and_skipped_past_weigh_into_a_feed`
+10. [app] A feed you built but did not open never takes over your Feed page: at the next launch the page still opens on the local feed — `docs/goal/ui/feed.md` § Persistence
+   - `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch`
+11. [app] After opening a feed of your own, the Local entry in the feed list takes you back to the local feed — `docs/goal/ui/feed.md` § Layout & flow
+   - `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+1c9a6a26 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -72,7 +76,9 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_filter.py::test_feed_multi_author_filter` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_feed_api.py::test_feed_with_several_rules_serves_all_or_any` | nest (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_feed_with_several_rules_requires_all_of_them_or_any_one` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 8 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_the_factor_picker_offers_a_trained_topic_by_its_name` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_watched_to_the_end_and_skipped_past_weigh_into_a_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_feed_creation.py::test_the_local_entry_returns_from_a_custom_feed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -212,8 +212,21 @@ public class InlineVideoPlaybackTests
         // so the source names what was opened rather than a route.
         var machine = new VideoPlaybackMachine();
         machine.Tap();
-        machine.Resolved(new PlaybackMedia.Opened(Hash, new byte[] { 1 }, "video/mp4"));
+        machine.Resolved(new PlaybackMedia.Opened(Hash, new byte[] { 1 }, "video/mp4", HeldVideo.Sealed));
         Assert.EndsWith($";source=sealed:{Hash}", machine.AutomationAttributes(0));
+    }
+
+    [Fact]
+    public void A_foreign_homed_plain_video_names_its_home_arm_as_the_source()
+    {
+        // A plain `Video` of a post homed on another nest is fetched whole through the
+        // post-blob plane and plays from memory too, but it is not sealed: the shared
+        // held_video_source spells it `home:<hash>` (render-model.md § D6c → Inline
+        // playback, the held-bytes `source` ruling), the arm carried from the resolve.
+        var machine = new VideoPlaybackMachine();
+        machine.Tap();
+        machine.Resolved(new PlaybackMedia.Opened(Hash, new byte[] { 1 }, "video/mp4", HeldVideo.Home));
+        Assert.EndsWith($";source=home:{Hash}", machine.AutomationAttributes(0));
     }
 
     [Fact]
@@ -402,6 +415,64 @@ public class InlineVideoPlaybackTests
         Assert.Equal(opened, sealedMedia.Bytes);
         Assert.Equal("video/mp4", sealedMedia.ContentType);
         Assert.Equal(Hash, sealedMedia.Hash);
+    }
+
+    /// <summary>The post-blob plane: answers <see cref="Bytes"/> and records every
+    /// (home, hash) it was asked for.</summary>
+    private sealed class FakeHosts : FfiPostBlobHostsFakeBase
+    {
+        public byte[] Bytes { get; init; } = Array.Empty<byte>();
+        public List<(FfiPostBlobHome? Home, string Hash)> Asked { get; } = new();
+
+        public override Task<byte[]> Get(FfiPostBlobHome? home, string hash)
+        {
+            Asked.Add((home, hash));
+            return Task.FromResult(Bytes);
+        }
+    }
+
+    private static readonly FfiPostBlobHome ForeignHome = new("https://home.example", new string('a', 64));
+
+    [Fact]
+    public async Task A_plain_video_homed_elsewhere_plays_the_planes_bytes_from_memory()
+    {
+        // feed-read-model.md § A post homed on another nest, the video leg: the reader dials
+        // only this nest, which holds none of the post's bytes, so the whole blob comes
+        // through the plane with the home passed unchanged — and plays from memory, as the
+        // sealed arm does. A plain blob passes the open unchanged.
+        var bytes = new byte[] { 0, 0, 0, 0x18, (byte)'f', (byte)'t', (byte)'y', (byte)'p',
+            (byte)'i', (byte)'s', (byte)'o', (byte)'m' };
+        var manager = new FakeFeedManager { Answer = new PlaybackSource.Url(BlobPath), OpenVerdict = bytes };
+        var hosts = new FakeHosts { Bytes = bytes };
+        var opener = new Opener();
+
+        var media = await VideoPlaybackResolver.ResolveAsync(
+            Nest(), manager, BlobVideo, openReader: opener.Open, hosts: hosts, home: ForeignHome);
+
+        var opened = Assert.IsType<PlaybackMedia.Opened>(media);
+        Assert.Equal((ForeignHome, Hash), Assert.Single(hosts.Asked));
+        Assert.Same(ForeignHome, hosts.Asked[0].Home);
+        Assert.Equal(Hash, manager.OpenedHash);
+        Assert.Equal(bytes, opened.Bytes);
+        Assert.Equal("video/mp4", opened.ContentType);
+        Assert.Empty(opener.Opened);
+    }
+
+    [Fact]
+    public async Task A_bridged_video_homed_elsewhere_still_streams_this_nests_proxy()
+    {
+        // A `ProxiedVideo`'s ticketed path is this nest's proxy whatever the post's home: it
+        // keeps streaming through the reader, and the plane is never asked.
+        var manager = new FakeFeedManager { Answer = new PlaybackSource.Url(TicketedClip) };
+        var hosts = new FakeHosts();
+        var opener = new Opener();
+
+        var media = await VideoPlaybackResolver.ResolveAsync(
+            Nest(), manager, BridgedVideo, openReader: opener.Open, hosts: hosts, home: ForeignHome);
+
+        Assert.IsType<PlaybackMedia.Streamed>(media);
+        Assert.Equal(("https://127.0.0.1:3000", TicketedClip), Assert.Single(opener.Opened));
+        Assert.Empty(hosts.Asked);
     }
 
     [Fact]

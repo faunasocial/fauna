@@ -74,6 +74,16 @@ struct MacContactListView: View {
                             }
                         }
                         CopyButton(Ids.contactActorIdCopyBtn, text: result.actorId)
+                        // Open the found actor's Profile, carrying the lookup's nest
+                        // URL as its home (`contacts.md` § Layout & flow region 3).
+                        Button(L.contacts.findUser.openProfile) {
+                            appState.openProfile(result.actorId, home: vm.findNestUrl)
+                        }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.contactActorIdOpenProfileButton)
+                        .automationActivate(Ids.contactActorIdOpenProfileButton) {
+                            appState.openProfile(result.actorId, home: vm.findNestUrl)
+                        }
                         Spacer()
                         Button(L.contacts.knock) {
                             Task { await vm.addContact(actorId: result.actorId) }
@@ -128,6 +138,7 @@ struct MacContactListView: View {
                                     .font(.caption)
                                     .lineLimit(2)
                             }
+                            KnockGuardianPendingLabel(visible: vm.knocksAwaitGuardian)
                             HStack(spacing: 8) {
                                 Button(L.common.accept) {
                                     Task { await vm.acceptKnock(peerId: knock.sender) }
@@ -210,6 +221,16 @@ struct MacContactListView: View {
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
+#if !FAUNA_KIDS
+                                    // Phase two's archive-link question / linked line
+                                    // (archive-import.md § Linking and merging, ruling 8):
+                                    // state and words are shared, painted by the one
+                                    // FaunaKit view both Contacts lists embed.
+                                    if let links = client?.archiveLinks {
+                                        ContactArchiveLinkAffordances(
+                                            store: links, peerId: contact.peerId, contactName: row.name)
+                                    }
+#endif
                                 }
                                 Spacer()
                                 ContactStatusBadge(status: contact.status)
@@ -258,7 +279,7 @@ struct MacContactListView: View {
                             // pane; converging that to the profile is a contacts
                             // follow-on.)
                             .automationActivate(contact.peerId) {
-                                appState.openProfile(contact.peerId)
+                                appState.openProfile(contact.peerId, home: contact.homeNestUrl)
                             }
                             // Outermost: every registration above — the row's own
                             // presence anchor included — records `contact-row[i]`,

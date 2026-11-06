@@ -277,7 +277,7 @@ EXIF/GPS leak on every web conversation attachment sent to date.
   feature (`Cargo.toml`), the same reader that has shipped on every native UniFFI app since
   2026-06-30 (`media.md` § State & data shape), and this closes the actual wiring gap: tui and
   the other five FFI-native apps get a real per-attachment verdict, not just the capability.
-  **Web remains a genuine stub** (wasm target keeps `process_media` only, no `c2pa-detect` — the
+  **Web paints the badge from its own JavaScript check** of the decrypted attachment bytes (`C2paImage`, `media.md` § C2PA provenance); the shared `AttachmentSnapshot.c2pa` stays `false` on web (wasm target keeps `process_media` only, no `c2pa-detect` — the
   heavy `c2pa` tree stays out of the bundle, unchanged design). Proven by
   `fauna_mls_backend_tests.rs::attachment_c2pa_detected_on_inbound_for_signed_image` (a real
   C2PA-signed fixture round-tripped seal → upload → fetch → open → detect, landing `c2pa == true`
@@ -304,5 +304,4 @@ EXIF/GPS leak on every web conversation attachment sent to date.
   bubble's dead header badge on the whole-message flag is gone, and the attachment loop
   (`ConversationDetailScreen.kt`) paints the feed's shared `C2paBadge` leaf beside each attachment
   whose `c2pa` is true, pinned by the Robolectric `c2paBadgeRendersPerSignedAttachment`. The same
-  test now runs `[tui, linux, macos, ios, windows, android]`; web's bubble verdict is the declared
-  `false` stub above.
+  test now runs `[tui, linux, macos, ios, windows, android, web]`; web's bubble verdict is its own JavaScript check above.

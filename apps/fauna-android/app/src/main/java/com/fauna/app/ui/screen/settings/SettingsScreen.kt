@@ -92,6 +92,10 @@ fun SettingsScreen(
         // by route, like the rows around it.
         if (!BuildConfig.KIDS) item { SettingsRow(Icons.Default.Apps, stringResource(R.string.connected_apps_title), testTag = navRowTag("connected-apps")) { navController.navigate("settings/connected-apps") } }
         if (!BuildConfig.KIDS) item { SettingsRow(Icons.Default.Email, stringResource(R.string.mail_settings_title), testTag = navRowTag("mail-settings")) { navController.navigate("settings/mail-settings") } }
+        // Import from other services (archive-import.md § The wizard and its
+        // machine; settings.md § Navigation model puts it directly after Mail
+        // import, which android reaches through the Mail & Calendar row above).
+        if (!BuildConfig.KIDS) item { SettingsRow(Icons.Default.Download, stringResource(R.string.archive_import_title), testTag = navRowTag("archive-import")) { navController.navigate("settings/archive-import") } }
         // Bluesky — the dedicated ATProto integration-depth page
         // (docs/goal/ui/atproto.md § Layout & flow; settings.md § Navigation
         // model places it after Nostr, which android's Settings rail doesn't

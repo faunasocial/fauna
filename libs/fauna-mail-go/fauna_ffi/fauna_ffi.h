@@ -1271,6 +1271,11 @@ void uniffi_fauna_ffi_fn_free_mlscapability(uint64_t handle, RustCallStatus *out
 uint64_t uniffi_fauna_ffi_fn_method_mlscapability_resume_mail_index_session(uint64_t ptr, RustBuffer snapshot_plaintext_bytes, uint64_t rail, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_DAV_SEAL_PUBKEYS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_DAV_SEAL_PUBKEYS
+RustBuffer uniffi_fauna_ffi_fn_method_mlscapability_dav_seal_pubkeys(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_DECRYPT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_DECRYPT
 RustBuffer uniffi_fauna_ffi_fn_method_mlscapability_decrypt(uint64_t ptr, RustBuffer ciphertext, RustCallStatus *out_status
@@ -1279,6 +1284,11 @@ RustBuffer uniffi_fauna_ffi_fn_method_mlscapability_decrypt(uint64_t ptr, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_NEW_EPOCH_AWARE_MAIL_RECORD_OPENER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_NEW_EPOCH_AWARE_MAIL_RECORD_OPENER
 uint64_t uniffi_fauna_ffi_fn_method_mlscapability_new_epoch_aware_mail_record_opener(uint64_t ptr, RustBuffer snapshot_plaintext_bytes, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_NEW_RECORD_OPENER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_NEW_RECORD_OPENER
+uint64_t uniffi_fauna_ffi_fn_method_mlscapability_new_record_opener(uint64_t ptr, RustBuffer snapshot_plaintext_bytes, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_MLSCAPABILITY_UNSEAL_WEBDAV_KEYS_BLOB
@@ -1419,6 +1429,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_disconnect(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_EMAIL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_EMAIL
 uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_email(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_ENSURE_CONNECTED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_ENSURE_CONNECTED
+uint64_t uniffi_fauna_ffi_fn_method_ffinestclient_ensure_connected(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINESTCLIENT_FAMILY
@@ -2276,6 +2291,11 @@ uint32_t uniffi_fauna_ffi_fn_func_notify_report_min_interval_secs(RustCallStatus
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_REGION_SEALED_NOTE_OWED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_REGION_SEALED_NOTE_OWED
+int8_t uniffi_fauna_ffi_fn_func_region_sealed_note_owed(int8_t region_drove, RustBuffer verdict, RustBuffer encryption, int8_t notify_counted, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_CONTACT_ASK_PENDING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_CONTACT_ASK_PENDING
 int8_t uniffi_fauna_ffi_fn_func_ward_contact_ask_pending(RustBuffer asks, RustBuffer peer_actor_id_hex, RustCallStatus *out_status
@@ -2403,6 +2423,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_build_capability_grant_blob(RustBuffer owner
 RustBuffer uniffi_fauna_ffi_fn_func_derive_bridge_service_user_mlkem768(RustBuffer ed25519_seed, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DERIVE_RECIPIENT_DAV_MATERIAL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DERIVE_RECIPIENT_DAV_MATERIAL
+RustBuffer uniffi_fauna_ffi_fn_func_derive_recipient_dav_material(RustBuffer msek, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DERIVE_RECIPIENT_EPOCH_HPKE_KEYPAIR
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DERIVE_RECIPIENT_EPOCH_HPKE_KEYPAIR
 RustBuffer uniffi_fauna_ffi_fn_func_derive_recipient_epoch_hpke_keypair(RustBuffer msek, uint64_t e, RustCallStatus *out_status
@@ -2469,9 +2494,24 @@ uint64_t uniffi_fauna_ffi_fn_func_mail_sealing_epoch_of(uint64_t unix_secs, Rust
 RustBuffer uniffi_fauna_ffi_fn_func_open_mail_record_with_key(RustBuffer envelope_bytes, RustBuffer key, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_OPEN_RECORD_WITH_KEY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_OPEN_RECORD_WITH_KEY
+RustBuffer uniffi_fauna_ffi_fn_func_open_record_with_key(RustBuffer kind, RustBuffer envelope_bytes, RustBuffer key, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_MLS_SNAPSHOT_BLOB
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_MLS_SNAPSHOT_BLOB
 RustBuffer uniffi_fauna_ffi_fn_func_seal_mls_snapshot_blob(RustBuffer serialized_state, RustBuffer actor_id, RustBuffer msek, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_RECORD_TO_RECIPIENT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_RECORD_TO_RECIPIENT
+RustBuffer uniffi_fauna_ffi_fn_func_seal_record_to_recipient(RustBuffer kind, RustBuffer plaintext, RustBuffer recipient_x25519_pubkey, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_RECORD_TO_RECIPIENT_XWING
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_RECORD_TO_RECIPIENT_XWING
+RustBuffer uniffi_fauna_ffi_fn_func_seal_record_to_recipient_xwing(RustBuffer kind, RustBuffer plaintext, RustBuffer recipient_xwing_pubkey, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SEAL_SPAM_MODEL_COPY
@@ -2841,11 +2881,6 @@ RustBuffer uniffi_fauna_ffi_fn_func_fauna_ffi_terms_url(RustCallStatus *out_stat
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_IS_NEWER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_IS_NEWER
 int8_t uniffi_fauna_ffi_fn_func_is_newer(RustBuffer current, RustBuffer candidate, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_LOOK_AT_SIGN_IN
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_LOOK_AT_SIGN_IN
-uint64_t uniffi_fauna_ffi_fn_func_look_at_sign_in(RustBuffer feed_origin, RustBuffer user_agent
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RELEASE_FEED_ORIGIN
@@ -3516,6 +3551,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_notify_report_min_interval_secs(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_REGION_SEALED_NOTE_OWED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_REGION_SEALED_NOTE_OWED
+uint16_t uniffi_fauna_ffi_checksum_func_region_sealed_note_owed(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_CONTACT_ASK_PENDING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_CONTACT_ASK_PENDING
 uint16_t uniffi_fauna_ffi_checksum_func_ward_contact_ask_pending(void
@@ -3666,6 +3707,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_derive_bridge_service_user_mlkem768(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DERIVE_RECIPIENT_DAV_MATERIAL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DERIVE_RECIPIENT_DAV_MATERIAL
+uint16_t uniffi_fauna_ffi_checksum_func_derive_recipient_dav_material(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DERIVE_RECIPIENT_EPOCH_HPKE_KEYPAIR
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DERIVE_RECIPIENT_EPOCH_HPKE_KEYPAIR
 uint16_t uniffi_fauna_ffi_checksum_func_derive_recipient_epoch_hpke_keypair(void
@@ -3744,9 +3791,27 @@ uint16_t uniffi_fauna_ffi_checksum_func_open_mail_record_with_key(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_OPEN_RECORD_WITH_KEY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_OPEN_RECORD_WITH_KEY
+uint16_t uniffi_fauna_ffi_checksum_func_open_record_with_key(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_MLS_SNAPSHOT_BLOB
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_MLS_SNAPSHOT_BLOB
 uint16_t uniffi_fauna_ffi_checksum_func_seal_mls_snapshot_blob(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_RECORD_TO_RECIPIENT
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_RECORD_TO_RECIPIENT
+uint16_t uniffi_fauna_ffi_checksum_func_seal_record_to_recipient(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_RECORD_TO_RECIPIENT_XWING
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SEAL_RECORD_TO_RECIPIENT_XWING
+uint16_t uniffi_fauna_ffi_checksum_func_seal_record_to_recipient_xwing(void
     
 );
 #endif
@@ -4185,12 +4250,6 @@ uint16_t uniffi_fauna_ffi_checksum_func_fauna_ffi_terms_url(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_IS_NEWER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_IS_NEWER
 uint16_t uniffi_fauna_ffi_checksum_func_is_newer(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_LOOK_AT_SIGN_IN
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_LOOK_AT_SIGN_IN
-uint16_t uniffi_fauna_ffi_checksum_func_look_at_sign_in(void
     
 );
 #endif
@@ -4998,6 +5057,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_resume_mail_index_sessio
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_DAV_SEAL_PUBKEYS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_DAV_SEAL_PUBKEYS
+uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_dav_seal_pubkeys(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_DECRYPT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_DECRYPT
 uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_decrypt(void
@@ -5007,6 +5072,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_decrypt(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_NEW_EPOCH_AWARE_MAIL_RECORD_OPENER
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_NEW_EPOCH_AWARE_MAIL_RECORD_OPENER
 uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_new_epoch_aware_mail_record_opener(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_NEW_RECORD_OPENER
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_MLSCAPABILITY_NEW_RECORD_OPENER
+uint16_t uniffi_fauna_ffi_checksum_method_mlscapability_new_record_opener(void
     
 );
 #endif
@@ -5133,6 +5204,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_disconnect(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_EMAIL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_EMAIL
 uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_email(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_ENSURE_CONNECTED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINESTCLIENT_ENSURE_CONNECTED
+uint16_t uniffi_fauna_ffi_checksum_method_ffinestclient_ensure_connected(void
     
 );
 #endif

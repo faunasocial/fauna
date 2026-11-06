@@ -396,8 +396,8 @@ fn the_nest_side_tools_speak_hex_and_never_clear_what_they_were_not_told_to() {
 }
 
 /// The tools over the kinds row 18 served without one: the domain add refuses
-/// while no domain is active (the first one becomes the permanent main
-/// domain — the admin's own act), a clearing write states its `null`, a value
+/// while no domain is active (the first one becomes the primary domain, never
+/// removable — the admin's own act), a clearing write states its `null`, a value
 /// the wire would refuse never reaches the nest, and the rules document reads
 /// back as data.
 #[test]

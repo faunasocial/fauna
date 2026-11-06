@@ -92,6 +92,7 @@ extension BridgeInfo {
                   mode: ffi.mode,
                   settings: ffi.settings.map(BridgeSetting.init(ffi:)),
                   supportsFollows: ffi.supportsFollows,
+                  supportsFollowRequests: ffi.supportsFollowRequests,
                   linkModes: ffi.linkModes.map { $0.map(BridgeLinkMode.init(ffi:)) },
                   error: ffi.error)
     }
@@ -109,6 +110,12 @@ extension BridgeFollow {
     init(ffi: FfiBridgeFollow) {
         self.init(id: ffi.id, petname: ffi.petname,
                   createdAt: ffi.createdAt.map(Int.init))
+    }
+}
+
+extension BridgeFollowRequest {
+    init(ffi: FfiFollowRequestRow) {
+        self.init(id: ffi.id, address: ffi.address, name: ffi.name, display: ffi.display)
     }
 }
 

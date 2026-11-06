@@ -195,6 +195,15 @@ def _relaunch_on_the_same_store(app: ActionLayer) -> None:
         driver.quit_app()
         driver.hard_reload()
         return
+    if driver.is_windows():
+        # windows keeps its credential/data dirs on the driver instance and
+        # `teardown()` reclaims the ones it owns, so teardown + launch would come
+        # back on an EMPTY store (a new data dir, no custody rows). The pinned
+        # `recover()` relaunch is windows' same-store mechanism
+        # (`test_account_switcher_windows.py`).
+        assert driver.preserve_state_across_relaunch(), "windows store could not be pinned"
+        assert driver.recover(), "windows force-quit + relaunch failed"
+        return
     driver.teardown()
     relaunch = dict(driver._launch_config)
     relaunch.pop("seed_credentials", None)

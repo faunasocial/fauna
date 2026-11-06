@@ -56,13 +56,18 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
         _feedManager = feedManager;
     }
 
-    public async Task<BitmapImage?> LoadAsync(string hash)
+    public Task<BitmapImage?> LoadAsync(string hash) => LoadAsync(hash, null);
+
+    /// <summary>As <see cref="LoadAsync(string)"/>, from the nest the post's own bytes rest
+    /// on — <paramref name="home"/> is the post's <c>FfiPostBlobHome</c> (<c>null</c> = this
+    /// nest), handed to the shared post-blob plane unchanged.</summary>
+    public async Task<BitmapImage?> LoadAsync(string hash, object? home)
     {
-        var result = await LoadWithC2paAsync(hash);
+        var result = await LoadWithC2paAsync(hash, home);
         return result.Image;
     }
 
-    public async Task<(BitmapImage? Image, bool HasC2pa)> LoadWithC2paAsync(string hash)
+    public async Task<(BitmapImage? Image, bool HasC2pa)> LoadWithC2paAsync(string hash, object? home = null)
     {
         var manager = _feedManager?.Invoke();
 
@@ -92,7 +97,13 @@ public sealed class BlobImageLoader : IHashImageLoader, IProxiedImageLoader
             // known-sealed item did not open — degrade to the same collapsed image a
             // decode failure gives, and DON'T cache it, so the render after the post's
             // detail-open unlock retries and paints.
-            var (bytes, hasC2pa) = await PostMediaOpen.FetchAndOpenAsync(nest, manager, hash);
+            // A foreign home with no plane built yet is a miss, never a fallback to this
+            // nest's by-hash GET (that would ask the wrong nest, bearer attached).
+            var postHome = home as FfiPostBlobHome;
+            var hosts = Core.PostBlobHostsHost.Current;
+            if (postHome is not null && hosts is null) return (null, false);
+            var (bytes, hasC2pa) = await PostMediaOpen.FetchAndOpenAsync(
+                nest, manager, hash, hosts: hosts, home: postHome);
             if (bytes is null) return (null, false);
             var bmp = await BitmapFromBytesAsync(bytes);
             if (bmp is null) return (null, false);

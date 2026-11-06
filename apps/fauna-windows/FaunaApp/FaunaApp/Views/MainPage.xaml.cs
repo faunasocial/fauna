@@ -239,6 +239,13 @@ public sealed partial class MainPage : Page
             // open store-backed page re-drives its own load (ViewModelBase
             // .WatchStoreChange), not this.
             clients.Rpc!.StoreChanged += OnRpcStoreChanged;
+            // The session nest's rules are re-read past the connection's memo on every
+            // `nest_info` push (nest-rules.md § A change is announced — the push an
+            // accepted fauna.admin.content_policy.set sends every connected member).
+            clients.Rpc!.NestInfoStale += OnRpcNestInfoStale;
+            // A fold that changed the rules (or a cleared session) repaints the shell's
+            // one-line changed notice.
+            NestRulesHost.Changed += OnNestRulesChanged;
             // Mirror the shell VM's app-global unread-notification count into the
             // e2e state snapshot (`data.notifications.unread_count`). Published from
             // the View, like every other AppDataSnapshot writer (ContactsPage,
@@ -285,6 +292,8 @@ public sealed partial class MainPage : Page
             $"[nav] OnRpcReconnected content={ContentFrame.Content?.GetType().Name} "
             + $"selected={(NavView.SelectedItem as NavigationViewItem)?.Tag}");
         _ = CheckFamilyStatusAsync();
+        // The admin gate is re-read on every reconnect (transport.md `admin_gate`).
+        _ = CheckAdminStatusAsync(onReconnect: true);
         // The viewer's own spam thresholds re-read on the same trigger as the
         // guardian floor above (family-client-enforcement.md § Content policy):
         // call order only — the two halves are independent by construction.
@@ -292,7 +301,37 @@ public sealed partial class MainPage : Page
             _ = new ContentPolicyPreloader(rpc).RefreshOwnThresholdsAsync();
         // The region relay is asked at every reconnect too, like the apple leg.
         StartRegionRefresh();
+        // The session nest's rules are read again on reconnect too (a change made
+        // while disconnected is found by its newer sequence) — through the pump's
+        // NestInfoStale (StaleSurfacesOnReconnect().nestInfo), not a second call here.
     }
+
+    private void OnRpcNestInfoStale() => StartNestRulesRefresh();
+
+    // NestRulesHost raises on whatever thread the read landed on — marshal back.
+    private void OnNestRulesChanged() => this.DispatcherQueue.TryEnqueue(PaintNestRulesNotice);
+
+    /// <summary>Paint the shell's one-line changed notice off
+    /// <see cref="NestRulesHost.ChangedNoticeText"/> (the shared
+    /// <c>nest_rules.changed_notice</c> frame naming the nest) — visible exactly while a
+    /// change is unread.</summary>
+    private void PaintNestRulesNotice()
+    {
+        var text = NestRulesHost.ChangedNoticeText;
+        if (text is null)
+        {
+            NestRulesChangedNotice.Visibility = Visibility.Collapsed;
+            return;
+        }
+        NestRulesChangedNotice.Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(NestRulesChangedNotice, text);
+        NestRulesChangedNotice.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The notice's way to the rules surface: Settings → Status, whose open
+    /// clears it (StatusPage.Page_Loaded → <see cref="NestRulesHost.DismissNotice"/>).</summary>
+    private void NestRulesChangedNotice_Click(object sender, RoutedEventArgs e)
+        => NavigateToSettingsSubPage("status");
 
     private void OnRpcStoreChanged()
     {
@@ -326,12 +365,26 @@ public sealed partial class MainPage : Page
         }
     }
 
+    /// <summary>
+    /// Set by <see cref="OnNavigatedFrom"/>: this MainPage has left the root frame for
+    /// good (sign-out, an account switch, the e2e reset — the next login builds a new
+    /// instance). <see cref="Page_Loaded"/> is <c>async void</c> and awaits three status
+    /// reads before it starts the page's timers, so a teardown landing during those awaits
+    /// used to be followed by the timers STARTING on the detached page — after
+    /// <see cref="OnNavigatedFrom"/> had already run its stops, so nothing would ever stop
+    /// them (the leak <see cref="LiveSyncAgentPollers"/> counts). Every await in it is
+    /// therefore followed by a check of this flag.
+    /// </summary>
+    private bool _navigatedAway;
+
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
         FaunaApp.Core.Logs.E2eTrace.Write("[loaded] enter");
+        if (_navigatedAway) return;
         if (_viewModel is not null)
         {
             await _viewModel.LoadCommand.ExecuteAsync(null);
+            if (_navigatedAway) return;
         }
         FaunaApp.Core.Logs.E2eTrace.Write("[loaded] after LoadCommand");
 
@@ -354,10 +407,16 @@ public sealed partial class MainPage : Page
         // Check admin status and show admin nav items if user is admin
         FaunaApp.Core.Logs.E2eTrace.Write("[loaded] before CheckAdminStatusAsync");
         await CheckAdminStatusAsync();
+        if (_navigatedAway) return;
         // Check family-safety status and show the gated family-tab / global
         // supervised-indicator as appropriate (family-safety.md § App surface).
         FaunaApp.Core.Logs.E2eTrace.Write("[loaded] before CheckFamilyStatusAsync");
         await CheckFamilyStatusAsync();
+        if (_navigatedAway)
+        {
+            FaunaApp.Core.Logs.E2eTrace.Write("[loaded] page left during the status reads; starting nothing");
+            return;
+        }
         // Content-policy hydration, own-thresholds half (moderation.md §
         // Categories & enforcement item 1). The OTHER half rides
         // CheckFamilyStatusAsync above; this one needs its own read, and an
@@ -369,6 +428,10 @@ public sealed partial class MainPage : Page
         // (region-blocking.md § How an app obtains its region's policy). Fire-and-
         // forget for the same reason as the line above.
         StartRegionRefresh();
+        // The session nest's rules (nest-rules.md § The nest content policy): read at
+        // sign-in, on the same one site on every login path. Fire-and-forget too.
+        StartNestRulesRefresh();
+        PaintNestRulesNotice();
 
         FaunaApp.Core.Logs.E2eTrace.Write("[loaded] before StartSyncAgentStatusPoll");
         StartSyncAgentStatusPoll();
@@ -479,6 +542,25 @@ public sealed partial class MainPage : Page
     }
 
     /// <summary>
+    /// Read this session's nest's self-description past the connection's memo and fold
+    /// its signed rules into the book (<see cref="NestRulesHost.RefreshAsync"/>) — at
+    /// sign-in (<c>Page_Loaded</c>, every login path), on every WS reconnect and on
+    /// every <c>nest_info</c> push (<see cref="INestRpcClient.NestInfoStale"/>). A fold
+    /// that changed the answer repaints the feed, the Status sub-page and the changed
+    /// notice through <see cref="NestRulesHost.Changed"/>. Best-effort: the host never
+    /// throws into the caller.
+    /// </summary>
+    private void StartNestRulesRefresh()
+    {
+        if (_clients?.Rpc is null)
+        {
+            ShellLog.Warn("MainPage", "[nest-rules] self-description read skipped: no Rpc on _clients");
+            return;
+        }
+        _ = NestRulesHost.RefreshAsync(_clients.Rpc);
+    }
+
+    /// <summary>
     /// Fetch the sync-agent-status indicator immediately, then start the ~10s
     /// poll (sync-agent.md § Local agent health). Idempotent — `Page_Loaded` can
     /// re-run (e.g. re-entry), and a running timer is left alone.
@@ -503,6 +585,9 @@ public sealed partial class MainPage : Page
     /// </summary>
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        // First: Page_Loaded may still be awaiting its status reads, and must start
+        // nothing once it resumes (see the field's doc).
+        _navigatedAway = true;
         if (_syncAgentStatusPollTimer is { IsEnabled: true } timer)
         {
             timer.Stop();
@@ -514,7 +599,21 @@ public sealed partial class MainPage : Page
         {
             _clients.Rpc.Reconnected -= OnRpcReconnected;
             _clients.Rpc.StoreChanged -= OnRpcStoreChanged;
+            _clients.Rpc.NestInfoStale -= OnRpcNestInfoStale;
         }
+        NestRulesHost.Changed -= OnNestRulesChanged;
+        // The shell VM is per-login too: release its subscriptions — the connection-
+        // state one writes the process-wide offline gate, the critical-alerts one sits
+        // on a process-wide host that would otherwise pin every MainPage ever built.
+        if (_viewModel is not null)
+        {
+            _viewModel.PropertyChanged -= MainViewModel_PropertyChanged;
+            _viewModel.Detach();
+        }
+        // The page inside ContentFrame gets no OnNavigatedFrom of its own when this
+        // page is the one leaving — end it, so its cleanup runs (Views.NestedFrame).
+        ContentFrame.Navigated -= ContentFrame_Navigated;
+        NestedFrame.EndPage(ContentFrame, nameof(MainPage));
         base.OnNavigatedFrom(e);
     }
 
@@ -533,7 +632,14 @@ public sealed partial class MainPage : Page
         // The agent's binding park (file-sync.md § Multi-writer shared sets → Revocation):
         // same tick, same reason as the engine holds — the agent derives it, so nothing
         // else re-drives the reconcile that would carry it to the row. Skips a failed read.
-        if (App.CurrentLocationBindings is { } bindings) await bindings.PollParksAsync();
+        if (App.CurrentLocationBindings is { } bindings)
+        {
+            await bindings.PollParksAsync();
+            // A group set's review list rides the same tick: the fold records a row inside
+            // the agent, so no gesture produces it (group-set.md § Build design — the group
+            // set, decision 9). Signals only when the lists moved; never throws.
+            await bindings.PollSetConflictsAsync();
+        }
     }
 
     /// <summary>
@@ -711,7 +817,7 @@ public sealed partial class MainPage : Page
             FaunaApp.Core.Logs.E2eTrace.Write(
                 $"[nav] generic-branch navigate tag={tag} to={pageType.Name} "
                 + $"from={ContentFrame.Content?.GetType().Name}");
-            ContentFrame.Navigate(pageType, _clients);
+            ContentFrame.Navigate(pageType, ClientsForTag(tag));
             _viewModel?.NavigateToCommand.Execute(tag);
         }
     }
@@ -777,34 +883,34 @@ public sealed partial class MainPage : Page
         args.Handled = true;
     }
 
-    private async Task CheckAdminStatusAsync()
+    // Read at Page_Loaded AND on every reconnect (transport.md § Which surfaces a
+    // push invalidates, `admin_gate`): a login read that failed before the nest's
+    // name resolved is repaired by the next reconnect. A failed read moves nothing
+    // and the once-per-session effects fire on the false→true transition only
+    // (AdminGateState). One instance per MainPage, so an account switch (MainPage
+    // is re-navigated) starts from "not an admin".
+    private readonly AdminGateState _adminGate = new();
+
+    private async Task CheckAdminStatusAsync(bool onReconnect = false)
     {
-        if (_clients?.Rpc is null) return;
+        if (_clients?.Rpc is not { } rpc) return;
 
-        try
-        {
-            var isAdmin = await _clients.Rpc.AmIAdminAsync();
-            ShellLog.Info("MainPage", $"[admin-gate] am_i_admin={isAdmin}");
-            if (isAdmin)
-            {
-                ShowAdminNavItems();
-                ShellLog.Info("MainPage", "[admin-gate] revealed admin-tab");
+        if (await _adminGate.RefreshAsync(rpc) != AdminGateRefresh.BecameAdmin) return;
 
-                // Stage-2 admin auto-default (long-term-store.md § Per-account re-auth):
-                // this IS the client's "when does an account count as admin" observation,
-                // so flip require-confirm ON for the active account here — iff the user
-                // never touched its toggle. Idempotent + best-effort; re-fires on every
-                // switch because MainPage is re-navigated and Page_Loaded re-runs.
-                App.AutoEnableRequireConfirmForActiveAdmin();
-            }
-        }
-        catch (Exception ex)
-        {
-            // Not admin or network error — admin nav stays hidden (fail-closed),
-            // but logged: this gate is one-shot at Page_Loaded too, so a throw
-            // hides admin-tab for the session with nothing on error-message.
-            ShellLog.Warn("MainPage", $"[admin-gate] am_i_admin read failed: {ex.Message}");
-        }
+        ShowAdminNavItems();
+        ShellLog.Info("MainPage", "[admin-gate] revealed admin-tab");
+
+        // Stage-2 admin auto-default (long-term-store.md § Per-account re-auth):
+        // this IS the client's "when does an account count as admin" observation,
+        // so flip require-confirm ON for the active account here — iff the user
+        // never touched its toggle. Idempotent + best-effort.
+        App.AutoEnableRequireConfirmForActiveAdmin();
+
+        // The login-time host-address report is StartMainAppAsync's one-shot; a
+        // transition seen on a reconnect means that one's admin read failed, so
+        // report here (same best-effort, idempotent reporter).
+        if (onReconnect)
+            _ = new HostAddressReporter(rpc).RunAdminAsync();
     }
 
     private void ShowAdminNavItems()
@@ -1087,6 +1193,35 @@ public sealed partial class MainPage : Page
         }
     }
 
+    /// <summary>The <c>dm-message-withheld-badge</c> tap (takedown-and-block.md § Legal
+    /// takedown → <i>App render</i>, the fourth surface): go to the Moderation page with
+    /// the matched queue row's <c>content_id</c> in the navigation parameter
+    /// (<see cref="ServiceClients.DeepLinkAppealContentId"/>), so the page's queue read
+    /// opens that row's own appeal. The id travels through
+    /// <see cref="_pendingAppealContentId"/> and is applied by whichever navigation
+    /// <see cref="NavigateToTag"/> takes — the selection handler or the direct one —
+    /// the same "apply where the page is constructed" shape as
+    /// <see cref="NavigateToSettingsSubPage"/>. Must be called on the UI thread.</summary>
+    public void OpenModerationAppeal(string contentId)
+    {
+        _pendingAppealContentId = contentId;
+        NavigateToTag("Moderation");
+    }
+
+    /// <summary>A badge tap's content id, waiting for the Moderation page's construction.</summary>
+    private string? _pendingAppealContentId;
+
+    /// <summary>The navigation parameter for <paramref name="tag"/>'s page: the shared
+    /// clients, carrying a pending badge appeal on the Moderation navigation (and taking
+    /// it, so it is handed over once).</summary>
+    private ServiceClients? ClientsForTag(string tag)
+    {
+        if (tag != "Moderation" || _pendingAppealContentId is not { } contentId || _clients is null)
+            return _clients;
+        _pendingAppealContentId = null;
+        return _clients with { DeepLinkAppealContentId = contentId };
+    }
+
     private void NavigateToTag(string tag)
     {
         if (_clients is null || string.IsNullOrEmpty(tag))
@@ -1123,7 +1258,7 @@ public sealed partial class MainPage : Page
                     if (pageType != null)
                     {
                         NavView.IsPaneVisible = true;
-                        ContentFrame.Navigate(pageType, _clients);
+                        ContentFrame.Navigate(pageType, ClientsForTag(tag));
                         _viewModel?.NavigateToCommand.Execute(tag);
                     }
                 }
@@ -1237,6 +1372,7 @@ public sealed partial class MainPage : Page
             ? Visibility.Visible
             : Visibility.Collapsed;
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Convention 17 layer (c)'s `switch_pane` — windows leg
     /// (`docs/goal/architecture/e2e-systematic-ui-walks.md` § Implementation
@@ -1284,6 +1420,7 @@ public sealed partial class MainPage : Page
         }
         return false;
     }
+#endif
 
     private static Type? TagToPageType(string tag) => tag switch
     {

@@ -7,6 +7,7 @@
     xmlns:loc="using:FaunaApp.Markup"
     xmlns:controls="using:FaunaApp.Controls"
     Loaded="Page_Loaded"
+    Unloaded="Page_Unloaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
     <Page.Resources>
@@ -169,6 +170,41 @@
                 </StackPanel>
             </Border>
 
+            <!-- The remove confirm (mail-multidomain.md § Removing a local domain,
+                 § Confirm dialog text): a row's admin-dns-domain-remove-button arms
+                 the shared LocalDomainMachine (arm_remove_domain), and this panel is
+                 painted while LocalDomainsSnapshot.removeConfirmDomain names a domain —
+                 never a local arm. Titled with the shared remove_confirm_title and
+                 followed by the ratified remove_confirm_body; only its confirm removes
+                 (LocalDomainAction.ConfirmRemoveDomain), and cancel
+                 (cancel_remove_domain) closes it with nothing removed. The page's
+                 inline Border + Visibility idiom (the rename sheet above): Collapsed is
+                 pruned from UIA, so the modal is absent while nothing is armed. The
+                 modal's get_text joins its TextBlocks: the title, then the body. -->
+            <Border x:Name="DomainRemoveConfirm"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRemoveConfirmModal}"
+                    AutomationProperties.Name="Remove domain"
+                    Visibility="Collapsed"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="6" Padding="12">
+                <StackPanel Spacing="12">
+                    <TextBlock x:Name="DomainRemoveConfirmTitle"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock x:Name="DomainRemoveConfirmBody" TextWrapping="Wrap" MaxWidth="560"
+                               HorizontalAlignment="Left" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRemoveConfirmButton}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Content="{loc:Localize Key=admin/dns/remove_confirm}"
+                                Click="DomainRemoveConfirm_Click" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainRemoveCancelButton}"
+                                Content="{loc:Localize Key=common/cancel}"
+                                Click="DomainRemoveCancel_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Add-domain form: a reveal button toggles an inline input + submit/
                  cancel row. Submit dispatches the shared LocalDomainMachine's
                  AddDomain (fauna.bridges.add_local_domain). Ports linux
@@ -184,33 +220,41 @@
                         Content="{loc:Localize Key=admin/dns/add_domain}" />
                 <!-- The first domain added to a domainless nest becomes the primary —
                      the deployment identity — and can never be removed
-                     (mail-multidomain.md § Adding a new local domain step 7,
-                     § Removing a local domain). Untagged chrome (no ui.yaml id,
-                     mirroring tui's Element::chrome), shown only when
-                     LocalDomainsSnapshot.addingFirstDomain is true; a second-or-later
-                     add stays ordinary. tui's apps/fauna-tui/src/admin/dns.rs
-                     (ADD_DOMAIN_PRIMARY_WARNING) is the reference. -->
+                     (mail-multidomain.md § Wizard steps step 7, § Removing a local
+                     domain). admin-dns-add-domain-primary-warning, shown only when
+                     LocalDomainsSnapshot.addingFirstDomain is true (Collapsed, so
+                     pruned from UIA, otherwise); a second-or-later add stays
+                     ordinary. AutomationId only, no static Name: get_text reads its
+                     Text. tui's apps/fauna-tui/src/admin/dns.rs is the reference. -->
                 <TextBlock x:Name="AddDomainPrimaryWarning"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainPrimaryWarning}"
                            Text="{loc:Localize Key=admin/dns/add_domain_primary_warning}"
                            TextWrapping="Wrap" Opacity="0.85" MaxWidth="480"
                            Visibility="Collapsed" HorizontalAlignment="Left" />
-                <StackPanel x:Name="AddDomainForm" Orientation="Horizontal" Spacing="8"
-                            Visibility="Collapsed">
-                    <!-- admin-dns-add-domain-input: a TextBox (the e2e type_text sets
-                         it via ValuePattern, no focus change needed). -->
-                    <TextBox x:Name="AddDomainInput"
-                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainInput}"
-                             MinWidth="240" VerticalAlignment="Center"
-                             PlaceholderText="{loc:Localize Key=admin/dns/add_domain_placeholder}" />
-                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainSubmitButton}"
-                            Style="{StaticResource AccentButtonStyle}"
-                            Click="AddDomainSubmit_Click"
-                            VerticalAlignment="Center"
-                            Content="{loc:Localize Key=admin/dns/add_domain_submit}" />
-                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainCancelButton}"
-                            Click="AddDomainCancel_Click"
-                            VerticalAlignment="Center"
-                            Content="{loc:Localize Key=common/cancel}" />
+                <!-- The input sits above its submit/cancel row, never beside it: in
+                     a narrow window a single horizontal row clipped both buttons off
+                     the page's right edge (offscreen, unreachable). The input fills
+                     the column up to 480 px. -->
+                <StackPanel x:Name="AddDomainForm" Spacing="8" Visibility="Collapsed">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" MaxWidth="480" />
+                        </Grid.ColumnDefinitions>
+                        <!-- admin-dns-add-domain-input: a TextBox (the e2e type_text
+                             sets it via ValuePattern, no focus change needed). -->
+                        <TextBox x:Name="AddDomainInput"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainInput}"
+                                 PlaceholderText="{loc:Localize Key=admin/dns/add_domain_placeholder}" />
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainSubmitButton}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="AddDomainSubmit_Click"
+                                Content="{loc:Localize Key=admin/dns/add_domain_submit}" />
+                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsAddDomainCancelButton}"
+                                Click="AddDomainCancel_Click"
+                                Content="{loc:Localize Key=common/cancel}" />
+                    </StackPanel>
                 </StackPanel>
             </StackPanel>
 
@@ -220,9 +264,11 @@
                  admin-dns page — the sole "Fauna controls DNS" master switch since
                  the admin-services page was removed, 2026-06-04, admin.md § Admin
                  IA redesign): a ToggleSwitch (FlaUI drives it via TogglePattern →
-                 fires Toggled, unlike a bare ToggleButton's Click). The refresh
-                 button re-fetches the matrix + credential store
-                 (admin-dns-refresh-button). -->
+                 fires Toggled, unlike a bare ToggleButton's Click). Its checked
+                 state is mirrored as the `state` attr (on/off) → HelpText, set
+                 alongside IsOn by RenderManageAll; "off" until the first render,
+                 like linux. The refresh button re-fetches the matrix + credential
+                 store (admin-dns-refresh-button). -->
             <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -230,6 +276,7 @@
                 </Grid.ColumnDefinitions>
                 <ToggleSwitch x:Name="ManageAllToggle" Grid.Column="0"
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsManageAllToggle}"
+                              AutomationProperties.HelpText="off"
                               Toggled="ManageAll_Toggled"
                               VerticalAlignment="Center"
                               Header="{loc:Localize Key=admin/dns/manage_all}" />
@@ -351,6 +398,17 @@
                     </StackPanel>
                 </StackPanel>
             </StackPanel>
+
+            <!-- Why the nest's own certificate requests are failing
+                 (tls-certificates.md § Keeping the cert alive, *The admin sees why
+                 issuance is failing*): deployment-level, one plain-text
+                 admin-dns-cert-issuance-error line per failing nest-placed order,
+                 painted once above the per-domain rows (mirrors linux, which
+                 prepends them to its domain list). Populated imperatively by
+                 RenderCertIssuanceErrors; each line is worded by the shared
+                 cert_issuance_error_line, never here. Collapsed (and thus
+                 uncounted) when no order fails. -->
+            <StackPanel x:Name="CertIssuanceErrorsHost" Spacing="4" Visibility="Collapsed" />
 
             <!-- Per-domain DNS record matrix -->
             <ItemsControl x:Name="DomainsList">

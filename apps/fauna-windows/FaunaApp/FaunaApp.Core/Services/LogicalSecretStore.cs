@@ -11,16 +11,17 @@ namespace FaunaApp.Core.Services;
 /// Everything above it — the account index, per-actor namespacing, the shared
 /// onboarding moments, and the <c>LaunchPersistence</c> the launch machine
 /// routes on — is shared Rust
-/// (<c>fauna-client-accounts</c>). Windows contributes exactly two things: the
-/// key→key table in <see cref="SecretKeyMap"/>, and the raw key/value backend in
-/// <see cref="ISecretBackend"/>. Do not add composition logic here — that is
+/// (<c>fauna-client-accounts</c>). Windows contributes exactly one thing: the raw
+/// key/value backend in <see cref="ISecretBackend"/>, which receives every logical
+/// key verbatim (android's <c>LogicalSecretStore</c> is the twin). Do not add
+/// composition logic here — that is
 /// what <c>long-term-store.md:348</c> ("the platform SecretStore stays a trivial
 /// key→key map") forbids, and it is why CR-3 could fix four apps' slot
 /// collision by fixing one crate.</para>
 ///
-/// <para>Linux's twin is <c>fauna_credential_store::CredentialStore</c>: the
-/// same shape (resolve the logical key, then hit one of two backends), so the
-/// two apps stay comparable line-for-line.</para>
+/// <para>Linux's twin is <c>fauna_credential_store::CredentialStore</c>, which the
+/// backend here reaches over the FFI: the same logical key lands on the same row
+/// on both apps.</para>
 ///
 /// <para><b>Save failures are swallowed by contract</b> (matching every other
 /// platform store, and the shared crate's documented expectation): a store
@@ -43,21 +44,9 @@ internal sealed class LogicalSecretStore : FfiSecretStore
     /// <summary>The backend, for the few call sites that need a raw namespace sweep.</summary>
     internal ISecretBackend Backend => _backend;
 
-    public string? Get(string key)
-    {
-        var (resource, user) = SecretKeyMap.Resolve(key);
-        return _backend.Get(resource, user);
-    }
+    public string? Get(string key) => _backend.Get(key);
 
-    public void Set(string key, string value)
-    {
-        var (resource, user) = SecretKeyMap.Resolve(key);
-        _backend.Set(resource, user, value);
-    }
+    public void Set(string key, string value) => _backend.Set(key, value);
 
-    public void Delete(string key)
-    {
-        var (resource, user) = SecretKeyMap.Resolve(key);
-        _backend.Delete(resource, user);
-    }
+    public void Delete(string key) => _backend.Delete(key);
 }

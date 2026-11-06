@@ -563,6 +563,9 @@ mod bearer_door_tests {
         // Test modules asserting a mint is (or is not) in the store.
         ("auth_core.rs", 2),
         ("bridge_blob_handlers.rs", 1),
+        // Test module reading a fresh mint's token id for the upgrade-window
+        // revoke test.
+        ("mail_import_tunnel.rs", 1),
     ];
 
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

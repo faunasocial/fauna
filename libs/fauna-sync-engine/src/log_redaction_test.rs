@@ -295,20 +295,68 @@ const ERROR_STRING_ALLOWLIST: &[(&str, &str, &str)] = &[
         "for {path} failed hash",
         "held address, reserved name plus hashes",
     ),
+    // The chunk-by-chunk pull (`pull_as_is`) names the same held address per chunk.
     (
         "fauna-client-sync/reseed_pull.rs",
-        "fetching {path}'s chunks",
+        "{path}'s chunk dedup check",
         "held address, reserved name plus hashes",
     ),
     (
         "fauna-client-sync/reseed_pull.rs",
-        "of {path}'s {} chunks",
+        "fetching {path}'s chunk {key_hex}",
         "held address, reserved name plus hashes",
     ),
     (
         "fauna-client-sync/reseed_pull.rs",
-        "chunk {} of {path} failed",
+        "bodies for {path}'s chunk {key_hex}",
         "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "of {path} failed hash verification",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "uploading {path}'s chunk {key_hex}",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "uploading {path}'s manifest",
+        "held address, reserved name plus hashes",
+    ),
+    // group_ring_mirror.rs: `dir`/`self.path` is the sync state dir joined with the fixed
+    // `MIRROR_FILE` name — an internal store path, never a user-chosen name.
+    (
+        "group_ring_mirror.rs",
+        "the mirror's directory {}",
+        "internal state dir path",
+    ),
+    (
+        "group_ring_mirror.rs",
+        "move the mirror into place at {}",
+        "internal state dir path",
+    ),
+    (
+        "group_ring_mirror.rs",
+        "read the mirror at {}",
+        "internal state dir path",
+    ),
+    (
+        "group_ring_mirror.rs",
+        "is not a group-ring mirror",
+        "internal state dir path",
+    ),
+    (
+        "group_ring_mirror.rs",
+        "is format version {version}",
+        "internal state dir path",
+    ),
+    (
+        "group_ring_mirror.rs",
+        "did not open",
+        "internal state dir path",
     ),
 ];
 

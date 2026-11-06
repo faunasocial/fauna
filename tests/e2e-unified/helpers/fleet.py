@@ -61,8 +61,9 @@ def device_set_state(driver, device_id_hex: str) -> dict:
 
 
 def require_device_set_reader(driver) -> None:
-    """Skip an app that hosts an account runtime but publishes no device-set
-    reader — convention 7 mode 5, never a bare skip.
+    """Fail on an app that hosts an account runtime but publishes no device-set
+    reader — every app answers it, so its absence is a regression to report,
+    never a skip to tally (convention 7, *The surface registry*).
 
     tui wired it 2026-09-16; linux, android, macOS, iOS and windows followed
     2026-09-21 (macOS and iOS share `FaunaKit`'s `DeviceSetStateTestCommand`),
@@ -72,22 +73,14 @@ def require_device_set_reader(driver) -> None:
     copy per app (priority #1). A built reader always answers a JSON object —
     at minimum ``{"found": false}`` — so ``None`` is unambiguous.
     """
-    from helpers.app_surface import skip_unbuilt
-
     if driver.call_command("device_set_state", {"device_id_hex": "00" * 32}) is None:
-        skip_unbuilt(
-            driver,
-            surface="the `device_set_state` account-data-plane reader",
-            detail=(
-                "this app hosts an account-store runtime but publishes no "
-                "`device_set_state` command, so a fleet-scope `Removed` row "
-                "cannot be observed here. Every app that hosts one answers it "
-                "over the shared `fauna_client_account_runtime::device_set_state_json`, "
-                "so a dispatcher that no longer does is a regression, which "
-                "`test_account_runtime_pump.py`'s reader test fails on rather "
-                "than skips"
-            ),
-            tracked="docs/goal/architecture/e2e-automation-surface-gating.md",
+        raise AssertionError(
+            "this app publishes no `device_set_state` command, so a fleet-scope "
+            "`Removed` row cannot be observed here. Every app answers it over the "
+            "shared `fauna_client_account_runtime::device_set_state_json`, so a "
+            "dispatcher that no longer does is a regression, not unbuilt debt "
+            "(e2e-conventions.md convention 7, *The surface registry*: a probed "
+            "property is an assertion)"
         )
 
 

@@ -42,7 +42,7 @@ use fauna_core::data::ContentHash;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
 use fauna_protocol::segments::{SegmentRef, SegmentsListReply};
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Serve-page bounds, sized under the peer channel's 1 MiB frame
 /// (`fauna_peer_channel::MAX_FRAME_LEN`) — and so under the nest's WS frame
@@ -91,10 +91,59 @@ enum StoreCmd {
 }
 
 /// A handle to a serving store, owned by a dedicated thread (see the module
-/// docs). Cloneable; the thread exits when every handle is dropped.
+/// docs). Cloneable; the thread exits when every handle is dropped, and
+/// [`Self::closed`] says when it has.
 #[derive(Clone)]
 pub struct ServeStoreHandle {
     tx: mpsc::Sender<StoreCmd>,
+    closed: ServeStoreClosed,
+}
+
+/// The serving thread's end, as an event: it resolves once the thread has
+/// dropped its store, so that second connection to the account's database is
+/// CLOSED. It holds no command sender, so waiting on it never keeps the thread
+/// alive; the thread ends when the last [`ServeStoreHandle`] is dropped.
+///
+/// Without it the close cannot be observed by whoever drops the last handle:
+/// the drop only asks the thread to end, and the thread closes the store on
+/// its own OS thread some time later. A teardown that must not meet the
+/// database still open waits on this — an erase on windows above all, where an
+/// open file cannot be deleted (`account-scoping.md` § Erasure follows scope,
+/// the open-store note).
+#[derive(Clone)]
+pub struct ServeStoreClosed(watch::Receiver<()>);
+
+impl ServeStoreClosed {
+    /// Whether the serving thread has dropped its store already.
+    pub fn is_closed(&self) -> bool {
+        self.0.has_changed().is_err()
+    }
+
+    /// Resolve once the serving thread has dropped its store. Nothing is ever
+    /// sent on the channel: the thread drops its sender after the store, and
+    /// that drop is the only event.
+    pub async fn wait(mut self) {
+        while self.0.changed().await.is_ok() {}
+    }
+}
+
+/// The serving thread's body: answer until every handle is gone, then close
+/// the store BEFORE the closed signal fires — the order [`ServeStoreClosed`]
+/// promises.
+fn serve_until_closed(
+    rt: tokio::runtime::Runtime,
+    store: AccountStore<SqliteBackend>,
+    mut rx: mpsc::Receiver<StoreCmd>,
+    closed: watch::Sender<()>,
+) {
+    rt.block_on(async move {
+        while let Some(cmd) = rx.recv().await {
+            answer(&store, cmd).await;
+        }
+        drop(store);
+    });
+    drop(rt);
+    drop(closed);
 }
 
 impl ServeStoreHandle {
@@ -102,21 +151,27 @@ impl ServeStoreHandle {
     /// over a channel. The thread runs a current-thread tokio runtime, so the
     /// store's AFIT futures never need to be `Send`.
     pub fn spawn(store: AccountStore<SqliteBackend>) -> Self {
-        let (tx, mut rx) = mpsc::channel::<StoreCmd>(64);
+        let (tx, rx) = mpsc::channel::<StoreCmd>(64);
+        let (closed_tx, closed_rx) = watch::channel(());
         std::thread::Builder::new()
             .name("peer-sync-store".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .expect("current-thread runtime for the serving store");
-                rt.block_on(async move {
-                    while let Some(cmd) = rx.recv().await {
-                        answer(&store, cmd).await;
-                    }
-                });
+                serve_until_closed(rt, store, rx, closed_tx);
             })
             .expect("spawn serving-store thread");
-        Self { tx }
+        Self {
+            tx,
+            closed: ServeStoreClosed(closed_rx),
+        }
+    }
+
+    /// The close of this handle's serving store, to wait on once every handle
+    /// has been dropped ([`ServeStoreClosed`]).
+    pub fn closed(&self) -> ServeStoreClosed {
+        self.closed.clone()
     }
 
     /// [`Self::spawn`], with the store OPENED on its owner thread too — for a
@@ -129,35 +184,35 @@ impl ServeStoreHandle {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<AccountStore<SqliteBackend>>>,
     {
-        let (tx, mut rx) = mpsc::channel::<StoreCmd>(64);
+        let (tx, rx) = mpsc::channel::<StoreCmd>(64);
         let (opened_tx, opened_rx) = oneshot::channel::<Result<()>>();
+        let (closed_tx, closed_rx) = watch::channel(());
         std::thread::Builder::new()
             .name("serving-store".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .expect("current-thread runtime for the serving store");
-                rt.block_on(async move {
-                    let store = match open().await {
-                        Ok(store) => {
-                            let _ = opened_tx.send(Ok(()));
-                            store
-                        }
-                        Err(e) => {
-                            let _ = opened_tx.send(Err(e));
-                            return;
-                        }
-                    };
-                    while let Some(cmd) = rx.recv().await {
-                        answer(&store, cmd).await;
+                let store = match rt.block_on(open()) {
+                    Ok(store) => {
+                        let _ = opened_tx.send(Ok(()));
+                        store
                     }
-                });
+                    Err(e) => {
+                        let _ = opened_tx.send(Err(e));
+                        return;
+                    }
+                };
+                serve_until_closed(rt, store, rx, closed_tx);
             })
             .context("spawn serving-store thread")?;
         opened_rx
             .await
             .context("serving-store thread exited before opening")??;
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            closed: ServeStoreClosed(closed_rx),
+        })
     }
 
     async fn relay_page(
@@ -421,12 +476,14 @@ fn relay_row_to_change(row: RelayRow) -> SyncChange {
         path: None,
         device_id: None,
         content_key_version: None,
+        content_generation: None,
         thumbnail_hash: None,
         author_actor_id: None,
         path_sealed: None,
         derived_through: None,
         is_resolution: None,
         is_retention: None,
+        deposited_by: None,
         item_class: Some(row.item_class),
         origin_writer: Some(row.writer.to_hex()),
         origin_seq: Some(row.writer_seq as i64),
@@ -538,5 +595,90 @@ pub async fn serve_segment_part(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("open {}", seg.dat_path.display())),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A generous bound for a close that takes milliseconds: a green run never
+    /// pays it, and a broken signal fails here instead of hanging the suite.
+    const CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// **The serving thread's end is observable, and it IS the close.** A
+    /// clone keeps the thread and its connection; once the last handle drops,
+    /// [`ServeStoreClosed`] resolves, and by then the connection is closed.
+    ///
+    /// The sidecars are the witness, as in the account runtime's own
+    /// `shutdown_closes_the_db_and_leaves_the_store_dir_removable`: SQLite
+    /// deletes `-wal`/`-shm` only when the last connection closes cleanly, so
+    /// their absence proves the close on every platform, where a removal would
+    /// prove nothing on POSIX (an open file unlinks there). Their presence is
+    /// asserted first, so a store that never opened a WAL cannot pass this
+    /// vacuously.
+    #[test]
+    fn closed_resolves_once_the_last_handle_drops_and_the_connection_is_closed() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = rt.block_on(async {
+            let store = AccountStore::open(
+                SqliteBackend::open(dir.path()).unwrap(),
+                &"ab".repeat(32),
+                WriterId([0x0E; 32]),
+            )
+            .await
+            .unwrap();
+            store
+                .stage_local_record(
+                    &format!("content:post:{}", "cc".repeat(32)),
+                    "post",
+                    b"a write, so the WAL exists",
+                )
+                .await
+                .unwrap();
+            store
+        });
+        let db = fauna_account_store::sqlite::ACCOUNT_STORE_DB_FILENAME;
+        let wal = dir.path().join(format!("{db}-wal"));
+        let shm = dir.path().join(format!("{db}-shm"));
+        assert!(
+            wal.is_file(),
+            "precondition: a live WAL-mode store has its -wal sidecar ({})",
+            wal.display()
+        );
+
+        let handle = ServeStoreHandle::spawn(store);
+        let clone = handle.clone();
+        let closed = handle.closed();
+        drop(handle);
+        assert!(
+            !closed.is_closed(),
+            "a live clone keeps the serving thread, and its connection, up"
+        );
+
+        drop(clone);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(closed.wait());
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(CLOSE_BUDGET)
+            .expect("closed() never resolved after the last handle dropped");
+        assert!(
+            !wal.exists() && !shm.exists(),
+            "closed() resolved with the serving connection still OPEN: the \
+             sidecars outlived it (-wal present: {}, -shm present: {}) — a \
+             teardown waiting on it would erase over an open store, which \
+             windows refuses (os error 32)",
+            wal.exists(),
+            shm.exists()
+        );
     }
 }

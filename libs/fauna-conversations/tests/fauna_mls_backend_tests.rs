@@ -23,8 +23,8 @@ use fauna_conversations::backend::{
     WelcomeNudge,
 };
 use fauna_conversations::backends::fauna_mls::{
-    FaunaMlsBackend, PARKED_PER_SLOT, ingest_scheduling_welcome, ingest_welcome,
-    join_folder_welcome, leave_folder, poll_inbound_conv, poll_inbound_folder,
+    FaunaMlsBackend, PARKED_PER_SLOT, archive_channel_for, ingest_scheduling_welcome,
+    ingest_welcome, join_folder_welcome, leave_folder, poll_inbound_conv, poll_inbound_folder,
     poll_inbound_scheduling, redrive_parked_successions, refill_evicted_attachments,
     settle_parked_successions,
 };
@@ -2435,10 +2435,14 @@ async fn welcome_then_inbound_end_to_end() {
         "re-delivered welcome reuses the thread"
     );
     assert_eq!(
-        bob_manager.snapshot().threads.len(),
+        bob_backend.bound_channels().len(),
         1,
         "no duplicate thread on re-delivery"
     );
+    // A Welcome-only direct thread is held off the rail until its first
+    // message (`archive-import.md` § Linking and merging (phase two),
+    // ruling 1); the "ping" below lists it.
+    assert!(bob_manager.snapshot().threads.is_empty());
 
     // Now the inbound driver routes Alice's "ping" into the materialized thread.
     let mut after_seq = 0i64;
@@ -2455,6 +2459,11 @@ async fn welcome_then_inbound_end_to_end() {
     assert_eq!(ingested, 1);
     let detail = bob_manager.thread_detail(thread_id).expect("thread");
     assert!(detail.messages.iter().any(|m| m.body == "ping"));
+    assert_eq!(
+        bob_manager.snapshot().threads.len(),
+        1,
+        "the first message lists the thread"
+    );
 }
 
 /// Parse a channel hex string back into a `ChannelId` for the driver call.
@@ -6151,6 +6160,10 @@ async fn manager_confirm_add_participant_oneonone_forks_snapshot_only() {
     backend.bind_channel(tid.clone(), channel_id);
     manager.register_backend(backend.clone());
 
+    // The channel-born 1:1 has carried no message, so it is not on the rail
+    // (`archive-import.md` § Linking and merging (phase two), ruling 1).
+    let listed_before = manager.snapshot().threads.len();
+
     manager.open_add_participant(tid.clone());
     manager.accept_add_participant_chip(fauna_addr("carol", carol_actor));
     let new_id = manager
@@ -6160,7 +6173,12 @@ async fn manager_confirm_add_participant_oneonone_forks_snapshot_only() {
 
     // Snapshot: forked a new thread, selected it; original 1:1 untouched.
     assert_ne!(new_id, tid, "1:1 add forks a new thread");
-    assert_eq!(manager.snapshot().threads.len(), 2, "fork added one thread");
+    assert_eq!(
+        manager.snapshot().threads.len(),
+        listed_before + 1,
+        "fork added one thread"
+    );
+    assert!(manager.thread_detail(tid).is_some(), "the 1:1 is untouched");
     assert_eq!(manager.snapshot().selected_thread_id, Some(new_id));
 
     // No wire op: the fork bootstraps lazily on first send.
@@ -7205,11 +7223,15 @@ async fn bootstrap_group_same_nest_participant_has_no_peer_domain() {
     assert_eq!(welcomes[0].peer_domain, None, "same-nest peer → no relay");
 }
 
-/// A registered handle whose actor has *no* key package is unreachable (nothing
-/// to add them to a group with), so resolution is `NotFound` — same invariant as
-/// the actor-id form (`Resolved(Fauna)` ⇒ startable group).
+/// A registered handle whose actor has *no* key package cannot be added to a
+/// group yet, and the home nest has FOUND the account — so its answer is the
+/// terminal `NotReachable`, in both the bare and the `localpart@<home domain>`
+/// form, never a `NotFound` the mail rail could claim by shape
+/// (`conversations.md` § Errors & edge cases → *The picker tells the truth*,
+/// rule 2). The actor-id form keeps `NotFound`
+/// (`resolve_address_actor_id_hex_no_keypackages_not_found`).
 #[tokio::test]
-async fn resolve_address_handle_resolved_but_no_keypackage_not_found() {
+async fn resolve_address_handle_resolved_but_no_keypackage_not_reachable() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
     let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
     let bob_hex = hex::encode(bob.identity_actor_id().0);
@@ -7222,8 +7244,13 @@ async fn resolve_address_handle_resolved_but_no_keypackage_not_found() {
 
     assert_eq!(
         backend.resolve_address("bob").await,
-        ResolveResult::NotFound,
-        "registered but unreachable (no key package)"
+        ResolveResult::NotReachable,
+        "bare handle: registered but no key package yet"
+    );
+    assert_eq!(
+        backend.resolve_address("bob@nest.test").await,
+        ResolveResult::NotReachable,
+        "home-domain form: registered but no key package yet"
     );
 }
 
@@ -7972,9 +7999,13 @@ async fn session_ingest_welcome_is_idempotent() {
         "re-delivered welcome reuses the same thread id"
     );
     assert_eq!(
-        manager.snapshot().threads.len(),
+        session.backend().bound_channels().len(),
         1,
         "no duplicate thread on re-delivery"
+    );
+    assert!(
+        manager.snapshot().threads.is_empty(),
+        "a Welcome-only direct thread is not listed (archive-import.md ruling 1)"
     );
 }
 
@@ -8285,7 +8316,7 @@ async fn ingest_welcome_by_kind_is_idempotent() {
         .await
         .expect("first ingest binds the thread");
     assert_eq!(
-        manager.snapshot().threads.len(),
+        session.backend().bound_channels().len(),
         1,
         "first ingest bound exactly one thread"
     );
@@ -8303,9 +8334,13 @@ async fn ingest_welcome_by_kind_is_idempotent() {
         .await
         .expect("re-ingest is a no-op, not an error");
     assert_eq!(
-        manager.snapshot().threads.len(),
+        session.backend().bound_channels().len(),
         1,
         "re-ingesting the same Welcome did not duplicate the thread"
+    );
+    assert!(
+        manager.snapshot().threads.is_empty(),
+        "a Welcome-only direct thread is not listed (archive-import.md ruling 1)"
     );
 }
 
@@ -12040,6 +12075,198 @@ async fn leave_folder_forgets_group_and_unmarks_channel() {
     // Idempotent: leaving again is a no-op success.
     let again = leave_folder(&bob_backend, &hex::encode(&raw_gid)).expect("re-leave no-op");
     assert_eq!(again, channel);
+}
+
+/// A [`FolderCustodySink`] recording every set-scoped share-endpoints drop
+/// (`p2p.md` stale-endpoint ruling 2's last sentence) and answering nothing
+/// else — the witness for both arms, leave and removal.
+#[derive(Default)]
+struct DropRecorder(Mutex<Vec<[u8; 32]>>);
+#[async_trait]
+impl FolderCustodySink for DropRecorder {
+    async fn fetch_sealed_envelope(
+        &self,
+        _channel_id_hex: &str,
+    ) -> Option<fauna_conversations::backend::FetchedEnvelope> {
+        None
+    }
+    async fn merge_and_persist(
+        &self,
+        _channel_id: &[u8; 32],
+        _payload: fauna_core::folder_keys::ContentKeyEnvelopePayload,
+        _may_move: bool,
+    ) -> bool {
+        true
+    }
+    async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        self.0.lock().unwrap().push(*channel_id);
+        true
+    }
+}
+
+/// The REMOVAL arm of ruling 2's last sentence: a device whose folder poll
+/// merges the commit removing it — the group still held, no longer active —
+/// tombstones the set's cached share-endpoints rows through the custody sink,
+/// once per session for that channel; a re-walk issues nothing new, a
+/// remaining member's poll of the same commit issues nothing, and a poll of a
+/// set this device never held drops nothing (a pass that merely does not hold
+/// the set is never the event). A fresh backend over the same evicted engine —
+/// a relaunch after a crash between the merge and the drop — drops once more
+/// (the store door answers 0 on a repeat).
+#[tokio::test]
+async fn a_processed_removal_drops_the_sets_share_endpoints_once_and_a_never_held_set_none() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let carol = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let kps: Vec<_> = bob
+        .generate_key_packages(1)
+        .unwrap()
+        .into_iter()
+        .chain(carol.generate_key_packages(1).unwrap())
+        .collect();
+    let (ch, welcome) = alice.create_group(&kps).unwrap();
+    let welcome_bytes = welcome.to_bytes().unwrap();
+    assert_eq!(bob.join_from_welcome_bytes(&welcome_bytes).unwrap(), ch);
+    assert_eq!(carol.join_from_welcome_bytes(&welcome_bytes).unwrap(), ch);
+
+    let nest = Arc::new(MockNest::default());
+    let bob_backend =
+        FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    let bob_sink = Arc::new(DropRecorder::default());
+    bob_backend.set_folder_custody_sink(bob_sink.clone());
+    let carol_backend = FaunaMlsBackend::new(
+        carol.clone(),
+        nest.clone(),
+        "carol",
+        carol.identity_actor_id(),
+    );
+    let carol_sink = Arc::new(DropRecorder::default());
+    carol_backend.set_folder_custody_sink(carol_sink.clone());
+
+    // Seated, nothing posted yet: a walk drops nothing.
+    let mut cursor = 0i64;
+    poll_inbound_folder(&bob_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("pre-removal poll");
+    assert!(
+        bob_sink.0.lock().unwrap().is_empty(),
+        "a seated set drops nothing"
+    );
+
+    // A set bob never held: polled, nothing dropped.
+    let never_held = ChannelId::from_group_id(b"a set bob never held");
+    let mut other = 0i64;
+    let _ = poll_inbound_folder(&bob_backend, &never_held, &mut other, 0).await;
+    assert!(
+        bob_sink.0.lock().unwrap().is_empty(),
+        "a never-held set drops nothing"
+    );
+
+    // The owner removes bob and posts the commit.
+    let bob_leaf = alice
+        .find_leaf_by_identity(&ch, &bob.identity_actor_id())
+        .expect("bob's leaf");
+    let commit = alice.remove_member(&ch, bob_leaf).expect("remove commit");
+    nest.channel_send(
+        ch.to_string(),
+        ChannelEnvelope::Commit(commit).to_bytes().unwrap(),
+        None,
+        vec![],
+    )
+    .await
+    .expect("owner posts the commit");
+
+    poll_inbound_folder(&bob_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("bob processes his removal");
+    assert!(
+        bob.has_group(&ch) && !bob.is_group_active(&ch),
+        "held, evicted"
+    );
+    assert_eq!(
+        *bob_sink.0.lock().unwrap(),
+        vec![ch.0],
+        "the processed removal drops the set's rows once"
+    );
+
+    // Re-walks — the live cursor and a restart-fresh one — issue nothing new.
+    poll_inbound_folder(&bob_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("again");
+    let mut fresh = 0i64;
+    let _ = poll_inbound_folder(&bob_backend, &ch, &mut fresh, 0).await;
+    assert_eq!(bob_sink.0.lock().unwrap().len(), 1, "once per session");
+
+    // The remaining member merges the same commit and drops nothing.
+    let mut carol_cursor = 0i64;
+    poll_inbound_folder(&carol_backend, &ch, &mut carol_cursor, 0)
+        .await
+        .expect("carol advances");
+    assert!(
+        carol_sink.0.lock().unwrap().is_empty(),
+        "a remaining member drops nothing"
+    );
+
+    // Relaunch over the evicted engine: the first walk drops once more.
+    let relaunched =
+        FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob.identity_actor_id());
+    let relaunch_sink = Arc::new(DropRecorder::default());
+    relaunched.set_folder_custody_sink(relaunch_sink.clone());
+    let mut c = 0i64;
+    let _ = poll_inbound_folder(&relaunched, &ch, &mut c, 0).await;
+    assert_eq!(
+        *relaunch_sink.0.lock().unwrap(),
+        vec![ch.0],
+        "a relaunch heals a crash between the merge and the drop"
+    );
+}
+
+/// A completed leave tombstones the set's cached share-endpoints rows — the
+/// positive local event of `p2p.md` § Cross-user shared-set transfer → *A
+/// departed member's cached endpoint*, ruling 2's last sentence — through the
+/// custody sink, exactly once and for that set's channel; a leave that fails
+/// (here: an unaddressable group id) issues nothing.
+#[tokio::test]
+async fn a_completed_leave_drops_the_sets_share_endpoints_once_and_a_failed_one_none() {
+    let (nest, bob, bob_actor, _alice_hex, welcome) = folder_welcome_setup().await;
+    let bob_backend = FaunaMlsBackend::new(bob.clone(), nest.clone(), "bob", bob_actor);
+    let sink = Arc::new(DropRecorder::default());
+    bob_backend.set_folder_custody_sink(sink.clone());
+    let channel = join_folder_welcome(
+        &bob_backend,
+        &welcome.channel_hex,
+        &welcome.welcome_bytes,
+        "",
+        &FolderWelcomeContext::default(),
+    )
+    .await
+    .expect("join");
+    let raw_gid = bob
+        .list_groups_with_raw_ids()
+        .into_iter()
+        .find(|(cid, _)| *cid == channel)
+        .map(|(_, gid)| gid)
+        .expect("joined group id");
+
+    assert!(
+        bob_backend.leave_folder("not hex").await.is_err(),
+        "an unaddressable leave fails"
+    );
+    assert!(
+        sink.0.lock().unwrap().is_empty(),
+        "a failed leave drops nothing"
+    );
+
+    let left = bob_backend
+        .leave_folder(&hex::encode(&raw_gid))
+        .await
+        .expect("leave");
+    assert_eq!(left, channel);
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        vec![channel.0],
+        "the completed leave drops the set's rows once"
+    );
 }
 
 #[tokio::test]
@@ -24537,5 +24764,333 @@ async fn a_statement_that_repoints_no_row_folds_nothing_and_the_next_verdict_doe
         folds.asked(),
         vec![pair.clone(), pair],
         "the projection-load reconcile folds it from the verdict already given"
+    );
+}
+
+/// A recording `ArchiveSignalSink` for the archive-link carrier tests.
+#[derive(Default)]
+struct RecordingArchiveSink {
+    /// `(channel_hex, sender, bytes)` per hand-off.
+    seen: std::sync::Mutex<Vec<(String, ActorId, Vec<u8>)>>,
+    /// What `archive_signal` answers (durably captured?).
+    capture: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl fauna_conversations::backend::ArchiveSignalSink for RecordingArchiveSink {
+    async fn archive_signal(&self, channel_hex: &str, sender: ActorId, bytes: &[u8]) -> bool {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((channel_hex.to_string(), sender, bytes.to_vec()));
+        self.capture.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The archive-link carrier end to end (`archive-import.md` § Linking and
+/// merging (phase two), rulings 1 and 2): a contact with no conversation gets
+/// a pair channel bootstrapped exactly as a first message would — one `Dm`
+/// Welcome, nothing posted — and the next ask returns the same channel. Its
+/// signals reach the receiver's sink with the MLS-authenticated sender and
+/// never a bubble; a sink-less session tallies `no_sink` and walks on. A
+/// thread that has carried only signals is listed on neither side and counts
+/// nothing, and the first chat message lists it like any other.
+#[tokio::test]
+async fn an_archive_signal_rides_a_bootstrapped_pair_channel_that_no_rail_lists() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob_actor = bob.identity_actor_id();
+    let nest = Arc::new(MockNest::default());
+    nest.seed_keypackage(
+        &hex::encode(bob_actor.0),
+        bob.generate_key_packages_bytes(1).unwrap()[0].clone(),
+    );
+
+    let alice_manager = ConversationsManager::new();
+    let alice_backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    alice_manager.register_backend(alice_backend.clone());
+    let bob_manager = ConversationsManager::new();
+    let bob_backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob_actor,
+    ));
+    bob_manager.register_backend(bob_backend.clone());
+
+    // (1) No conversation yet: a pair channel is bootstrapped, nothing posted.
+    let channel_hex = archive_channel_for(&alice_backend, &alice_manager, bob_actor, None)
+        .await
+        .expect("bootstrap the pair channel");
+    let welcomes = nest.welcomes();
+    assert_eq!(welcomes.len(), 1, "exactly one Welcome");
+    assert_eq!(welcomes[0].recipient_hex, hex::encode(bob_actor.0));
+    assert_eq!(welcomes[0].channel_hex, channel_hex);
+    assert!(matches!(welcomes[0].kind, WelcomeChannelKind::Dm));
+    assert!(
+        nest.sent_envelopes(&channel_hex).is_empty(),
+        "the bootstrap posts no Text"
+    );
+    assert!(
+        alice_manager.snapshot().threads.is_empty(),
+        "the signal carrier is not listed on the sender's rail"
+    );
+
+    // (2) The next ask returns the same channel and bootstraps nothing.
+    assert_eq!(
+        archive_channel_for(&alice_backend, &alice_manager, bob_actor, None)
+            .await
+            .expect("existing pair channel"),
+        channel_hex
+    );
+    assert_eq!(nest.welcomes().len(), 1, "no second Welcome");
+
+    // (3) The receiver joins: a Welcome-only thread is unlisted.
+    let bob_thread = ingest_welcome(
+        &bob_backend,
+        &bob_manager,
+        &welcomes[0].channel_hex,
+        &welcomes[0].welcome_bytes,
+        "",
+        None,
+    )
+    .await
+    .expect("welcome ingest");
+    assert!(bob_manager.snapshot().threads.is_empty());
+
+    // (4) No sink registered: skipped, tallied, no bubble, the walk goes on.
+    let channel_id = fauna_mls::types::ChannelId::from_hex(&channel_hex).unwrap();
+    let payload = vec![0xA5u8; 48];
+    alice_backend
+        .send_archive_signal(&channel_hex, payload.clone())
+        .await
+        .expect("send signal");
+    let mut after_seq = 0i64;
+    let outcome = poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    assert_eq!(outcome.ingested, 0, "a signal is never a bubble");
+    let counts = bob_backend.archive_signal_counts();
+    assert_eq!((counts.seen, counts.no_sink), (1, 1), "{counts:?}");
+
+    // (5) Sink registered: the verbatim bytes, the authenticated sender, the
+    // carrying channel; a capture failure is tallied and never stalls.
+    let sink = Arc::new(RecordingArchiveSink::default());
+    sink.capture
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    bob_backend.set_archive_signal_sink(sink.clone());
+    alice_backend
+        .send_archive_signal(&channel_hex, payload.clone())
+        .await
+        .expect("send signal");
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    {
+        let seen = sink.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (hex, sender, bytes) = &seen[0];
+        assert_eq!(hex, &channel_hex);
+        assert_eq!(sender, &alice_actor, "the MLS-authenticated sender");
+        assert_eq!(bytes, &payload, "verbatim bytes");
+    }
+    sink.capture
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    alice_backend
+        .send_archive_signal(&channel_hex, payload.clone())
+        .await
+        .expect("send signal");
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok — a capture failure never stalls the walk");
+    let counts = bob_backend.archive_signal_counts();
+    assert_eq!(
+        (
+            counts.seen,
+            counts.no_sink,
+            counts.captured,
+            counts.uncaptured
+        ),
+        (3, 1, 1, 1),
+        "{counts:?}"
+    );
+    assert!(
+        bob_manager.snapshot().threads.is_empty(),
+        "signals alone never list the thread"
+    );
+    assert_eq!(bob_manager.unread_total(), 0, "and never count");
+    assert!(
+        bob_manager
+            .thread_detail(bob_thread.clone())
+            .expect("the thread exists, unlisted")
+            .messages
+            .is_empty()
+    );
+
+    // (6) The first chat message lists the thread on both sides.
+    let alice_thread = alice_backend
+        .thread_for_channel(&channel_id)
+        .expect("the bootstrap bound a thread");
+    alice_manager.set_compose_body(alice_thread.clone(), "hello bob".into());
+    alice_manager
+        .send(alice_thread.clone())
+        .await
+        .expect("chat send on the pair channel");
+    assert_eq!(alice_manager.snapshot().threads.len(), 1);
+    let outcome = poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    assert_eq!(outcome.ingested, 1);
+    let threads = bob_manager.snapshot().threads;
+    assert_eq!(threads.len(), 1, "the first bubble lists it");
+    assert_eq!(threads[0].thread_id, bob_thread);
+    assert_eq!(threads[0].snippet, "hello bob");
+}
+
+/// A bootstrap whose Welcome the nest refuses leaves no group behind. Before
+/// the fix the group was created and bound ahead of the delivery and kept on
+/// its failure, so the next signal found it as "the existing pair channel" and
+/// posted into a group the contact had never joined — lost for good (seen in
+/// the phase-two witness: a contact's first announce, refused while the pair
+/// was not yet mutual, swallowed every later one). The next call bootstraps
+/// afresh, and that channel is the one the contact can join.
+#[tokio::test]
+async fn a_refused_bootstrap_welcome_leaves_no_pair_channel_and_the_next_signal_bootstraps_afresh()
+{
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob_actor = bob.identity_actor_id();
+    let nest = Arc::new(MockNest::default());
+    for kp in bob.generate_key_packages_bytes(2).unwrap() {
+        nest.seed_keypackage(&hex::encode(bob_actor.0), kp);
+    }
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+
+    nest.fail_welcome_deliver(true);
+    archive_channel_for(&backend, &manager, bob_actor, None)
+        .await
+        .expect_err("a refused Welcome fails the bootstrap");
+    assert!(
+        alice.list_groups().is_empty(),
+        "the refused bootstrap's group is forgotten, not kept as a pair channel"
+    );
+    assert!(backend.conv_channels().is_empty(), "and unbound");
+
+    nest.fail_welcome_deliver(false);
+    let carrier = archive_channel_for(&backend, &manager, bob_actor, None)
+        .await
+        .expect("the next signal bootstraps afresh");
+    let welcomes = nest.welcomes();
+    assert_eq!(welcomes.len(), 1, "one Welcome landed");
+    assert_eq!(
+        welcomes[0].channel_hex, carrier,
+        "for the channel the signal rides"
+    );
+    let joined = bob
+        .join_from_welcome_bytes(&welcomes[0].welcome_bytes)
+        .expect("the contact joins the carrier");
+    assert_eq!(joined.to_string(), carrier);
+}
+
+/// The chat twin: a first send whose Welcome is refused leaves the thread with
+/// no channel, so the user's retry bootstraps a group the peer can join rather
+/// than sealing into the abandoned one.
+#[tokio::test]
+async fn a_chat_send_retried_after_a_refused_welcome_bootstraps_a_group_the_peer_can_join() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob_actor = bob.identity_actor_id();
+    let nest = Arc::new(MockNest::default());
+    for kp in bob.generate_key_packages_bytes(2).unwrap() {
+        nest.seed_keypackage(&hex::encode(bob_actor.0), kp);
+    }
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+
+    let thread = manager.create_mls_group(vec![fauna_addr("bob@nest", bob_actor)]);
+    manager.set_compose_body(thread.clone(), "hi bob".into());
+    nest.fail_welcome_deliver(true);
+    manager
+        .send(thread.clone())
+        .await
+        .expect_err("a refused Welcome fails the first send");
+    assert!(alice.list_groups().is_empty(), "no abandoned group is kept");
+
+    nest.fail_welcome_deliver(false);
+    manager.set_compose_body(thread.clone(), "hi bob".into());
+    manager
+        .send(thread.clone())
+        .await
+        .expect("the retry bootstraps afresh");
+    let welcomes = nest.welcomes();
+    assert_eq!(welcomes.len(), 1, "one Welcome landed");
+    let joined = bob
+        .join_from_welcome_bytes(&welcomes[0].welcome_bytes)
+        .expect("bob joins the retry's group");
+    assert_eq!(
+        alice.list_groups(),
+        vec![joined],
+        "the retry sealed into the group bob joined"
+    );
+}
+
+/// An existing two-member chat channel with the contact is the carrier — no
+/// second group is born for a signal (ruling 1).
+#[tokio::test]
+async fn archive_channel_for_returns_the_existing_pair_channel() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let alice_actor = alice.identity_actor_id();
+    let bob_actor = bob.identity_actor_id();
+    let nest = Arc::new(MockNest::default());
+    nest.seed_keypackage(
+        &hex::encode(bob_actor.0),
+        bob.generate_key_packages_bytes(1).unwrap()[0].clone(),
+    );
+    let manager = ConversationsManager::new();
+    let backend = Arc::new(FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice_actor,
+    ));
+    manager.register_backend(backend.clone());
+
+    let thread = manager.create_mls_group(vec![fauna_addr("bob@nest", bob_actor)]);
+    manager.set_compose_body(thread.clone(), "hi bob".into());
+    manager.send(thread.clone()).await.expect("chat bootstrap");
+    let chat_channel = nest.welcomes()[0].channel_hex.clone();
+
+    let carrier = archive_channel_for(&backend, &manager, bob_actor, None)
+        .await
+        .expect("pair channel");
+    assert_eq!(carrier, chat_channel, "the chat channel carries the signal");
+    assert_eq!(nest.welcomes().len(), 1, "no second group is born");
+    assert!(
+        archive_channel_for(&backend, &manager, alice_actor, None)
+            .await
+            .is_err(),
+        "no pair channel with oneself"
     );
 }

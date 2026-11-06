@@ -1,17 +1,20 @@
-"""tier_3: four outcomes of the private, on-device search index witnessed
+"""tier_3: six outcomes of the private, on-device search index witnessed
 through the real app UI (`docs/features/private-search-index.md` outcomes 4, 5,
-6, 8; `docs/goal/behavior/content-index.md` § Goal, § What's indexed, § Where
-queries run — per app).
+6, 8, 9, 10; `docs/goal/behavior/content-index.md` § Goal, § What's indexed,
+§ Where queries run — per app; `docs/goal/ui/search.md` § State & data shape
+for 9 and 10).
 
 tui first (the lead app); the other native apps register the same shared local
 arm, so their legs are marks added here as each is run. Web is a declared
 absence on this page (no browser Tantivy — `content-index.md` § Where queries
 run).
 
-**The apps are named per test**, because iOS answers each outcome in the
-phone's own shape. A phone builds no index (`content-index.md` § Build vs.
-query), so every journey whose hit is content the seat under test seeded is a
-desktop journey here, and iOS has a twin of each in which a DESKTOP seat of the
+**The apps are named per test**, because the phones (iOS and android) answer
+each outcome in the phone's own shape. A phone builds no index
+(`content-index.md` § Build vs. query), so every journey whose hit is content
+the seat under test seeded is a desktop journey here, and each phone has a twin
+of each (the same six tests carry both phone marks; android's are not yet run,
+the device venue being absent) in which a DESKTOP seat of the
 same account builds and the phone finds (`alice_builder_seats`): the desktop
 restores the phone's conversations from the `__mls` replica and its draft from
 `__drafts` at launch, walks the mailbox and the posts, and publishes; the phone
@@ -46,6 +49,7 @@ from helpers.budgets import MLS_HANDSHAKE_S
 from helpers.search_journeys import (
     HELD_SETTLE_S,
     LOCAL_INDEX_S,
+    NEST_HIT_S,
     FailingNestArm,
     actor_client,
     discard_new_thread_draft,
@@ -132,14 +136,10 @@ def _receive_a_conversation_message(app, nest_instance, test_user, body: str) ->
     # Reach policy: accept the sender as a contact so the Welcome flows under the
     # default mode (per-pair — the session user's own mode is untouched).
     conv_api.accept_contact(port, test_user, sender["actor_id_hex"])
-    conv_api.welcome_deliver(port, sender, me, channel_id_hex, welcome)
-    wait_until(
-        lambda: any(
-            t.channel_id_hex == channel_id_hex for t in app.conversations.list_threads()
-        ),
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "the app never joined the Welcome's group",
-    )
+    inbox_id = conv_api.welcome_deliver(port, sender, me, channel_id_hex, welcome)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first message.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S)
     conv_api.channel_send(port, sender, channel_id_hex, envelope)
     wait_until(
         lambda: any(
@@ -255,6 +255,7 @@ def test_a_conversation_message_a_post_and_a_draft_of_your_own_are_found_by_thei
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index", "search")
 def test_a_phone_finds_its_own_message_post_and_draft_a_desktop_seat_indexed(
@@ -437,6 +438,7 @@ def test_content_indexed_on_one_device_is_found_from_another_that_never_indexed_
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index")
 def test_a_phone_finds_content_a_desktop_seat_of_the_same_account_indexed(
@@ -570,6 +572,7 @@ def test_a_result_shows_the_item_as_it_is_now(logged_in_app):
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index")
 def test_a_phone_result_shows_the_draft_as_it_is_now_once_a_builder_relaunches(
@@ -801,6 +804,7 @@ def test_mail_your_device_filed_as_junk_never_turns_up_in_search(
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("private-search-index")
 def test_mail_a_phone_filed_as_junk_never_turns_up_in_its_search_over_a_desktop_seats_index(
@@ -916,6 +920,411 @@ def test_mail_a_phone_filed_as_junk_never_turns_up_in_its_search_over_a_desktop_
         )
         assert all(kinds_in(t) == {email} for t in texts if nonce in t), (
             f"every hit for {nonce!r} must be the kept {email}; rows={texts!r}"
+        )
+    finally:
+        reset_search_page(phone)
+
+
+def _row_index(app, needle: str, kind: str) -> int | None:
+    """The row index of the first painted row carrying `needle` whose only kind
+    is `kind` — the row a user would activate."""
+    for i, text in enumerate(app.search.result_texts()):
+        if needle in text and kinds_in(text) == {kind}:
+            return i
+    return None
+
+
+def _open_found_row(app, needle: str, kind: str) -> None:
+    """Search `needle` until a `kind` row carrying it shows, then activate THAT
+    row (never blindly row 0 — the page may hold other hits)."""
+    wait_until(
+        lambda: found(app, needle, kind),
+        LOCAL_INDEX_S,
+        diagnose=lambda: (
+            f"the {kind} carrying {needle!r} was never found by search — "
+            f"rows={rows(app)} error={app.error_text()!r}"
+        ),
+    )
+    index = _row_index(app, needle, kind)
+    assert index is not None, f"the {kind} row for {needle!r} vanished; rows={rows(app)}"
+    app.search.open_result(index)
+
+
+def _selected_thread_id(app):
+    app.driver.set_state({})
+    return app.driver.get_state("data.selected_thread_id")
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_opening_a_draft_found_by_search_opens_the_composer_holding_it(
+    real_faunamls_app, nest_instance, test_user
+):
+    """`private-search-index` outcome 9 — `ui/search.md` § State & data shape:
+    a draft's row navigates to `SearchNav::Draft`, whose target "is the
+    composer holding it, and `None` there is the thread-less new-thread
+    compose". Both cases, each left first so the composer reappearing is the
+    row's doing:
+
+    * thread-tied — a draft typed into a conversation's compose bar and left
+      unsent; activating its row opens THAT conversation with the draft in the
+      compose bar;
+    * thread-less — a half-written new conversation, stepped out of; activating
+      its row opens the new-conversation composer holding it.
+
+    A draft never reaches the nest's search corpus, so both rows are the
+    private index's by construction."""
+    app = real_faunamls_app
+    conv = app.conversations
+    draft = S.search_page.badge_draft
+    tag = uuid.uuid4().hex[:10]
+    tied_needle, loose_needle = f"tied{tag}", f"loose{tag}"
+    tied_body = f"{tied_needle} reply about the boiler"
+    loose_body = f"{loose_needle} invite for the allotment"
+
+    channel = _receive_a_conversation_message(
+        app, nest_instance, test_user, f"the msg{tag} boiler is broken again"
+    )
+    thread_id = next(
+        t.thread_id for t in conv.list_threads() if t.channel_id_hex == channel
+    )
+    try:
+        # ── thread-tied: type into the conversation, leave it unsent, step out.
+        conv.open_thread_by_id(thread_id)
+        app.driver.wait_for("dm-text-field", timeout=10.0)
+        app.driver.clear_and_type("dm-text-field", tied_body)
+        conv.navigate()
+        app.search.navigate()
+        _open_found_row(app, tied_needle, draft)
+        app.driver.wait_for("thread-header", timeout=15.0)
+        wait_until(
+            lambda: _selected_thread_id(app) == thread_id
+            and conv.compose_body_text() == tied_body,
+            15.0,
+            diagnose=lambda: (
+                f"activating the thread-tied draft's row must open its "
+                f"conversation {thread_id!r} holding the draft; "
+                f"selected={_selected_thread_id(app)!r} "
+                f"composer={conv.compose_body_text()!r} error={app.error_text()!r}"
+            ),
+        )
+
+        # ── thread-less: a half-written new conversation, stepped out of.
+        start_new_thread_draft(app, loose_body)
+        conv.step_out_of_new_conversation()
+        wait_until(
+            lambda: not app.driver.is_visible("new-conversation-cancel"),
+            10.0,
+            diagnose=lambda: "stepping out should take the composer off the screen",
+        )
+        app.search.navigate()
+        _open_found_row(app, loose_needle, draft)
+        app.driver.wait_for("new-conversation-cancel", timeout=15.0)
+        wait_until(
+            lambda: conv.compose_body_text() == loose_body,
+            15.0,
+            diagnose=lambda: (
+                f"activating the thread-less draft's row must open the new-"
+                f"conversation composer holding it; composer="
+                f"{conv.compose_body_text()!r} error={app.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(app)
+        discard_new_thread_draft(app)
+        # The thread-tied draft lives on a conversation only this test made;
+        # sent anyway — a send is the other thing that clears a draft
+        # (`conversation-drafts.md` § Persistence) — so the session user's
+        # `__drafts` carries no residue into later tests.
+        conv.open_thread_by_id(thread_id)
+        app.driver.wait_for("dm-text-field", timeout=10.0)
+        if conv.compose_body_text():
+            app.driver.click("dm-send-button")
+
+
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_a_phone_opens_a_draft_a_desktop_seat_indexed_into_the_composer_holding_it(
+    real_faunamls_app, nest_instance, test_user, alice_builder_seats
+):
+    """`private-search-index` outcome 9 on a phone — `ui/search.md` § State &
+    data shape: a draft's row navigates to `SearchNav::Draft`, whose target "is
+    the composer holding it, and `None` there is the thread-less new-thread
+    compose". The journey above in the phone's real shape (`content-index.md`
+    § Build vs. query): the phone writes both drafts, a DESKTOP seat of the
+    same account (`alice_builder_seats`) restores the conversation from the
+    `__mls` replica and both drafts from `__drafts` at its launch and indexes
+    them, and the phone opens each row it finds in the synced index.
+
+    * thread-tied — a draft typed into a conversation's compose bar and left
+      unsent; activating its row opens THAT conversation with the draft in the
+      compose bar;
+    * thread-less — a half-written new conversation, stepped out of; activating
+      its row opens the new-conversation composer holding it.
+
+    The desktop learns of the phone's drafts only at its own launch, so the
+    launch waits on the phone's uploads — never on a delay — and each draft is
+    found on the desktop first, so a miss on the phone names the leg that
+    failed. A draft never reaches the nest's search corpus, so every row is
+    the private index's by construction."""
+    phone = real_faunamls_app
+    conv = phone.conversations
+    draft = S.search_page.badge_draft
+    tag = uuid.uuid4().hex[:10]
+    tied_needle, loose_needle = f"tied{tag}", f"loose{tag}"
+    tied_body = f"{tied_needle} reply about the boiler"
+    loose_body = f"{loose_needle} invite for the allotment"
+
+    provider_before = replica_blob(nest_instance, test_user, "provider")
+    drafts_before = drafts_blob(nest_instance, test_user)
+    channel = _receive_a_conversation_message(
+        phone, nest_instance, test_user, f"the msg{tag} boiler is broken again"
+    )
+    history_before = replica_blob(nest_instance, test_user, f"history/{channel}")
+    thread_id = next(
+        t.thread_id for t in conv.list_threads() if t.channel_id_hex == channel
+    )
+    try:
+        # ── both drafts written on the phone, each left unsent.
+        conv.open_thread_by_id(thread_id)
+        phone.driver.wait_for("dm-text-field", timeout=10.0)
+        phone.driver.clear_and_type("dm-text-field", tied_body)
+        conv.navigate()
+        tied_settled = wait_drafts_uploaded(
+            nest_instance, test_user, superseding=drafts_before
+        )
+        start_new_thread_draft(phone, loose_body)
+        conv.step_out_of_new_conversation()
+        wait_until(
+            lambda: not phone.driver.is_visible("new-conversation-cancel"),
+            10.0,
+            diagnose=lambda: "stepping out should take the composer off the screen",
+        )
+        wait_drafts_uploaded(nest_instance, test_user, superseding=tied_settled)
+        wait_replica_uploaded(
+            nest_instance, test_user, "provider", superseding=provider_before
+        )
+        wait_replica_uploaded(
+            nest_instance, test_user, f"history/{channel}", superseding=history_before
+        )
+
+        # ── a desktop seat builds; both drafts are in its index first.
+        desktop, _ = alice_builder_seats.launch()
+        desktop.search.navigate()
+        for needle in (tied_needle, loose_needle):
+            wait_until(
+                lambda needle=needle: found(desktop, needle, draft),
+                LOCAL_INDEX_S,
+                diagnose=lambda needle=needle: (
+                    f"the desktop seat never indexed the phone's draft {needle!r} "
+                    f"it restored from `__drafts` at launch; rows={rows(desktop)} "
+                    f"error={desktop.error_text()!r}"
+                ),
+            )
+
+        # ── thread-tied: the phone's row opens the conversation holding it.
+        phone.search.navigate()
+        _open_found_row(phone, tied_needle, draft)
+        phone.driver.wait_for("thread-header", timeout=15.0)
+        wait_until(
+            lambda: _selected_thread_id(phone) == thread_id
+            and conv.compose_body_text() == tied_body,
+            15.0,
+            diagnose=lambda: (
+                f"activating the thread-tied draft's row must open its "
+                f"conversation {thread_id!r} holding the draft; "
+                f"selected={_selected_thread_id(phone)!r} "
+                f"composer={conv.compose_body_text()!r} error={phone.error_text()!r}"
+            ),
+        )
+
+        # ── thread-less: the phone's row opens the new-conversation composer.
+        conv.navigate()
+        phone.search.navigate()
+        _open_found_row(phone, loose_needle, draft)
+        phone.driver.wait_for("new-conversation-cancel", timeout=15.0)
+        wait_until(
+            lambda: conv.compose_body_text() == loose_body,
+            15.0,
+            diagnose=lambda: (
+                f"activating the thread-less draft's row must open the new-"
+                f"conversation composer holding it; composer="
+                f"{conv.compose_body_text()!r} error={phone.error_text()!r}"
+            ),
+        )
+    finally:
+        reset_search_page(phone)
+        discard_new_thread_draft(phone)
+        # A send clears the thread-tied draft too (`conversation-drafts.md`
+        # § Persistence), so `__drafts` carries no residue into later tests.
+        conv.open_thread_by_id(thread_id)
+        phone.driver.wait_for("dm-text-field", timeout=10.0)
+        if conv.compose_body_text():
+            phone.driver.click("dm-send-button")
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_a_post_found_by_both_the_private_index_and_the_nest_is_listed_once(
+    real_faunamls_app, nest_instance, test_user
+):
+    """`private-search-index` outcome 10 — `ui/search.md` § State & data shape,
+    *Dedup by identity, local wins*: a post row from each arm with the same
+    `(kind-class, id)` is ONE row.
+
+    Each arm is proven to hold the post on its own first — the nest over the
+    wire (`fauna.search.query`, convention 5), the private index with the nest
+    arm failing — so a single row afterwards, from a search whose nest arm
+    answered (no error on the page), can only be the dedup."""
+    from tests.api import ws_api
+
+    app = real_faunamls_app
+    post = S.search_page.badge_post
+    needle = f"twin{uuid.uuid4().hex[:10]}"
+    _publish_post(nest_instance, test_user, f"{needle} lighthouse at dusk")
+
+    wait_until(
+        lambda: any(
+            needle in str(hit)
+            for hit in ws_api.search(nest_instance["port"], test_user, needle)
+        ),
+        NEST_HIT_S,
+        diagnose=lambda: f"the nest's own search never found the post {needle!r}",
+    )
+    try:
+        app.search.navigate()
+        empty_the_page(app)
+        with FailingNestArm(nest_instance["port"]) as arm:
+            wait_until(
+                lambda: arm.find(app, needle, post),
+                HELD_LOCAL_INDEX_S,
+                diagnose=lambda: (
+                    f"with the nest arm failing, the post {needle!r} was never "
+                    f"found — the private index does not hold it; rows={rows(app)} "
+                    f"error={app.error_text()!r}"
+                ),
+            )
+
+        # Both arms healthy now. A cleared page first, so a failed-arm error
+        # from the held search above cannot be read as this search's.
+        reset_search_page(app)
+        app.search.navigate()
+
+        def both_arms_answered():
+            app.search.query(needle)
+            if app.error_text():
+                return None
+            hits = [t for t in app.search.result_texts() if needle in t]
+            return hits or None
+
+        hits = wait_until(
+            both_arms_answered,
+            NEST_HIT_S,
+            diagnose=lambda: (
+                f"a healthy search for {needle!r} never committed without an "
+                f"error; rows={rows(app)} error={app.error_text()!r}"
+            ),
+        )
+        assert len(hits) == 1 and kinds_in(hits[0]) == {post}, (
+            f"the post both arms found must be listed once, as a {post}; "
+            f"rows carrying {needle!r}: {hits!r}"
+        )
+    finally:
+        reset_search_page(app)
+
+
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.real_conversations
+@pytest.mark.feature("private-search-index")
+def test_a_phone_lists_once_a_post_both_a_desktop_seats_index_and_the_nest_find(
+    logged_in_app, nest_instance, test_user, alice_builder_seats
+):
+    """`private-search-index` outcome 10 on a phone — `ui/search.md` § State &
+    data shape, *Dedup by identity, local wins*: a post row from each arm with
+    the same `(kind-class, id)` is ONE row. The journey above in the phone's
+    real shape (`content-index.md` § Build vs. query): a DESKTOP seat of the
+    same account (`alice_builder_seats`) indexes the post and publishes the
+    segments the phone reads.
+
+    Each arm is proven to hold the post on its own first — the nest over the
+    wire (`fauna.search.query`, convention 5), the phone's synced index with
+    the nest arm failing (after the desktop's own copy, so a miss names the
+    leg) — so a single row afterwards, from a phone search whose nest arm
+    answered (no error on the page), can only be the dedup."""
+    from tests.api import ws_api
+
+    phone = logged_in_app
+    post = S.search_page.badge_post
+    needle = f"phonetwin{uuid.uuid4().hex[:10]}"
+    _publish_post(nest_instance, test_user, f"{needle} lighthouse at dusk")
+
+    wait_until(
+        lambda: any(
+            needle in str(hit)
+            for hit in ws_api.search(nest_instance["port"], test_user, needle)
+        ),
+        NEST_HIT_S,
+        diagnose=lambda: f"the nest's own search never found the post {needle!r}",
+    )
+    phone.search.navigate()
+    empty_the_page(phone)
+    desktop, _ = alice_builder_seats.launch()
+    desktop.search.navigate()
+    empty_the_page(desktop)
+    try:
+        with FailingNestArm(nest_instance["port"]) as arm:
+            wait_until(
+                lambda: arm.find(desktop, needle, post),
+                HELD_LOCAL_INDEX_S,
+                diagnose=lambda: (
+                    f"the desktop seat never indexed the post {needle!r} — "
+                    f"rows={rows(desktop)} error={desktop.error_text()!r}"
+                ),
+            )
+            wait_until(
+                lambda: arm.find(phone, needle, post),
+                HELD_LOCAL_INDEX_S,
+                diagnose=lambda: (
+                    f"with the nest arm failing, the phone never found {needle!r} "
+                    f"in the index the desktop published; rows={rows(phone)} "
+                    f"error={phone.error_text()!r}"
+                ),
+            )
+
+        # Both arms healthy now. A cleared page first, so a failed-arm error
+        # from the held search above cannot be read as this search's.
+        reset_search_page(phone)
+        phone.search.navigate()
+
+        def both_arms_answered():
+            phone.search.query(needle)
+            if phone.error_text():
+                return None
+            hits = [t for t in phone.search.result_texts() if needle in t]
+            return hits or None
+
+        hits = wait_until(
+            both_arms_answered,
+            NEST_HIT_S,
+            diagnose=lambda: (
+                f"a healthy phone search for {needle!r} never committed without "
+                f"an error; rows={rows(phone)} error={phone.error_text()!r}"
+            ),
+        )
+        assert len(hits) == 1 and kinds_in(hits[0]) == {post}, (
+            f"the post both arms found must be listed once on the phone, as a "
+            f"{post}; rows carrying {needle!r}: {hits!r}"
         )
     finally:
         reset_search_page(phone)

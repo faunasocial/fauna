@@ -21,41 +21,59 @@ import SwiftUI
 /// elements, same no-retry rule).
 ///
 /// `pinnedHex`/`seenHex` are the fingerprints the machine's
-/// `LaunchPhase::IdentityChanged` carries. They are **not** rendered as the warning
-/// text (the warning is the fixed, localized `identity_changed_warning` string that
-/// every app shows); they are available for a detail line, and are held here so
-/// the surface can grow one without re-plumbing the phase.
+/// `LaunchPhase::IdentityChanged` carries. In the ordinary variant they are **not**
+/// rendered (the warning is the fixed, localized `identity_changed_warning` string).
+///
+/// **Fork variant** (`isFork`, from `LaunchSnapshot.identityFork`;
+/// `box-recovery.md` § Client acceptance): rotation-chain fork evidence paints
+/// `nest-identity-fork-warning` — the shared `identity_fork_warning` sentence naming
+/// both heads — and the wizard fallthrough ONLY. No trust button: no path re-trusts a
+/// forked chain. Mirrors tui `LaunchSurface::IdentityForked`.
 public struct LaunchIdentityChangedView: View {
     private let pinnedHex: String
     private let seenHex: String?
+    private let isFork: Bool
     private let onTrust: () -> Void
     private let onUseDifferentNest: () -> Void
 
     public init(
         pinnedHex: String,
         seenHex: String?,
+        isFork: Bool = false,
         onTrust: @escaping () -> Void,
         onUseDifferentNest: @escaping () -> Void
     ) {
         self.pinnedHex = pinnedHex
         self.seenHex = seenHex
+        self.isFork = isFork
         self.onTrust = onTrust
         self.onUseDifferentNest = onUseDifferentNest
     }
 
     public var body: some View {
         VStack(spacing: 16) {
-            Text(L.onboarding.launch.identityChangedWarning)
-                .multilineTextAlignment(.center)
-                .accessibilityIdentifier(Ids.nestIdentityChangedWarning)
-                .automationValue(
-                    Ids.nestIdentityChangedWarning,
-                    text: { L.onboarding.launch.identityChangedWarning }
-                )
+            if isFork {
+                // A fork always carries a seen head (only the Withdrawn arm leaves it
+                // nil), so the empty fallback is unreachable and still never trustable.
+                let forkWarning = L.onboarding.launch.identityForkWarning(
+                    pinned: pinnedHex, seen: seenHex ?? "")
+                Text(forkWarning)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier(Ids.nestIdentityForkWarning)
+                    .automationValue(Ids.nestIdentityForkWarning, text: { forkWarning })
+            } else {
+                Text(L.onboarding.launch.identityChangedWarning)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier(Ids.nestIdentityChangedWarning)
+                    .automationValue(
+                        Ids.nestIdentityChangedWarning,
+                        text: { L.onboarding.launch.identityChangedWarning }
+                    )
 
-            Button(L.onboarding.launch.identityChangedTrust) { onTrust() }
-                .accessibilityIdentifier(Ids.nestIdentityChangedTrustButton)
-                .automationActivate(Ids.nestIdentityChangedTrustButton) { onTrust() }
+                Button(L.onboarding.launch.identityChangedTrust) { onTrust() }
+                    .accessibilityIdentifier(Ids.nestIdentityChangedTrustButton)
+                    .automationActivate(Ids.nestIdentityChangedTrustButton) { onTrust() }
+            }
 
             Button(L.launch.useDifferentNest) { onUseDifferentNest() }
                 .accessibilityIdentifier(Ids.launchFallthroughButton)

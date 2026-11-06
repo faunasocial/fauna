@@ -21,13 +21,15 @@ host OS (`feature_ledger.host_platform`), one file per platform.
   the second, `duration` the test's setup + call + teardown seconds, `origin` who ran
   it (`session`, `check`, `tester` — `FAUNA_RUN_ORIGIN`, default `session`), `dirty`
   the ledger's tree mark.
-* `last` — `{outcome, commit, time}`: the newest outcome, `green`, `red`, `error` or
+* `last` — `{outcome, commit, dirty, time}`: the newest outcome, `green`, `red`, `error` or
   `skip:<class>` (convention 7's two declared classes; an environment or undeclared
   skip, an xfail and an xpass observe nothing about the test and record no outcome).
 * `red_since` — `{tip, count}`: the commit at which the test went red and the count of
   consecutive reds since; cleared by a green.
-* `flaky` — `{count, last}`: reds that went green on a re-run at the SAME commit — the
-  tree did not change, so the outcome did not come from the code.
+* `flaky` — `{count, last}`: reds that went green on a re-run at the SAME commit on a
+  CLEAN tree both times — the tree did not change, so the outcome did not come from the
+  code. A dirty tree is not its commit: a red then a green with edits in between is a
+  fix in progress, and a `last` written before `dirty` was recorded counts as dirty.
 * `collected` — the day a collection last named the node id: the 45-day prune's clock.
 
 **Never fatal.** A run that produced real results must not be turned red by a
@@ -170,7 +172,8 @@ def observe(record: dict | None, *, outcome: str | None, time: str | None,
             rec["last_green"] = green
         return rec
     if green:
-        if prev and prev.get("outcome") in (RED, ERROR) and prev.get("commit") == run["commit"]:
+        if (prev and prev.get("outcome") in (RED, ERROR) and prev.get("commit") == run["commit"]
+                and prev.get("dirty") is False and not run["dirty"]):
             rec["flaky"] = {"count": (rec.get("flaky") or {}).get("count", 0) + 1, "last": time}
         rec["last_green"] = green
         rec["red_since"] = None
@@ -178,7 +181,8 @@ def observe(record: dict | None, *, outcome: str | None, time: str | None,
         since = rec.get("red_since")
         rec["red_since"] = ({"count": since["count"] + 1, "tip": since["tip"]} if since
                             else {"count": 1, "tip": run["commit"]})
-    rec["last"] = {"commit": run["commit"], "outcome": outcome, "time": time}
+    rec["last"] = {"commit": run["commit"], "dirty": run["dirty"], "outcome": outcome,
+                   "time": time}
     return rec
 
 

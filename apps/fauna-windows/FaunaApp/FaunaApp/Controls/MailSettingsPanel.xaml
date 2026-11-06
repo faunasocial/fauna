@@ -37,6 +37,14 @@
                       OffContent="{loc:Localize Key=settings/mail/enable_subtitle}"
                       Toggled="EnabledToggle_Toggled" />
 
+        <!-- A box that cannot run mail (no content scanners): the toggle is disabled
+             with state "unavailable" and this notice says why (read from the shared
+             snapshot's mail_unavailable_here, never re-derived). -->
+        <TextBlock x:Name="UnavailableNotice"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsUnavailableNotice}"
+                   Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed"
+                   Text="{loc:Localize Key=mail_settings/unavailable_notice}" />
+
         <!-- ── Disable-mail confirm (inline destructive overlay; present only while
              open, per mail-settings.md § Disable mail). The enabled-toggle off-path
              snaps the toggle back ON and opens this; confirm dispatches DisableMail
@@ -381,6 +389,72 @@
                           Toggled="ServeHereToggle_Toggled" />
             <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
                        Text="{loc:Localize Key=mail_settings/serve_here_subtitle}" />
+        </StackPanel>
+
+        <!-- ── Account controls (visible when mail is enabled; mail-policy-config.md § Tier
+             3, email-filters.md § The auto-respond setting, imap-server.md § Composition with
+             submission quota). Each toggle and readout is absent until its first read and
+             paints what the nest kept, never the gesture (the serve-here shape: the on/off is
+             carried as HelpText, read as get_attr(id, "state")). The reply's message commits
+             on Enter, the forward-all shape, which also turns the reply on. The readouts are
+             wrapped in a non-interactive Button: a TextBlock that starts Collapsed and later
+             flips Visible gets no real AutomationPeer in WinUI3 (MailAliasesPanel's import
+             result). Lifts tui's account_switch_elements / autorespond_elements /
+             quota_elements. -->
+        <StackPanel x:Name="AccountGroup" Spacing="8" Visibility="Collapsed">
+            <StackPanel x:Name="SwitchesGroup" Spacing="8" Visibility="Collapsed">
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="ReceiveToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsReceiveToggle}"
+                                  Header="{loc:Localize Key=mail_settings/receive_label}"
+                                  Toggled="ReceiveToggle_Toggled" />
+                    <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=mail_settings/receive_subtitle}" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="SendToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsSendToggle}"
+                                  Header="{loc:Localize Key=mail_settings/send_label}"
+                                  Toggled="SendToggle_Toggled" />
+                    <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=mail_settings/send_subtitle}" />
+                </StackPanel>
+            </StackPanel>
+            <StackPanel x:Name="AutorespondToggleGroup" Spacing="2" Visibility="Collapsed">
+                <ToggleSwitch x:Name="AutorespondToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsAutorespondToggle}"
+                              Header="{loc:Localize Key=mail_settings/autorespond_label}"
+                              Toggled="AutorespondToggle_Toggled" />
+                <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=mail_settings/autorespond_subtitle}" />
+            </StackPanel>
+            <TextBox x:Name="AutorespondMessageInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsAutorespondMessageInput}"
+                     Header="{loc:Localize Key=mail_settings/autorespond_message_label}"
+                     HorizontalAlignment="Left" Width="320"
+                     KeyDown="AutorespondMessageInput_KeyDown" />
+            <Button x:Name="MailboxQuotaButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsMailboxQuota}"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    HorizontalContentAlignment="Left" IsTabStop="False"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="MailboxQuotaText" TextWrapping="Wrap" />
+            </Button>
+            <Button x:Name="SubmissionQuotaButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsSubmissionQuota}"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    HorizontalContentAlignment="Left" IsTabStop="False"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="SubmissionQuotaText" TextWrapping="Wrap" />
+            </Button>
+            <Button x:Name="OverQuotaNoticeButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailSettingsOverQuotaNotice}"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    HorizontalContentAlignment="Left" IsTabStop="False"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="OverQuotaNoticeText" TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+            </Button>
         </StackPanel>
 
         <!-- ── Forwarding (visible when mail is enabled; mail-forwarding.md § Per-account

@@ -355,6 +355,9 @@ async fn oauth_par(
         Ok(request) => request,
         Err(deny) => return respond(oauth_error_response(&deny)),
     };
+    if let Err(deny) = require_writer_for_deposit(&accepted.scopes, &attested) {
+        return respond(oauth_error_response(&deny));
+    }
 
     let request_uri = mint_request_uri();
     runtime.par.put(
@@ -419,6 +422,34 @@ fn parse_attested_keys(
             "Ed25519",
         )?,
     })
+}
+
+/// A `fauna:folder:deposit` arm — qualified or card-qualified bare — from a
+/// start that attested no writer key is `invalid_request`: a deposit is signed
+/// with the depositor's writer key and its grant names that writer, so a
+/// principal with none could never deposit (`folder-deposit.md` § The
+/// depositor signs, the owner's device verifies; the app's half is the
+/// planner's `ExtConsentError::NoWriterKey`). Run on the effective scopes, so
+/// an arm a permission set expands to is held to it as well.
+fn require_writer_for_deposit(
+    scopes: &[String],
+    attested: &crate::db::third_party_principals::AttestedKeys,
+) -> Result<(), OAuthDeny> {
+    use fauna_bridge_atproto::fauna_scope::{FaunaScopeArm, arm_of, user_qualified_bare_arm};
+    if attested.writer_ed25519.is_none()
+        && scopes.iter().any(|s| {
+            (arm_of(s).or_else(|| user_qualified_bare_arm(s))) == Some(FaunaScopeArm::FolderDeposit)
+        })
+    {
+        return Err(OAuthDeny::new(
+            ERR_INVALID_REQUEST,
+            format!(
+                "a fauna:folder:deposit scope needs a writer key: attest {WRITER_ED25519_PARAM} \
+                 (the Ed25519 key the app signs its deposits with)"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Decode one attested key: absent → `None`; exactly 32 bytes of base64url →
@@ -1213,6 +1244,7 @@ fn build_approved_redirect(
             dpop_jkt: dpop_jkt.to_string(),
             nonce,
             attested,
+            fauna_manifest: approved.fauna_manifest.clone(),
             expires: fauna_core::data::Timestamp::now_secs_or_zero()
                 .saturating_add(AUTH_CODE_TTL_SECS),
         },
@@ -1618,6 +1650,7 @@ async fn authorization_code_grant(
             dpop_jkt: &entry.dpop_jkt,
             nonce: entry.nonce.as_deref(),
             attested: entry.attested,
+            fauna_manifest: entry.fauna_manifest.as_deref(),
         },
         issuer,
         now,
@@ -1647,6 +1680,10 @@ struct ConsentedGrant<'a> {
     /// `third-party.md` § The principal model) — at PAR for the browser start,
     /// at the start endpoint itself for the two polled starts.
     attested: crate::db::third_party_principals::AttestedKeys,
+    /// The kind manifest the card showed (the consent binding's JWS), which
+    /// the principal row records — never the client document as re-resolved
+    /// at redemption, which its publisher may have republished since.
+    fauna_manifest: Option<&'a str>,
 }
 
 /// Record the grant a consent settled, then answer its tokens — **one owner
@@ -1714,14 +1751,20 @@ async fn record_and_issue(
         // transaction (`third-party.md` § The principal model). Its execution
         // form is derived from how the client authenticates — read off its own
         // document at resolution — never from anything it says about itself.
-        // The manifest is the client's own, verified at its resolution — the
-        // re-run here only yields the parsed form the row keeps.
+        // The manifest is the one the CARD showed, off the consent's binding,
+        // verified by the same door against the consented scopes — never the
+        // document re-resolved for this redemption, which its publisher may
+        // have republished under the same key with a wider set.
         &crate::db::third_party_principals::PrincipalAttestation {
             keys: consented.attested,
             execution_form: crate::db::third_party_principals::ExecutionForm::for_client(
                 client.is_remote_form(),
             ),
-            manifest: match crate::oauth_as_client::verified_manifest(client) {
+            manifest: match crate::oauth_as_client::verify_document_manifest(
+                consented.client_id,
+                consented.scopes,
+                consented.fauna_manifest,
+            ) {
                 Ok(manifest) => manifest
                     .as_ref()
                     .and_then(crate::db::third_party_principals::PrincipalManifest::of),
@@ -2325,6 +2368,7 @@ async fn polled_start_prologue(
     )
     .await
     .map_err(respond)?;
+    require_writer_for_deposit(&request.scopes, &attested).map_err(respond)?;
     Ok(PolledStart {
         issuer,
         dpop_jkt,
@@ -2769,6 +2813,7 @@ async fn backchannel_grant(
             dpop_jkt: &flow.dpop_jkt,
             nonce: None,
             attested: flow.attested,
+            fauna_manifest: approved.fauna_manifest.as_deref(),
         },
         issuer,
         now,
@@ -2898,6 +2943,37 @@ mod tests {
                 assert!(deny.description.contains(param), "{deny:?}");
             }
         }
+    }
+
+    /// A deposit arm — qualified or bare — from a start that attested no
+    /// writer key is refused at PAR and both polled starts; with a writer key,
+    /// or with no deposit arm, nothing is refused (`folder-deposit.md` § The
+    /// depositor signs, the owner's device verifies).
+    #[test]
+    fn a_deposit_arm_without_a_writer_key_is_refused() {
+        use crate::db::third_party_principals::AttestedKeys;
+        let holder_only = AttestedKeys {
+            holder_x25519: Some([9; 32]),
+            writer_ed25519: None,
+        };
+        for arm in ["fauna:folder:deposit:17", "fauna:folder:deposit"] {
+            let scopes = vec!["atproto".to_string(), arm.to_string()];
+            let deny = require_writer_for_deposit(&scopes, &holder_only).expect_err(arm);
+            assert_eq!(deny.error, ERR_INVALID_REQUEST);
+            assert!(deny.description.contains(WRITER_ED25519_PARAM), "{deny:?}");
+            let with_writer = AttestedKeys {
+                writer_ed25519: Some([8; 32]),
+                ..holder_only
+            };
+            assert!(require_writer_for_deposit(&scopes, &with_writer).is_ok());
+        }
+        assert!(
+            require_writer_for_deposit(
+                &["atproto".to_string(), "fauna:folder:read:17".to_string()],
+                &holder_only
+            )
+            .is_ok()
+        );
     }
 
     /// A duplicated parameter takes its first value rather than concatenating
@@ -3581,5 +3657,293 @@ mod tests {
                 ERR_INVALID_GRANT
             );
         }
+    }
+}
+
+/// `third-party.md` § The manifest: the roster row keeps the manifest the
+/// consent card showed — never a document re-resolved at redemption. A
+/// publisher may republish under the same key between the card and the
+/// redemption, and past the client cache's positive TTL the redemption fetches
+/// that new document; the row must still hold the card's set, on the code
+/// grant and on a polled start alike.
+#[cfg(test)]
+mod consented_manifest_tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use fauna_protocol::kind_manifest::{ServiceAuthEntry, ed25519_did_key, sign_manifest};
+
+    use super::*;
+    use crate::db::atproto_pds::ConsentStartKind;
+    use crate::oauth_as_ceremony::{BackchannelFlow, BackchannelStart};
+    use crate::oauth_as_client::{ClientMetadataFetcher, MetadataFetchError};
+    use crate::oauth_as_state::{
+        CLIENT_CACHE_POSITIVE_TTL_SECS, CachedResolution, ClientMetadataCache,
+    };
+
+    const CLIENT: &str = "https://app.example/client.json";
+    const REDIRECT: &str = "https://app.example/cb";
+    const SCOPE: &str = "fauna:identity:op:atproto.service_auth";
+    const ISSUER: &str = "https://nest.example";
+    const JKT: &str = "thumbprint";
+    const VERIFIER: &str = "a-code-verifier-that-is-long-enough-to-be-valid-0000";
+    const CODE_ACCOUNT: [u8; 32] = [0xC0; 32];
+    const POLL_ACCOUNT: [u8; 32] = [0xB0; 32];
+    const FEED: (&str, &str) = (
+        "did:web:feed.example#bsky_fg",
+        "app.bsky.feed.getFeedSkeleton",
+    );
+    const WIDER: (&str, &str) = ("did:web:blog.example", "com.example.blog.getPost");
+
+    /// Serves one document, swappable — the publisher republishing.
+    struct SwapFetcher(Mutex<String>);
+
+    impl SwapFetcher {
+        fn serve(&self, doc: String) {
+            *self.0.lock().unwrap() = doc;
+        }
+    }
+
+    #[async_trait]
+    impl ClientMetadataFetcher for SwapFetcher {
+        async fn fetch(&self, url: &str) -> Result<String, MetadataFetchError> {
+            if url == CLIENT {
+                Ok(self.0.lock().unwrap().clone())
+            } else {
+                Err(MetadataFetchError::Network)
+            }
+        }
+    }
+
+    /// The client document, its manifest signed by ONE publisher key whatever
+    /// it declares — key continuity cannot tell the two documents apart.
+    fn document(service_auth: &[(&str, &str)]) -> String {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let entries: Vec<serde_json::Value> = service_auth
+            .iter()
+            .map(|(aud, lxm)| serde_json::json!({ "aud": aud, "lxm": [lxm] }))
+            .collect();
+        let jws = sign_manifest(
+            &key,
+            &serde_json::json!({
+                "version": 1,
+                "publisher": {
+                    "domain": "app.example",
+                    "key": ed25519_did_key(&key.verifying_key().to_bytes()),
+                },
+                "service_auth": entries,
+            }),
+            None,
+        );
+        serde_json::json!({
+            "client_id": CLIENT,
+            "client_name": "Feed App",
+            "redirect_uris": [REDIRECT],
+            "scope": SCOPE,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "application_type": "web",
+            "dpop_bound_access_tokens": true,
+            "fauna": jws,
+        })
+        .to_string()
+    }
+
+    fn entries(pairs: &[(&str, &str)]) -> Vec<ServiceAuthEntry> {
+        pairs
+            .iter()
+            .map(|(aud, lxm)| ServiceAuthEntry {
+                aud: (*aud).into(),
+                lxm: vec![(*lxm).into()],
+                extra: Default::default(),
+            })
+            .collect()
+    }
+
+    fn form(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
+            .collect()
+    }
+
+    /// Seat the card's document in the client cache as resolved at `t_card` —
+    /// PAR's resolution, one positive TTL and more before the redemption.
+    async fn card_resolution(state: &Arc<AppState>, fetcher: &SwapFetcher, t_card: i64) {
+        fetcher.serve(document(&[FEED]));
+        let client = crate::oauth_as_client::resolve_client(
+            &ClientMetadataCache::new(),
+            fetcher,
+            CLIENT,
+            t_card,
+        )
+        .await
+        .expect("the card's document resolves");
+        state.oauth_as.clients.put(
+            CLIENT.to_string(),
+            CachedResolution::Resolved(Box::new(client)),
+            t_card,
+        );
+    }
+
+    /// One consent through to its approval: the card's binding is the
+    /// PAR-time resolution's, read from the client cache at `t_card`.
+    async fn approved_consent(
+        state: &Arc<AppState>,
+        account: [u8; 32],
+        start: ConsentStartKind,
+        t_card: i64,
+    ) -> (Vec<u8>, ApprovedConsent) {
+        let runtime = &state.oauth_as;
+        let client = crate::oauth_as_client::resolve_client(
+            &runtime.clients,
+            runtime.fetcher.as_ref(),
+            CLIENT,
+            t_card,
+        )
+        .await
+        .expect("the card's document resolves");
+        let row = state
+            .db
+            .open_atproto_consent_request_for(
+                start,
+                Some(account),
+                CLIENT,
+                consent_client_name(&client),
+                SCOPE,
+                &[],
+                &consent_binding(&client, Default::default()),
+                CONSENT_REQUEST_TTL_MILLIS,
+            )
+            .await
+            .expect("open the consent");
+        state
+            .db
+            .resolve_atproto_consent_request(&row.consent_id, &account, true)
+            .await
+            .expect("approve")
+            .expect("the row resolves");
+        let ConsentState::Approved(approved) =
+            crate::bridge_atproto_handlers::read_consent_state(state, &row.consent_id)
+                .await
+                .expect("read back")
+        else {
+            panic!("the consent reads approved");
+        };
+        (row.consent_id, *approved)
+    }
+
+    async fn recorded_service_auth(
+        state: &Arc<AppState>,
+        account: [u8; 32],
+    ) -> Vec<ServiceAuthEntry> {
+        let principals = state
+            .db
+            .list_third_party_principals(&account)
+            .await
+            .expect("list principals");
+        assert_eq!(principals.len(), 1, "the redemption recorded the principal");
+        principals[0].declared_service_auth.clone()
+    }
+
+    #[tokio::test]
+    async fn the_row_keeps_the_cards_manifest_when_the_document_changes_before_redemption() {
+        let fetcher = Arc::new(SwapFetcher(Mutex::new(document(&[FEED]))));
+        let now = fauna_core::data::Timestamp::now_secs_or_zero();
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
+        let state = Arc::new(AppState {
+            oauth_as: Arc::new(crate::oauth_as_state::OAuthAsRuntime::new(
+                now,
+                fetcher.clone(),
+            )),
+            ..AppState::for_test(db)
+        });
+        for account in [CODE_ACCOUNT, POLL_ACCOUNT] {
+            state
+                .db
+                .create_user(&account, "free", "test")
+                .await
+                .unwrap();
+        }
+        // The card was resolved just past one positive TTL ago, so each
+        // redemption below fetches the document afresh.
+        let t_card = now - CLIENT_CACHE_POSITIVE_TTL_SECS - 1;
+
+        // ── The code grant ──
+        card_resolution(&state, &fetcher, t_card).await;
+        let (_, approved) =
+            approved_consent(&state, CODE_ACCOUNT, ConsentStartKind::Browser, t_card).await;
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(<sha2::Sha256 as sha2::Digest>::digest(VERIFIER.as_bytes()));
+        let redirect = build_approved_redirect(
+            &state.oauth_as,
+            CLIENT,
+            &challenge,
+            JKT,
+            None,
+            Default::default(),
+            REDIRECT,
+            "csrf",
+            ISSUER,
+            &approved,
+        );
+        let code = url::Url::parse(&redirect)
+            .expect("redirect url")
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .expect("the redirect carries a code")
+            .1
+            .into_owned();
+        // The publisher republishes: the same key, a wider service_auth.
+        fetcher.serve(document(&[FEED, WIDER]));
+        authorization_code_grant(
+            &state,
+            &form(&[
+                ("code", &code),
+                ("client_id", CLIENT),
+                ("redirect_uri", REDIRECT),
+                ("code_verifier", VERIFIER),
+            ]),
+            ISSUER,
+            JKT,
+            now,
+        )
+        .await;
+        assert_eq!(
+            recorded_service_auth(&state, CODE_ACCOUNT).await,
+            entries(&[FEED]),
+            "the code grant's row keeps the card's service_auth"
+        );
+
+        // ── A polled start ──
+        card_resolution(&state, &fetcher, t_card).await;
+        let (consent_id, _) =
+            approved_consent(&state, POLL_ACCOUNT, ConsentStartKind::Push, t_card).await;
+        fetcher.serve(document(&[FEED, WIDER]));
+        state.oauth_as.backchannel.put(
+            "auth-req".into(),
+            BackchannelFlow::new(
+                BackchannelStart::Push,
+                Some(consent_id),
+                CLIENT.into(),
+                JKT.into(),
+                Default::default(),
+                now + 300,
+            ),
+        );
+        backchannel_grant(
+            &state,
+            &form(&[("auth_req_id", "auth-req"), ("client_id", CLIENT)]),
+            BackchannelStart::Push,
+            ISSUER,
+            JKT,
+            now,
+        )
+        .await;
+        assert_eq!(
+            recorded_service_auth(&state, POLL_ACCOUNT).await,
+            entries(&[FEED]),
+            "the polled start's row keeps the card's service_auth"
+        );
     }
 }

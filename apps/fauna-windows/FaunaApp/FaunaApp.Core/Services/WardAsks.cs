@@ -13,6 +13,8 @@ namespace FaunaApp.Core.Services;
 //
 //   * `contact-request-guardian-button` / `contact-request-pending` on the contacts
 //     page's Find User result and on another actor's profile;
+//   * `knock-guardian-pending` on each of the contacts page's knock cards while the
+//     ward's own policy has contact approval on (`KnocksAwaitGuardian`);
 //   * `bridge-source-request-button` / `bridge-source-request-state` inside a
 //     `bridge-card`;
 //   * `family-blocked-peer-item` / `family-blocked-peer-allow-button` in the
@@ -59,6 +61,7 @@ internal static class WardAsksCache
     private static FfiFamilyContactRequest[] _contactRequests = Array.Empty<FfiFamilyContactRequest>();
     private static FfiFamilyFeedRequest[] _feedRequests = Array.Empty<FfiFamilyFeedRequest>();
     private static readonly List<FeedTriple> _refusedFeed = new();
+    private static bool _knocksAwaitGuardian;
 
     /// <summary>Raised (on whichever thread moved the state) whenever the held asks or
     /// refusals change, so a painted surface can re-render. Handlers marshal to the UI
@@ -69,16 +72,31 @@ internal static class WardAsksCache
     /// <paramref name="supervised"/> is whether it named a guardian: a graduated
     /// account has no guardian to be waiting on, so a stale ask from an earlier read
     /// must not keep painting "asked — waiting" (the client half of the nest's own
-    /// graduation drop).</summary>
+    /// graduation drop). <paramref name="ownPolicy"/> is the reply's own
+    /// <c>policy</c>.</summary>
     public static void SetFromStatus(
-        bool supervised, FfiFamilyContactRequest[] contact, FfiFamilyFeedRequest[] feed)
+        bool supervised, FfiReachPolicy? ownPolicy,
+        FfiFamilyContactRequest[] contact, FfiFamilyFeedRequest[] feed)
     {
+        var awaitsGuardian = supervised && FaunaFfiMethods.WardKnocksAwaitGuardian(ownPolicy);
         lock (Gate)
         {
             _contactRequests = supervised ? contact : Array.Empty<FfiFamilyContactRequest>();
             _feedRequests = supervised ? feed : Array.Empty<FfiFamilyFeedRequest>();
+            _knocksAwaitGuardian = awaitsGuardian;
         }
         Changed?.Invoke();
+    }
+
+    /// <summary>Whether every knock waiting on this account waits on its guardian —
+    /// what each knock card's <c>knock-guardian-pending</c> paints from
+    /// (family-safety.md § App surface). The shared
+    /// <c>fauna_client_family::knocks_await_guardian</c> over the caller's own status
+    /// policy (<c>FaunaFfiMethods.WardKnocksAwaitGuardian</c>), folded at the same
+    /// read; android's <c>WardAsks.knocksAwaitGuardian</c>.</summary>
+    public static bool KnocksAwaitGuardian
+    {
+        get { lock (Gate) return _knocksAwaitGuardian; }
     }
 
     /// <summary>The ward's own live feed-source asks (durable, rule (c)).</summary>
@@ -127,6 +145,7 @@ internal static class WardAsksCache
             _contactRequests = Array.Empty<FfiFamilyContactRequest>();
             _feedRequests = Array.Empty<FfiFamilyFeedRequest>();
             _refusedFeed.Clear();
+            _knocksAwaitGuardian = false;
         }
         Changed?.Invoke();
     }

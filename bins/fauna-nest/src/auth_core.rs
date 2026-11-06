@@ -173,6 +173,10 @@ pub enum AuthError {
     /// device, and its next step — import the successor identity — is only
     /// possible if the error says so.
     Superseded { new_actor_id: [u8; 32] },
+    /// The connection already carries a different device key
+    /// (`fauna.auth.device_bind`, which binds once). WS
+    /// `fauna.auth.device_bind.already_bound`.
+    AlreadyBound,
     /// The challenge store holds its per-source or global cap
     /// (`challenge_auth::CHALLENGE_PER_SOURCE_CAP`) — issue only. WS
     /// `fauna.protocol.rate_limited`, the dispatcher throttle's own refusal, so
@@ -410,7 +414,7 @@ pub async fn direct_auth_core(
             // Test-only: the outside witness that a locked app stops retrying
             // (`account_lock_test_hook`). Compiled out of every production build.
             #[cfg(feature = "test-hooks")]
-            state.account_lock_refusals.note(&actor_bytes);
+            state.account_lock_hook.note(&actor_bytes);
             return Err(AuthError::AccountLocked { locked_until });
         }
     }
@@ -620,6 +624,15 @@ pub async fn verify_core(
     // 2026-10-01), mirroring the use-time exemption in
     // `auth::check_bearer_session`, until a cannot-lock-the-last-admin guard
     // exists. A database fault reads as no lock, as the handshake's check does.
+    //
+    // Test-only: a near lock a run armed for this actor's next verify is
+    // written here, just before it is read, so its window starts at this gate
+    // (`account_lock_test_hook`). Compiled out of every production build.
+    #[cfg(feature = "test-hooks")]
+    state
+        .account_lock_hook
+        .write_armed_lock(&state.db, &actor_bytes)
+        .await;
     if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
         let now_secs = fauna_core::data::Timestamp::now_secs() as u64;
         if (locked_until as u64) > now_secs
@@ -628,7 +641,7 @@ pub async fn verify_core(
             // Test-only: the outside witness that a locked app stops retrying
             // (`account_lock_test_hook`). Compiled out of every production build.
             #[cfg(feature = "test-hooks")]
-            state.account_lock_refusals.note(&actor_bytes);
+            state.account_lock_hook.note(&actor_bytes);
             return Err(AuthError::AccountLocked { locked_until });
         }
     }
@@ -704,141 +717,23 @@ pub async fn device_auth_core(
         parse_actor_id(device_key_hex).ok_or(AuthError::InvalidRequest("device_key"))?;
     let own_nest = require_own_nest(state, nest_id_hex)?;
 
-    // 2. Timestamp freshness — the direct-auth window.
-    let now_ms = fauna_core::data::Timestamp::now_millis();
-    if timestamp_ms.abs_diff(now_ms) > MAX_TIMESTAMP_DRIFT_MS {
-        return Err(AuthError::TimestampDrift);
-    }
-
-    // 3. Verify the request signature by the presented device key BEFORE any DB
-    //    read beyond the grant lookup — but the grant lookup must come first,
-    //    since an unregistered key should not learn whether its signature was
-    //    otherwise valid. Load the grant, then check everything.
-    let grant_wire = state
-        .db
-        .get_sync_device_grant(&actor_bytes, &device_key_bytes)
-        .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?
-        .ok_or_else(|| AuthError::NotRegistered("no renewal grant".into()))?;
-
-    // 3b. Revocation memory — the belt beside the register-side refusal: a
-    //     device key tombstoned by `fauna.sync.devices.delete` never mints
-    //     again, however its grant row came back (sync-agent.md § Credential
-    //     model — device revocation). Opaque like a missing grant: a revoked
-    //     key learns nothing a never-registered one would not.
-    if state
-        .db
-        .is_device_grant_revoked(&actor_bytes, &device_key_bytes)
-        .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?
-    {
-        return Err(AuthError::NotRegistered("no renewal grant".into()));
-    }
-
-    // 3c. Test-only rendezvous, at the exact instant the window opens:
-    //     3b has just observed "not revoked", and everything from here to the
-    //     mint at step 7 is work a concurrent `fauna.sync.devices.delete` can
-    //     run underneath (three DB round-trips, each taking and releasing the
-    //     same `conn` mutex the delete needs). A test arms this to hold a mint
-    //     here while it runs an entire revocation, which turns a timing race
-    //     into a causal barrier — e2e-conventions.md § convention 14, "assert
-    //     latency-independent state, never wall-clock timing". Task-local
-    //     rather than a global, so an arming test cannot perturb the other
-    //     `device_auth_core` tests running beside it; `#[cfg(test)]` alone, so
-    //     no artifact and no integration test can even reach it (§ convention
-    //     15 satisfied by construction rather than by a feature flag).
-    #[cfg(test)]
-    if let Ok(barrier) = mint_race::BARRIER.try_with(std::sync::Arc::clone) {
-        barrier.cleared_revocation_check.notify_one();
-        barrier.may_mint.notified().await;
-    }
-
-    // 4. Re-verify the stored grant: decode the embed-as-bytes wire, check the
-    //    root-key envelope signature, and check the authorization's scope.
-    let wire: fauna_core::encoding::EmbedAsBytes = fauna_cbor::decode_strict(&grant_wire)
-        .map_err(|e| AuthError::Internal(format!("stored grant wire: {e:?}")))?;
-    let (auth_bytes, auth_env) = wire
-        .into_signed()
-        .map_err(|e| AuthError::Internal(format!("stored grant envelope: {e}")))?;
-    let auth: fauna_core::data::DeviceAuthorization =
-        fauna_core::encoding::decode_signed_bytes(&auth_bytes)
-            .map_err(|e| AuthError::Internal(format!("stored grant decode: {e}")))?;
-    if auth.actor_id.0 != actor_bytes || auth.device_key != device_key_bytes {
-        // A stored grant that doesn't match its own row keys is corrupt state,
-        // but surface it opaquely like a missing grant.
-        return Err(AuthError::NotRegistered("grant mismatch".into()));
-    }
-    let has_renew = auth.capabilities.iter().any(|c| {
-        matches!(
-            c,
-            fauna_core::data::Capability::RenewBearer | fauna_core::data::Capability::All
-        )
-    });
-    if !has_renew {
-        return Err(AuthError::NotRegistered("grant not renewal-scoped".into()));
-    }
-    // `Timestamp` is microseconds (`Timestamp::now`); the drift-checked
-    // `now_ms` is milliseconds.
-    if let Some(expires) = auth.expires_at
-        && expires.0 <= now_ms.saturating_mul(1000)
-    {
-        return Err(AuthError::NotRegistered("grant expired".into()));
-    }
-    if fauna_core::encoding::verify_envelope(&auth, &auth_bytes, &auth_env).is_err() {
-        return Err(AuthError::NotRegistered("grant signature invalid".into()));
-    }
-
-    // 5. Verify the request signature by the granted device key over the
-    //    domain-tagged message.
-    let sig_bytes = match hex::decode(signature_hex) {
-        Ok(b) if b.len() == 64 => b,
-        _ => return Err(AuthError::InvalidRequest("signature")),
-    };
-    let signature =
-        Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidRequest("signature"))?;
-    let msg = fauna_protocol::auth::device_handshake_signed_message(
+    // 2–6. The proof — shared with the in-band bind.
+    let signed_message = fauna_protocol::auth::device_handshake_signed_message(
         &actor_bytes,
         &device_key_bytes,
         timestamp_ms,
         &own_nest,
         client_nonce,
     );
-    if !fauna_core::identity::verify_detached(&device_key_bytes, &msg, &sig_bytes) {
-        return Err(AuthError::SignatureFailed);
-    }
-
-    // 5b. Replay guard — same single-use property as direct auth (§ L4); the
-    //     shared map keys on signature bytes, so contexts can't collide.
-    if !state
-        .auth
-        .replay_guard
-        .check_and_record(&signature.to_bytes(), now_ms, MAX_TIMESTAMP_DRIFT_MS)
-        .await
-    {
-        return Err(AuthError::SignatureFailed);
-    }
-
-    // 6. Actor-level gates, identical to direct auth — including the
-    //    supersession consult first. A sync agent holding a renewal grant of
-    //    the old identity is exactly the "device registrations and renewal
-    //    grants die with the old rows" case (`identity-succession.md:92`): the
-    //    grant row may still be there, and this is what stops it minting.
-    refuse_if_superseded(state, &actor_bytes).await?;
-    state
-        .db
-        .check_actor_active(&actor_bytes)
-        .await
-        .map_err(|e| AuthError::NotRegistered(e.to_string()))?;
-    if let Ok(Some(locked_until)) = state.db.get_locked_until(&actor_bytes).await {
-        let now_secs = now_ms / 1000;
-        if (locked_until as u64) > now_secs {
-            // Test-only: the outside witness that a locked app stops retrying
-            // (`account_lock_test_hook`). Compiled out of every production build.
-            #[cfg(feature = "test-hooks")]
-            state.account_lock_refusals.note(&actor_bytes);
-            return Err(AuthError::AccountLocked { locked_until });
-        }
-    }
+    let now_ms = verify_device_proof(
+        state,
+        &actor_bytes,
+        &device_key_bytes,
+        timestamp_ms,
+        signature_hex,
+        &signed_message,
+    )
+    .await?;
 
     // 7. Mint — an ordinary session token, visible in `fauna.sessions.list`,
     //    tagged with the renewal device key that minted it so device deletion
@@ -905,6 +800,274 @@ pub async fn device_auth_core(
         expires_at: now_ms / 1000 + TOKEN_TTL_SECS,
         expires_in: TOKEN_TTL_SECS,
     })
+}
+
+/// In-band device bind — the body of the post-auth `fauna.auth.device_bind` kind
+/// (`devices.md` § Listing Devices → *The binding* → *Web binds its one socket
+/// in band*). Binds connection `conn_id` of `conn_actor` to a device of that
+/// same actor, on the proof a mint carries ([`verify_device_proof`]), and mints
+/// nothing: the connection already dispatches as its actor, so the binding
+/// confers no authority and only narrows — the socket reads online for its row
+/// and falls under device removal's sweep.
+///
+/// The nest named by the signed message is this one: the request rode in on a
+/// connection to it, so no request field names it, and a blob signed for
+/// another nest simply fails its signature.
+#[allow(clippy::too_many_arguments)]
+pub async fn device_bind_core(
+    state: &Arc<AppState>,
+    conn_actor: &[u8; 32],
+    conn_id: u64,
+    actor_id_hex: &str,
+    device_key_hex: &str,
+    timestamp_ms: u64,
+    signature_hex: &str,
+    nonce: &[u8],
+) -> Result<(), AuthError> {
+    let actor_bytes = parse_actor_id(actor_id_hex).ok_or(AuthError::InvalidRequest("actor_id"))?;
+    let device_key_bytes =
+        parse_actor_id(device_key_hex).ok_or(AuthError::InvalidRequest("device_key"))?;
+
+    // A connection binds only a device of its own actor. Ahead of the proof,
+    // and answering what a missing grant answers: run after it, the verdict on
+    // a stranger's key would tell a key that actor holds from one it does not.
+    if actor_bytes != *conn_actor {
+        return Err(AuthError::NotRegistered("no renewal grant".into()));
+    }
+
+    let signed_message = fauna_protocol::auth::device_bind_signed_message(
+        &actor_bytes,
+        &device_key_bytes,
+        timestamp_ms,
+        &state.bound_identity(),
+        nonce,
+    );
+    verify_device_proof(
+        state,
+        &actor_bytes,
+        &device_key_bytes,
+        timestamp_ms,
+        signature_hex,
+        &signed_message,
+    )
+    .await?;
+
+    let newly_bound = match state
+        .ws
+        .bind_device_key(&actor_bytes, conn_id, device_key_bytes)
+    {
+        crate::ws::DeviceBindOutcome::Bound => true,
+        crate::ws::DeviceBindOutcome::AlreadyBound => false,
+        crate::ws::DeviceBindOutcome::AlreadyBoundElsewhere => {
+            return Err(AuthError::AlreadyBound);
+        }
+        crate::ws::DeviceBindOutcome::ConnectionGone => {
+            return Err(AuthError::Internal("the connection is gone".into()));
+        }
+    };
+
+    // Re-read the revocation memory, AFTER the binding is on the connection —
+    // `device_auth_core` step 8's total ordering, for a socket instead of a
+    // token. A removal commits its tombstone strictly before it sweeps, so
+    // either the tombstone is visible here and we take the binding back, or it
+    // commits after this read and its sweep sees the binding and closes the
+    // socket. A DB error fails closed, as it does there.
+    //
+    // "Take the binding back" means two things, by who set it. A binding this
+    // call newly set is cleared: the socket was unbound before it and stays
+    // so. A binding that was already there (a repeat of the same key) is
+    // NEVER cleared — the removal's sweep may already have run, or may run
+    // now, and an unbound socket matches nothing it selects, so a thief
+    // spamming repeat binds over a stolen key's socket would slip the removal
+    // and keep acting as the user. The connection is revoked instead (WS
+    // 4401), which is what the sweep would have done to it.
+    let take_back = || {
+        if newly_bound {
+            state.ws.clear_device_key(&actor_bytes, conn_id);
+        } else {
+            state.ws.revoke_connection(&actor_bytes, conn_id);
+        }
+    };
+    let revoked_after_bind = state
+        .db
+        .is_device_grant_revoked(&actor_bytes, &device_key_bytes)
+        .await;
+    match revoked_after_bind {
+        Ok(false) => {}
+        Ok(true) => {
+            take_back();
+            tracing::info!(
+                target: "auth",
+                newly_bound,
+                "an in-band device bind raced its own revocation; the binding was taken back"
+            );
+            return Err(AuthError::NotRegistered("no renewal grant".into()));
+        }
+        Err(e) => {
+            take_back();
+            return Err(AuthError::Internal(e.to_string()));
+        }
+    }
+
+    // The row's `last_seen`, as the bound upgrade marks it
+    // (`AppState::register_upgraded_connection`), best-effort as it is there:
+    // the bind has landed and a DB fault here takes nothing back.
+    if let Err(e) = state
+        .db
+        .touch_device_last_seen_by_principal(&actor_bytes, &device_key_bytes)
+        .await
+    {
+        tracing::warn!(
+            actor = %hex::encode(actor_bytes),
+            "an in-band device bind could not mark its row last_seen: {e:#}"
+        );
+    }
+    Ok(())
+}
+
+/// The proof a device key presents — the shared verification of the bearer door
+/// ([`device_auth_core`]) and the in-band door ([`device_bind_core`]), which
+/// differ only in the tag over `signed_message` and in what a success does.
+/// Answers the drift-checked `now_ms` the verification ran at.
+///
+/// Refusals are [`device_auth_core`]'s opaque taxonomy.
+async fn verify_device_proof(
+    state: &Arc<AppState>,
+    actor_bytes: &[u8; 32],
+    device_key_bytes: &[u8; 32],
+    timestamp_ms: u64,
+    signature_hex: &str,
+    signed_message: &[u8],
+) -> Result<u64, AuthError> {
+    // 2. Timestamp freshness — the direct-auth window.
+    let now_ms = fauna_core::data::Timestamp::now_millis();
+    if timestamp_ms.abs_diff(now_ms) > MAX_TIMESTAMP_DRIFT_MS {
+        return Err(AuthError::TimestampDrift);
+    }
+
+    // 3. Verify the request signature by the presented device key BEFORE any DB
+    //    read beyond the grant lookup — but the grant lookup must come first,
+    //    since an unregistered key should not learn whether its signature was
+    //    otherwise valid. Load the grant, then check everything.
+    let grant_wire = state
+        .db
+        .get_sync_device_grant(actor_bytes, device_key_bytes)
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))?
+        .ok_or_else(|| AuthError::NotRegistered("no renewal grant".into()))?;
+
+    // 3b. Revocation memory — the belt beside the register-side refusal: a
+    //     device key tombstoned by `fauna.sync.devices.delete` never mints
+    //     again, however its grant row came back (sync-agent.md § Credential
+    //     model — device revocation). Opaque like a missing grant: a revoked
+    //     key learns nothing a never-registered one would not.
+    if state
+        .db
+        .is_device_grant_revoked(actor_bytes, device_key_bytes)
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))?
+    {
+        return Err(AuthError::NotRegistered("no renewal grant".into()));
+    }
+
+    // 3c. Test-only rendezvous, at the exact instant the window opens:
+    //     3b has just observed "not revoked", and everything from here to the
+    //     mint at step 7 is work a concurrent `fauna.sync.devices.delete` can
+    //     run underneath (three DB round-trips, each taking and releasing the
+    //     same `conn` mutex the delete needs). A test arms this to hold a mint
+    //     here while it runs an entire revocation, which turns a timing race
+    //     into a causal barrier — e2e-conventions.md § convention 14, "assert
+    //     latency-independent state, never wall-clock timing". Task-local
+    //     rather than a global, so an arming test cannot perturb the other
+    //     `device_auth_core` tests running beside it; `#[cfg(test)]` alone, so
+    //     no artifact and no integration test can even reach it (§ convention
+    //     15 satisfied by construction rather than by a feature flag).
+    #[cfg(test)]
+    if let Ok(barrier) = mint_race::BARRIER.try_with(std::sync::Arc::clone) {
+        barrier.cleared_revocation_check.notify_one();
+        barrier.may_mint.notified().await;
+    }
+
+    // 4. Re-verify the stored grant: decode the embed-as-bytes wire, check the
+    //    root-key envelope signature, and check the authorization's scope.
+    let wire: fauna_core::encoding::EmbedAsBytes = fauna_cbor::decode_strict(&grant_wire)
+        .map_err(|e| AuthError::Internal(format!("stored grant wire: {e:?}")))?;
+    let (auth_bytes, auth_env) = wire
+        .into_signed()
+        .map_err(|e| AuthError::Internal(format!("stored grant envelope: {e}")))?;
+    let auth: fauna_core::data::DeviceAuthorization =
+        fauna_core::encoding::decode_signed_bytes(&auth_bytes)
+            .map_err(|e| AuthError::Internal(format!("stored grant decode: {e}")))?;
+    if auth.actor_id.0 != *actor_bytes || auth.device_key != *device_key_bytes {
+        // A stored grant that doesn't match its own row keys is corrupt state,
+        // but surface it opaquely like a missing grant.
+        return Err(AuthError::NotRegistered("grant mismatch".into()));
+    }
+    let has_renew = auth.capabilities.iter().any(|c| {
+        matches!(
+            c,
+            fauna_core::data::Capability::RenewBearer | fauna_core::data::Capability::All
+        )
+    });
+    if !has_renew {
+        return Err(AuthError::NotRegistered("grant not renewal-scoped".into()));
+    }
+    // `Timestamp` is microseconds (`Timestamp::now`); the drift-checked
+    // `now_ms` is milliseconds.
+    if let Some(expires) = auth.expires_at
+        && expires.0 <= now_ms.saturating_mul(1000)
+    {
+        return Err(AuthError::NotRegistered("grant expired".into()));
+    }
+    if fauna_core::encoding::verify_envelope(&auth, &auth_bytes, &auth_env).is_err() {
+        return Err(AuthError::NotRegistered("grant signature invalid".into()));
+    }
+
+    // 5. Verify the request signature by the granted device key over the
+    //    domain-tagged message.
+    let sig_bytes = match hex::decode(signature_hex) {
+        Ok(b) if b.len() == 64 => b,
+        _ => return Err(AuthError::InvalidRequest("signature")),
+    };
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|_| AuthError::InvalidRequest("signature"))?;
+    if !fauna_core::identity::verify_detached(device_key_bytes, signed_message, &sig_bytes) {
+        return Err(AuthError::SignatureFailed);
+    }
+
+    // 5b. Replay guard — same single-use property as direct auth (§ L4); the
+    //     shared map keys on signature bytes, so contexts can't collide.
+    if !state
+        .auth
+        .replay_guard
+        .check_and_record(&signature.to_bytes(), now_ms, MAX_TIMESTAMP_DRIFT_MS)
+        .await
+    {
+        return Err(AuthError::SignatureFailed);
+    }
+
+    // 6. Actor-level gates, identical to direct auth — including the
+    //    supersession consult first. A sync agent holding a renewal grant of
+    //    the old identity is exactly the "device registrations and renewal
+    //    grants die with the old rows" case (`identity-succession.md:92`): the
+    //    grant row may still be there, and this is what stops it minting.
+    refuse_if_superseded(state, actor_bytes).await?;
+    state
+        .db
+        .check_actor_active(actor_bytes)
+        .await
+        .map_err(|e| AuthError::NotRegistered(e.to_string()))?;
+    if let Ok(Some(locked_until)) = state.db.get_locked_until(actor_bytes).await {
+        let now_secs = now_ms / 1000;
+        if (locked_until as u64) > now_secs {
+            // Test-only: the outside witness that a locked app stops retrying
+            // (`account_lock_test_hook`). Compiled out of every production build.
+            #[cfg(feature = "test-hooks")]
+            state.account_lock_hook.note(actor_bytes);
+            return Err(AuthError::AccountLocked { locked_until });
+        }
+    }
+    Ok(now_ms)
 }
 
 /// The custody-handshake verification body — the mint half of the nest
@@ -1062,7 +1225,9 @@ pub async fn custody_auth_core(
 /// Refusal opacity mirrors the custody door: a cert that does not verify
 /// under the claimed owner (a stranger, the host's own device), a device the
 /// owner's grants name as removed, and an owner with no live hosting row here
-/// all answer the same `NotRegistered("no held custody")`.
+/// all answer the same `NotRegistered("no held custody")`. The PoP precedes
+/// the hosting read: a caller without the device key learns only
+/// `SignatureFailed`, wherever it asks.
 #[allow(clippy::too_many_arguments)]
 pub async fn custodied_fleet_auth_core(
     state: &Arc<AppState>,
@@ -1101,17 +1266,12 @@ pub async fn custodied_fleet_auth_core(
     )
     .map_err(|_| refused())?;
 
-    // 4. A live hosting row for that owner on this nest that serves this
-    //    device — window open, not refused by the owner's nest, the device not
-    //    on the owner's exclusion set (the class predicate's own read).
-    if !crate::custody_fleet::owner_hosting_serves(&state.db, owner_bytes, &device_bytes)
-        .await
-        .map_err(|e| AuthError::Internal(e.to_string()))?
-    {
-        return Err(refused());
-    }
-
-    // 5. The PoP — the domain-tagged signature by the device key.
+    // 4. The PoP — the domain-tagged signature by the device key — BEFORE any
+    //    row read (ruling 2). The cert is public (it rides on every
+    //    delegated-signed row), so were the hosting row read first, a cert
+    //    holder without the key could tell from `signature_failed` versus
+    //    `not_registered` — or from the read's timing — whether this nest
+    //    custodies the owner.
     let sig_bytes = match hex::decode(signature_hex) {
         Ok(b) if b.len() == 64 => b,
         _ => return Err(AuthError::InvalidRequest("signature")),
@@ -1129,7 +1289,8 @@ pub async fn custodied_fleet_auth_core(
         return Err(AuthError::SignatureFailed);
     }
 
-    // 5b. Replay guard — single-use signatures, the shared map.
+    // 4b. Replay guard — single-use signatures, the shared map (in memory, no
+    //     row read).
     if !state
         .auth
         .replay_guard
@@ -1137,6 +1298,16 @@ pub async fn custodied_fleet_auth_core(
         .await
     {
         return Err(AuthError::SignatureFailed);
+    }
+
+    // 5. A live hosting row for that owner on this nest that serves this
+    //    device — window open, not refused by the owner's nest, the device not
+    //    on the owner's exclusion set (the class predicate's own read).
+    if !crate::custody_fleet::owner_hosting_serves(&state.db, owner_bytes, &device_bytes)
+        .await
+        .map_err(|e| AuthError::Internal(e.to_string()))?
+    {
+        return Err(refused());
     }
 
     // 6. The register row (ruling 3): the verified cert verbatim, rewritten at
@@ -1247,6 +1418,212 @@ mod device_auth_tests {
             crate::db::GrantStoreOutcome::Stored
         );
         renewal
+    }
+
+    /// Hold a `device_bind_core` call inside the same window — the proof has
+    /// observed "not revoked" — run a whole removal through the real handler,
+    /// then let the bind finish. The removal's sweep has passed a connection
+    /// that carries no key yet, so only the re-read after the write can catch
+    /// it. The revocation is the real handler's, for the reason
+    /// [`race_a_delete_against_a_mint`] gives.
+    #[tokio::test]
+    async fn a_bind_racing_its_own_revocation_leaves_nothing_bound() {
+        let state = test_state().await;
+        let identity = ActorKeypair::generate();
+        let renewal = seed_grant(&state, &identity, vec![Capability::RenewBearer], None).await;
+        let actor = identity.actor_id().0;
+        let renewal_key = renewal.actor_id().0;
+        let (conn, _rx) = state.ws.subscribe_with_session(
+            actor,
+            Some("feedfeedfeedfeed".into()),
+            None,
+            false,
+            None,
+        );
+
+        let mut b = crate::rpc_router::RpcRouter::builder();
+        crate::sync_handlers::register_sync_handlers(&mut b);
+        let router = b.build();
+        let barrier = std::sync::Arc::new(mint_race::Barrier::default());
+
+        // spawn-ok(test): the held bind, joined below before any assert.
+        let conn_id = conn.conn_id;
+        let binding = tokio::spawn(mint_race::BARRIER.scope(std::sync::Arc::clone(&barrier), {
+            let state = Arc::clone(&state);
+            async move {
+                let ts = now_ms();
+                let msg = fauna_protocol::auth::device_bind_signed_message(
+                    &actor,
+                    &renewal_key,
+                    ts,
+                    &state.bound_identity(),
+                    b"race",
+                );
+                let sig = renewal.signing_key().sign(&msg);
+                device_bind_core(
+                    &state,
+                    &actor,
+                    conn_id,
+                    &hex::encode(actor),
+                    &hex::encode(renewal_key),
+                    ts,
+                    &hex::encode(sig.to_bytes()),
+                    b"race",
+                )
+                .await
+            }
+        }));
+        barrier.cleared_revocation_check.notified().await;
+
+        let meta = router
+            .kind_meta("fauna.sync.devices.delete")
+            .expect("kind registered");
+        let payload = bytes::Bytes::from(
+            fauna_protocol::encode_canonical(&fauna_protocol::sync::SyncDeviceDeleteRequest {
+                device_id: hex::encode([0xD1u8; 32]),
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        (meta.handler)(Arc::clone(&state), actor, payload)
+            .await
+            .expect("the device deletes");
+
+        barrier.may_mint.notify_one();
+        let outcome = binding.await.expect("the bind task joins");
+        assert!(
+            matches!(outcome, Err(AuthError::NotRegistered(_))),
+            "the bind lost to the removal and says so opaquely: {outcome:?}"
+        );
+        assert_eq!(
+            conn.bound_device_key(),
+            None,
+            "the binding the sweep never saw was taken back"
+        );
+    }
+
+    /// A REPEAT bind racing a removal: the connection already
+    /// carries the key, a same-key bind clears its pre-check, the removal
+    /// commits its tombstone and is held just before its sweep, the bind
+    /// re-reads "revoked" — and only then does the sweep run. Taking the
+    /// binding back by unbinding it would leave the sweep nothing to match and
+    /// the socket alive; the binding was never that call's to clear, so the
+    /// connection must be revoked instead.
+    #[tokio::test]
+    async fn a_repeat_bind_racing_a_removal_revokes_the_connection() {
+        let state = test_state().await;
+        let identity = ActorKeypair::generate();
+        let renewal = seed_grant(&state, &identity, vec![Capability::RenewBearer], None).await;
+        let actor = identity.actor_id().0;
+        let renewal_key = renewal.actor_id().0;
+        let (conn, _rx) = state.ws.subscribe_with_session(
+            actor,
+            Some("feedfeedfeedfeed".into()),
+            None,
+            false,
+            None,
+        );
+        let conn_id = conn.conn_id;
+        let bind = |nonce: &'static [u8]| {
+            let state = Arc::clone(&state);
+            let msg_sig = {
+                let ts = now_ms();
+                let msg = fauna_protocol::auth::device_bind_signed_message(
+                    &actor,
+                    &renewal_key,
+                    ts,
+                    &state.bound_identity(),
+                    nonce,
+                );
+                (ts, renewal.signing_key().sign(&msg))
+            };
+            async move {
+                let (ts, sig) = msg_sig;
+                device_bind_core(
+                    &state,
+                    &actor,
+                    conn_id,
+                    &hex::encode(actor),
+                    &hex::encode(renewal_key),
+                    ts,
+                    &hex::encode(sig.to_bytes()),
+                    nonce,
+                )
+                .await
+            }
+        };
+        bind(b"first").await.expect("the first bind lands");
+        assert_eq!(conn.bound_device_key(), Some(renewal_key));
+
+        let mut b = crate::rpc_router::RpcRouter::builder();
+        crate::sync_handlers::register_sync_handlers(&mut b);
+        let router = b.build();
+        let barrier = std::sync::Arc::new(mint_race::Barrier::default());
+
+        // spawn-ok(test): the held repeat bind, joined below before any assert.
+        let binding = tokio::spawn(
+            mint_race::BARRIER.scope(std::sync::Arc::clone(&barrier), bind(b"repeat")),
+        );
+        barrier.cleared_revocation_check.notified().await;
+
+        let held = crate::routes::revoke_race::arm_before_sweep(actor);
+        let meta = router
+            .kind_meta("fauna.sync.devices.delete")
+            .expect("kind registered");
+        let payload = bytes::Bytes::from(
+            fauna_protocol::encode_canonical(&fauna_protocol::sync::SyncDeviceDeleteRequest {
+                device_id: hex::encode([0xD1u8; 32]),
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        // spawn-ok(test): the held removal, joined below before any assert.
+        let removal = (meta.handler)(Arc::clone(&state), actor, payload);
+        let removing = tokio::spawn(async move { removal.await.map(|_| ()) });
+        held.reached.notified().await;
+
+        barrier.may_mint.notify_one();
+        let outcome = binding.await.expect("the bind task joins");
+        assert!(
+            matches!(outcome, Err(AuthError::NotRegistered(_))),
+            "the repeat bind lost to the removal and says so opaquely: {outcome:?}"
+        );
+
+        held.may_sweep.notify_one();
+        assert!(
+            removing.await.expect("the removal task joins").is_ok(),
+            "the device deletes"
+        );
+        assert!(
+            conn.is_revoked(),
+            "the socket bound to the removed key outlived the removal \
+             (bound now: {:?})",
+            conn.bound_device_key()
+        );
+    }
+
+    /// The other half of that ordering, decidable only in the source for the
+    /// reason `the_revocation_re_read_stays_after_the_mint` gives: a
+    /// re-read moved above the write leaves a gap the sweep cannot reach.
+    #[test]
+    fn the_bind_re_reads_revocation_after_the_write() {
+        let src = include_str!("auth_core.rs");
+        let body = src
+            .split_once("pub async fn device_bind_core(")
+            .expect("device_bind_core is in this file")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("device_bind_core ends with a column-0 brace")];
+        let wrote_at = body
+            .find(".bind_device_key(")
+            .expect("the bind writes through bind_device_key");
+        assert!(
+            body[wrote_at..].contains(".is_device_grant_revoked("),
+            "the revocation re-read must follow the write"
+        );
     }
 
     /// A well-formed device-handshake attempt with the given keys; returns the
@@ -1415,14 +1792,14 @@ mod device_auth_tests {
     /// pin cannot see a difference that only shows up in an interleaving the
     /// correct code has no state for.
     ///
-    /// ⚠ **The exactly-2 count below is ALSO a belt guard**,
-    /// not only this test's own non-vacuity check — a fully-deleted 3b drops
-    /// the count to 1 (mutation-verified). It is a weaker instrument than
+    /// ⚠ **The exactly-one count in each function below is ALSO a belt
+    /// guard**, not only this test's own non-vacuity
+    /// check — a fully-deleted 3b drops the proof's count to 0. It is a weaker instrument than
     /// `step_3b_refuses_before_the_barrier_ever_sees_a_tombstoned_key`
     /// (which isolates 3b's own early return
     /// directly and also catches a full deletion — 3c is unconditional, so
     /// it is reached either way): a mutation that neuters 3b while leaving
-    /// the call textually present (`&& false`) keeps this count at 2 and
+    /// the call textually present (`&& false`) keeps this count at 1 and
     /// stays green, which is exactly what the barrier test exists to catch.
     /// `a_tombstoned_key_never_mints_even_with_its_grant_row_intact` stays
     /// green against BOTH mutations, since step 8 independently catches the
@@ -1464,15 +1841,27 @@ mod device_auth_tests {
         // Non-vacuity: the needle this guard hunts must genuinely be absent
         // before the mint inside this function, or a later edit that added a
         // *second* pre-insert read would slip past on the post-insert one.
-        // (3b's own check sits above `device_auth_core`'s mint too, so the
-        // count is what distinguishes "3b plus step 8" from "3b plus a new
-        // pre-insert read plus step 8".)
+        // (3b's own check sits in the proof `device_auth_core` runs ahead of
+        // its mint, so the two counts together are what distinguish "3b plus
+        // step 8" from "3b plus a new pre-insert read plus step 8".)
         assert_eq!(
             body.matches(".is_device_grant_revoked(").count(),
-            2,
-            "device_auth_core must read the revocation memory exactly twice — \
-             once at 3b and once after the mint; a third read is either a \
-             re-opened window or a duplicate to fold"
+            1,
+            "device_auth_core itself must read the revocation memory exactly \
+             once, after the mint; a second read is either a re-opened window \
+             or a duplicate to fold"
+        );
+        let proof = src
+            .split_once("async fn verify_device_proof(")
+            .expect("verify_device_proof is in this file")
+            .1;
+        let proof = &proof[..proof
+            .find("\n}\n")
+            .expect("verify_device_proof ends with a column-0 brace")];
+        assert_eq!(
+            proof.matches(".is_device_grant_revoked(").count(),
+            1,
+            "the shared proof must read the revocation memory exactly once, at 3b"
         );
     }
 
@@ -1911,5 +2300,121 @@ mod replay_guard_tests {
             "a replay while the blob is still within its ±window must be \
              rejected, even though the entry was recorded a full window ago"
         );
+    }
+}
+
+#[cfg(test)]
+mod custodied_fleet_tests {
+    //! `custodied_fleet_auth_core` — the custodian-NEST serve door's handshake
+    //! (`account-replica-posture.md` § Replica posture → *The custody grant +
+    //! ceremony*, the custodian-NEST serve door bullet, ruling 2).
+    use super::*;
+    use crate::db::CacheDb;
+    use fauna_core::custody_grant::{CustodyGrant, CustodyScopeSet, sign_custody_grant};
+    use fauna_core::data::{Capability, DeviceAuthorization, Timestamp};
+    use fauna_core::encoding::{EmbedAsBytes, sign_envelope};
+    use fauna_core::identity::ActorKeypair;
+
+    async fn test_state() -> Arc<AppState> {
+        Arc::new(AppState::for_test(Arc::new(
+            CacheDb::open_in_memory().unwrap(),
+        )))
+    }
+
+    /// A root-signed `DeviceAuthorization` for `device` under `owner` — the
+    /// cert every co-member of a set the device writes into already holds.
+    fn device_cert(owner: &ActorKeypair, device: [u8; 32]) -> EmbedAsBytes {
+        let cert = DeviceAuthorization {
+            actor_id: owner.actor_id(),
+            device_key: device,
+            capabilities: vec![Capability::RenewBearer],
+            created_at: Timestamp(1_000),
+            expires_at: None,
+        };
+        let (bytes, env) = sign_envelope(owner, &cert).unwrap();
+        EmbedAsBytes::from_signed(bytes, env)
+    }
+
+    /// Plant a live hosting row for `owner` on `state` (unexpired witness, not
+    /// refused, no removals): this nest custodies the owner.
+    async fn host_owner(state: &Arc<AppState>, owner: &ActorKeypair, device: &[u8; 32]) {
+        let witness = sign_custody_grant(
+            owner,
+            &CustodyGrant {
+                grant_id: vec![0x4A; 16],
+                owner: owner.actor_id(),
+                custodian_key: state.bound_identity(),
+                scopes: CustodyScopeSet::Account,
+                minted_at: Timestamp(1_000),
+                expires_at: Timestamp(u64::MAX / 2),
+                removed_devices: Vec::new(),
+            },
+        )
+        .unwrap();
+        state
+            .db
+            .put_custody_hosting(
+                &[0x48; 32],
+                &[0x4A; 16],
+                &owner.actor_id().0,
+                &fauna_core::encoding::canonical_encode(&witness).unwrap(),
+                "http://owner.invalid",
+                b"",
+                4096,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(
+            crate::custody_fleet::owner_hosting_serves(&state.db, owner.actor_id().0, device)
+                .await
+                .unwrap(),
+            "the planted row is live and serves the device"
+        );
+    }
+
+    /// A caller holding a served device's cert but not its key: a valid cert
+    /// and a well-formed junk signature.
+    async fn junk_handshake(
+        state: &Arc<AppState>,
+        owner: &ActorKeypair,
+        device: [u8; 32],
+    ) -> String {
+        let result = custodied_fleet_auth_core(
+            state,
+            &owner.actor_id_hex(),
+            &hex::encode(device),
+            fauna_core::data::Timestamp::now_millis(),
+            &hex::encode([0x5Au8; 64]),
+            &[0x01; 16],
+            &device_cert(owner, device),
+            &hex::encode(state.bound_identity()),
+        )
+        .await;
+        match result {
+            Ok(_) => "<minted>".into(),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    /// Ruling 2: the proof of possession precedes every row read, so a holder
+    /// of the (public) cert without the device key cannot ask a nest whether
+    /// it custodies the owner — the hosting nest and a nest holding nothing
+    /// answer alike.
+    #[tokio::test]
+    async fn a_cert_without_the_device_key_cannot_tell_whether_a_nest_custodies_the_owner() {
+        let owner = ActorKeypair::generate();
+        let device = ActorKeypair::generate().actor_id().0;
+        let hosting = test_state().await;
+        host_owner(&hosting, &owner, &device).await;
+        let stranger_nest = test_state().await;
+
+        let at_host = junk_handshake(&hosting, &owner, device).await;
+        let elsewhere = junk_handshake(&stranger_nest, &owner, device).await;
+        assert_eq!(
+            at_host, elsewhere,
+            "the hosting nest and a nest holding nothing must refuse a junk proof alike"
+        );
+        assert_eq!(at_host, "SignatureFailed");
     }
 }

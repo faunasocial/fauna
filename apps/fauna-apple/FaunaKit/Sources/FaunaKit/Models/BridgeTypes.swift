@@ -9,6 +9,10 @@ public struct BridgeInfo: Codable, Identifiable {
     public let mode: String?
     public let settings: [BridgeSetting]
     public let supportsFollows: Bool
+    /// The provider holds follow requests the user approves or refuses
+    /// (bridges.md § Follow requests). FFI-only: not in `CodingKeys`, so a JSON
+    /// decode leaves it false.
+    public var supportsFollowRequests: Bool = false
     public let linkModes: [BridgeLinkMode]?
     /// The nest's own explanation when `provider.status()` errored — the
     /// degraded shape's `error` slot (bridges.md § Errors & edge cases). Was
@@ -85,6 +89,14 @@ public struct BridgeFollow: Codable, Identifiable {
         case id, petname
         case createdAt = "created_at"
     }
+}
+
+/// One pending follow request on a bridge (`display` is the line the row paints).
+public struct BridgeFollowRequest: Identifiable, Equatable {
+    public let id: String
+    public let address: String
+    public let name: String?
+    public let display: String
 }
 
 /// Type-erased Codable wrapper for mixed JSON values.

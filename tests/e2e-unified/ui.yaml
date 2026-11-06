@@ -148,6 +148,7 @@ gated_features:
       - gated-post-price                      # the price-and-route class: a gated post's price
       - gated-post-payment-link               # the price-and-route class: a gated post's payment link
       - gated-post-buy-button                 # the price-and-route class: a gated post's buy button
+      - gated-post-purchase-pending           # the price-and-route class: a bought sold post's purchase-pending line
   # The NIP-57 Lightning zap plane — a subset member of `payments` (excising `payments`
   # excises this too; excising this alone keeps provider-rail payments).
   zaps:
@@ -390,6 +391,8 @@ pages:
                               # ever present. User-approved 2026-09-25. feed.md § Errors & edge cases.
       - error-message         # text — error display
     optional_elements:
+      - feed-imported-notice  # text — the imported-posts selection's notice naming the platform ("Showing the posts you imported from Instagram"); present only while FeedSnapshot.imported_selected is set. feed.md § State & data shape → The imported-posts selection. User-approved 2026-11-01; tui first.
+      - feed-imported-clear   # button — leaves the imported-posts selection for Local (clear_imported); present only beside feed-imported-notice. User-approved 2026-11-01; tui first.
       - content-policy-blocked-notice # text, indexed — v1.x family content-floor block placeholder in place of a post body (renders only for supervised accounts; family-safety.md § Content policy; IDs user-approved 2026-07-15; built on all 7 apps, tui last 2026-08-02). `state` attribute blocked | collapsed (user-approved 2026-10-16; tui first 2026-10-17)
       - content-policy-collapsed-reveal-button # button, indexed — scoped in post-card[i]; a content-policy `collapse` verdict's reveal (user-approved 2026-10-16; tui first 2026-10-17)
       - content-policy-blocked-reason  # text, indexed — scoped in post-card[i] (and the post detail dialog); the guardian rule's reason, verbatim, beside the notice; absent for a floor (nest-rules.md § The shared rule editor; user-approved 2026-10-20; tui first)
@@ -424,7 +427,7 @@ pages:
     sub_pages:
       post_detail:
         trigger: "click post-card"
-        elements: [feed-post-detail-dialog, feed-post-detail-author, feed-post-detail-body, tag-chip, post-image, doc-remote-image, quoted-post, post-tip-total, post-tip-count, post-tip-list-button, feed-post-view-thread-button, content-label-badge]
+        elements: [feed-post-detail-dialog, feed-post-detail-author, feed-post-detail-body, tag-chip, post-image, doc-remote-image, quoted-post, post-tip-total, post-tip-count, post-tip-list-button, feed-post-view-thread-button, content-label-badge, post-reaction-pill]
       thread:
         # The Bluesky-native thread view (bridges.md § Bluesky-native thread view): IDs user-approved 2026-10-03, all seven apps; tui first. Back returns to post_detail. A failed fetch paints the page's error-message.
         trigger: "click feed-post-view-thread-button"
@@ -635,6 +638,13 @@ pages:
       # The private overlay on the roster row (contacts.md § The private overlay; IDs user-approved 2026-09-25):
       - contact-public-name        # text, indexed — scoped in contact-row[i]; the public name beneath a nickname contact-name, only while a nickname is set
       - contact-labels             # text, indexed — scoped in contact-row[i]; the viewer's labels on one line, absent when none
+      # Archive-import phase two's link prompt (archive-import.md § Linking and merging, ruling 8; IDs user-approved 2026-11-01).
+      # Each scoped in contact-row[i], rendered only while the shared ArchiveLinkView holds the matching state:
+      - contact-archive-link-prompt  # text, indexed — the same-person question (platform + archived name), while the pair is asked
+      - contact-archive-link-yes     # button, indexed — yes to the question, while asked
+      - contact-archive-link-no      # button, indexed — no to the question (asked once, never again), while asked
+      - contact-archive-linked       # text, indexed — "Linked: Facebook" (+ the unmatched count when above zero), while linked
+      - contact-archive-unlink       # button, indexed — unlink, while linked
       # ── Ward-side contact requests (family v1.x follow-on batch, user-approved 2026-08-13 (item 14, confirmed live with the user);
       # family-safety.md § Child-initiated contact requests). Render only for a supervised
       # account whose add/knock was refused by policy. Also on the profile page (same ids). ──
@@ -868,7 +878,7 @@ pages:
       - restore-history-section        # view — collapsible restore-history section header
       - restore-history-list           # view — restore_history rows container
       - restore-history-item           # view, indexed — one row per restore
-      - restore-divergence-banner      # text, indexed — "N MUAs reconnected with newer state" (renders only when ≥1 divergence row)
+      - restore-divergence-banner      # text, indexed — "N mail or calendar apps reconnected with newer state" (renders only when ≥1 divergence row)
       - restore-divergence-details-modal  # view — divergence details modal (opens on banner click)
       - restore-divergence-details-item   # view, indexed — per-(collection, MUA) divergence row inside the modal
       # ── Manage backup destinations (backups.md § Manage backup destinations) ──
@@ -1027,6 +1037,18 @@ pages:
       # runtime — nothing to derive the list from). tui first (2026-09-25).
       - device-member-note       # text, single — the group's three warnings: removal is permanent; a signed-in-but-not-yet-registered device lists here too; compare fingerprints with the devices in hand first
       - device-own-fingerprint   # text, single — this device's own key fingerprint on its own device-card beside device-this-mark-badge: the user's half of the comparison, the SAME shared-Rust formatter as device-member-fingerprint
+      # ── Device names — the rename affordance (ui/devices.md § Device names;
+      # behavior/devices.md § Device names, rule (1); IDs user-approved
+      # 2026-11-01). The owner may name any of their devices from any of
+      # their apps (the name seals under the owner root, so every owner app
+      # opens it). The button is on every device-card; the editor opens over
+      # ONE card at a time, prefilled with the device's name (without the
+      # ` · code` an alike name paints beside it). tui first (2026-11-02);
+      # the other six by trickle-down.
+      - device-rename-button     # button, indexed — open the name editor on this device-card
+      - device-rename-input      # text input, single — the open editor's name, prefilled with the current name
+      - device-rename-confirm-button # button, single — save the typed name (unchanged = nothing sent)
+      - device-rename-cancel-button  # button, single — close the editor; nothing written
       - settings-nav-back        # button — returns to the Settings hub (tui: SubPage::Root — a live user-reported bug found Esc was the only way out on File Sets, undiscoverable; user-approved 2026-08-03)
     components:
       - custody-holder-card      # owner side — cross-account custodian devices ("who holds my data"; indexed; devices.md § Custody facet piece 2; IDs user-approved 2026-08-16)
@@ -1517,20 +1539,6 @@ pages:
       - account-activate-reauth-prompt # view — in-app re-auth confirm (only where no native OS prompt exists)
       - account-activate-reauth-confirm-button # button — confirm the switch (in-app re-auth)
       - account-activate-reauth-cancel-button  # button — decline; pure no-op, stay on the current account
-      # apple's iOS Settings root-List nav links (user-approved 2026-08-11
-      # under rule A) — bookkeeping for ids apple already renders; not the shared
-      # account-settings-link shape (that stays in elements:, see the comment
-      # there), since Settings navigation is genuinely platform-shaped (desktop
-      # rail vs iOS's List of NavigationLinks).
-      - mail-settings-link         # button — navigate to mail settings (iOS)
-      - web-settings-link          # button — navigate to web (paywalled content) settings (iOS)
-      - devices-settings-link      # button — navigate to devices settings (iOS)
-      - folders-settings-link      # button — navigate to folders settings (iOS)
-      - subscription-settings-link # button — navigate to subscription settings (iOS)
-      - nostr-settings-link        # button — navigate to Nostr settings (iOS)
-      - atproto-settings-link      # button — navigate to AT Protocol settings (iOS, macOS)
-      - task-delegation-link       # button — navigate to task delegation settings (iOS)
-      - linked-nests-link          # button — navigate to linked nests settings (iOS)
       # Cancel twin of sign-out-confirm-button above — the destructive-confirm
       # convention declared the confirm and never the cancel.
       - sign-out-cancel-button     # button — destructive confirm cancel (inline, sign out)
@@ -2357,7 +2365,9 @@ pages:
       - admin-mail-dmarc-fo-mode-select                 # select — fo_mode: 1 / 0 / d / s
       - admin-mail-dmarc-aggregate-retention-input      # text_input — aggregate_retention_days (1–365)
       - admin-mail-dmarc-forensic-retention-input       # text_input — forensic_retention_days (1–90; the app warns above 30)
-      - admin-mail-dmarc-save-button                    # button — fauna.bridges.put_dmarc_policy (full PUT)
+      # ✅ Rule-A sign-off on the outbound switch's id GIVEN by the user 2026-10-31.
+      - admin-mail-dmarc-outbound-aggregate-toggle      # switch — outbound_aggregate_enabled (the daily aggregate reports this nest sends; default on)
+      - admin-mail-dmarc-save-button                   # button — fauna.bridges.put_dmarc_policy (full PUT)
       # ── Secrets (mail-mass-mailing.md § Secret rotation; mail-forwarding.md § SRS
       # scheme). ✅ Rule-A sign-off on the two ids GIVEN by the user 2026-10-16. Each
       # is confirmed by a second press of the same button (no confirm id): the first
@@ -2407,9 +2417,9 @@ pages:
       tui: "lead app — built 2026-10-17 (apps/fauna-tui/src/admin/mail_reports.rs, every id; witness test_admin_mail_reports.py)."
       linux: "built 2026-10-18 (apps/fauna-linux/src/settings/admin_mail_reports.rs, every id over the shared DmarcReportsMachine)."
       web: "built 2026-10-18 (apps/fauna-web/src/routes/admin/mail-reports/+page.svelte, every id over the shared DmarcReportsMachine)."
-      windows: "lift — pending (batched trickle-down)."
-      macos: "lift — pending (batched trickle-down)."
-      ios: "lift — pending (batched trickle-down)."
+      windows: "built 2026-10-30 (Views/AdminMailReportsPage.xaml over AdminMailReportsViewModel, every id over the shared DmarcReportsMachine; rail row after admin-mail)."
+      macos: "built 2026-10-25 (FaunaKit AdminMailReportsView + AdminMailReportsVM, every id over the shared DmarcReportsMachine; rail row after admin-mail)."
+      ios: "built 2026-10-25 (the same shared FaunaKit AdminMailReportsView, pushed from the admin dashboard list)."
       android: "built 2026-10-18 (apps/fauna-android/app/src/noKids/java/com/fauna/app/ui/screen/settings/AdminMailReportsScreen.kt, every id over the shared DmarcReportsMachine)."
 
   # admin-invite-requests page retired 2026-05-29 — its pending-request rows are
@@ -2595,7 +2605,7 @@ pages:
       macos: "AtprotoSettingsView (shared FaunaKit, SettingsPage.atproto rail sub-page after Nostr) — full port: depth selector + transition card + Linked panel (shared BridgeCardContent) + hosted panel + full-PDS panel, 2026-07-23. Delete-presence confirm ceremony wired (openDeleteConfirm/cancelDelete/confirmDelete against the shared machine, mirroring the contest-confirm card's shape), 2026-08-28."
       ios: "Same shared FaunaKit AtprotoSettingsView as macOS (atproto-settings-link row in SettingsView), 2026-07-23."
       android: "AtprotoSettingsScreen.kt (settings/atproto, reached from the Settings rail); full port: depth selector + transition card + hosted panel + Linked panel (BridgesScreen's BridgeCard made internal + embedded verbatim) + full-PDS panel gated on level, 2026-07-30. D10 authoring-delegation row (atproto-delegation-*) trickle-down leg 4 of 6, 2026-08-15 — DelegationRowSection, the same two-shape surface tui leads. Inherited apple's UniFFI gestures; consumes the shared wire→i18n maps through two new value-format-gated exports (delegationCapabilityLabel/delegationLivenessLabel) rather than a Kotlin `when`. The lapse clock is TestAgent's atproto_delegation_advance_clock arm, poking the same AtprotoSettingsHost singleton the page observes. Robolectric-verified; the e2e trio is host-emulator-gated like every android leg."
-      tui: "settings/atproto.rs; the full ui/atproto.md surface — depth selector + transition card + Linked panel (embedded via crate::bridges::embed_bridge_card) + hosted panel + full-PDS panel gated on level, 2026-07-24. F1 login-plane built 2026-07-22. LEAD APP for the D10 authoring-delegation row (atproto-delegation-*), 2026-07-29 — the other six follow in a batched trickle-down. LEAD APP for the delete-presence confirm ceremony (AtprotoConfirmDelete/AtprotoCancelDelete gestures), 2026-08-21 — linux, web and android joined 2026-08-28, macOS and iOS the same day; windows remains entrusted (still a static button)."
+      tui: "settings/atproto.rs; the full ui/atproto.md surface — depth selector + transition card + Linked panel (embedded via crate::bridges::embed_bridge_card) + hosted panel + full-PDS panel gated on level, 2026-07-24. F1 login-plane built 2026-07-22. LEAD APP for the D10 authoring-delegation row (atproto-delegation-*), 2026-07-29 — the other six follow in a batched trickle-down. LEAD APP for the delete-presence confirm ceremony (AtprotoConfirmDelete/AtprotoCancelDelete gestures), 2026-08-21 — linux, web and android joined 2026-08-28, macOS and iOS the same day; windows 2026-09-06, the last app."
 
   p2p:
     heading: S.p2p.title  # "P2P Contacts"
@@ -2818,6 +2828,11 @@ pages:
       # 2026-07-18), android's SAF DocumentsProvider set (user-approved 2026-09-30);
       # on-demand-files-apple.md § Apple File Provider binding / § Android SAF
       # DocumentsProvider binding.
+      # macos/ios additionally carry the one-time OS enable pair beneath that switch
+      # (user-approved 2026-10-31; on-demand-files-apple.md § Apple File Provider
+      # binding, The one-time OS enable): folder-on-demand-os-enable-hint and, where
+      # the OS offers a door, folder-on-demand-open-settings-button. Conditional:
+      # present only while the OS reports the set's registered domain not enabled.
       # folder-location-deletes-held + folder-location-apply-deletes-button are the
       # mass-delete floor's confirm affordance (user-approved 2026-08-15;
       # delete-propagation.md § A wholesale-vanished folder is infrastructure
@@ -2843,7 +2858,7 @@ pages:
       # where the OS offers none) — present exactly while the row is on-demand
       # and its placeholder surface stands (LocationBindingsModel::free_space_verb).
       linux:   [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-browse-button, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-location-mode-toggle, folder-location-free-space-button, folder-location-on-device, folder-location-free-space-result]
-      macos:   [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-browse-button, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-on-demand-toggle]
+      macos:   [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-browse-button, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-on-demand-toggle, folder-on-demand-os-enable-hint, folder-on-demand-open-settings-button]
       windows: [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-browse-button, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-location-mode-toggle, folder-location-free-space-button, folder-location-on-device, folder-location-free-space-result]
       # tui additionally carries sync-agent-linger-toggle: the headless-deployment
       # offer (loginctl enable-linger), tui-only because tui is the SSH surface —
@@ -2855,7 +2870,7 @@ pages:
       # YES for tui, 2026-09-26;
       # on-demand-files.md § On-Demand Files).
       tui:     [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-location-mode-toggle, folder-location-free-space-button, folder-location-on-device, folder-location-free-space-result, sync-agent-linger-toggle]
-      ios:     [folder-on-demand-toggle]
+      ios:     [folder-on-demand-toggle, folder-on-demand-os-enable-hint, folder-on-demand-open-settings-button]
       android: [folder-on-demand-toggle]
     components:
       - photo-backup-controls   # Apple + android — the "Photo Library" folder's config (see component notes); other clients have no device photo library
@@ -3119,6 +3134,7 @@ pages:
       - unlock-reset-button         # button — web, unlock mode: start over (reveals the confirm)
       - unlock-reset-confirm-button # button — web: erase this browser's identity store, back to create mode
       - unlock-passkey-button       # button — web, unlock mode, a passkey wrap in the header, a secure named host (user-approved 2026-10-20)
+      - unlock-keyring-locked-notice # label — tui, create mode, the OS keyring answered but is locked: S.unlock.keyring_locked_notice (user-approved 2026-11-01)
 
   subscription-settings:
     # Reached from the Settings sub-nav as "Subscriptions" (sibling of
@@ -3581,7 +3597,7 @@ pages:
       - nests-item                         # per-nest rows (indexed): identity line + trust facet
       - nest-trust-grant-item              # per-grant rows inside a nest's trust facet (indexed)
       - nest-trust-backup-item             # backup trust rows on the HOME nest's row (indexed): NestBackupKey seal grant + one writer-grant row per destination (IDs user-approved 2026-07-24)
-      - nest-trust-holders-status          # HOME row Now lens: unreachable copy when the holder roster could not be read, else empty; replaces nest-trust-empty when set (owner-approved 2026-10-16; tui renders 2026-10-17, other apps pending — ui-actual files own the per-app gap)
+      - nest-trust-holders-status          # HOME row Now lens: unreachable copy when the holder roster could not be read, else empty; replaces nest-trust-empty when set (owner-approved 2026-10-16; tui renders 2026-10-17, the other six apps follow 2026-10-18..31)
       - nest-trust-generation-item         # retained backup generations a destination still holds inside the grace window T (indexed): what the owner can roll back to after revoking a rogue source (IDs user-approved 2026-07-29)
       - nest-trust-custody-item            # custodian-nest rows inside a nest's trust facet (indexed): T16's owner-side custody family, nest-shaped half (IDs user-approved 2026-08-16; the nest-custodian identity fact ruled 2026-08-17 — accept-bound nest custodians render here; tui renders 2026-08-17, other apps pending — ui-actual files own the per-app gap)
     platform_elements:
@@ -3839,19 +3855,15 @@ pages:
       - family-policy-feed-sources-select     # select — allow | block (new external sources/follows)
       - family-policy-unknown-peer-dm-select  # select — allow | hold (bridge DMs from unknown peers; twin of family-policy-unknown-sender-select. v1.x follow-on batch, user-approved 2026-08-13 (item 14, confirmed live with the user); family-safety.md § The bridge-DM gate)
       # ── v1.x policy editor (IDs user-approved 2026-07-15; family-safety.md §§ Content policy /
-      # Guardian Notify / Screen time — the content floors + Notify toggle are BUILT on all 7 apps
-      # (tui's render-enforcement leg landed last, 2026-08-02); the three screen-time inputs are
-      # BUILT on all 7 apps (windows landed last, 2026-08-24) ──
-      - family-policy-content-nsfw-select        # select — inherit | collapse | block (guardian content floor)
-      - family-policy-content-spam-select        # select — inherit | collapse | block
-      - family-policy-content-phishing-select    # select — inherit | collapse | block
-      - family-policy-content-commercial-select  # select — inherit | collapse | block
+      # Guardian Notify / Screen time — the Notify toggle is BUILT on all 7 apps; the three
+      # screen-time inputs are BUILT on all 7 apps (windows landed last, 2026-08-24) ──
       - family-policy-content-notify-toggle      # toggle — guardian Notify (category + count, never content); default off
-      - family-policy-content-hint               # text — under the content selects: the categories no app can detect yet, so a limit on them waits until one can (family-client-enforcement.md § Content policy; user-approved 2026-10-16 under rule A)
+      - family-policy-content-hint               # text — beside the content rules: the categories no app can detect yet, so a limit on them waits until one can (family-client-enforcement.md § Content policy; user-approved 2026-10-16 under rule A)
       # The guardian's mounting of the shared rule-editor (nest-rules.md § The shared rule
-      # editor (b); family-safety.md § App surface → Content rules) supersedes the four
-      # content selects above, which retire app by app as each app mounts it (approved
-      # with the nest-rules package 2026-10-17); the floors leave the wire once all 7 apps do.
+      # editor (b); family-safety.md § App surface → Content rules) superseded the four
+      # family-policy-content-*-select floors, retired app by app as each app mounted it and
+      # gone from ui.yaml with the seventh, windows, 2026-11-04 (approved with the nest-rules
+      # package 2026-10-17); the floors leave the wire in their own change.
       - family-policy-rules-section              # view — container / scope; hosts rule-editor for the selected ward
       - family-policy-screen-window-start-input  # text_input — usage window start, typed HH:MM (stored as local minutes; wrap allowed). Empty = no window
       - family-policy-screen-window-end-input    # text_input — usage window end, typed HH:MM. Bounds come in pairs
@@ -4134,11 +4146,12 @@ onboarding:
   # either success (drops straight into the authenticated app) or failure
   # (launch_retry, below) is known. Distinct page from launch_retry — this is
   # the state BEFORE any failure, not the failure/retry state itself. Row 23,
-  # user-approved 2026-08-11 under rule A — no convention sibling; genuinely
-  # per-app (macOS only, so far).
+  # user-approved 2026-08-11 under rule A — no convention sibling; widened to iOS
+  # (one shared FaunaKit view on both apple targets) user-approved 2026-11-01.
   launch_progress:
     platform_elements:
       macos: [launch-status]
+      ios: [launch-status]
 
   # -------------------------------------------------------------------------
   # Pre-stage: launch-screen retry surface
@@ -5129,9 +5142,11 @@ components:
         to a hard-coded /work/tmp/fauna-blob-… path and opened nothing (a stale doc
         comment on post_list.rs::build_post_image claimed otherwise). conversations'
         dm-attachment-image still has no click handler — the remaining per-page gap."
-      tui: "A modal overlay element painted while feed.lightbox is Some, dismissed with
+      tui: "One painter, lightbox.rs, serves both wired pages: a modal overlay element
+        painted while feed.lightbox (a post-image click) or conversations.lightbox (a
+        received dm-attachment-image click, since 2026-11-05) is Some, dismissed with
         Escape (ui.yaml declares no dismiss element inside; the conversations-overlay
-        keymap shape). The picture is RE-RASTERIZED from the cached Thumbnail.pixels at
+        keymap shape), and cleared when the thread is left. The picture is RE-RASTERIZED from the cached Thumbnail.pixels at
         thumbnail::LIGHTBOX_COLS (72 cells) rather than repeating the card's
         POST_IMAGE_COLS (32) preview, so it is genuinely enlarged — and on a
         kitty/iTerm2/sixel terminal the graphics painter scales the same pixels into the
@@ -5146,9 +5161,19 @@ components:
         trigger is a click on the FEED LIST CARD's post-image. Five apps agree —
         web (C2paImage onclick), ios (PostCardView), macos (MacPostCardView),
         linux and tui — and test_feed_image_lightbox.py runs on all five. The
-        remaining work is per-page, not per-app: the conversations
-        dm-attachment-image and the media page's items are wired on no app at all.
-      windows: "ContentDialog."
+        remaining work is per-page, not per-app. Conversations: activating a
+        received dm-attachment-image opens the lightbox over the thread, Escape
+        closes it — wired on tui first (2026-11-05,
+        test_conversations_image_lightbox.py), the other six to follow. Media: a
+        media-item tap already opens media-item-detail, so the page has no free
+        gesture; whether a preview inside media-item-detail becomes the trigger or
+        media leaves used_in waits on an owner ruling, and no app wires it until then.
+      windows: "Controls/ImageLightboxOverlay — a Visibility-toggled transparent Button
+        spanning the page, NOT a ContentDialog (a shown ContentDialog read
+        count=1/visible=False to FlaUI, 2026-09-07). Wired on feed's post-image and on
+        the profile's Posts tab (the same post-card). The ContentDialog twins
+        ConversationsPage and MediaPage carried had no caller and were retired
+        2026-11-04: a page that wires a trigger hosts this one control."
 
   c2pa-badge:
     description: "Content provenance badge showing C2PA verification status and details"
@@ -5304,8 +5329,9 @@ components:
       - gated-post-purchase-pending   # indexed — "purchase pending" on a sold post this actor has bought while the author's grant is still on its way (monetization.md § Per-post pay-to-unlock → a completed buy must not be re-offered; ID user-approved 2026-10-16). Present iff PostSummary.unlock_purchase_pending and the post is still gated — never together with gated-post-buy-button; a reload drops it until the next resolve pass re-sets it, so its reappearance is the positive trace that the later pass declined to re-offer (e2e-latency-independent-assertions.md convention 14). Text = i18n feed.post.purchase_pending. tui-lead 2026-10-18; the other six follow in the batched trickle-down
       - repost-attribution          # indexed — the "reposted" marker in a REPOST ROW's author header (feed.md § Interaction bar → Repost; ID user-approved 2026-08-11). Present iff PostSummary.reposted_post_id is set, which is exactly when the card also renders NO interaction-bar and activates at the original. tui-lead 2026-08-11, linux+web 2026-08-11, macos+ios 2026-09-03, windows 2026-09-06; android remains, so it stays optional_elements until then
       - c2pa-badge                   # present iff this card's post-image resolves a positive C2PA provenance check (ui/media.md § C2PA provenance; the `c2pa-badge` top-level component owns the concept, this is its list-card scope). BUILT ON ALL 7 APPS (2026-08-10 tui, 2026-08-15 linux+android, 2026-08-25 macos+ios, 2026-08-26 windows — the last leg): tui/linux HEAD `head_has_c2pa`, android its own `checkBlobC2pa` lifted from post_detail — android compile+Robolectric-verified only, real e2e fleet-wide host-emulator-gated; apple's `APIClient.hasC2pa(hash:)` HEAD, shared FaunaKit `PostImageC2paBadge` view; windows reuses its existing authenticated blob GET (`BlobImageLoader.LoadWithC2paAsync`, already fetching the `x-c2pa` header for the image itself — no new request), threaded onto an observable `FeedPostItem.HasC2pa`
-      - post-archive-comments        # indexed — the collapsed owner-only context under an IMPORTED post: other people's comments from the archive, read by the feed manager from the sealed folder's model/comments.cbor (archive-import.md § What each category becomes). Present only on the owner's own archive-origin posts that have any. IDs user-approved 2026-09-08 with slice 4; BUILT by slice 6 (Rail::Archive + the projections), no app renders it yet
+      - post-archive-comments        # indexed — the collapsed owner-only context under an IMPORTED post: other people's comments from the archive, read by the feed manager from the sealed folder's model/comments.cbor (archive-import.md § What each category becomes). Present only on the owner's own archive-origin posts that have any. IDs user-approved 2026-09-08 with slice 4; BUILT by slice 6 (the shared PostSummary.archive_comments fold, placed by ruling 5's ladder): tui-lead 2026-10-28; the other six follow in the batched trickle-down
       - post-archive-comment-item    # indexed — one collapsed comment (author display name + text), scoped inside post-archive-comments. Same approval and build slice
+      - post-reaction-pill           # indexed — one per PostSummary.reactions group, in its order, under the interaction bar: text = the emoji and its count, the viewer's own (viewer_react_id present) highlighted; a tap toggles the viewer's own reaction of that emoji through FeedManager::react (feed.md § Layout & flow → Reaction posts count and paint, ruling 4; the feed twin of dm-reaction-pill). Present only while the post has ≥1 reaction of that emoji; a repost row (no interaction bar) and a bluesky row paint none. ID user-approved 2026-11-01; tui-lead 2026-11-01, the other six follow in the batched trickle-down
     children:
       - interaction-bar
       - post-tip-list
@@ -5430,21 +5456,26 @@ components:
         PostCardBody (list card) + MacFeedDetailView (post detail). Built
         2026-08-25. Since 2026-10-03 the element is the inline player host
         (render-model.md § D6c → Inline playback): a tap resolves the shared
-        FeedManager playbackSource (FeedVM.videoPlaybackURL — a blob URL, or a
-        sealed video opened to an owner-only temp file) and swaps the glyph for
-        AVPlayer in a SwiftUI VideoPlayer in the same element, publishing state
-        idle/loading/playing/error plus position and source; never autoplays
-        (InlineVideoPlaybackTests; test_feed_video_playback.py marked, its run
-        owed). A bridged post's ProxiedVideo (render-model.md § D6c → Proxied
+        FeedManager playbackSource (FeedVM.videoPlayback — a blob path streamed
+        through the pinned FfiRangedNestReader behind an AVURLAsset on the
+        private fauna-nest:// scheme since 2026-10-22, never a nest URL AVPlayer
+        dials; or a sealed video opened to an owner-only temp file) and swaps
+        the glyph for AVPlayer in a SwiftUI VideoPlayer in the same element,
+        publishing state idle/loading/playing/error plus position and source;
+        never autoplays (InlineVideoPlaybackTests; test_feed_video_playback.py
+        green on macos + ios 2026-10-22). A bridged post's ProxiedVideo (render-model.md § D6c → Proxied
         video, 2026-10-08) paints in the same element as the play glyph + its
         nest-relative path (documentMediaProxiedVideoPath) when the post has no
-        blob Video — inert (no resolve closure) and never byte-loaded."
+        blob Video — never byte-loaded before the tap, which (since 2026-10-22)
+        plays it through the ticketed proxy path playback_source answers
+        (FeedVM.proxiedVideoPlayback, the Video arm's own stream branch)."
       ios: "Same shared FaunaKit VideoThumbnailView as macOS, inline player
         included (since 2026-10-03). Call sites: the shared PostCardBody (list
         card) + PostDetailView (post detail). Built 2026-08-25. A bridged post's
         ProxiedVideo (render-model.md § D6c → Proxied video, 2026-10-08) paints
         in the same element as the play glyph + its nest-relative path
-        (documentMediaProxiedVideoPath), inert and never byte-loaded."
+        (documentMediaProxiedVideoPath), never byte-loaded before the tap, which
+        (since 2026-10-22) plays it through the ticketed proxy, as on macOS."
       web: "VideoThumbnail.svelte, painted when the decoded body item's media_type
         starts with 'video/' (media_type is the browser-supplied File.type at
         upload, not server-sniffed — real end-to-end since always). Verified
@@ -5582,6 +5613,7 @@ components:
     description: "Feed switcher: the built-in Trending virtual feed + the user's own custom feeds"
     elements:
       - feed-trending-item    # built-in Trending virtual feed (fauna.feed.trending.posts), above the user's own feeds
+      - feed-local-item       # built-in Local entry (select_feed(None)), directly below feed-trending-item, above the user's own feeds. User-approved 2026-11-01; tui first.
       - feed-item
     used_in: [feed]
     notes:
@@ -7799,6 +7831,9 @@ elements:
   admin-mail-dmarc-forensic-retention-input:
     description: "Days an inbound DMARC forensic report is kept, 1–90 (default 30; the app warns above 30, the nest refuses more than 90). forensic_retention_days of put_dmarc_policy."
     type: text_input
+  admin-mail-dmarc-outbound-aggregate-toggle:
+    description: "Whether this nest sends the daily DMARC aggregate reports to the domains whose mail it received. Default on; off, each daily pass sends nothing and discards the window it closes. outbound_aggregate_enabled of put_dmarc_policy (read via the get_dmarc_policy twin — not in FetchConfigReply)."
+    type: toggle
   admin-mail-dmarc-save-button:
     description: "Persist the whole deployment-wide DMARC catalog (full PUT, fauna.bridges.put_dmarc_policy); the record tags with no control round-trip unchanged."
     type: button
@@ -8128,7 +8163,7 @@ elements:
     description: "macOS-only title text on the launch-screen retry surface, painted above the shared launch-transient-error/launch-retry-button (user-approved 2026-08-11 under rule A — no convention sibling; genuinely per-app)."
     type: text
   launch-status:
-    description: "macOS-only 'Signing in…' status text shown on the launch progress spinner, before any retry state is known (distinct from launch_retry, which models the failure case). Row 23, user-approved 2026-08-11 under rule A — no convention sibling; genuinely per-app."
+    description: "macOS + iOS 'Signing in…' status text shown on the launch progress spinner while the launch verdict is pending, before any retry state is known (distinct from launch_retry, which models the failure case). User-approved 2026-08-11 under rule A for macOS; widened to iOS (the shared FaunaKit view) user-approved 2026-11-01."
     type: text
   # (security.md § Transport trust): the nest-identity-changed
   # launch surface (page launch_identity_changed). ALL-APP since 2026-07-13 —
@@ -8708,6 +8743,11 @@ elements:
     description: "The post's summed tip amount, via the shared fauna_core::format::tip_amount (sats at 1 sat and above, msats below). Present iff the resolved total is NON-ZERO — deliberately NOT post-tip-count's condition, because tip_count includes receipts that reported no parseable amount: a post whose every receipt did so has real tips and nothing summable, and rendering '0 sats' there would tell the reader nobody paid (monetization.md § Tips — a missing amount is a real state, never coerced to 0). Absent until the lazy resolve lands, and absent in a payments-excised build (dynamic-features.md § Charter members)."
     type: text
     indexed: true
+  # --- Reaction pills (feed.md § Layout & flow → Reaction posts count and paint, ruling 4; ID user-approved 2026-11-01) ---
+  post-reaction-pill:
+    description: "Aggregated reaction under the interaction bar (emoji + count, own highlighted); tap toggles the viewer's own reaction of that emoji through FeedManager::react. One per PostSummary.reactions group, in its order. Present only when the post has ≥1 reaction of that emoji (feed.md § Interaction bar → Reaction posts count and paint, ruling 4); the feed twin of dm-reaction-pill. A repost row and a bluesky row paint none."
+    type: button
+    indexed: true
   post-tip-count:
     description: "How many tips the post has, via the shared fauna_core::format::tip_count (which owns the singular, so no app ships '1 tips'). Counts EVERY tip including amount-less ones, so it renders in cases where post-tip-total does not. Present iff the resolved count is non-zero."
     type: text
@@ -8967,7 +9007,7 @@ elements:
     type: view
     indexed: true
   recipient-resolve-status:
-    description: "Recipient resolve state (idle / resolving / resolved / not-found / error). State exposed via attribute, not separate elements."
+    description: "Recipient resolve state (idle / resolving / resolved / not-found / not-reachable / error). State exposed via attribute, not separate elements."
     type: text
   recipient-picker-class:
     description: "The class of the room about to be created, stated in the new-thread composer once a recipient chip is committed (conversation-rooms.md § The three classes) — end-to-end when every chip is a Fauna address, transport-only when any chip rides a bridge; derived in shared Rust (prospective_room_class). State exposed via the `class` attribute (end-to-end | community | transport-only), the recipient-resolve-status shape."
@@ -9109,7 +9149,7 @@ elements:
     type: button
     indexed: true
   dm-message-report-button:
-    description: "Report this received message to your nest admins (in the dm-message-actions-menu overflow, beside mark-as-spam; gated !is_own). Opens the shared report-sheet with subject message {channel, record_cid} — the same key the legal-takedown conversation half uses, so an admin can withhold a sealed message without reading it. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; unbuilt on every app."
+    description: "Report this received message to your nest admins (in the dm-message-actions-menu overflow, beside mark-as-spam; gated !is_own). Opens the shared report-sheet with subject message {channel, record_cid} — the same key the legal-takedown conversation half uses, so an admin can withhold a sealed message without reading it. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; painted on all 7 apps."
     type: button
     indexed: true
   dm-attachment-file:
@@ -9886,6 +9926,14 @@ elements:
     description: "Clear search and restore normal feed"
     type: button
     indexed: false
+  feed-imported-notice:
+    description: "The imported-posts selection's notice above the post list, naming the archive's platform; present only while that selection is active"
+    type: text
+    indexed: false
+  feed-imported-clear:
+    description: "Leave the imported-posts selection and return to the Local feed"
+    type: button
+    indexed: false
   feed-combination-select:
     description: "All rules vs Any rule combination mode in feed creation"
     type: select
@@ -9960,7 +10008,7 @@ elements:
     description: "Destructive-action confirm step for post delete (mirrors dm-message-delete-confirm-button)"
     type: button
   feed-post-report-button:
-    description: "Report this post to your nest admins (in the feed-post-actions-menu overflow; gated !is_own). Opens the shared report-sheet with subject post {cid}. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; unbuilt on every app."
+    description: "Report this post to your nest admins (in the feed-post-actions-menu overflow; gated !is_own). Opens the shared report-sheet with subject post {cid}. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; painted on all 7 apps."
     type: button
     indexed: true
   feed-post-publish-web-button:
@@ -10586,10 +10634,10 @@ elements:
     description: "Once a source is chosen, lists snapshots rows from that destination, grouped by close-in-time (mail snapshot at T₀ + calendar snapshot within ±60s render as one selectable pair). Selecting a row picks both kinds' snapshots."
     type: select
   restore-kinds-checkboxes:
-    description: "Container for the per-kind restore checkboxes (mail, calendar). Defaults to both checked when both have a snapshot; bound to data.backups.restore_kinds."
+    description: "Container for the per-kind restore checkboxes (mail, calendar, contacts, posts, conversations). Defaults to all checked; bound to data.backups.restore_kinds."
     type: view
   restore-kind-checkbox:
-    description: "One restore-kind checkbox; indexed, one per kind (mail, calendar). User may uncheck a kind to restore only the other."
+    description: "One restore-kind checkbox; indexed, one per kind (mail, calendar, contacts, posts, conversations). User may uncheck a kind to leave it out of the restore."
     type: checkbox
     indexed: true
   restore-confirm-input:
@@ -10615,7 +10663,7 @@ elements:
     type: view
     indexed: true
   restore-divergence-banner:
-    description: "Per-row banner 'N MUAs reconnected with newer state'; indexed. Renders only on rows where ≥1 bridge_restore_divergence row exists for that snapshot_id. Clicking opens restore-divergence-details-modal."
+    description: "Per-row banner 'N mail or calendar apps reconnected with newer state'; indexed. Renders only on rows where ≥1 bridge_restore_divergence row exists for that snapshot_id. Clicking opens restore-divergence-details-modal."
     type: text
     indexed: true
   restore-divergence-details-modal:
@@ -11011,7 +11059,7 @@ elements:
     indexed: true
   share-transfer-state:
     type: text
-    description: "The transfer row's state: Pulling / Up to date / admission pending / the transfer gate's 'limited by …' refusal rendered honestly (Dim-3 — the p2p-share.transfer verdict names its binding tier and bound). User-approved 2026-08-18."
+    description: "The transfer row's state: Pulling / Up to date / admission pending / the transfer gate's 'limited by …' refusal rendered honestly (Dim-3 — the p2p-share.transfer verdict names its binding tier and bound). User-approved 2026-08-18. A pull that failed keeps its row and reads it: unreachable ('Could not reach their device' — the dial or admission failed) or interrupted ('Connection lost; retrying' — admitted, then failed); after 'limited by …', before admission pending. User-approved 2026-11-01."
     indexed: true
   folder-writer-uncapped-warning:
     type: text
@@ -11027,7 +11075,15 @@ elements:
     indexed: true
   folder-on-demand-toggle:
     type: checkbox
-    description: "Per-set, per-device 'Show in Finder' (macOS) / 'Show in Files' (iOS, android) — adds/removes the set's File Provider domain (apple; on-demand placeholders under the system-managed Fauna location) or its set under the Fauna root of the system file browser (android's SAF DocumentsProvider). Every owner row, and every row of a folder shared with the account (user-approved 2026-09-30; hide-only there — it writes no place); default ON; mutually exclusive with a local-folder binding for the same set (one local presence per set per device). macos+ios+android platform_elements. User-approved 2026-07-18 (android 2026-09-30). Behavior authority docs/goal/behavior/on-demand-files-apple.md § Apple File Provider binding, § Android SAF DocumentsProvider binding and § Shared sets on a capability host"
+    description: "Per-set, per-device 'Show in Finder' (macOS) / 'Show in Files' (iOS, android) — adds/removes the set's File Provider domain (apple; on-demand placeholders under the system-managed Fauna location) or its set under the Fauna root of the system file browser (android's SAF DocumentsProvider). Every owner row, every row of a folder shared with the account (user-approved 2026-09-30; hide-only there — it writes no place), and every group-scope row of the folders page — a set shared in person — on macos, ios and android (user-approved 2026-11-01; hide-only there too, one local presence per set per device); default ON; mutually exclusive with a local-folder binding for the same set (one local presence per set per device). macos+ios+android platform_elements. User-approved 2026-07-18 (android 2026-09-30). Behavior authority docs/goal/behavior/on-demand-files-apple.md § Apple File Provider binding, § Android SAF DocumentsProvider binding and § Shared sets on a capability host"
+    indexed: true
+  folder-on-demand-os-enable-hint:
+    type: text
+    description: "Apple only: beneath folder-on-demand-toggle, on a row whose set has a registered File Provider domain the OS reports not user-enabled — names the OS surface and the steps; clears by itself once the person has enabled Fauna there. macos+ios platform_elements. User-approved 2026-10-31. Behavior authority docs/goal/behavior/on-demand-files-apple.md § Apple File Provider binding, The one-time OS enable"
+    indexed: true
+  folder-on-demand-open-settings-button:
+    type: button
+    description: "Apple only: beside folder-on-demand-os-enable-hint, where the OS offers a door — macOS opens System Settings at Login Items & Extensions; iOS has none unless one is measured. macos+ios platform_elements. User-approved 2026-10-31. Behavior authority docs/goal/behavior/on-demand-files-apple.md § Apple File Provider binding, The one-time OS enable"
     indexed: true
   # --- Local-folder binding (per folder; DESKTOP only — on the folders page) ---
   # 2026-06-28 unification: a bound folder lives nested UNDER its folder, so the set
@@ -11233,36 +11289,6 @@ elements:
   account-settings-link:
     description: "Navigate to account settings / page landmark"
     type: button
-  # apple iOS Settings root-List nav links (user-approved 2026-08-11 under
-  # rule A) — same shape as account-settings-link above, platform-scoped in
-  # settings' optional_elements rather than the shared elements list.
-  mail-settings-link:
-    description: "Navigate to mail settings (iOS)"
-    type: button
-  web-settings-link:
-    description: "Navigate to web (paywalled content) settings (iOS)"
-    type: button
-  devices-settings-link:
-    description: "Navigate to devices settings (iOS)"
-    type: button
-  folders-settings-link:
-    description: "Navigate to folders settings (iOS)"
-    type: button
-  subscription-settings-link:
-    description: "Navigate to subscription settings (iOS)"
-    type: button
-  nostr-settings-link:
-    description: "Navigate to Nostr settings (iOS, windows)"
-    type: button
-  atproto-settings-link:
-    description: "Navigate to AT Protocol settings (iOS, macOS)"
-    type: button
-  task-delegation-link:
-    description: "Navigate to task delegation settings (iOS)"
-    type: button
-  linked-nests-link:
-    description: "Navigate to linked nests settings (iOS)"
-    type: button
   # Cancel twin of sign-out-confirm-button — row 23, the destructive-confirm
   # convention declared the confirm and never the cancel.
   sign-out-cancel-button:
@@ -11314,6 +11340,30 @@ elements:
   contact-unattested-mark:
     description: "Marks a contact still awaiting the owner's post-succession review verdict — a reminder, never an accusation"
     type: text
+    indexed: true
+  # Archive-import phase two (archive-import.md § Linking and merging, ruling 8):
+  # each scoped INSIDE contact-row[i] and rendered only while the shared
+  # ArchiveLinkView (fauna-archive-import-machine `link`) holds the matching
+  # state. IDs user-approved 2026-11-01 under rule A.
+  contact-archive-link-prompt:
+    description: "The same-person question on a contact's row — is this contact the person from your archive's friends — naming the platform and the archived name; while the pair is asked"
+    type: text
+    indexed: true
+  contact-archive-link-yes:
+    description: "Yes to the row's same-person question — offers the link, or confirms the contact's offer"
+    type: button
+    indexed: true
+  contact-archive-link-no:
+    description: "No to the row's same-person question — declined for good; never asked again for that contact and platform"
+    type: button
+    indexed: true
+  contact-archive-linked:
+    description: "'Linked: <platform>' on a linked contact's row, with how many items could not be matched to a post when there are any"
+    type: text
+    indexed: true
+  contact-archive-unlink:
+    description: "Unlink a linked contact — future merges stop; what already came back stays with the person who wrote it"
+    type: button
     indexed: true
   contact-request-guardian-button:
     description: "Ward's 'ask your guardian' on a refused-send surface (contacts + profile pages) — the ask carries WHO, never a free-text why (family v1.x, user-approved 2026-08-13 (item 14, confirmed live with the user); family-safety.md § Child-initiated contact requests)"
@@ -11652,6 +11702,10 @@ elements:
   feed-trending-item:
     description: "Built-in Trending virtual-feed entry in the feed selector (fauna.feed.trending.posts; above the user's own feeds — trending.md § The Trending feed)"
     type: view
+  feed-local-item:
+    description: "Built-in Local entry in the feed selector, directly below feed-trending-item and above the user's own feeds; returns the selection to the nest's local feed (select_feed(None) — feed.md § Persistence)"
+    type: button
+    indexed: false
   compose-dialog-button:
     description: "Button to open rich compose dialog"
     type: button
@@ -12944,7 +12998,7 @@ elements:
     description: "Close the restore form"
   nests-custody-restore-notice:
     type: text
-    description: "CONDITIONAL — the last restore's outcome, each its own state, never collapsed: running · address refused (the policy's reason) · not admitted (copy names all three causes) · restored (rows applied, and the sealed count beside it) · nothing new · identity mismatch. Absent until a restore ran this session (the nest-trust-generation-notice shape)"
+    description: "CONDITIONAL — the last restore's outcome, each its own state, never collapsed: running · address refused (the policy's reason) · not admitted (copy names all three causes) · restored (rows applied, and the sealed count beside it) · nothing new · identity mismatch · identity unchecked (a row on record, the bound identity unread). Absent until a restore ran this session (the nest-trust-generation-notice shape)"
   nests-item:
     type: view
     description: "One nest row in the user's Nests list (one per fauna.pair.list pairing plus the home nest): identity line + trust facet"
@@ -13432,18 +13486,6 @@ elements:
     indexed: true
   # ── family v1.x (IDs user-approved 2026-07-15; family-safety.md §§ Content policy /
   # Guardian Notify / Screen time / Full visibility — spec-first, unbuilt) ──
-  family-policy-content-nsfw-select:
-    type: select
-    description: "Content floor: nsfw — inherit | collapse | block (client-enforced post-decrypt; conforming-client bound stated on the surface)"
-  family-policy-content-spam-select:
-    type: select
-    description: "Content floor: spam — inherit | collapse | block"
-  family-policy-content-phishing-select:
-    type: select
-    description: "Content floor: phishing — inherit | collapse | block"
-  family-policy-content-commercial-select:
-    type: select
-    description: "Content floor: commercial — inherit | collapse | block"
   family-policy-content-notify-toggle:
     type: toggle
     description: "Guardian Notify: category + count, never content (default off)"
@@ -13581,7 +13623,7 @@ elements:
     description: "The submit state, the first defect sentence the crate names, the nest's typed refusal, or the saved state (\"saved — version N\" on the admin's mounting)."
   onboarding-nest-rules:
     type: text
-    description: "The joining nest's published rules above the by-continuing terms notice (above the bottom row while that notice is unbuilt) — on invite_request, and on handle_entry while its Continue signs in (nest-rules.md § Acceptance at joining). Absent for a nest with no rules."
+    description: "The joining nest's rules heading, directly above the by-continuing terms notice — on invite_request, and on handle_entry while its Continue signs in (nest-rules.md § Acceptance at joining); it carries the not-applied sentence when none of the document applies on this device, whether or not any rule is listed. Absent for a nest with no rules."
   onboarding-nest-rules-item:
     type: text
     description: "One rule at joining: its verdict, level and the nest's reason, from the shared NestRulesSummary."
@@ -13644,6 +13686,22 @@ elements:
   device-member-note:
     type: text
     description: "The member group's three warnings, in its own text: removal is permanent (no undo; the device signs in again from scratch); a listed device is not necessarily a problem (one signed in but not yet registered with the server lists here until it does); compare fingerprints with the devices in hand first — if two cards appear where one was expected, one is a device you hold (devices.md § Members without a matching entry)"
+    indexed: false
+  device-rename-button:
+    type: button
+    description: "Open the name editor over this device-card, prefilled with the device's name — the opened name, without the ' · code' an alike name paints beside it (ui/devices.md § Device names; IDs user-approved 2026-11-01)"
+    indexed: true
+  device-rename-input:
+    type: text_input
+    description: "The open name editor's text, prefilled with the device's current name; Enter saves (ui/devices.md § Device names)"
+    indexed: false
+  device-rename-confirm-button:
+    type: button
+    description: "Save the typed name: sealed under the owner root and sent as fauna.sync.devices.rename; an unchanged name sends nothing; closes the editor (ui/devices.md § Device names)"
+    indexed: false
+  device-rename-cancel-button:
+    type: button
+    description: "Close the name editor; nothing written (ui/devices.md § Device names)"
     indexed: false
   device-member-card:
     type: view
@@ -13846,6 +13904,9 @@ elements:
   unlock-confirm-input:
     type: input
     description: "Second passphrase entry, painted ONLY in create mode (no sealed store yet). Same masking + Enter-submits contract as unlock-passphrase-input. A mismatch on submit paints S.unlock.error_mismatch in error-message and stays. Label: S.unlock.confirm_label."
+  unlock-keyring-locked-notice:
+    type: text
+    description: "tui only (user-approved 2026-11-01): the create surface's statement that the system keyring answered but is locked or not set up, so the identity will be sealed under the chosen passphrase instead — painted only when the sealed arm's cause is KeyringLocked (architecture/apps/tui.md § Credential storage; common.md § Credential storage: an unreachable protected store is reported, never a quiet fallback). A notice, never a refusal to start. Text: S.unlock.keyring_locked_notice."
   unlock-submit-button:
     type: button
     description: "Runs the unlock (Argon2id derive + AEAD open; wrong passphrase paints S.unlock.error_wrong and stays) or the create (fresh salt, seals the store; tui refuses if a file appeared meanwhile). On success the surface clears its buffers and hands the screen to launch routing. Text: S.unlock.unlock_button / create_button by mode."
@@ -15283,7 +15344,7 @@ elements:
     description: "Block ⇄ unblock this user — one toggle whose label flips on contact_status (OTHER view only). Reuses contacts.md fauna.knocks.block / the contact-edge block state. profile.md § Layout & flow + § Where logic lives → block."
     type: button
   profile-report-button:
-    description: "Report this account to your nest admins (OTHER view only; beside profile-block-button). Opens the shared report-sheet with subject actor {actor_id}. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; unbuilt on every app."
+    description: "Report this account to your nest admins (OTHER view only; beside profile-block-button). Opens the shared report-sheet with subject actor {actor_id}. moderation.md § User-initiated reporting; IDs user-approved 2026-09-25; painted on all 7 apps."
     type: button
   # ── The private section (OTHER only) — your own nickname, notes and labels on
   #    this person. profile.md § The private section + contacts.md § The private

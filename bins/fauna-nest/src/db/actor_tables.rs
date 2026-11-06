@@ -631,6 +631,20 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // set is the honest shape — the same argument as `bridge_search_policy`.
         export: Export::Verbatim,
     },
+    // Whether the user has turned their mail off — the nest-side half of
+    // "Disable mail" (`mail-credentials.md` § Trigger taxonomy). It moves with
+    // the mailbox for the same reason as `actor_mail_serving` above: left
+    // behind, a successor whose mail was off would find it silently back on.
+    ActorTable {
+        table: "actor_mail_enabled",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Move(MoveShape::Plain),
+        // One user-set boolean, absent ⇒ ON: a switch the user flipped is the
+        // user's data — the same ruling as `actor_mail_serving`.
+        export: Export::Verbatim,
+    },
     // The mail-import dedup ledger: one row per (actor, dedup key) the account
     // has already ingested, consulted by `mail_import` before persisting so a
     // re-import of mail the delivery path already landed is a no-op. It moves
@@ -4242,6 +4256,23 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
              owner's that the archive does not already carry as mail, events or cards",
         ),
     },
+    // The marker's companion (`db/materialize_in_flight.rs`): the collections a
+    // door deleted while the marker stood, so the retry keeps the deletion. It
+    // moves with the marker it belongs to, for the marker's reason, and is
+    // withheld from export for the same one.
+    ActorTable {
+        table: "materialize_deleted_collections",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Move(MoveShape::Plain),
+        export: Export::WithheldOperational(
+            "the ids of collections a door deleted while an interrupted restore ceremony on \
+             this box stood, kept so the ceremony's retry does not bring them back. It is \
+             about this box's own half-finished write, meaningless off it, and holds nothing \
+             of the owner's that the archive does not already carry",
+        ),
+    },
     // The per-message scan record for mail this account was DELIVERED. Its own
     // per-actor consumer is what rules it: `seed_factor_backlog` selects on
     // `delivered_to_actor` to enumerate "the owner's mail item universe" and seed
@@ -6191,6 +6222,30 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
                      link, and `redeemed_by` is already in the owner's own `claims.list`",
         },
     },
+    // The purchase ledger beside the claim ledger (`monetization.md` § Expiry
+    // & revocation): which provider purchase reference is bound to which
+    // buyer or claim, so a refund — its own provider event, with its own id —
+    // can find what the purchase granted.
+    ActorTable {
+        table: "payment_purchases",
+        column: "author_id",
+        key: ActorKey::Blob,
+        policy: Policy::Retain("financial record -- see subscription_tiers."),
+        // Moves with the tiers and the claim ledger it points into. The
+        // provider config burns, so refunds reach the successor only once the
+        // creator re-registers the webhook under the new id — and from then on
+        // a refund for a sale made before the ceremony must still find its
+        // purchase, or the successor keeps access that was refunded. The row
+        // holds no credential: a claim is named by its `external_ref`, never
+        // its bearer code, so nothing here is standing authority a thief could
+        // have planted beyond the sale itself.
+        succession: Succession::Move(MoveShape::Plain),
+        // The author's sales ledger, no wider than `claims.list`: provider,
+        // purchase id, tier, the product it was sold as, the buyer the
+        // author's own claim list already names, and the claim's dashboard
+        // reference — no bearer code.
+        export: Export::Verbatim,
+    },
     // ⚠ Ruled `Burn` against a `Policy::Retain`, and the pairing is deliberate
     // rather than an oversight: the two axes answer different questions. The
     // deletion axis retains this row as part of the monetization plane's
@@ -8007,6 +8062,15 @@ pub const SUCCESSION_REFERENCES: &[(&str, &str, Succession)] = &[
         )),
     ),
     (
+        "payment_purchases",
+        "buyer_actor_id",
+        // The bound buyer of a provider purchase. `apply_refund` resolves
+        // through it exactly as through `payment_claim_codes.redeemed_by` — a
+        // provider refund carries no buyer binding of its own — so it follows
+        // the roster row the payment granted, for the same reason.
+        Succession::Move(MoveShape::Plain),
+    ),
+    (
         "payment_claim_codes",
         "redeemed_by",
         // **Ruled `Move`, against the prediction the row that asked for it
@@ -8580,6 +8644,24 @@ pub const SUCCESSION_REFERENCES: &[(&str, &str, Succession)] = &[
              row the key signed as the predecessor verifies under",
         ),
     ),
+    (
+        "sync_conflicts",
+        "reporter_actor_id",
+        // The actor whose `sync_devices` row the reporting device resolved
+        // under when the conflict was reported (schema 163) — a third party
+        // to the row, which belongs to the folder, not to the reporter. The
+        // choose-winner path reads it only to bind the reporting-device
+        // attestation: that arm passes when this actor IS the chooser, and a
+        // row whose reporter is not the chooser falls through to the
+        // change-row arm (`conflicts.md`).
+        Succession::Stay(
+            "attribution of a report the retired identity's device actually made: \
+             re-pointing it would let the successor's choose pass the reporting-device \
+             arm on a report no device of the successor sent — the forged self-echo the \
+             bind exists to refuse. Left on the predecessor, a successor's choose fails \
+             that arm closed and falls through to the change-row arm, never a loss",
+        ),
+    ),
 ];
 
 impl CacheDb {
@@ -9148,6 +9230,16 @@ mod tests {
         // names why the column is NOT "this row belongs to that actor".
         const EXCLUDED: &[(&str, &str, &str)] = &[
             (
+                "succession_pull_queue",
+                "actor_id",
+                "a derived visit-order queue for the hourly succession pull, re-derived \
+                 from the residue tables (`channel_foreign_members`, `remote_follows`, \
+                 `subscribers`, `subscribe_requests`) on every pass by \
+                 `succession_pull_worklist`: an id that leaves those tables (deleted, \
+                 or re-pointed by a succession) leaves the queue on the next pass, and \
+                 its successor joins it — scheduling state, no row of the actor's own",
+            ),
+            (
                 "custody_hosting",
                 "owner_refused_at",
                 "an INTEGER unix-seconds mark (when the custodied owner's nest last refused \
@@ -9197,6 +9289,16 @@ mod tests {
                  (`third_party_principals.principal_id`) -- an app, never an account. \
                  The table has no actor column: an item is its folder's \
                  (`folder_id`, ON DELETE CASCADE) and leaves with it",
+            ),
+            (
+                "sync_changes",
+                "deposited_by",
+                "the DEPOSITOR's 32-byte writer PUBLIC key (`folder-deposit.md` ruling 3) -- \
+                 a third-party principal's `writer_ed25519`, an app and never an account, \
+                 resolved by the owner's app through its connected-apps roster. It rides \
+                 inside the writer-signed statement, so a succession could not rewrite it \
+                 without voiding the row's signature; the row's own actor is `actor_id`, \
+                 registered",
             ),
             // The oracle's posting class (the row's own actor is `actor_id`,
             // registered); its principal is an app, as on the other two
@@ -11762,6 +11864,20 @@ mod tests {
              seal inbound mail at the perimeter -- published material by function. The private \
              half is MSEK-derived and client-held and has never rested here. The \
              `actor_epoch_seal_keys.mls_pubkey` class, whose migration says it in the same words",
+        ),
+        (
+            "actor_mls_pubkeys",
+            "calendar_pubkey",
+            "the actor's calendar-DAV X25519 PUBLIC recipient key, the `mls_pubkey` shape for \
+             the calendar plane after the calendar and card key split -- provisioned by their own \
+             client, fetched by the bridge to seal at the perimeter. The private half is \
+             MSEK-derived and client-held and has never rested here",
+        ),
+        (
+            "actor_mls_pubkeys",
+            "card_pubkey",
+            "the same shape for the contacts (card) plane: the actor's card-DAV X25519 PUBLIC \
+             recipient key, published material by function, its private half client-held",
         ),
         (
             "actor_index_pubkeys",

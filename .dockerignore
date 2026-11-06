@@ -16,3 +16,11 @@ apps/fauna-apple/
 # resolved but never compiled and never reaches the runtime image. (ios/android/
 # apple stay ignored — Swift/Kotlin, not cargo members.) See the Dockerfile
 # comment at the strip's former site for the full rationale.
+
+# The SPA's wasm chunks reach the image ONLY from the rust-wasm stage (the
+# Dockerfile COPYs all four files per chunk from it). A long-lived checkout's
+# git-ignored static/fauna_wasm* files (a `just wasm` output, panic-witness and
+# onnx builds) must not ride along in the `COPY apps/fauna-web/` context: they
+# would add files to the web-tree that a clean checkout lacks, and its manifest
+# would fail `just web-verify` (release-integrity.md § Web-app verifiability).
+apps/fauna-web/static/fauna_wasm*

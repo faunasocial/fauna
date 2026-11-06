@@ -17,6 +17,8 @@
 ;;   handle  → "/s…" spins until the fuel budget ends it
 ;;             "/g…" asks for 128 MiB: 507 when the cap refuses it, 200 when admitted
 ;;             "/w…" 200 with the asserted actor as the body, 401 when anonymous
+;;             "/h…" 200 answering Clear-Site-Data: "*", Alt-Svc: h3=":443" and
+;;                   Content-Type: text/plain — the reply-header filter's probe
 ;;             else 404
 ;;
 ;; Memory map: data in page 0 (strings from 1024), scratch return areas at
@@ -57,6 +59,17 @@
   (data (i32.const 1184) "http")                           ;; 4
   (data (i32.const 1192) "now")                            ;; 3
   (data (i32.const 1200) "hello from the fixture plugin") ;; 29
+  (data (i32.const 1280) "clear-site-data")                ;; 15
+  (data (i32.const 1296) "\"*\"")                          ;; 3
+  (data (i32.const 1304) "alt-svc")                        ;; 7
+  (data (i32.const 1312) "h3=\":443\"")                    ;; 9
+  (data (i32.const 1328) "content-type")                   ;; 12
+  (data (i32.const 1344) "text/plain")                     ;; 10
+  ;; "/h…"'s header list at 1360: three (name ptr, len, value ptr, len)
+  (data (i32.const 1360)
+    "\00\05\00\00\0f\00\00\00\10\05\00\00\03\00\00\00"
+    "\18\05\00\00\07\00\00\00\20\05\00\00\09\00\00\00"
+    "\30\05\00\00\0c\00\00\00\40\05\00\00\0a\00\00\00")
 
   ;; A bump allocator — the host lowers lists and strings into our memory
   ;; through it. Never frees; grows the memory as needed.
@@ -156,6 +169,12 @@
                 (local.set $status (i32.const 200))
                 (i32.store (i32.const 2316) (local.get $a_ptr))
                 (i32.store (i32.const 2320) (local.get $a_len)))
-              (else (local.set $status (i32.const 401))))))))
+              (else (local.set $status (i32.const 401))))))
+        ;; "/h…": origin-wide reply headers beside a representation one
+        (if (i32.eq (local.get $second) (i32.const 104))
+          (then
+            (local.set $status (i32.const 200))
+            (i32.store (i32.const 2308) (i32.const 1360))
+            (i32.store (i32.const 2312) (i32.const 3))))))
     (i32.store16 (i32.const 2304) (local.get $status))
     (i32.const 2304)))

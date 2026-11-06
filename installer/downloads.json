@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "about": "The downloads table on fauna.social/apps: one row per app, one column per operating system, one link per released file a user installs. The page links each file at the release of the version it was built for. The release workflow checks this file against the files it is about to publish, in both directions: every file named here must be among them, and every one of them must be named here or match `not_listed`. A release that adds or drops a platform cannot publish until this table says so.",
+  "columns": [
+    { "id": "ios", "label": "iOS" },
+    { "id": "macos", "label": "macOS" },
+    { "id": "android", "label": "Android" },
+    { "id": "linux", "label": "Linux" },
+    { "id": "windows", "label": "Windows" }
+  ],
+  "rows": [
+    {
+      "label": "Desktop",
+      "cells": {
+        "macos": [
+          { "label": "Apple Silicon", "file": "Fauna-{version}.dmg", "workflow": "release-macos.yml" }
+        ],
+        "linux": [
+          { "label": "x64", "file": "fauna-linux-x86_64-linux", "workflow": "release.yml" },
+          { "label": "arm64", "file": "fauna-linux-aarch64-linux", "workflow": "release.yml" }
+        ],
+        "windows": [
+          { "label": "x64", "file": "Fauna-Setup-x64.msi", "workflow": "release.yml" },
+          { "label": "arm64", "file": "Fauna-Setup-arm64.msi", "workflow": "release.yml" }
+        ]
+      }
+    },
+    {
+      "label": "Terminal and CLI",
+      "cells": {
+        "macos": [
+          { "label": "arm64", "file": "fauna-tui-aarch64-darwin.tar.gz", "workflow": "release-macos.yml" },
+          { "label": "x64", "file": "fauna-tui-x86_64-darwin.tar.gz", "workflow": "release-macos.yml" }
+        ],
+        "linux": [
+          { "label": "x64", "file": "fauna-tui-x86_64-linux.tar.gz", "workflow": "release.yml" },
+          { "label": "arm64", "file": "fauna-tui-aarch64-linux.tar.gz", "workflow": "release.yml" }
+        ],
+        "windows": [
+          { "label": "x64", "file": "fauna-tui-x64-windows.zip", "workflow": "release.yml" },
+          { "label": "arm64", "file": "fauna-tui-arm64-windows.zip", "workflow": "release.yml" }
+        ]
+      }
+    },
+    {
+      "label": "Nest",
+      "cells": {
+        "linux": [
+          { "label": "Docker", "href": "https://github.com/faunasocial/fauna/pkgs/container/nest" }
+        ]
+      }
+    }
+  ],
+  "not_listed": {
+    "release.yml": [
+      "*.bundle",
+      "SHA256SUMS",
+      "fauna-nest-*",
+      "fauna-front-door-*",
+      "fauna-push-relay-*",
+      "fauna-cors-proxy-*"
+    ],
+    "release-macos.yml": [
+      "*.sha256"
+    ]
+  }
+}

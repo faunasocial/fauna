@@ -18,7 +18,7 @@ pub mod fake;
 pub mod ws_rpc;
 
 #[cfg(any(test, feature = "test-helpers"))]
-pub use fake::{FakeCall, FakeLabelerCatalogNestApi};
+pub use fake::{FakeCall, FakeLabelerCatalogNestApi, ListHold};
 #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
 pub use ws_rpc::build_labeler_catalog_machine;
 #[cfg(feature = "rpc-glue")]

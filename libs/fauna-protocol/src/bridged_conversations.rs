@@ -8,9 +8,10 @@
 //! scope `fauna:conversations:bridge`) deposit inbound ciphertext sealed to the
 //! user's recipient key, drain the outbox the user's app sealed to the bridge's
 //! X25519 key, and report a room's shape, its far membership and receipts. The
-//! **user's four** (`User`, caller-scoped — none takes a target actor) list and
-//! open rooms, read one room's rows in both directions, and send. The nest
-//! opens nothing in either direction.
+//! **user's six** (`User`, caller-scoped — none takes a target actor) list and
+//! open rooms, read one room's rows in both directions, send, and remove the
+//! nest's copy of rows or of a whole room. The nest opens nothing in either
+//! direction.
 //!
 //! A bridge names a room by its own `far_room_id`; the nest mints `room_id`
 //! (the `rooms` row's id) at the room's birth and the user's side names rooms
@@ -46,6 +47,12 @@ pub const KIND_ROOMS_OPEN: &str = "fauna.bridges.conversation.rooms.open";
 pub const KIND_INBOX_FETCH: &str = "fauna.bridges.conversation.inbox.fetch";
 /// The user's send.
 pub const KIND_SEND: &str = "fauna.bridges.conversation.send";
+/// The user's local remove of bridged rows — the nest's copy only
+/// (`docs/goal/behavior/bridged-adapter.md` § Removing bridged rows).
+pub const KIND_MESSAGES_REMOVE: &str = "fauna.bridges.conversation.messages.remove";
+/// The user's local remove of a whole bridged room — every row tombstoned,
+/// the room hidden until a new live row reopens it.
+pub const KIND_ROOMS_REMOVE: &str = "fauna.bridges.conversation.rooms.remove";
 /// The push nudging the account's own clients after a deposit, a room change
 /// or a receipt. Carries no content.
 pub const PUSH_CONVERSATION_CHANGED: &str = "fauna.bridges.push.conversation_changed";
@@ -224,7 +231,7 @@ pub struct ReceiptRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
-// ── the user's four ────────────────────────────────────────────────────
+// ── the user's six ─────────────────────────────────────────────────────
 
 /// One bridged room as the user's app reads it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -265,6 +272,11 @@ pub struct BridgedRoomInfo {
     /// the bridge stops serving*). Absent on the wire means connected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disconnected: bool,
+    /// The room's newest local remove, unix ms; 0 when none. Another device
+    /// re-reads the room from the start when it moves (`bridged-adapter.md`
+    /// § Removing bridged rows, rule 5).
+    #[serde(default)]
+    pub last_removed_at: i64,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -358,6 +370,12 @@ pub struct BridgedMessageInfo {
     /// wire means not marked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub undelivered: bool,
+    /// `true` on a tombstone — a row the user removed from the nest; its
+    /// `sealed_content` is empty. Served so a from-the-start read can name
+    /// it (`bridged-adapter.md` § Removing bridged rows, rule 5). Absent on
+    /// the wire means live.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -398,6 +416,36 @@ pub struct SendReply {
     /// it has).
     #[serde(default)]
     pub self_address: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `conversation.messages.remove` — tombstone the nest's copy of these rows
+/// of one room (at most [`BRIDGED_PAGE_MAX`] ids). The far side sees nothing;
+/// an id of no live row of this room counts nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MessagesRemoveRequest {
+    #[serde(with = "serde_bytes")]
+    pub room_id: Vec<u8>,
+    pub ids: Vec<i64>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `conversation.rooms.remove` — tombstone every row of the room and hide it
+/// from `rooms.list` until a new live row reopens it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RoomsRemoveRequest {
+    #[serde(with = "serde_bytes")]
+    pub room_id: Vec<u8>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// How many live rows a remove tombstoned — a repeat answers 0.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RemoveReply {
+    pub removed: u32,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

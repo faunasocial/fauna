@@ -1,11 +1,61 @@
 import Foundation
 
-/// One-shot best-effort post-auth identity re-check (`security.md` § Post-auth
-/// surfacing) — the native analog of linux's `launch_authenticated()`
-/// `silent_sign_in()` call and tui's `spawn_domain_refresh`: re-run the same
-/// silent challenge the boot-time `LaunchMachine` ran, once, against the
-/// now-authenticated session, so a nest identity that changes AFTER that
-/// challenge is still caught before the session goes stale.
+/// Merge one identity the session client's mint confirmed into the account's
+/// server-data cache (handle / domain / tier, the switcher rows) and the live
+/// `SessionState.handle` — tui's and linux's `apply_self_identity`. An empty
+/// field keeps whatever the cache already holds (the launch machine wrote it,
+/// or an earlier mint did), so an empty handle never clobbers a cached one.
+@MainActor
+public func applySelfIdentity(
+    _ identity: LaunchIdentity,
+    actorId: String,
+    registry: FfiAccountRegistry,
+    session: SessionState?
+) {
+    let cur = registry.list().first { $0.actorId == actorId }
+    let handle = identity.handle.isEmpty ? cur?.handle : identity.handle
+    let domain = identity.domain.isEmpty ? cur?.domain : identity.domain
+    let tier = identity.tier.isEmpty ? cur?.tier : identity.tier
+    do {
+        try registry.updateCache(actorId: actorId, handle: handle, domain: domain, tier: tier)
+    } catch {
+        logMessage(level: .warn, target: "fauna.accounts",
+                   message: "[self-identity] cache update failed: \(error)")
+    }
+    if let handle, !handle.isEmpty {
+        session?.handle = handle
+    }
+    if let domain, !domain.isEmpty {
+        session?.domain = domain
+    }
+}
+
+/// Apply every identity `next` yields until it returns `nil` (the session
+/// client was torn down) or the task is cancelled — the body of
+/// ``FaunaClient/startSelfIdentityFollow(session:)``, split out so a test can
+/// script the subscription.
+@MainActor
+public func followSelfIdentity(
+    next: () async -> LaunchIdentity?,
+    apply: (LaunchIdentity) -> Void
+) async {
+    while !Task.isCancelled, let identity = await next() {
+        guard !Task.isCancelled else { return }
+        apply(identity)
+    }
+}
+
+/// The FORCED post-auth identity re-check (`transport-trust.md` § Post-auth
+/// surfacing, channel 3) — the body of the `#if DEBUG` `silent_sign_in` test
+/// command `test_nest_identity_pin_post_auth.py` drives, and the one place
+/// apple still runs a challenge on demand. An authenticated launch no longer
+/// runs it: ``FaunaClient/startSelfIdentityFollow(session:)`` reads the session
+/// mint's reply instead, and that mint's own session-ending verdict reaches
+/// ``escalateSessionEnding(_:ceremonyHold:escalate:)`` through the connection
+/// observer (`transport-connection.md` § The dial budget). It re-runs the same
+/// silent challenge the boot-time `LaunchMachine` ran against the
+/// now-authenticated session, the analog of linux's and tui's own
+/// `silent_sign_in` command.
 /// `FfiError.NestIdentityChanged` and `FfiError.IdentitySuperseded` are the
 /// verdicts that escalate — every other outcome (success, transient
 /// reachability, a rejected secret) is swallowed: a live session must never
@@ -42,6 +92,13 @@ public func performPostAuthSilentSignIn(
         case .IdentitySuperseded:
             await escalateSessionEnding(.superseded,
                                         ceremonyHold: ceremonyHold, escalate: escalate)
+        case .AccountLocked:
+            // Locked while signed in (`devices.md` § The locked state) — the
+            // fourth escalating verdict, tui's `SilentSignInVerdict::Locked`
+            // arm: the re-run launch meets the lock and paints its notice.
+            logMessage(level: .warn, target: "fauna.app",
+                       message: "[post-auth] this account is locked — re-entering launch")
+            await escalate()
         default:
             return
         }
@@ -50,8 +107,8 @@ public func performPostAuthSilentSignIn(
     }
 }
 
-/// Route a session-ending verdict (`security.md` § Post-auth surfacing) to the
-/// launch surface — the one door both the post-auth refresh above and the
+/// Route a session-ending verdict (`transport-trust.md` § Post-auth surfacing) to the
+/// launch surface — the one door both the forced re-check above and the
 /// connection supervisor's stop (`FaunaClient`'s connection-state observer,
 /// `.faunaSessionEnding`) go through, so the two cannot disagree. Re-entering
 /// the real launch flow is what lands the right screen: the re-run challenge

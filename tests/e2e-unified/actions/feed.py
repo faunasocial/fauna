@@ -569,7 +569,12 @@ class FeedActions:
         initial = self._settled_post_count()
         if image_path is not None and attach_first:
             self._attach_file("compose-file", image_path)
-        self.driver.select("compose-gate-tier-select", tier)
+        # The tier list paints once the app has read its tiers; selecting is
+        # the read (an agent refuses an option the frame did not paint).
+        assert self.wait_for_audience_option(tier, 30.0), (
+            f"the composer never offered the audience {tier!r}: "
+            f"{self._audience_select_diagnosis()}"
+        )
         self.driver.wait_for("compose-gate-preview-field")
         self.driver.type_text("compose-gate-preview-field", preview)
         self.driver.type_text("compose-text-field", full_text)
@@ -578,6 +583,20 @@ class FeedActions:
         self._wait_for_submit_enabled()
         self.driver.click("post-submit-button")
         self._wait_for_new_post(initial, expected_text=preview)
+
+    def _audience_select_diagnosis(self) -> str:
+        """What the audience select says about itself, for a failure message
+        (convention 6): the driver's one-line diagnosis, plus the registry
+        dump's lines for the id where the app publishes one (the in-process
+        agents' ``tree()`` carries the painted option list)."""
+        select_id = "compose-gate-tier-select"
+        lines = [self.driver.diagnose(select_id)]
+        try:
+            tree = self.driver.tree() or ""
+        except Exception:  # pragma: no cover — not every driver dumps a registry
+            tree = ""
+        lines += [ln for ln in str(tree).splitlines() if select_id in ln][:6]
+        return "\n".join(lines)
 
     def wait_for_audience_option(self, option: str, timeout_s: float) -> bool:
         """Poll until the composer's audience select (`compose-gate-tier-select`)
@@ -772,23 +791,6 @@ class FeedActions:
                 return True
             time.sleep(0.2)
         return False
-
-    def require_purchase_pending_supported(self) -> None:
-        """Skip unless this app renders `gated-post-purchase-pending` — the
-        bought-and-pending line off `PostSummary::unlock_purchase_pending`
-        (monetization.md § Per-post pay-to-unlock → *a completed buy must not
-        be re-offered*). tui leads (2026-10-18); linux, web and android follow;
-        the rest of the six are tracked in the batched trickle-down."""
-        d = self.driver
-        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="gated-post-purchase-pending (a bought post's pending line)",
-                detail="tui, linux, web and android today",
-                tracked="",
-            )
 
     def wait_for_purchase_pending(
         self, timeout: float = 30.0, *, card: int
@@ -1021,10 +1023,21 @@ class FeedActions:
         whether it has hydrated from the nest yet — ``{"hydrated": bool,
         "verdict": "watch-complete" | "skip" | None}``, read-only. How a second
         seat witnesses that it starts from the rollup the first collected
-        (`engagement-cues.md` § At rest). tui: ``feed_cue_verdict_for_test`` on
-        the test agent; the other apps follow in the trickle-down. See
+        (`engagement-cues.md` § At rest). tui/linux/windows:
+        ``feed_cue_verdict_for_test`` on the test agent (windows over
+        ``FfiFeedManager.CueVerdictForTest``); web:
+        ``WasmFeedManager.cueVerdictForTest``; macos/ios: FaunaKit's
+        ``FeedCueVerdictTestCommand`` over ``FfiFeedManager.cueVerdictForTest``;
+        the other apps follow in the trickle-down. See
         ``fauna_feed::FeedManager::cue_verdict_for_test``."""
-        if not self.driver.is_tui():
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_macos()
+            or self.driver.is_ios()
+            or self.driver.is_windows()
+        ):
             raise NotImplementedError(
                 f"{type(self.driver).__name__} has no cue verdict read"
             )
@@ -1092,20 +1105,70 @@ class FeedActions:
         — a non-media ``watch-complete`` needs ``seconds >= CUE_DWELL_LONG_MS/
         1000`` (8 s) of credit at long-dwell visibility.
 
-        Where the app has the frozen cue clock (:meth:`has_cue_clock`), the
-        dwell is ADVANCED, not slept (convention 14): a wall-clock hold on a
-        loaded box earns less credit than it waited, because the capture
-        refuses to count a stalled main loop past one sample's cap — the
-        2026-10-09 linux reds. The clock moves in capped steps until the
-        probe reports the card's long-dwell credit reached ``seconds`` (a
-        sample that measured the card mid-layout credits less, so the step
-        count is the state's, never a fixed number), then thaws; the scroll
-        that ends the exposure runs on the real clocks. Elsewhere the hold is
-        an honest wall-clock sleep until the clock reaches that app."""
-        self.driver.scroll_to("post-card", index=index)
-        if not self.has_cue_clock():
-            time.sleep(seconds)
+        The dwell is ADVANCED on the frozen cue clock, not slept (convention
+        14; :meth:`accrue_dwell`)."""
+        self.bring_post_into_dwell_view(index)
+        self.accrue_dwell(index, seconds)
+
+    # fauna_core::scoring::cues::CUE_LONG_DWELL_VISIBLE_PM / 1000 — the share
+    # of a card that must show for its dwell to count toward watch-complete.
+    CUE_LONG_DWELL_VISIBLE = 0.75
+
+    def bring_post_into_dwell_view(self, index: int) -> None:
+        """Bring ``post-card[index]`` into view the way a reader settles on it:
+        whole where it fits, and at least at long-dwell visibility.
+
+        Every app's ``scroll_to`` centres the element (the base driver's
+        contract). windows' stops as soon as UIA calls the card on screen,
+        which can be a sliver of it, and the bridge's measured sibling
+        (``scroll_to_visible_fraction``) reads UIA's bounding rect, which UIA
+        clips to the viewport — a card 28 % in view measured whole on
+        2026-11-04 and was never scrolled. So on windows the card is placed
+        through the app's own pixel step (``feed_cue_scroll_by``), from the
+        unclipped geometry its capture measured — the list is not
+        virtualized, so every card is in the probe — and the share that
+        shows is asserted from the step's own probe."""
+        if not self.driver.is_windows():
+            self.driver.scroll_to("post-card", index=index)
             return
+        post_id = self._post_id_of_card(index)
+        _, probe = self._scroll_feed_by(0)  # a fresh measurement, nothing moved
+        card = self._probe_card(probe, post_id)
+        start, end = probe["band"]
+        _, probe = self._scroll_feed_by(
+            (card["top"] + card["height"] / 2) - (start + end) / 2
+        )
+        card = self._probe_card(probe, post_id)
+        shown = min(card["top"] + card["height"], end) - max(card["top"], start)
+        visible = max(0.0, shown) / card["height"]
+        assert visible >= self.CUE_LONG_DWELL_VISIBLE, (
+            f"centring post-card[{index}] ({post_id[:12]}) left it only "
+            f"{visible:.0%} visible — under the long-dwell gate: {probe!r}"
+        )
+
+    @staticmethod
+    def _probe_card(probe: dict, post_id: str) -> dict:
+        card = next((c for c in probe.get("cards") or [] if c["post_id"] == post_id), None)
+        assert card is not None and card["height"] > 0, (
+            f"the capture measured no card for {post_id[:12]}: {probe!r}"
+        )
+        return card
+
+    def accrue_dwell(self, index: int, seconds: float) -> None:
+        """Let ``post-card[index]``, already in view, accrue ``seconds`` of
+        long-dwell credit on the frozen cue clock — the hold half of
+        :meth:`dwell_on_post`, for a caller that placed the card itself (a
+        measured scroll to long-dwell visibility).
+
+        Advanced, not slept (convention 14): a wall-clock hold on a loaded box
+        earns less credit than it waited, because the capture refuses to count
+        a stalled main loop past one sample's cap — the 2026-10-09 linux reds.
+        The clock moves in capped steps until the probe reports the card's
+        long-dwell credit reached ``seconds`` (a sample that measured the card
+        mid-layout credits less, so the step count is the state's, never a
+        fixed number), then thaws; whatever ends the exposure runs on the real
+        clocks."""
+        self._require_cue_clock()
         post_id = self._post_id_of_card(index)
         want_ms = int(seconds * 1000)
         self.freeze_cue_clock()
@@ -1145,14 +1208,21 @@ class FeedActions:
         never matched by text (a session's earlier journeys leave posts with
         the same text) or by the state's order (it agrees with the render only
         once the render has caught up). linux stamps the row's own ``post``
-        attr; tui's identity rides its capture subject, which the probe's
-        ``cards`` list in rendered order."""
-        try:
-            post_id = self.driver.get_attr("post-card", "post", index=index)
-        except Exception:  # noqa: BLE001 — an app without the attr
-            post_id = None
-        if post_id:
-            return post_id
+        attr, windows its card's HelpText (which answers the read); tui's
+        identity rides its capture subject, which the probe's ``cards`` list
+        in rendered order."""
+        # web stamps `data-post-id` (`PostCard.svelte`), which the bridge's
+        # `data-` fallback answers for `post-id`. Without it web fell through
+        # to the probe's `cards` — the rows the shell's last sample measured,
+        # which need not be every rendered card nor in render order — and a
+        # card below the first screen read back another post's id.
+        for attr in ("post", "post-id"):
+            try:
+                post_id = self.driver.get_attr("post-card", attr, index=index)
+            except Exception:  # noqa: BLE001 — an app without the attr
+                post_id = None
+            if post_id:
+                return post_id
         cards = self.cue_probe().get("cards") or []
         assert index < len(cards), (
             f"the capture measured {len(cards)} cards, not post-card[{index}]: {cards!r}"
@@ -1165,7 +1235,14 @@ class FeedActions:
         exposure when the first card leaves the viewport."""
         self.driver.scroll_to("post-card", index=index)
 
-    # ── engagement-cue test clock (convention 14; tui, linux, web, android) ────────
+    def place_post_at_bottom_edge(self, index: int, fraction: float) -> float:
+        """Leave ``post-card[index]`` with ``fraction`` of its height above
+        the feed's bottom edge — a card the reader has scrolled mostly out of
+        view — and return the visible fraction actually reached (the driver's
+        measurement, `PlatformDriver.scroll_to_bottom_fraction`)."""
+        return self.driver.scroll_to_bottom_fraction("post-card", fraction, index=index)
+
+    # ── engagement-cue test clock (convention 14; all seven apps) ──────────
     #
     # A skip (seen for LESS than CUE_SKIP_MS) and a fast-scroll burst
     # (exposures ending LESS than CUE_BURST_MIN_GAP_MS apart) are bounded from
@@ -1174,7 +1251,8 @@ class FeedActions:
     # (`fauna_feed::CueTracker` § The test clock): frozen, no time passes at
     # all, so a card accrues exactly what the test advances while it is in
     # view. The scroll stays real — tui's focus ring the viewport follows, and
-    # on linux, web and android the list's own pixel scroll position.
+    # on linux, web, android, macos, ios and windows the list's own pixel
+    # scroll position.
 
     # fauna_core::scoring::cues::CUE_MAX_SAMPLE_CREDIT_MS — one sample's
     # credit cap; a larger advance is refused by the app.
@@ -1189,15 +1267,21 @@ class FeedActions:
             or self.driver.is_linux()
             or self.driver.is_web()
             or self.driver.is_android()
+            or self.driver.is_macos()
+            or self.driver.is_ios()
+            or self.driver.is_windows()
         )
 
     def cue_step_is_the_record_barrier(self) -> bool:
         """Whether a cue-clock step's ack is itself the barrier that every
         exposure it ended is recorded (a train and its put included) — web's
-        shape, and android's: neither has a quit door a test can drive and then
-        wait out, so the step resolves only once its records are done. Where
-        this is false the app's own quit-time flush is the barrier."""
-        return self.driver.is_web() or self.driver.is_mobile()
+        shape, and android's and both apple apps': none has a quit door a test
+        can drive and then wait out (a macOS app outlives its last window), so
+        the step resolves only once its records are done. Where this is false
+        the app's own quit-time flush is the barrier (tui, linux and windows;
+        windows' step awaits its records too, `FeedCueClockCommands`, but its
+        journeys keep the real quit door)."""
+        return self.driver.is_web() or self.driver.is_mobile() or self.driver.is_macos()
 
     def _require_cue_clock(self) -> None:
         if not self.has_cue_clock():
@@ -1252,7 +1336,7 @@ class FeedActions:
     CUE_SCROLL_STEP_PX = 16
 
     def _scroll_feed_by(self, px: float) -> tuple[bool, dict]:
-        """Scroll the post list by ``px`` (linux, web and android: the list's real
+        """Scroll the post list by ``px`` (every app but tui: the list's real
         scroll position) and land it — the app answers once a sample has read
         the moved layout, with the probe as THAT sample left it (a later probe
         could already show the feed re-ranked in answer to an exposure the
@@ -1501,6 +1585,40 @@ class FeedActions:
         """
         self.driver.click("feed-repost-button", scope=f"post-card[{index}]")
 
+    # ── the reaction pills (feed.md § Layout & flow → *Reaction posts count
+    #    and paint*, ruling 4; `post-reaction-pill`, user-approved 2026-11-01) ──
+
+    def reaction_pills(self, index: int | None = None) -> list[dict]:
+        """Every ``post-reaction-pill`` on the post card at ``index`` — or, with
+        ``index=None``, the open ``post_detail``'s read (the detail paints one
+        post, so its pills carry no ancestor index; they are read inside
+        ``feed-post-detail-dialog`` so a list card still registered beneath a
+        sheet, as on macos, is not counted — the ``post-image`` precedent). Each
+        entry is ``{"text", "state"}``: the text is the emoji and its count, the
+        ``state`` attr ``on`` for the viewer's own reaction (empty where the
+        app exposes none). tui marks the viewer's own pill with a trailing
+        ``✓`` (a terminal has no fill to vary); the read drops it, so the text
+        is one form on every app and ``state`` alone says whose it is."""
+        scope = "feed-post-detail-dialog" if index is None else f"post-card[{index}]"
+        n = self.driver.count("post-reaction-pill", scope=scope)
+        return [
+            {
+                "text": (self.driver.get_text("post-reaction-pill", i, scope=scope) or "")
+                .strip().removesuffix("\u2713").rstrip(),
+                "state": str(
+                    self.driver.get_attr("post-reaction-pill", "state", i, scope=scope) or ""
+                ).strip().lower(),
+            }
+            for i in range(n)
+        ]
+
+    def toggle_reaction_pill(self, index: int, pill: int = 0) -> None:
+        """Tap the ``pill``-th ``post-reaction-pill`` on the post card at
+        ``index`` — ``FeedManager::react(post_id, emoji)``, the repost toggle's
+        semantics: absent → compose the viewer's wordless ``React`` post,
+        present → delete it. Scoped to the card, as :meth:`repost_post` is."""
+        self.driver.click("post-reaction-pill", pill, scope=f"post-card[{index}]")
+
     def repost_attribution_count(self, index: int = 0) -> int:
         """How many ``repost-attribution`` markers the post card at ``index``
         paints — 1 on a REPOST ROW, 0 on any ordinary post (feed.md
@@ -1707,8 +1825,12 @@ class FeedActions:
         `compose-dialog-button`. Reuses `_open_composer` to reach the compose
         bar first — required on iOS (compose-dialog-button only renders once a
         feed is selected); a no-op wait on clients with an always-inline
-        composer (web, linux, macos)."""
-        self._open_composer()
+        composer (web, linux, macos). Android's `compose-dialog-button` is the
+        feed screen's TopAppBar action, which navigates straight to the full
+        compose screen (`feed-compose-dialog`); `_open_composer` would already
+        have left the feed page through the FAB, so android clicks it directly."""
+        if not self.driver.is_android():
+            self._open_composer()
         self.driver.click("compose-dialog-button")
 
     def compose_dialog_visible(self) -> bool:
@@ -1760,15 +1882,18 @@ class FeedActions:
         back is the Esc key, which the agent presses over the painted dialog
         (`press_key(id, "Escape")` runs the keymap's own Esc arm on tui, the
         Escape shortcut the linux detail binds, and the dismiss door macos's
-        sheet and ios's pushed detail register on the dialog). The other apps'
-        dismiss gestures have no journey that needs them yet."""
+        sheet and ios's pushed detail register on the dialog, and windows's
+        ContentDialog closes on Esc as WinUI gives every dialog with a close
+        button). The other apps' dismiss gestures have no journey that needs them
+        yet."""
         if not (
             self.driver.is_tui() or self.driver.is_linux()
             or self.driver.is_macos() or self.driver.is_ios() or self.driver.is_web()
+            or self.driver.is_windows()
         ):
             raise NotImplementedError(
-                "close_post_detail is driven on tui, linux, macos, ios and web only; the "
-                "other apps' dialog dismiss has no journey that needs it yet"
+                "close_post_detail is driven on tui, linux, macos, ios, web and windows only; "
+                "the other apps' dialog dismiss has no journey that needs it yet"
             )
         self.driver.press_key("feed-post-detail-dialog", "Escape")
         deadline = time.monotonic() + 10.0
@@ -2075,27 +2200,9 @@ class FeedActions:
         Convention 7: the ``None`` this helper used to return off tui, which every
         caller quietly skipped on, reported a paint nobody had observed as covered.
         Called before any polling, so a declared app pays no timeout."""
-        if (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            return
-        from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-        skip_unbuilt(
-            self.driver,
-            surface="post-image paint state",
-            detail=(
-                "its test agent answers no get_attr(post-image, state) of "
-                "painted / placeholder, so whether a post's fetched bytes opened, "
-                "decoded and reached the picture cannot be read headlessly"
-            ),
-            tracked="docs/goal/behavior/archive-import.md § Implementation status today",
-        )
+        require_surface(self.driver, "post-image-paint-state")
 
     def post_image_paint_report(self) -> str:
         """Every post card's text and its ``post-image`` paint states, then the open
@@ -2251,6 +2358,22 @@ class FeedActions:
             budget_s=FEED_SELECT_BUDGET_S,
             what=f"searching the feed for {query!r}",
         )
+
+    def write_search_as_one_edit(self, query: str) -> None:
+        """Put ``query`` into the empty search field as ONE write, so it starts
+        exactly one re-query, for a test that has armed the one-shot reload hold.
+
+        Web debounces a field edit by 250 ms and `type_text` is one browser
+        round trip per key, so a loaded box that pauses longer than that
+        mid-word re-queries twice: the partial word takes the hold, and the whole
+        word runs free and commits past it. Web's `clear_and_type` is one atomic
+        fill. Elsewhere it is two writes, a clear and a type, and `type_text` is
+        the one write.
+        """
+        if self.driver.is_web():
+            self.driver.clear_and_type("feed-search-field", query)
+        else:
+            self.driver.type_text("feed-search-field", query)
 
     def clear_feed_search(self) -> None:
         """Tap feed-search-clear to restore normal feed."""
@@ -2440,22 +2563,6 @@ class FeedActions:
 
     # ── Trained-topic training verbs (post-card ⋯ overflow;
     # topic-factors.md § Training signals) ─────────────────────────────────
-
-    def require_author_line_opens_profile(self) -> None:
-        """Skip unless activating a card's ``post-author`` opens the author's
-        Profile (ui.yaml ``click post-author → profile``; convention 7). tui
-        leads (`feed.md` § User actions); android and linux have lifted it and the other
-        four lift it in the batched trickle-down — parity debt, so
-        ``skip_unbuilt``."""
-        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="post-author / feed-post-detail-author activation",
-                detail="the author line opens the author's Profile with the post's home carried",
-                tracked="feed.md § User actions; the batched per-app trickle-down",
-            )
 
     def open_post_author(self, index: int = 0) -> None:
         """Activate post ``index``'s author line (scoped to
@@ -2863,6 +2970,22 @@ class FeedActions:
             time.sleep(0.3)
         raise TimeoutError("feed-trending-item never appeared")
 
+    def select_local(self, timeout_s: float = 10.0) -> None:
+        """Return to the nest's local feed through the built-in Local entry
+        (``feed-local-item``, feed.md § Layout & flow region 1) — the shared
+        ``FeedManager.select_feed(None)``. Retries the click until the row is
+        present, as ``select_trending`` does."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                if self.driver.count("feed-local-item") > 0:
+                    self.driver.click("feed-local-item")
+                    return
+            except Exception:  # noqa: BLE001 — settle-poll
+                pass
+            time.sleep(0.3)
+        raise TimeoutError("feed-local-item never appeared")
+
     def wait_for_first_post_text(self, text: str, timeout_s: float = 15.0) -> bool:
         """Poll until the FIRST post's rendered body contains ``text``.
 
@@ -2935,9 +3058,10 @@ class FeedActions:
 
     def create_feed_with_factor(self, name: str, factor_label: str = "engagement",
                                  weight: str = "1.0", global_scope: bool = False,
-                                 combination: str = "all") -> None:
-        """Create a feed with a single factor-weight entry, no filter rules
-        (content-moderation-and-ranking.md § Composition).
+                                 combination: str = "all",
+                                 rule: tuple[str, str] | None = None) -> None:
+        """Create a feed with a single factor-weight entry and, by default, no
+        filter rules (content-moderation-and-ranking.md § Composition).
 
         Args:
             name: Feed name.
@@ -2956,10 +3080,15 @@ class FeedActions:
                 ×1000 into the wire's signed `weight_permille`.
             global_scope: Toggle `feed-factor-global-toggle` — routes the
                 entry to the caller's global factor set instead of this feed.
+            rule: ``(rule_type, value)`` of one filter rule staged in the same
+                form, as :meth:`create_feed_with_rule` stages its one — what
+                scopes a ranked feed to the posts a journey made.
         """
         self.driver.click("feed-create-feed-button")
         self.driver.wait_for("feed-create-feed-name")
         self.driver.clear_and_type("feed-create-feed-name", name)
+        if rule is not None:
+            self._stage_rule(*rule)
 
         # Labeler + trained-topic options land ASYNC after the dialog opens
         # (fauna.labelers.list + the sealed-registry read) — retry the select

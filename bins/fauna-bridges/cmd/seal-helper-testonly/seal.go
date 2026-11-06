@@ -36,6 +36,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 
@@ -223,6 +224,66 @@ func sealMailRecord(plaintext, recipientPubkey []byte) ([]byte, error) {
 	return fauna_ffi.SealToRecipient(plaintext, recipientPubkey)
 }
 
+// sealRecord is sealMailRecord for a record of any kind — a `calendar-record`
+// or `card-record` envelope (`owner-key-material.md` § Path B-sibling-5 / -6),
+// the only body shape the nest's calendar and card RPCs accept since the key
+// split. The recipient key is the kind's own (the calendar or card pubkey).
+func sealRecord(kind fauna_ffi.FfiRecordKind, plaintext, recipientPubkey []byte) ([]byte, error) {
+	return fauna_ffi.SealRecordToRecipient(kind, plaintext, recipientPubkey)
+}
+
+// recordKindOf maps a `seal-mail-record` `kind` parameter to the FFI kind.
+func recordKindOf(name string) (fauna_ffi.FfiRecordKind, error) {
+	switch name {
+	case "mail":
+		return fauna_ffi.FfiRecordKindMail, nil
+	case "calendar":
+		return fauna_ffi.FfiRecordKindCalendar, nil
+	case "card":
+		return fauna_ffi.FfiRecordKindCard, nil
+	}
+	return 0, fmt.Errorf("kind %q is not mail, calendar or card", name)
+}
+
+// unsealGrantKeys is the holder's unseal of a deposited capability grant —
+// the production drain's `UnsealCapabilityGrant` with a classical holder (no
+// ML-KEM dk), keeping only the key-bearing scope keys.
+func unsealGrantKeys(grantBlob, holderX25519Secret []byte) ([]fauna_ffi.UnsealedScopeKey, error) {
+	grant, err := fauna_ffi.UnsealCapabilityGrant(grantBlob, holderX25519Secret, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unseal capability grant: %w", err)
+	}
+	keys := make([]fauna_ffi.UnsealedScopeKey, 0, len(grant.Keys))
+	for _, k := range grant.Keys {
+		if len(k.Key) > 0 {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
+// openRecordWithKeys tries every grant key on one record under the record's
+// own kind (`OpenRecordWithKey`), so a key that fails is refused by the AEAD —
+// the per-kind key split — never by a kind check.
+func openRecordWithKeys(keys []fauna_ffi.UnsealedScopeKey, kind fauna_ffi.FfiRecordKind, envelope []byte) openedRecord {
+	opened := openedRecord{OpenedBy: []string{}}
+	for _, k := range keys {
+		pt, err := fauna_ffi.OpenRecordWithKey(kind, envelope, k.Key)
+		if err != nil {
+			continue
+		}
+		scope := k.Class
+		if k.Kind != nil {
+			scope += "{" + *k.Kind + "}"
+		}
+		opened.OpenedBy = append(opened.OpenedBy, scope)
+		if opened.PlaintextB64 == "" {
+			opened.PlaintextB64 = base64.StdEncoding.EncodeToString(pt)
+		}
+	}
+	return opened
+}
+
 // sealSpamModelCopy seals a plaintext `SpamModel` serde_json blob to the
 // aggregation holder's X25519 pubkey, producing the canonical `SpamModelCopyBlob`
 // bytes a contributor attaches to `put_spam_model.holder_copy` (mail-spam.md
@@ -389,6 +450,26 @@ func deriveRecipientMlkemEk(msek []byte) ([]byte, error) {
 		return nil, fmt.Errorf("derive recipient mail xwing material: %w", err)
 	}
 	return material.MlkemEk, nil
+}
+
+// deriveRecipientDavPubkeys returns the actor's calendar and card recipient
+// public halves, derived from MSEK through the shared Rust
+// (`fauna_ffi.DeriveRecipientDavMaterial`), concatenated
+// `calendar_pubkey ∥ calendar_mlkem_ek ∥ card_pubkey ∥ card_mlkem_ek` — the
+// three-pair registration's calendar and card halves, which the e2e harness's
+// one recipient-key writer (`helpers/recipient_seal_key.py`) sends beside the
+// mail pair.
+func deriveRecipientDavPubkeys(msek []byte) ([]byte, error) {
+	material, err := fauna_ffi.DeriveRecipientDavMaterial(msek)
+	if err != nil {
+		return nil, fmt.Errorf("derive recipient dav material: %w", err)
+	}
+	out := make([]byte, 0, 2*(32+1184))
+	out = append(out, material.CalendarPubkey...)
+	out = append(out, material.CalendarMlkemEk...)
+	out = append(out, material.CardPubkey...)
+	out = append(out, material.CardMlkemEk...)
+	return out, nil
 }
 
 // deriveBridgeMlkemEk returns the 1184-byte ML-KEM-768 encapsulation key a bridge

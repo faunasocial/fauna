@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use fauna_folders_machine::on_demand_presence::{self as odp, OnDemandPrefs};
 pub use fauna_folders_machine::on_demand_presence::{
     DesiredPresence, ForeignHold, PresencePlan, PresenceRemoval, PresenceRole, PresenceScope,
-    PresenceSet,
+    PresenceSet, RegisteredPresence,
 };
 
 use crate::{FfiError, general_err};
@@ -78,6 +78,39 @@ impl FfiOnDemandPrefsStore {
         prefs.set_enabled(&scoped, enabled);
         prefs.save(&self.path).map_err(general_err)
     }
+
+    /// Carry the toggle across an identity succession — the successor's
+    /// reconcile calls this once before its plan, with the registry's chain
+    /// (`FfiAccountRegistry::predecessors_of`, nearest hop first): every
+    /// predecessor-keyed off toggle is re-keyed to `successor_hex` and the
+    /// predecessor key dropped (`OnDemandPrefs::carry_from_predecessors`).
+    /// One whole read-modify-write under the store's lock; writes only when
+    /// something moved. Errors on a malformed actor id or a failed write.
+    pub fn carry_from_predecessors(
+        &self,
+        successor_hex: String,
+        predecessors_hex: Vec<String>,
+    ) -> Result<bool, FfiError> {
+        let successor = actor_from_hex(&successor_hex)?;
+        let chain = predecessors_hex
+            .iter()
+            .map(|hex| actor_from_hex(hex))
+            .collect::<Result<Vec<_>, _>>()?;
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut prefs = self.snapshot();
+        if !prefs.carry_from_predecessors(successor, &chain) {
+            return Ok(false);
+        }
+        prefs.save(&self.path).map_err(general_err)?;
+        Ok(true)
+    }
+}
+
+fn actor_from_hex(actor_id_hex: &str) -> Result<[u8; 32], FfiError> {
+    hex::decode(actor_id_hex)
+        .ok()
+        .and_then(|raw| <[u8; 32]>::try_from(raw.as_slice()).ok())
+        .ok_or_else(|| general_err(format!("malformed actor id: {actor_id_hex}")))
 }
 
 /// One reconcile's decision: the account's sets (every set it holds, own and
@@ -97,18 +130,50 @@ pub fn on_demand_presence_plan(
     registered: Vec<String>,
     owners: Option<HashMap<String, String>>,
 ) -> Result<PresencePlan, FfiError> {
-    let actor_id = hex::decode(&actor_id_hex)
-        .ok()
-        .and_then(|raw| <[u8; 32]>::try_from(raw.as_slice()).ok())
-        .ok_or_else(|| general_err(format!("malformed actor id: {actor_id_hex}")))?;
+    let (actor_id, desired) = desired_presences(&actor_id_hex, &sets, stronger, &prefs)?;
+    let owners: Option<BTreeMap<String, String>> = owners.map(|m| m.into_iter().collect());
+    Ok(odp::plan(actor_id, &desired, &registered, owners.as_ref()))
+}
+
+/// The scoped identifiers whose row carries the one-time OS enable notice
+/// (`odp::os_enable_notices`), over the plan's own inputs with each registered
+/// identifier's OS-enabled bit. Reads only, so it is safe where a reconcile is
+/// not. Android never calls it: its SAF root needs no enable. Errors only on a
+/// malformed `actor_id_hex`.
+#[uniffi::export]
+pub fn on_demand_os_enable_notices(
+    actor_id_hex: String,
+    sets: Vec<PresenceSet>,
+    stronger: Vec<String>,
+    prefs: Arc<FfiOnDemandPrefsStore>,
+    registered: Vec<RegisteredPresence>,
+    owners: Option<HashMap<String, String>>,
+) -> Result<Vec<String>, FfiError> {
+    let (actor_id, desired) = desired_presences(&actor_id_hex, &sets, stronger, &prefs)?;
+    let owners: Option<BTreeMap<String, String>> = owners.map(|m| m.into_iter().collect());
+    Ok(odp::os_enable_notices(
+        actor_id,
+        &desired,
+        &registered,
+        owners.as_ref(),
+    ))
+}
+
+/// The account and its desired presences, the toggle store read once.
+fn desired_presences(
+    actor_id_hex: &str,
+    sets: &[PresenceSet],
+    stronger: Vec<String>,
+    prefs: &FfiOnDemandPrefsStore,
+) -> Result<([u8; 32], Vec<DesiredPresence>), FfiError> {
+    let actor_id = actor_from_hex(actor_id_hex)?;
     let stronger: BTreeSet<String> = stronger.into_iter().collect();
     let snapshot = {
         let _guard = prefs.lock.lock().unwrap_or_else(|p| p.into_inner());
         prefs.snapshot()
     };
-    let desired = odp::desired_presences(actor_id, &sets, &stronger, &snapshot);
-    let owners: Option<BTreeMap<String, String>> = owners.map(|m| m.into_iter().collect());
-    Ok(odp::plan(actor_id, &desired, &registered, owners.as_ref()))
+    let desired = odp::desired_presences(actor_id, sets, &stronger, &snapshot);
+    Ok((actor_id, desired))
 }
 
 #[cfg(test)]
@@ -169,6 +234,77 @@ mod tests {
             "never keyed by a bare ref"
         );
         assert!(on_demand_presence_plan("zz".into(), vec![], vec![], store, vec![], None).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_os_enable_notice_reads_the_same_inputs_as_the_plan() {
+        let path = temp_path("notice");
+        let store = FfiOnDemandPrefsStore::new(path.to_string_lossy().into());
+        let actor = "bb".repeat(32);
+        let id = format!("local%3A1@{actor}");
+        let sets = vec![PresenceSet {
+            name: "docs".into(),
+            set_name: "docs".into(),
+            folder_id: "local:1".into(),
+            this_device_accepts: true,
+            role: PresenceRole::Own,
+            read_only: false,
+        }];
+        let notices = |stronger: Vec<String>, user_enabled: bool| {
+            on_demand_os_enable_notices(
+                actor.clone(),
+                sets.clone(),
+                stronger,
+                store.clone(),
+                vec![RegisteredPresence {
+                    identifier: id.clone(),
+                    user_enabled,
+                }],
+                None,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(notices(vec![], false), vec![id.clone()]);
+        assert!(notices(vec![], true).is_empty(), "the OS has enabled it");
+        assert!(notices(vec!["local:1".into()], false).is_empty(), "bound");
+        store.set_enabled(id.clone(), false).unwrap();
+        assert!(notices(vec![], false).is_empty(), "toggled off");
+        assert!(
+            on_demand_os_enable_notices("zz".into(), vec![], vec![], store, vec![], None).is_err()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_succession_carry_persists_through_the_ffi_store() {
+        let path = temp_path("carry");
+        let store = FfiOnDemandPrefsStore::new(path.to_string_lossy().into());
+        let (pred, succ) = ("aa".repeat(32), "bb".repeat(32));
+        store
+            .set_enabled(format!("local%3A1@{pred}"), false)
+            .unwrap();
+
+        assert!(!store.carry_from_predecessors(succ.clone(), vec![]).unwrap());
+        assert!(
+            store
+                .carry_from_predecessors(succ.clone(), vec![pred.clone()])
+                .unwrap()
+        );
+        let reopened = FfiOnDemandPrefsStore::new(path.to_string_lossy().into());
+        assert!(!reopened.is_enabled(format!("local%3A1@{succ}")));
+        assert!(reopened.is_enabled(format!("local%3A1@{pred}")), "dropped");
+        assert!(
+            !reopened
+                .carry_from_predecessors(succ.clone(), vec![pred])
+                .unwrap()
+        );
+        assert!(
+            store
+                .carry_from_predecessors(succ, vec!["zz".into()])
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

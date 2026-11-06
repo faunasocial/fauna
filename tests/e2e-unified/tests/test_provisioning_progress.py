@@ -70,10 +70,13 @@ def _assert_orchestrator_narrated_its_attempts(app):
     silence as broken log plumbing rather than absent instrumentation. This
     assertion is what stops that silence coming back unnoticed.
 
-    A driver with neither reader (web — the browser keeps no client-side log
-    file, and its wasm build has no stderr layer) cannot answer, so there is
-    nothing to assert there; that is a driver-capability absence, not a skipped
-    assertion — every app that HAS a log must show the lines.
+    On web the same line crosses a chunk boundary: the orchestrator runs in the
+    onboarding wasm chunk, whose `tracing` reaches the core chunk's ring and the
+    console through `setLogSink`, and the console ring is what the driver reads.
+
+    A driver with neither reader cannot answer, so there is nothing to assert
+    there; that is a driver-capability absence, not a skipped assertion — every
+    app that HAS a log must show the lines.
     """
     attr, text = _app_own_log(app.driver)
     if attr is None:
@@ -761,7 +764,11 @@ def test_cancel_mid_online_then_retry_succeeds(app, fake_cloud, provision_target
     wait_until(
         lambda: app.is_enabled("provisioning-continue-button"),
         ORCHESTRATION_STEP_S,
-        diagnose=lambda: "Provisioning never reached Succeeded after Retry",
+        diagnose=lambda: (
+            "Provisioning never reached Succeeded after Retry. snapshot="
+            + json.dumps(drv.call_machine_method("provisioning_snapshot"))
+            + f" {app.driver.diagnose('provisioning-continue-button')}"
+        ),
     )
     assert app.is_absent("provisioning-retry-button"), (
         "Retry button should be gone once the resumed run Succeeded: "

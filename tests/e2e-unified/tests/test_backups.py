@@ -14,7 +14,6 @@ from common.auth import (
     user_create_folder,
     user_folder_ref,
 )
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.backup_destinations import DestinationEnrollment
 from helpers.harness_writer import HarnessWriter
 from helpers.waiting import wait_until
@@ -22,15 +21,16 @@ from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
-# Against a release nest (`--nest live:`), this file's discovery draw is the
-# test's cadence, not a user's: every `logged_in_app` test re-signs the shared
-# `test_user` (a sign-out + sign-in, about two authenticated connections — the
-# app's and the sync agent's), about 13 sign-ins a minute, and each draws
-# `fauna.nest.info` on the actor's 60 / 60 s discovery budget (`federation.md`
-# § Security). The draw per sign-in is pinned by `test_nest_info_draw.py`; at
-# its 2026-10-10 figure the whole tui file draws no `rate_limited` refusal. If
-# it ever does again, give the custodian tests their own actor — never a sleep
-# (convention 14).
+# Against a release nest (`--nest docker` or `live:`), this file's discovery
+# draw is the test's cadence, not a user's: every fresh sign-in of the shared
+# `test_user` reads `fauna.nest.info` about four times on the actor's 60 / 60 s
+# discovery budget (`federation.md` § Security; the per-sign-in draw is pinned
+# by `test_nest_info_draw.py`). A `logged_in_app` test resets the app and signs
+# in afresh, so a run of one-second page tests alternating apps drew 99-127 per
+# 60 s and shed. The page tests below therefore take `kept_login_app` (one
+# sign-in for the whole run, conftest.py), and the destination and custodian
+# tests, which seat other actors and nests, keep `logged_in_app`. Never a sleep
+# (convention 14); a new page test here takes `kept_login_app`.
 
 
 def _seed_folder_with_snapshot(nest_instance, owner, name=None, with_snapshot=True):
@@ -210,76 +210,76 @@ def pruneable_backup_set(nest_instance, test_user):
     return name, newest_id
 
 
-def test_navigate_to_backups(logged_in_app):
+def test_navigate_to_backups(kept_login_app):
     """Navigate to backups page and verify UI is visible."""
-    logged_in_app.backups.navigate()
-    assert logged_in_app.driver.is_visible("snapshot-list"), (
+    kept_login_app.backups.navigate()
+    assert kept_login_app.driver.is_visible("snapshot-list"), (
         "backups page should render the snapshot-list after navigate: "
-        f"{logged_in_app.driver.diagnose('snapshot-list')} "
-        f"error={logged_in_app.error_text()!r}"
+        f"{kept_login_app.driver.diagnose('snapshot-list')} "
+        f"error={kept_login_app.error_text()!r}"
     )
 
 
-def test_backup_controls_visible(logged_in_app):
+def test_backup_controls_visible(kept_login_app):
     """Verify backup action buttons are present."""
-    logged_in_app.backups.navigate()
-    assert logged_in_app.driver.is_visible("snapshot-create-button"), (
+    kept_login_app.backups.navigate()
+    assert kept_login_app.driver.is_visible("snapshot-create-button"), (
         "backups page should render the snapshot-create-button: "
-        f"{logged_in_app.driver.diagnose('snapshot-create-button')} "
-        f"error={logged_in_app.error_text()!r}"
+        f"{kept_login_app.driver.diagnose('snapshot-create-button')} "
+        f"error={kept_login_app.error_text()!r}"
     )
-    assert logged_in_app.driver.is_visible("snapshot-prune-button"), (
+    assert kept_login_app.driver.is_visible("snapshot-prune-button"), (
         "backups page should render the snapshot-prune-button: "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-button')} "
-        f"error={logged_in_app.error_text()!r}"
+        f"{kept_login_app.driver.diagnose('snapshot-prune-button')} "
+        f"error={kept_login_app.error_text()!r}"
     )
-    assert logged_in_app.driver.is_visible("snapshot-check-button"), (
+    assert kept_login_app.driver.is_visible("snapshot-check-button"), (
         "backups page should render the snapshot-check-button: "
-        f"{logged_in_app.driver.diagnose('snapshot-check-button')} "
-        f"error={logged_in_app.error_text()!r}"
+        f"{kept_login_app.driver.diagnose('snapshot-check-button')} "
+        f"error={kept_login_app.error_text()!r}"
     )
 
 
-def test_navigate_to_devices(logged_in_app):
+def test_navigate_to_devices(kept_login_app):
     """Navigate to devices page and verify it loads."""
-    logged_in_app.backups.navigate_devices()
-    count = logged_in_app.backups.device_count()
+    kept_login_app.backups.navigate_devices()
+    count = kept_login_app.backups.device_count()
     assert count >= 0
 
 
-def test_folder_count_accessible(logged_in_app):
+def test_folder_count_accessible(kept_login_app):
     """Verify folder count is accessible on the folder control plane."""
     # 2026-06-28 unification: the folder list lives on Settings → Folders (web)
     # / the combined Devices page (not-yet-migrated clients) — navigate_folders()
     # reaches the folder-row surface on either.
-    logged_in_app.backups.navigate_folders()
-    count = logged_in_app.backups.folder_count()
+    kept_login_app.backups.navigate_folders()
+    count = kept_login_app.backups.folder_count()
     assert count >= 0
 
 
 @pytest.mark.feature("snapshots")
-def test_snapshot_detail_files_visible(logged_in_app, empty_backup_set):
+def test_snapshot_detail_files_visible(kept_login_app, empty_backup_set):
     """Snapshot detail screen exposes the file list with snapshot-detail-files testTag.
 
     Also the module's coverage of `snapshot-create-button`: the set starts EMPTY,
     so the create this test drives is the set's first — an unambiguous 0 -> 1,
     with no same-second dedup against a seeded snapshot (see `empty_backup_set`).
     """
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(empty_backup_set)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(empty_backup_set)
     # Causal barrier, not a count threshold: zero rows can only be OUR set, since
     # every set this module leaves mounted holds a snapshot (convention 14).
-    logged_in_app.backups.wait_for_no_snapshots()
-    logged_in_app.backups.create_snapshot()
+    kept_login_app.backups.wait_for_no_snapshots()
+    kept_login_app.backups.create_snapshot()
     # Index 0 is the row just created (newest-first), so it is always rendered
     # even where the list virtualizes — see `fresh_backup_set`.
-    logged_in_app.backups.open_snapshot(index=0)
-    assert logged_in_app.backups.is_snapshot_detail_visible()
+    kept_login_app.backups.open_snapshot(index=0)
+    assert kept_login_app.backups.is_snapshot_detail_visible()
 
 
 @pytest.mark.feature("snapshots")
 def test_last_backed_up_is_the_selected_set_s_newest_snapshot(
-    logged_in_app, empty_backup_set, fresh_backup_set
+    kept_login_app, empty_backup_set, fresh_backup_set
 ):
     """`last-backed-up` reports the SELECTED set, and says "never" when that set
     has no snapshots.
@@ -309,32 +309,32 @@ def test_last_backed_up_is_the_selected_set_s_newest_snapshot(
     switch to the second set.
     """
     fresh_name, snapshot_id = fresh_backup_set
-    logged_in_app.backups.navigate()
+    kept_login_app.backups.navigate()
 
-    logged_in_app.backups.select_folder(empty_backup_set)
-    logged_in_app.backups.wait_for_no_snapshots()
-    empty_text = logged_in_app.backups.wait_for_last_backed_up(
+    kept_login_app.backups.select_folder(empty_backup_set)
+    kept_login_app.backups.wait_for_no_snapshots()
+    empty_text = kept_login_app.backups.wait_for_last_backed_up(
         lambda t: t == S.backups.last_backed_up_never
     )
     assert empty_text == S.backups.last_backed_up_never, (
         f"a set with no snapshots must read {S.backups.last_backed_up_never!r}; "
         f"{empty_text!r} means the value is derived from something other than "
         f"the selected set's own rows (or the label was never cleared). "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('last-backed-up')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('last-backed-up')}"
     )
 
-    logged_in_app.backups.select_folder(fresh_name)
-    logged_in_app.backups.wait_for_snapshot_row(snapshot_id)
-    populated_text = logged_in_app.backups.wait_for_last_backed_up(
+    kept_login_app.backups.select_folder(fresh_name)
+    kept_login_app.backups.wait_for_snapshot_row(snapshot_id)
+    populated_text = kept_login_app.backups.wait_for_last_backed_up(
         lambda t: bool(t) and t != S.backups.last_backed_up_never
     )
     assert populated_text and populated_text != S.backups.last_backed_up_never, (
         f"set {fresh_name!r} holds snapshot {snapshot_id} but `last-backed-up` "
         f"reads {populated_text!r} — a client that always says 'never' passes "
         f"the empty-set half without deriving anything. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('last-backed-up')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('last-backed-up')}"
     )
 
 
@@ -362,9 +362,12 @@ def _kind_snapshot_ids_from_nest(nest_instance, owner, kind: str) -> set[int]:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("snapshots")
 def test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore(
-    logged_in_app, nest_instance, test_user
+    kept_login_app, nest_instance, test_user
 ):
     """The Mail entry of `backup-folder-selector` takes a mail snapshot, and the
     local restore picker on the same page offers it.
@@ -381,7 +384,7 @@ def test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore(
     create added, and the page is then waited on for that id, in the snapshot
     list and in the restore picker.
     """
-    app = logged_in_app
+    app = kept_login_app
     before = _kind_snapshot_ids_from_nest(nest_instance, test_user, "mail")
     app.backups.navigate()
 
@@ -422,7 +425,7 @@ def test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore(
 
 
 @pytest.mark.feature("snapshots")
-def test_prune_previews_before_it_deletes(logged_in_app, pruneable_backup_set):
+def test_prune_previews_before_it_deletes(kept_login_app, pruneable_backup_set):
     """Prune is preview-first: the button previews, only *execute* deletes, and
     cancel leaves the candidate exactly where it was.
 
@@ -455,102 +458,74 @@ def test_prune_previews_before_it_deletes(logged_in_app, pruneable_backup_set):
     """
     folder, newest_id = pruneable_backup_set
 
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
     # Identity barrier, not a count: the outgoing set's rows stay mounted while
     # this set's fetch is in flight (see `fresh_backup_set`).
-    logged_in_app.backups.wait_for_snapshot_row(newest_id)
+    kept_login_app.backups.wait_for_snapshot_row(newest_id)
 
-    assert logged_in_app.backups.prune_until_preview(), (
+    assert kept_login_app.backups.prune_until_preview(), (
         "clicking snapshot-prune-button must raise a standing prune preview "
         "(the dry run), never delete directly. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
-    assert logged_in_app.backups.has_prune_execute(), (
+    assert kept_login_app.backups.has_prune_execute(), (
         f"set {folder!r} holds 4 snapshots under max_snapshots=1, so the "
         "preview must name a candidate (one, floor-clamped) and offer execute. "
-        f"preview: {logged_in_app.backups.prune_preview_text()!r} "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-execute-button')}"
+        f"preview: {kept_login_app.backups.prune_preview_text()!r} "
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-execute-button')}"
     )
 
-    logged_in_app.backups.cancel_prune()
-    assert logged_in_app.backups.wait_for_no_prune_preview(), (
+    kept_login_app.backups.cancel_prune()
+    assert kept_login_app.backups.wait_for_no_prune_preview(), (
         "cancel must discard the standing preview. "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
 
-    assert logged_in_app.backups.prune_until_preview(), (
+    assert kept_login_app.backups.prune_until_preview(), (
         "the page must still be usable after a cancel — cancel discards a dry "
         "run, it does not wedge the machine. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
-    assert logged_in_app.backups.has_prune_execute(), (
+    assert kept_login_app.backups.has_prune_execute(), (
         "THE load-bearing assertion: after a preview and a cancel, the "
         "candidate must still be there. An execute button that has vanished "
         "means the earlier preview (or the cancel) actually pruned — the exact "
         "bug the preview-first ruling exists to prevent. "
-        f"preview: {logged_in_app.backups.prune_preview_text()!r} "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-execute-button')}"
+        f"preview: {kept_login_app.backups.prune_preview_text()!r} "
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-execute-button')}"
     )
 
-    logged_in_app.backups.execute_prune()
-    assert logged_in_app.backups.wait_for_no_prune_preview(), (
+    kept_login_app.backups.execute_prune()
+    assert kept_login_app.backups.wait_for_no_prune_preview(), (
         "executing consumes the preview it applied. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
 
-    assert logged_in_app.backups.prune_until_preview(), (
+    assert kept_login_app.backups.prune_until_preview(), (
         "a fresh dry run must still be available after an execute. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
-    assert not logged_in_app.backups.has_prune_execute(), (
+    assert not kept_login_app.backups.has_prune_execute(), (
         "the execute applied the policy, so the set now sits at the hard floor "
         "(3 active snapshots) with nothing left to prune — the preview must "
         "say so and offer no execute. Still offering one means the execute "
         "never reached the nest, which a preview-only test would have missed. "
-        f"preview: {logged_in_app.backups.prune_preview_text()!r} "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-execute-button')}"
+        f"preview: {kept_login_app.backups.prune_preview_text()!r} "
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-execute-button')}"
     )
-
-
-# `snapshot-undelete-button` was approved 2026-08-14 and tui LED the render
-# (lead-app rule). The gesture, both boundary faces and the machine's refusal
-# rule are shared, so each remaining app owes a render only. linux/web/android landed the same day;
-# apple (macOS+iOS) landed 2026-08-23; windows landed
-# last, closing this affordance on ALL SEVEN apps.
-_UNDELETE_APPS = ("tui", "linux", "web", "android", "macos", "ios", "windows")
-
-
-def _require_undelete_affordance(driver):
-    """Gate the recovery test on an app that has built the affordance.
-
-    Temporary parity debt, so it declares `skip_unbuilt`: it fails under
-    `--strict-app` and is tallied every run, which is what stops "six apps
-    still owe this" from reading as coverage.
-    """
-    if app_name(driver) not in _UNDELETE_APPS:
-        skip_unbuilt(
-            driver,
-            surface="snapshot-undelete-button",
-            detail=(
-                "the undelete gesture, both boundary faces and the machine's "
-                "SoftDeleted-only refusal are shared; each app owes the render "
-                "only (id approved 2026-08-14, tui led)"
-            ),
-            tracked="",
-        )
 
 
 @pytest.mark.feature("snapshots")
 def test_a_soft_deleted_snapshot_can_be_recovered_from_the_app(
-    logged_in_app, pruneable_backup_set
+    kept_login_app, pruneable_backup_set
 ):
     """A pruned snapshot renders a recovery affordance, and using it returns the
     row to `Active` — `fauna.filesync.snapshot.undelete` is reachable from the
@@ -577,60 +552,59 @@ def test_a_soft_deleted_snapshot_can_be_recovered_from_the_app(
     Barriers are causal throughout (convention 14) — each is the surface the
     gesture itself produces or clears.
     """
-    _require_undelete_affordance(logged_in_app.driver)
     folder, newest_id = pruneable_backup_set
 
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
-    logged_in_app.backups.wait_for_snapshot_row(newest_id)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
+    kept_login_app.backups.wait_for_snapshot_row(newest_id)
 
-    assert logged_in_app.backups.recoverable_row_count() == 0, (
+    assert kept_login_app.backups.recoverable_row_count() == 0, (
         "precondition: a freshly seeded set holds only Active snapshots, so no "
         "row may offer recovery. A control painted here would mean the "
         "affordance is unconditional — it must render only on a SoftDeleted "
         "row, which is what makes its presence the state observable. "
-        f"{logged_in_app.driver.diagnose('snapshot-undelete-button')}"
+        f"{kept_login_app.driver.diagnose('snapshot-undelete-button')}"
     )
 
     # Drive the set into the soft-deleted state through the UI: the prune is
     # preview-first, and executing it soft-deletes the one floor-clamped
     # candidate (`test_prune_previews_before_it_deletes` pins that half).
-    assert logged_in_app.backups.prune_until_preview(), (
+    assert kept_login_app.backups.prune_until_preview(), (
         "the prune dry run must stand before it can be executed. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
-    assert logged_in_app.backups.has_prune_execute(), (
+    assert kept_login_app.backups.has_prune_execute(), (
         f"set {folder!r} holds 4 snapshots under max_snapshots=1, so the "
         "preview must name exactly one candidate and offer execute. "
-        f"preview: {logged_in_app.backups.prune_preview_text()!r} "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"preview: {kept_login_app.backups.prune_preview_text()!r} "
+        f"error-message: {kept_login_app.error_text()!r}"
     )
-    logged_in_app.backups.execute_prune()
+    kept_login_app.backups.execute_prune()
 
-    assert logged_in_app.backups.wait_for_recoverable_rows(1), (
+    assert kept_login_app.backups.wait_for_recoverable_rows(1), (
         "executing the prune must SOFT-delete its candidate, so exactly one "
         "row now offers recovery. Zero means either the row was hard-deleted "
         "(the 30-day recovery window the ruling depends on does not exist) or "
         "the app does not paint the affordance on a soft-deleted row. "
-        f"rows offering recovery: {logged_in_app.backups.recoverable_row_count()} "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-undelete-button')}"
+        f"rows offering recovery: {kept_login_app.backups.recoverable_row_count()} "
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-undelete-button')}"
     )
 
-    logged_in_app.backups.undelete_snapshot()
+    kept_login_app.backups.undelete_snapshot()
 
-    assert logged_in_app.backups.wait_for_recoverable_rows(0), (
+    assert kept_login_app.backups.wait_for_recoverable_rows(0), (
         "THE load-bearing assertion: recovering the row must return it to "
         "Active, so the affordance disappears. A control still standing means "
         "the click never reached fauna.filesync.snapshot.undelete — the verb "
         "is dark again, which is exactly what this id was approved to end. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-undelete-button')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-undelete-button')}"
     )
-    assert not logged_in_app.error_text(), (
+    assert not kept_login_app.error_text(), (
         "a successful recovery raises no error banner: "
-        f"error-message reads {logged_in_app.error_text()!r}"
+        f"error-message reads {kept_login_app.error_text()!r}"
     )
 
 
@@ -799,7 +773,7 @@ def _row_carrying(app, fragment: str, budget_s: float = 45.0) -> str:
 
 @pytest.mark.feature("snapshots")
 def test_every_snapshot_row_reads_as_a_snapshot_newest_first(
-    logged_in_app, nest_instance, test_user, pruneable_backup_set
+    kept_login_app, nest_instance, test_user, pruneable_backup_set
 ):
     """A `snapshot-item` says when it was taken, how many files and how big, in
     the wire's newest-first order — never a raw record dump.
@@ -828,9 +802,9 @@ def test_every_snapshot_row_reads_as_a_snapshot_newest_first(
     """
     folder, newest_id = pruneable_backup_set
 
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
-    logged_in_app.backups.wait_for_snapshot_row(newest_id)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
+    kept_login_app.backups.wait_for_snapshot_row(newest_id)
 
     nest_rows = _snapshot_rows_from_nest(nest_instance, test_user, folder)
     assert len(nest_rows) >= 2, (
@@ -839,13 +813,13 @@ def test_every_snapshot_row_reads_as_a_snapshot_newest_first(
     )
 
     rendered = [
-        logged_in_app.backups.snapshot_row_id(i)
-        for i in range(logged_in_app.driver.count("snapshot-item"))
+        kept_login_app.backups.snapshot_row_id(i)
+        for i in range(kept_login_app.driver.count("snapshot-item"))
     ]
     assert len(rendered) >= 2, (
         f"only {len(rendered)} snapshot row(s) rendered for {folder!r}; ordering "
         f"cannot be asserted from one row. "
-        f"{logged_in_app.driver.diagnose('snapshot-item')}"
+        f"{kept_login_app.driver.diagnose('snapshot-item')}"
     )
     nest_ids = [r["id"] for r in nest_rows]
     assert rendered == nest_ids[: len(rendered)], (
@@ -857,12 +831,12 @@ def test_every_snapshot_row_reads_as_a_snapshot_newest_first(
     )
 
     top = nest_rows[0]
-    row_text = logged_in_app.backups.snapshot_row_text(0)
+    row_text = kept_login_app.backups.snapshot_row_text(0)
     expected_files = S.backups.file_count(count=str(top["file_count"]))
     assert expected_files in row_text, (
         f"row 0 reads {row_text!r} and does not carry {expected_files!r}, the "
         f"file count the nest reports for snapshot {top['id']}. "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"error-message: {kept_login_app.error_text()!r}"
     )
     expected_size = _expected_size_text(top["total_bytes"])
     assert expected_size in row_text, (
@@ -879,7 +853,7 @@ def test_every_snapshot_row_reads_as_a_snapshot_newest_first(
 
 @pytest.mark.feature("snapshots")
 def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
-    logged_in_app, nest_instance, test_user, lifecycle_backup_set
+    kept_login_app, nest_instance, test_user, lifecycle_backup_set
 ):
     """A non-`Active` row carries its state AND the deadline the owner can still
     act on — deletion-pending with its `execute_after`, soft-deleted with its
@@ -908,14 +882,14 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
     """
     folder, newest_id = lifecycle_backup_set
 
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
-    logged_in_app.backups.wait_for_snapshot_row(newest_id)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
+    kept_login_app.backups.wait_for_snapshot_row(newest_id)
 
     # Precondition: five Active rows say nothing about going anywhere. Without
     # it a page that painted a lifecycle suffix unconditionally would satisfy
     # both halves below.
-    for text in logged_in_app.driver.get_texts("snapshot-item"):
+    for text in kept_login_app.driver.get_texts("snapshot-item"):
         assert _SOFT_DELETED_PREFIX not in text and _DELETION_PENDING_PREFIX not in text, (
             f"a freshly seeded set holds only Active snapshots, but a row already "
             f"reads {text!r} — the suffix is unconditional, so its presence says "
@@ -945,19 +919,19 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
 
     # Re-mount so the page re-reads the list: the machine re-reads on load and
     # after its own gestures, and this state change was not one of its gestures.
-    logged_in_app.driver.navigate_to("feed")
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
-    logged_in_app.backups.wait_for_snapshot_row(newest_id)
+    kept_login_app.driver.navigate_to("feed")
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
+    kept_login_app.backups.wait_for_snapshot_row(newest_id)
 
-    pending_text = _row_carrying(logged_in_app, _DELETION_PENDING_PREFIX)
+    pending_text = _row_carrying(kept_login_app, _DELETION_PENDING_PREFIX)
     assert pending_text, (
         f"no row reads {_DELETION_PENDING_PREFIX!r} after snapshot {oldest_id} "
         f"was queued for deletion. The rows read "
-        f"{logged_in_app.driver.get_texts('snapshot-item')!r}; a set whose "
+        f"{kept_login_app.driver.get_texts('snapshot-item')!r}; a set whose "
         f"snapshot is going in 48 h and does not say so leaves the owner no "
         f"reason to look for the cancel. "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"error-message: {kept_login_app.error_text()!r}"
     )
     assert pending_text.split(_DELETION_PENDING_PREFIX, 1)[1].strip(), (
         f"the row reads {pending_text!r} — the state renders but the deadline "
@@ -972,32 +946,32 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
     )
 
     # -- Soft deleted: "how long you can still get it back" ------------------
-    assert logged_in_app.backups.prune_until_preview(), (
+    assert kept_login_app.backups.prune_until_preview(), (
         "the prune dry run must stand before it can be executed. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-prune-preview')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-prune-preview')}"
     )
-    assert logged_in_app.backups.has_prune_execute(), (
+    assert kept_login_app.backups.has_prune_execute(), (
         f"set {folder!r} holds 4 active snapshots under max_snapshots=1, so the "
         "preview must name one floor-clamped candidate and offer execute. "
-        f"preview: {logged_in_app.backups.prune_preview_text()!r} "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"preview: {kept_login_app.backups.prune_preview_text()!r} "
+        f"error-message: {kept_login_app.error_text()!r}"
     )
-    logged_in_app.backups.execute_prune()
-    assert logged_in_app.backups.wait_for_recoverable_rows(1), (
+    kept_login_app.backups.execute_prune()
+    assert kept_login_app.backups.wait_for_recoverable_rows(1), (
         "executing the prune must SOFT-delete its candidate. "
-        f"rows offering recovery: {logged_in_app.backups.recoverable_row_count()} "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"rows offering recovery: {kept_login_app.backups.recoverable_row_count()} "
+        f"error-message: {kept_login_app.error_text()!r}"
     )
 
-    soft_text = _row_carrying(logged_in_app, _SOFT_DELETED_PREFIX)
+    soft_text = _row_carrying(kept_login_app, _SOFT_DELETED_PREFIX)
     assert soft_text, (
         f"no row reads {_SOFT_DELETED_PREFIX!r} after the prune soft-deleted its "
         f"candidate. The rows read "
-        f"{logged_in_app.driver.get_texts('snapshot-item')!r}; the undelete "
+        f"{kept_login_app.driver.get_texts('snapshot-item')!r}; the undelete "
         f"control is painted on that row, so the state is known — it is the "
         f"sentence that is missing. "
-        f"error-message: {logged_in_app.error_text()!r}"
+        f"error-message: {kept_login_app.error_text()!r}"
     )
     assert soft_text.split(_SOFT_DELETED_PREFIX, 1)[1].strip(), (
         f"the row reads {soft_text!r} — it says the snapshot is deleted and not "
@@ -1014,10 +988,10 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
 # The prune VERDICT rides `snapshot-prune-preview`'s own text as "<title>
 # <verdict>" on tui, linux, android, macos and ios (each declares it on the id'd
 # element; apple's one FaunaKit `PrunePreviewView` serves both targets), and
-# web's container's text contains its verdict paragraph. windows (a constant UIA
-# name) still reads nothing that says which of the two no-op states the nest
-# returned.
+# web's container's text contains its verdict paragraph. windows folds the
+# verdict into the panel's UIA name from `RenderPrunePreview`.
 @pytest.mark.web
+@pytest.mark.windows
 @pytest.mark.linux
 @pytest.mark.android
 @pytest.mark.tui
@@ -1025,7 +999,7 @@ def test_a_snapshot_on_its_way_out_says_so_on_its_own_row(
 @pytest.mark.ios
 @pytest.mark.feature("snapshots")
 def test_a_prune_with_nothing_to_remove_says_which_kind_of_nothing(
-    logged_in_app, fresh_backup_set, slack_policy_backup_set
+    kept_login_app, fresh_backup_set, slack_policy_backup_set
 ):
     """"Nothing to prune" and "no retention policy configured for this set" are
     DIFFERENT answers, and the preview says which one it gave.
@@ -1043,7 +1017,7 @@ def test_a_prune_with_nothing_to_remove_says_which_kind_of_nothing(
     Both halves click the same button on two sets and assert the two sentences,
     so a page that hard-coded either one fails on the other.
     """
-    app = logged_in_app
+    app = kept_login_app
     app.backups.navigate()
 
     # A set with NO policy: the preview explains that, and names the wizard.
@@ -1105,7 +1079,7 @@ def test_a_prune_with_nothing_to_remove_says_which_kind_of_nothing(
 
 
 @pytest.mark.feature("snapshots")
-def test_completed_check_is_a_result_not_an_error(logged_in_app, fresh_backup_set):
+def test_completed_check_is_a_result_not_an_error(kept_login_app, fresh_backup_set):
     """A completed integrity check renders its verdict in `snapshot-check-result`
     and leaves `error-message` clear.
 
@@ -1121,46 +1095,46 @@ def test_completed_check_is_a_result_not_an_error(logged_in_app, fresh_backup_se
     """
     folder, snapshot_id = fresh_backup_set
 
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
-    logged_in_app.backups.wait_for_snapshot_row(snapshot_id)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
+    kept_login_app.backups.wait_for_snapshot_row(snapshot_id)
 
-    logged_in_app.backups.check_integrity()
-    verdict = logged_in_app.backups.wait_for_check_result()
+    kept_login_app.backups.check_integrity()
+    verdict = kept_login_app.backups.wait_for_check_result()
     assert verdict, (
         "clicking snapshot-check-button must run the check and render its "
         "verdict in snapshot-check-result. An empty read means either the "
         "button only opened a sheet (the actuation contract) or the result was "
         "never surfaced. "
-        f"error-message: {logged_in_app.error_text()!r} "
-        f"{logged_in_app.driver.diagnose('snapshot-check-result')}"
+        f"error-message: {kept_login_app.error_text()!r} "
+        f"{kept_login_app.driver.diagnose('snapshot-check-result')}"
     )
-    assert not logged_in_app.error_text(), (
+    assert not kept_login_app.error_text(), (
         "a COMPLETED check is a result, never an error (rule 6): "
-        f"error-message reads {logged_in_app.error_text()!r} while the verdict "
+        f"error-message reads {kept_login_app.error_text()!r} while the verdict "
         f"reads {verdict!r}. Routing the verdict through error-message is the "
         "pre-adoption bug this pins."
     )
 
 
 @pytest.mark.feature("snapshots")
-def test_backup_folder_selector_visible(logged_in_app):
+def test_backup_folder_selector_visible(kept_login_app):
     """Backups page exposes a folder selector after the dropdown loads."""
-    logged_in_app.backups.navigate()
-    assert logged_in_app.backups.is_folder_selector_visible()
+    kept_login_app.backups.navigate()
+    assert kept_login_app.backups.is_folder_selector_visible()
 
 
 @pytest.mark.feature("snapshots")
-def test_snapshot_delete_button_indexed(logged_in_app, fresh_backup_set):
+def test_snapshot_delete_button_indexed(kept_login_app, fresh_backup_set):
     """Each snapshot row exposes a delete button (indexed)."""
     folder, snapshot_id = fresh_backup_set
-    logged_in_app.backups.navigate()
-    logged_in_app.backups.select_folder(folder)
+    kept_login_app.backups.navigate()
+    kept_login_app.backups.select_folder(folder)
     # Identity barrier, not a count — see `wait_for_snapshot_row`. A bare count
     # is satisfied by the previously selected set's still-mounted rows, and the
     # delete buttons counted below would then be another set's.
-    logged_in_app.backups.wait_for_snapshot_row(snapshot_id)
-    assert logged_in_app.driver.count("snapshot-delete-button") >= 1
+    kept_login_app.backups.wait_for_snapshot_row(snapshot_id)
+    assert kept_login_app.driver.count("snapshot-delete-button") >= 1
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
@@ -1249,11 +1223,13 @@ def test_backup_destination_crud(logged_in_app, nest_instance, second_nest, test
     app.backups.wait_for_destination_count(0)
 
 
+@pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.linux
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_client_device_custodian_destination(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -1266,8 +1242,11 @@ def test_client_device_custodian_destination(
 
     Scoped to macOS + iOS + windows and tui (joined 2026-09-19, its
     same UI in `apps/fauna-tui/src/backups.rs`).
-    linux and android have also landed this UI; widen the marks once their
-    exact behavior against this same test is confirmed. web joined in its
+    android joined 2026-10-30: `BackupDestinationsSection.kt` paints the kind
+    select, capacity input, kind badge, usage line and sole-client warning
+    under the same ids this test drives, and the generic add flow needs no
+    android branch. linux joined 2026-10-30 against this same test, its UI
+    in `apps/fauna-linux/src/views/backups`. web joined in its
     catalog trickle-down pass: it DECLARES the kind select and capacity input
     absent (`ui/backups.md` § Implementation status today — enrolment runs on
     the device being enrolled) but owes the badge, the usage line and the
@@ -1460,7 +1439,7 @@ def test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it(
 
     tui-marked because tui is the lead app and drives the sync agent directly;
     **linux and windows joined once each grew the `custodian_pull_run_now`
-    command arm this poll pokes** (`apps/fauna-linux/src/main.rs`;
+    command arm this poll pokes** (`apps/fauna-linux/src/lib.rs`;
     `apps/fauna-windows/FaunaApp/FaunaApp/Testing/TestAgent.cs`) — they host the
     same replica through the same agent. web is a declared absence (a browser
     cannot host the sealed store), and the mobile shells drive their own
@@ -1578,7 +1557,6 @@ def test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it(
     app.backups.remove_destination(0)
     app.backups.wait_for_destination_count(0)
     _reclaim_the_orphaned_store(app)
-
 
 
 @pytest.mark.tui
@@ -1919,7 +1897,7 @@ def test_removing_a_custodian_without_the_opt_in_leaves_a_reclaimable_orphaned_s
     * **tui, linux** — marked. Both run the sync agent in-process and answer
       `driver.config_home`, so both halves of this test work: the
       `custodian_pull_run_now` command arm (`apps/fauna-tui/src/automation.rs`,
-      `apps/fauna-linux/src/main.rs`) runs the pass, and `custodian_store_roots`
+      `apps/fauna-linux/src/lib.rs`) runs the pass, and `custodian_store_roots`
       finds the store inside the launch's own isolated XDG world. linux's
       sibling round trip
       (`test_a_hosted_custodian_pulls_checks_in_and_the_owners_row_reports_it`)
@@ -2598,6 +2576,7 @@ def _wait_for_backlog_text(app, accept, budget_s: float = 30.0) -> str:
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_destination_that_refuses_this_box_reads_refused_not_queued(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -2722,6 +2701,10 @@ def test_a_destination_that_refuses_this_box_reads_refused_not_queued(
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+# android's leg is marked and declared: its test agent has no `backup_audit_run_now`
+# arm yet, so `backup-audit-run-now` (a harness surface) holds it unrun.
+@pytest.mark.android
+@pytest.mark.requires_surface("backup-audit-run-now")
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_backup_audit_pass_advances_the_last_checked_row(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -2865,6 +2848,9 @@ def test_backup_audit_pass_advances_the_last_checked_row(
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+# android: marked and declared, as on the audit-pass test above.
+@pytest.mark.android
+@pytest.mark.requires_surface("backup-audit-run-now")
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_backup_audit_alerts_when_the_destination_goes_dark(
     logged_in_app, nest_instance, test_user, stoppable_nest, request
@@ -3137,6 +3123,10 @@ def test_snapshot_immediate_delete(
 # `download_dir()`, and every action-layer method this test drives are generic
 # across web/native, and `drivers/tui.py::download_dir` mirrors linux's.
 @pytest.mark.tui
+# android joined 2026-10-30: `SnapshotDetailScreen.kt` tags the per-file button
+# `snapshot-file-download-button`, `ShareFile.kt` saves into `downloadsDir()`,
+# and `drivers/android.py::download_dir` mirrors that directory to the host.
+@pytest.mark.android
 @pytest.mark.feature("snapshots")
 def test_snapshot_file_download_button_downloads_sealed_bytes(
     logged_in_app, nest_instance, test_user
@@ -3223,14 +3213,15 @@ def test_snapshot_file_download_button_downloads_sealed_bytes(
     )
 
 
-
 # The whole-snapshot restore is a desktop + tui surface (ui.yaml `backups`
-# platform_elements; user-approved 2026-10-16). tui leads and linux has joined;
-# macos and windows join this mark list as their trickle-down lands. Web, ios
+# platform_elements; user-approved 2026-10-16). tui led; linux, macos and
+# windows followed — every app that carries the surface is marked. Web, ios
 # and android declare the absence — they keep the per-file download above.
 @pytest.mark.feature("snapshots")
 @pytest.mark.tui
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.windows
 def test_snapshot_restore_writes_the_whole_tree_byte_identically(
     logged_in_app, nest_instance, test_user
 ):
@@ -3649,8 +3640,12 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
         owner re-claims A'          -> same identity, INBOX empty (pre-state)
         the app signs in to A'      -> the list survives -> D's row carries the
                                        gesture
-        press "Restore my data..."  -> in the app: grant, pull D's custody onto A'
-                                       as-is, materialize (the shared driver)
+        press "Restore my data..."  -> the preflight reads D's ledgers against
+                                       this device's pins (none: unvouched); the
+                                       confirm opens carrying its lines
+        confirm                     -> in the app: grant, pull D's custody onto A'
+                                       by its ledgers, materialize (the shared
+                                       driver)
         result view                 -> the driver's whole verdict
         INBOX on A'                 -> the message is back
         A''s next sweep             -> D accepts it: re-enrolled, its writer seat
@@ -3659,9 +3654,8 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
     Latency-independent (convention 14): every wait is a deadline poll on the
     state it waits for, and each sweep is the synchronous run-now barrier.
 
-    tui leads; linux, android and web run it (2026-10-18); the other three
-    follow in their batched lifts and skip as unbuilt until then
-    (`require_pull_back_supported`).
+    tui leads; linux, android and web run it (2026-10-18), macos and ios
+    (2026-10-24), and windows has it too.
 
     On web a browser reaches its own nest only through an SPA proxy (CORS), so
     each box the owner signs in to gets its own — A's, then the rebuilt A′'s.
@@ -3687,7 +3681,6 @@ def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
 
     _login_app_as(app, request, box_a, owner, spa_url=_spa_proxy_for(app, request, box_a))
     app.backups.require_destination_management_supported()
-    app.backups.require_pull_back_supported()
     _seed_one_mail_segment(app, box_a, owner)
     assert _inbox_count(box_a, owner) == 1
 
@@ -3833,8 +3826,11 @@ def _banner_texts(app) -> list[str]:
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
-# The other apps follow in their batched trickle-down lifts; each adds its
-# marker here, and `require_recover_supported` names the gap meanwhile.
+@pytest.mark.windows
+# Every app builds the recovery gesture; android's leg is declared through the
+# audit-clock harness surface, as on the audit-pass test.
+@pytest.mark.android
+@pytest.mark.requires_surface("backup-audit-run-now")
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
     app, request, nest_mode, tmp_path_factory
@@ -3873,7 +3869,9 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
     Latency-independent (convention 14): every wait is a deadline poll on the
     state it waits for; the only time values are explicit audit-clock offsets.
     """
-    from common.nest import start_nest_in_place, stop_nest
+    from common.nest import (
+        copy_data_dir, restore_data_dir, start_nest_in_place, stop_nest,
+    )
     from conftest import _login_app_as, _start_dedicated_nest
 
     box_a, cleanup_a = _start_dedicated_nest(request, nest_mode, tmp_path_factory, "recover-src")
@@ -3897,7 +3895,6 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
         request.addfinalizer(spa_server.shutdown)
     _login_app_as(app, request, box_a, owner, spa_url=spa_url)
     app.backups.require_destination_management_supported()
-    app.backups.require_recover_supported()
     app.backups.navigate()
     # A process-wide static nothing resets; zero it so this test's offsets are
     # its own, and put it back afterwards.
@@ -3918,7 +3915,7 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
     # ── The copy, taken while A is stopped so it is consistent ───────────────
     copy_dir = str(tmp_path_factory.mktemp("recover-src-copy") / "data")
     stop_nest(box_a, graceful=True)
-    shutil.copytree(box_a["tmp_dir"], copy_dir)
+    request.addfinalizer(copy_data_dir(box_a, copy_dir))
     start_nest_in_place(box_a)
     at_copy = _mail_segments(box_a, owner)
 
@@ -3933,8 +3930,11 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
     )
     assert _inbox_count(box_a, owner) == 3
 
-    # This device pins the ledger generation B now serves.
+    # This device pins the ledger generation B now serves. B's row must still be
+    # listed after A's restart, or the pass has nothing to audit: fail here,
+    # saying so, rather than at the banner below (convention 6).
     app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
     app.driver.call_command(
         "backup_audit_run_now", {"now_offset_secs": 25 * 60 * 60}, timeout=120
     )
@@ -3945,8 +3945,7 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
 
     # ── The regression ───────────────────────────────────────────────────────
     stop_nest(box_a, graceful=True)
-    shutil.rmtree(box_a["tmp_dir"])
-    shutil.copytree(copy_dir, box_a["tmp_dir"])
+    restore_data_dir(box_a, copy_dir)
     start_nest_in_place(box_a)
     assert _inbox_count(box_a, owner) == 1, "the restored copy predates the two messages"
     _import_one_mail(box_a, owner)
@@ -3958,6 +3957,7 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
     )
 
     app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
     app.driver.call_command(
         "backup_audit_run_now", {"now_offset_secs": 50 * 60 * 60}, timeout=120
     )
@@ -3997,9 +3997,14 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
         f"{recovered} message(s), not the 4 it ever held"
     )
 
-    # The notice has nothing left to say, now and on the next pass.
-    assert app.driver.count("backup-audit-alert") == 0, (
-        f"a whole recovery clears the notice: {_banner_texts(app)!r}"
+    # The notice has nothing left to say, now and on the next pass. The result
+    # paints first and the page then re-audits, so the banner goes a beat later
+    # (the sibling test below polls the same way): a deadline poll, never a
+    # read straight after the result (convention 14).
+    wait_until(
+        lambda: app.driver.count("backup-audit-alert") == 0,
+        30.0,
+        diagnose=lambda: f"a whole recovery clears the notice: {_banner_texts(app)!r}",
     )
     app.driver.call_command(
         "backup_audit_run_now", {"now_offset_secs": 75 * 60 * 60}, timeout=120
@@ -4014,10 +4019,17 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
-# windows follows in its batched trickle-down lift; it adds its marker here, and
-# `require_recover_supported` names the gap meanwhile. web is never a custodian,
-# so it is never marked. android's witness is its Robolectric test (no e2e lane).
+@pytest.mark.windows
+# web is never a custodian, so it is never marked (`ui/backups.md`: web hosts no
+# custodian, a declared absence — the marked-witness rule, `feature-catalog.md`
+# § Cell semantics). android holds a custodian store and its Robolectric test pins
+# the leg; its e2e leg is declared through the audit-clock harness surface.
+@pytest.mark.android
+@pytest.mark.requires_surface("backup-audit-run-now")
 @pytest.mark.real_sync_agent
+# windows only: its agent is a separate process, so this pins it to the run's own
+# pipe rather than the box's installed one — the orphaned-store test's pair.
+@pytest.mark.isolated_sync_agent
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy(
     app, request, nest_mode, tmp_path_factory
@@ -4057,7 +4069,9 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices
     Latency-independent (convention 14): every wait is a deadline poll that runs
     the pass it waits on (the agent's pull poke, the app's audit poke).
     """
-    from common.nest import start_nest_in_place, stop_nest
+    from common.nest import (
+        copy_data_dir, restore_data_dir, start_nest_in_place, stop_nest,
+    )
     from conftest import _login_app_as, _start_dedicated_nest
 
     box_a, cleanup_a = _start_dedicated_nest(
@@ -4067,7 +4081,6 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices
 
     _login_app_as(app, request, box_a, owner)
     app.backups.require_destination_management_supported()
-    app.backups.require_recover_supported()
     app.backups.navigate()
     # A process-wide static nothing resets; zero it so this test's passes run at
     # the real clock, and put it back afterwards.
@@ -4089,7 +4102,7 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices
     # ── The copy, taken while A is stopped so it is consistent ───────────────
     copy_dir = str(tmp_path_factory.mktemp("recover-store-src-copy") / "data")
     stop_nest(box_a, graceful=True)
-    shutil.copytree(box_a["tmp_dir"], copy_dir)
+    request.addfinalizer(copy_data_dir(box_a, copy_dir))
     start_nest_in_place(box_a)
     at_copy = _mail_segments(box_a, owner)
 
@@ -4123,8 +4136,7 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices
 
     # ── The regression ───────────────────────────────────────────────────────
     stop_nest(box_a, graceful=True)
-    shutil.rmtree(box_a["tmp_dir"])
-    shutil.copytree(copy_dir, box_a["tmp_dir"])
+    restore_data_dir(box_a, copy_dir)
     start_nest_in_place(box_a)
     assert _inbox_count(box_a, owner) == 1, "the restored copy predates the two messages"
     after_rollback = _mail_segments(box_a, owner)

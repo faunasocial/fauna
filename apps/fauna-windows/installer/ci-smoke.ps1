@@ -13,6 +13,9 @@
 #   * every native binary installed is built for -Arch (an x64 binary on an
 #     arm64 runner would still run, under emulation, so loading alone proves
 #     nothing about the arch);
+#   * the terminal app's one machine Path entry: a shell reading the machine
+#     Path fresh from the registry finds fauna-tui and runs fauna-cli --help,
+#     and the uninstall removes both files and the entry;
 #   * the FaunaNest and FaunaBridge services reach Running and are still
 #     Running a few seconds later (the binaries load and do not crash at
 #     start), and are gone after uninstall;
@@ -71,6 +74,44 @@ function Get-PeMachine([string]$Path) {
   [BitConverter]::ToUInt16($bytes, $peOffset + 4)
 }
 
+# The machine Path the way a NEW shell reads it: from the registry, expanded.
+# Never $env:Path, which was fixed when this process started, before the
+# install wrote (or the uninstall removed) anything.
+function Get-MachinePath { [Environment]::GetEnvironmentVariable('Path', 'Machine') }
+
+function Test-PathHolds([string]$PathValue, [string]$Dir) {
+  $want = $Dir.TrimEnd('\')
+  [bool]@($PathValue -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ieq $want }).Count
+}
+
+# Run $Command in cmd.exe with PATH set to $PathValue, as a shell opened after
+# the install would; returns its output lines, $LASTEXITCODE is its exit code.
+function Invoke-FreshShell([string]$PathValue, [string]$Command) {
+  $saved = $env:Path
+  try {
+    $env:Path = $PathValue
+    & (Join-Path $env:SystemRoot 'System32\cmd.exe') /d /c "$Command 2>&1"
+  } finally { $env:Path = $saved }
+}
+
+# The TerminalApp feature (TerminalApp.wxs): its one machine Path entry makes
+# fauna-tui and fauna-cli typeable in any new shell. fauna-tui is only found,
+# never run (it has no headless invocation); fauna-cli --help needs no host,
+# account or store.
+function Assert-TerminalAppOnPath {
+  $machinePath = Get-MachinePath
+  if (-not (Test-PathHolds $machinePath $installDir)) { throw "the machine Path does not hold $installDir after install" }
+  $where = @(Invoke-FreshShell $machinePath 'where fauna-tui')
+  if ($LASTEXITCODE -ne 0 -or -not $where -or (Split-Path -Parent $where[0]).TrimEnd('\') -ine $installDir.TrimEnd('\')) {
+    throw "a fresh shell does not find fauna-tui in ${installDir}: $($where -join ' | ')"
+  }
+  $help = (Invoke-FreshShell $machinePath 'fauna-cli --help') -join "`n"
+  if ($LASTEXITCODE -ne 0 -or $help -notmatch 'commands:') {
+    throw "fauna-cli --help in a fresh shell failed (exit $LASTEXITCODE):`n$help"
+  }
+  Write-Host "Terminal app OK: $installDir on the machine Path; fauna-tui found, fauna-cli --help runs"
+}
+
 function Get-ShellClsids {
   @(Get-ChildItem 'HKLM:\SOFTWARE\Classes\CLSID' |
     Where-Object { $_.PSChildName.StartsWith($clsidPrefix, 'OrdinalIgnoreCase') } |
@@ -99,6 +140,8 @@ function Assert-Installed {
     }
   }
   Write-Host "Arch OK: $($natives.Count) native binaries are $Arch"
+
+  Assert-TerminalAppOnPath
 
   # The machine services start and stay up.
   foreach ($name in $services) {
@@ -144,7 +187,15 @@ function Assert-Uninstalled {
   }
   $left = Get-ShellClsids
   if ($left.Count -ne 0) { throw "uninstall left shell-extension CLSIDs behind: $($left -join ', ')" }
+  foreach ($f in 'fauna-tui.exe', 'fauna-cli.exe') {
+    if (Test-Path -LiteralPath (Join-Path $installDir $f)) { throw "uninstall left $f behind in $installDir" }
+  }
+  if (Test-PathHolds (Get-MachinePath) $installDir) { throw "uninstall left $installDir on the machine Path" }
 }
+
+# Without this, the uninstall half's Path check could not tell removal from an
+# entry that was there all along.
+if (Test-PathHolds (Get-MachinePath) $installDir) { throw "the machine Path holds $installDir BEFORE the install" }
 
 # Case 1 — full install passes every runtime check; a plain uninstall PRESERVES
 # %ProgramData%\Fauna\.

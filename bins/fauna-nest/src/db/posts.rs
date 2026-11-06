@@ -221,32 +221,69 @@ impl CacheDb {
     /// `content_fts` row**: the Search corpus is nest-wide and a delivered post
     /// is the readers' who follow its author (`db::feeds::FeedLocality`).
     ///
-    /// A row this nest already lists nest-wide (a discovery stub of the same
-    /// post) keeps that standing: the delivery adds the body, never narrows
-    /// who sees a row. Orchestrated by `segments::post::store_delivered_post`.
+    /// **Custody is per home** (`federated-follow.md` § Decision 3, *What a
+    /// reader-named home is trusted for*): every delivery inserts — or,
+    /// re-delivered, refreshes the URL of — the delivering origin's
+    /// `follow_delivery_homes` row, and nothing else of a row this nest
+    /// already holds. The first delivery stores the projection and the
+    /// row's `content.origin_nest_*` ([`DeliveredStore::Stored`]); a later
+    /// delivery from another home adds its custody and leaves those columns
+    /// alone ([`DeliveredStore::CustodyAdded`]), so a delivery never relabels
+    /// whose a row is nor overwrites another home's record; a re-delivery from
+    /// a custodian is idempotent ([`DeliveredStore::Stored`], `delivered_at`
+    /// untouched). A row this nest already lists nest-wide (a discovery stub, a
+    /// forwarded post) takes no custody and keeps its standing AND its origin
+    /// columns ([`DeliveredStore::KeptNestWide`] — the delivery adds the body
+    /// to the segment, never narrows who sees a row nor relabels whose it is).
+    /// Orchestrated by `segments::post::store_delivered_post`.
     pub async fn put_delivered_post_index_only(
         &self,
         post_id: &[u8; 32],
         data: &[u8],
         home_url: &str,
         home_nest_id: &[u8; 32],
-    ) -> Result<()> {
+    ) -> Result<DeliveredStore> {
         let Some(post) = decode_stored_post(data) else {
             anyhow::bail!("a delivered post must decode");
         };
         let schema = post_body_schema(&post);
         let meta = extract_post_metadata(&post);
+        let now = fauna_core::data::Timestamp::now().0 as i64;
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction().context("begin delivered post")?;
-        let nest_wide: bool = tx
-            .query_row(
-                "SELECT follow_delivered = 0 FROM content WHERE id = ?1",
-                [post_id.as_slice()],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("read the prior row's standing")?
-            .unwrap_or(false);
+        let standing = delivered_standing_tx(&tx, post_id)?;
+        match standing {
+            Some(DeliveredStanding::NestWide) => {
+                write_post_index(&tx, post_id, &meta)?;
+                tx.commit().context("commit delivered post")?;
+                return Ok(DeliveredStore::KeptNestWide);
+            }
+            Some(DeliveredStanding::Delivered(_)) => {
+                let refreshed = tx
+                    .execute(
+                        "UPDATE follow_delivery_homes SET origin_nest_url = ?3
+                          WHERE post_id = ?1 AND origin_nest_id = ?2",
+                        rusqlite::params![post_id.as_slice(), home_nest_id.as_slice(), home_url],
+                    )
+                    .context("refresh the home's custody")?;
+                let outcome = if refreshed > 0 {
+                    // The row's columns follow their own custodian's URL.
+                    tx.execute(
+                        "UPDATE content SET origin_nest_url = ?2
+                          WHERE id = ?1 AND origin_nest_id = ?3",
+                        rusqlite::params![post_id.as_slice(), home_url, home_nest_id.as_slice()],
+                    )
+                    .context("refresh the delivered post's home URL")?;
+                    DeliveredStore::Stored
+                } else {
+                    insert_custody_tx(&tx, post_id, home_nest_id, home_url, now)?;
+                    DeliveredStore::CustodyAdded
+                };
+                tx.commit().context("commit delivered post")?;
+                return Ok(outcome);
+            }
+            None => {}
+        }
         content::insert_content(
             &tx,
             post_id,
@@ -260,18 +297,71 @@ impl CacheDb {
         )
         .context("put delivered post")?;
         tx.execute(
-            "UPDATE content SET origin_nest_url = ?2, origin_nest_id = ?3, follow_delivered = ?4
+            "UPDATE content SET origin_nest_url = ?2, origin_nest_id = ?3, follow_delivered = 1
              WHERE id = ?1",
-            rusqlite::params![
-                post_id.as_slice(),
-                home_url,
-                home_nest_id.as_slice(),
-                !nest_wide
-            ],
+            rusqlite::params![post_id.as_slice(), home_url, home_nest_id.as_slice()],
         )
         .context("mark the delivered post")?;
+        insert_custody_tx(&tx, post_id, home_nest_id, home_url, now)?;
         write_post_index(&tx, post_id, &meta)?;
-        tx.commit().context("commit delivered post")
+        tx.commit().context("commit delivered post")?;
+        Ok(DeliveredStore::Stored)
+    }
+
+    /// Whether `origin` holds custody of a follow-delivered row
+    /// (`follow_delivery_homes`): `None` for a row no follow delivered (or
+    /// none at all), else `Some(held)` — the tombstone door of
+    /// `federated-follow.md` § Decision 5.
+    pub async fn delivered_custody_of(
+        &self,
+        post_id: &[u8; 32],
+        origin: &[u8; 32],
+    ) -> Result<Option<bool>> {
+        let conn = self.conn.lock().await;
+        let row: Option<bool> = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM follow_delivery_homes
+                                WHERE post_id = c.id AND origin_nest_id = ?2)
+                   FROM content c WHERE c.id = ?1 AND c.follow_delivered = 1",
+                rusqlite::params![post_id.as_slice(), origin.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read a delivered post's custody")?;
+        Ok(row)
+    }
+
+    /// The homes holding custody of a follow-delivered row, oldest delivery
+    /// first: `(origin_nest_id, origin_nest_url)`. Empty for any other row.
+    pub async fn delivered_post_homes(
+        &self,
+        post_id: &[u8; 32],
+    ) -> Result<Vec<([u8; 32], String)>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT origin_nest_id, origin_nest_url FROM follow_delivery_homes
+              WHERE post_id = ?1 ORDER BY delivered_at, origin_nest_id",
+        )?;
+        let homes = stmt
+            .query_map([post_id.as_slice()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, url)| <[u8; 32]>::try_from(id).ok().map(|id| (id, url)))
+            .collect();
+        Ok(homes)
+    }
+
+    /// How this nest already holds a post id, for a delivery about to land on
+    /// it: `None` — no row; `NestWide` — a row every reader may list;
+    /// `Delivered(origin)` — a federated follow's row, with the home it came
+    /// through (`None` only if that column was never written).
+    pub async fn delivered_standing(
+        &self,
+        post_id: &[u8; 32],
+    ) -> Result<Option<DeliveredStanding>> {
+        let conn = self.conn.lock().await;
+        delivered_standing_tx(&conn, post_id)
     }
 
     /// Whether a `content` row exists for this post id. The newly-stored gate
@@ -455,19 +545,35 @@ impl CacheDb {
         for reference in &post.references {
             // PostId → 32-byte content digest: strip the 4-byte CID prefix
             // (`v1 + dag-cbor + blake3-256 + len 32`), mirroring
-            // `get_post_references` above. React/Upvote/Downvote are not
-            // interaction-bar counts.
+            // `get_post_references` above. `React` is a tally projected from
+            // the `react` link, never a counter; `Downvote` is inert
+            // (`feed.md` § Layout & flow → *Reaction posts count and paint*,
+            // rulings 2 and 3).
             let (target_digest, tag) = match reference {
                 fauna_core::data::Reference::Reply { post_id } => (cid_to_digest(post_id), "reply"),
                 fauna_core::data::Reference::Repost { post_id } => {
                     (cid_to_digest(post_id), "repost")
                 }
                 fauna_core::data::Reference::Quote { post_id } => (cid_to_digest(post_id), "quote"),
+                fauna_core::data::Reference::Upvote { post_id } => (cid_to_digest(post_id), "like"),
                 _ => continue,
             };
             let target = fauna_core::data::ContentHash::from_digest_raw(target_digest);
-            let event_id =
-                fauna_core::engagement::compute_reference_event_id(&referencing, &target, tag);
+            // An `Upvote` post is a like (ruling 1): it dedupes on the interact
+            // door's own per-(actor, target) key, so a door like and an
+            // `Upvote` post by one actor count once, and its row names its
+            // carrier in `event_data` so only this post's deletion reverses it.
+            let (event_id, carrier) = if tag == "like" {
+                (
+                    fauna_core::engagement::compute_toggle_event_id(&post.author, &target, "like"),
+                    Some(referencing_post_id.as_slice()),
+                )
+            } else {
+                (
+                    fauna_core::engagement::compute_reference_event_id(&referencing, &target, tag),
+                    None,
+                )
+            };
             // First-insert gate: only the first time this reference is recorded
             // does the counter move (idempotent on re-create).
             let first = self
@@ -476,7 +582,7 @@ impl CacheDb {
                     &target_digest,
                     Some(referencing_author),
                     tag,
-                    None,
+                    carrier,
                     now_us,
                 )
                 .await?;
@@ -581,6 +687,13 @@ impl CacheDb {
             rusqlite::params![post_id.as_slice()],
         )
         .context("delete engagement_events")?;
+        // A follow-delivered row goes whole: every home's custody with it
+        // (`federated-follow.md` § Decision 5).
+        tx.execute(
+            "DELETE FROM follow_delivery_homes WHERE post_id = ?1",
+            rusqlite::params![post_id.as_slice()],
+        )
+        .context("delete follow_delivery_homes")?;
         // Propagate (not `let _ =`-swallow) so an FTS-removal failure rolls the
         // WHOLE transaction back — an FTS5 error class that leaves the tx
         // committable (does not auto-abort) must not let the other five deletes
@@ -637,15 +750,26 @@ impl CacheDb {
                     (cid_to_digest(post_id), "repost")
                 }
                 fauna_core::data::Reference::Quote { post_id } => (cid_to_digest(post_id), "quote"),
+                fauna_core::data::Reference::Upvote { post_id } => (cid_to_digest(post_id), "like"),
                 _ => continue,
             };
             let target = fauna_core::data::ContentHash::from_digest_raw(target_digest);
-            let event_id =
-                fauna_core::engagement::compute_reference_event_id(&referencing, &target, tag);
             // Only a still-present reference event moves the counter —
             // idempotent on a repeated delete, symmetric with the
-            // first-insert gate on the create side.
-            if self.delete_engagement_event(&event_id.digest()).await? {
+            // first-insert gate on the create side. An `Upvote`'s like row is
+            // removed only when it names THIS post (ruling 1): a door like or
+            // another `Upvote` post by the same actor survives.
+            let removed = if tag == "like" {
+                let event_id =
+                    fauna_core::engagement::compute_toggle_event_id(&post.author, &target, "like");
+                self.delete_engagement_event_carried_by(&event_id.digest(), referencing_post_id)
+                    .await?
+            } else {
+                let event_id =
+                    fauna_core::engagement::compute_reference_event_id(&referencing, &target, tag);
+                self.delete_engagement_event(&event_id.digest()).await?
+            };
+            if removed {
                 self.decrement_engagement_count(&target_digest, tag).await?;
             }
         }
@@ -875,4 +999,356 @@ mod delete_projection_atomicity_tests {
             "the content row must survive the rolled-back delete — no partial commit"
         );
     }
+}
+
+/// The reaction arms of the reference funnel and the `react` projection
+/// (`docs/goal/ui/feed.md` § Layout & flow → *Reaction posts count and paint*,
+/// rulings 1 and 2).
+#[cfg(test)]
+mod reaction_post_tests {
+    use crate::db::CacheDb;
+    use fauna_core::data::{Post, PostBody, Reference, Timestamp};
+    use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+    use fauna_core::identity::ActorKeypair;
+
+    /// Index a signed post the way the create path's projection does and
+    /// return `(wire bytes, content id)`.
+    async fn land(
+        db: &CacheDb,
+        author: &ActorKeypair,
+        created_at: u64,
+        references: Vec<Reference>,
+    ) -> (Vec<u8>, [u8; 32]) {
+        let post = Post {
+            author: author.actor_id(),
+            created_at: Timestamp(created_at),
+            body: PostBody::Text {
+                content: String::new(),
+                facets: vec![],
+            },
+            references,
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let (bytes, env) = sign_envelope(author, &post).unwrap();
+        let wire = canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+        let post_id = *blake3::hash(&wire).as_bytes();
+        db.put_post_index_only(&post_id, &wire).await.unwrap();
+        (wire, post_id)
+    }
+
+    /// Land a post AND run the create funnel on it, as `fauna.posts.create` does.
+    async fn create(
+        db: &CacheDb,
+        author: &ActorKeypair,
+        created_at: u64,
+        references: Vec<Reference>,
+    ) -> (Vec<u8>, [u8; 32]) {
+        let (wire, id) = land(db, author, created_at, references).await;
+        db.record_reference_engagements(&id, &author.actor_id().0, &wire, 0)
+            .await
+            .unwrap();
+        (wire, id)
+    }
+
+    fn upvote(target: [u8; 32]) -> Vec<Reference> {
+        vec![Reference::Upvote {
+            post_id: fauna_cbor::Cid::from_digest_dag_cbor(target),
+        }]
+    }
+
+    fn react(target: [u8; 32], emoji: &str) -> Vec<Reference> {
+        vec![Reference::React {
+            post_id: fauna_cbor::Cid::from_digest_dag_cbor(target),
+            emoji: emoji.into(),
+        }]
+    }
+
+    async fn likes(db: &CacheDb, target: &[u8; 32]) -> i64 {
+        db.get_engagement_counts(target).await.unwrap().like_count
+    }
+
+    fn door_key(actor: &ActorKeypair, target: [u8; 32]) -> [u8; 32] {
+        fauna_core::engagement::compute_toggle_event_id(
+            &actor.actor_id(),
+            &fauna_core::data::ContentHash::from_digest_raw(target),
+            "like",
+        )
+        .digest()
+    }
+
+    #[tokio::test]
+    async fn an_upvote_post_is_a_like_on_the_doors_key() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::from_secret([1u8; 32]);
+        let bob = ActorKeypair::from_secret([2u8; 32]);
+        let (_, target) = land(&db, &author, 1, vec![]).await;
+
+        // First Upvote moves the counter; the row names its carrier.
+        let (u1_wire, u1) = create(&db, &bob, 2, upvote(target)).await;
+        assert_eq!(likes(&db, &target).await, 1);
+        assert_eq!(
+            db.get_engagement_event_data(&door_key(&bob, target))
+                .await
+                .unwrap(),
+            Some(Some(u1.to_vec())),
+            "the like row names the Upvote post that carries it"
+        );
+        // A second Upvote by the same actor dedupes on the same key.
+        let (u2_wire, u2) = create(&db, &bob, 3, upvote(target)).await;
+        assert_eq!(likes(&db, &target).await, 1, "one actor, one like");
+        // A door like by that actor dedupes too.
+        let inserted = db
+            .insert_engagement_event(
+                &door_key(&bob, target),
+                &target,
+                Some(&bob.actor_id().0),
+                "like",
+                None,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(!inserted, "the door like hits the Upvote's row");
+
+        // Deleting the redundant Upvote reverses nothing — the row names u1.
+        db.reverse_reference_engagements(&u2, &u2_wire)
+            .await
+            .unwrap();
+        assert_eq!(likes(&db, &target).await, 1);
+        // Deleting the carrier reverses its own row, once.
+        db.reverse_reference_engagements(&u1, &u1_wire)
+            .await
+            .unwrap();
+        assert_eq!(likes(&db, &target).await, 0);
+        db.reverse_reference_engagements(&u1, &u1_wire)
+            .await
+            .unwrap();
+        assert_eq!(
+            likes(&db, &target).await,
+            0,
+            "idempotent on a repeated delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_door_like_survives_the_deletion_of_a_redundant_upvote_post() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::from_secret([1u8; 32]);
+        let carol = ActorKeypair::from_secret([3u8; 32]);
+        let (_, target) = land(&db, &author, 1, vec![]).await;
+        assert!(
+            db.insert_engagement_event(
+                &door_key(&carol, target),
+                &target,
+                Some(&carol.actor_id().0),
+                "like",
+                None,
+                0,
+            )
+            .await
+            .unwrap()
+        );
+        db.increment_engagement_count(&target, "like")
+            .await
+            .unwrap();
+
+        let (wire, upvote_id) = create(&db, &carol, 2, upvote(target)).await;
+        assert_eq!(
+            likes(&db, &target).await,
+            1,
+            "the Upvote dedupes on the door like"
+        );
+        db.reverse_reference_engagements(&upvote_id, &wire)
+            .await
+            .unwrap();
+        assert_eq!(
+            likes(&db, &target).await,
+            1,
+            "the door like (NULL carrier) survives"
+        );
+        assert_eq!(
+            db.get_engagement_event_data(&door_key(&carol, target))
+                .await
+                .unwrap(),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_react_link_projects_a_per_emoji_tally_of_distinct_actors() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::from_secret([1u8; 32]);
+        let bob = ActorKeypair::from_secret([2u8; 32]);
+        let carol = ActorKeypair::from_secret([3u8; 32]);
+        let (_, target) = land(&db, &author, 1, vec![]).await;
+
+        let (_, bob_heart_1) = create(&db, &bob, 2, react(target, "❤️")).await;
+        let (_, bob_heart_2) = create(&db, &bob, 3, react(target, "❤️")).await;
+        let (_, carol_fire) = create(&db, &carol, 4, react(target, "🔥")).await;
+        let (_, _carol_heart) = create(&db, &carol, 5, react(target, "❤️")).await;
+
+        assert_eq!(likes(&db, &target).await, 0, "a reaction moves no counter");
+        let tally = db
+            .get_reaction_tally(&target, Some(&bob.actor_id().0))
+            .await
+            .unwrap();
+        let shape: Vec<(&str, i64, Option<String>)> = tally
+            .iter()
+            .map(|g| (g.emoji.as_str(), g.count, g.viewer_react_id.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![("❤️", 2, Some(hex::encode(bob_heart_2))), ("🔥", 1, None),],
+            "distinct actors per emoji, first-added order, the viewer's latest post"
+        );
+        let _ = bob_heart_1;
+
+        // Carol's view: her own fire, her own heart.
+        let tally = db
+            .get_reaction_tally(&target, Some(&carol.actor_id().0))
+            .await
+            .unwrap();
+        assert_eq!(tally[1].viewer_react_id, Some(hex::encode(carol_fire)));
+        assert!(tally[0].viewer_react_id.is_some());
+
+        // A deleted React post leaves the tally with its link.
+        db.delete_post_projection(&carol_fire).await.unwrap();
+        let tally = db.get_reaction_tally(&target, None).await.unwrap();
+        assert_eq!(tally.len(), 1);
+        assert_eq!(tally[0].emoji, "❤️");
+    }
+
+    /// Ruling 2's bound on the emoji, at the index: a `React` post whose
+    /// emoji is text, two emoji or over the byte bound mints no `react` link,
+    /// so it joins no tally.
+    #[tokio::test]
+    async fn an_emoji_that_fails_the_rule_mints_no_react_link() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::from_secret([1u8; 32]);
+        let bob = ActorKeypair::from_secret([2u8; 32]);
+        let (_, target) = land(&db, &author, 1, vec![]).await;
+
+        let oversized = format!(
+            ":{}:",
+            "a".repeat(fauna_core::data::REACTION_EMOJI_MAX_BYTES)
+        );
+        for (i, bad) in ["what a great post", "🔥🔥", oversized.as_str()]
+            .into_iter()
+            .enumerate()
+        {
+            create(&db, &bob, 2 + i as u64, react(target, bad)).await;
+        }
+        assert!(
+            db.get_reaction_tally(&target, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no failing emoji reaches the tally"
+        );
+        create(&db, &bob, 9, react(target, "🔥")).await;
+        assert_eq!(db.get_reaction_tally(&target, None).await.unwrap().len(), 1);
+    }
+
+    /// Ruling 2's bound on the groups, at the read: a post with more distinct
+    /// emoji than `REACTION_TALLY_MAX_GROUPS` returns exactly that many — the
+    /// most-reacted, ties to the earliest — still in first-added order, on the
+    /// single read every path shares (the feed pass, the author read and
+    /// `fauna.posts.get` prepare the same statements).
+    #[tokio::test]
+    async fn the_tally_returns_at_most_the_group_cap_most_reacted_first_added_order() {
+        use crate::db::feeds::REACTION_TALLY_MAX_GROUPS as CAP;
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = ActorKeypair::from_secret([1u8; 32]);
+        let bob = ActorKeypair::from_secret([2u8; 32]);
+        let carol = ActorKeypair::from_secret([3u8; 32]);
+        let (_, target) = land(&db, &author, 1, vec![]).await;
+
+        let emoji = |i: usize| char::from_u32(0x1F600 + i as u32).unwrap().to_string();
+        let total = CAP + 5;
+        for i in 0..total {
+            create(&db, &bob, 10 + i as u64, react(target, &emoji(i))).await;
+        }
+        // The last-added emoji is the most reacted: it survives the cap.
+        create(&db, &carol, 100, react(target, &emoji(total - 1))).await;
+
+        let tally = db.get_reaction_tally(&target, None).await.unwrap();
+        assert_eq!(tally.len(), CAP, "the read is capped");
+        let mut expect: Vec<String> = (0..CAP - 1).map(emoji).collect();
+        expect.push(emoji(total - 1));
+        let got: Vec<String> = tally.iter().map(|g| g.emoji.clone()).collect();
+        assert_eq!(
+            got, expect,
+            "top by count, ties earliest, first-added order"
+        );
+        assert_eq!(tally[CAP - 1].count, 2);
+    }
+}
+
+/// What a federated follow's delivery did to the projection
+/// ([`CacheDb::put_delivered_post_index_only`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveredStore {
+    /// Stored as a delivered row, or re-delivered by a home already in its
+    /// custody (that custody's URL refreshed).
+    Stored,
+    /// The row was already listed nest-wide and is left as it was.
+    KeptNestWide,
+    /// The row was already delivered by another home: this home's custody is
+    /// added beside it, the row and its origin columns untouched.
+    CustodyAdded,
+}
+
+/// Insert one home's custody of a delivered row (`follow_delivery_homes`).
+fn insert_custody_tx(
+    conn: &rusqlite::Connection,
+    post_id: &[u8; 32],
+    home_nest_id: &[u8; 32],
+    home_url: &str,
+    delivered_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO follow_delivery_homes (post_id, origin_nest_id, origin_nest_url, delivered_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (post_id, origin_nest_id) DO UPDATE SET origin_nest_url = excluded.origin_nest_url",
+        rusqlite::params![
+            post_id.as_slice(),
+            home_nest_id.as_slice(),
+            home_url,
+            delivered_at
+        ],
+    )
+    .context("record the home's custody")?;
+    Ok(())
+}
+
+/// How a `content` row is held, as a delivery sees it
+/// ([`CacheDb::delivered_standing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveredStanding {
+    NestWide,
+    Delivered(Option<[u8; 32]>),
+}
+
+fn delivered_standing_tx(
+    conn: &rusqlite::Connection,
+    post_id: &[u8; 32],
+) -> Result<Option<DeliveredStanding>> {
+    let row: Option<(bool, Option<Vec<u8>>)> = conn
+        .query_row(
+            "SELECT follow_delivered = 1, origin_nest_id FROM content WHERE id = ?1",
+            [post_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("read the prior row's standing")?;
+    Ok(row.map(|(delivered, origin)| {
+        if delivered {
+            DeliveredStanding::Delivered(origin.and_then(|o| <[u8; 32]>::try_from(o).ok()))
+        } else {
+            DeliveredStanding::NestWide
+        }
+    }))
 }

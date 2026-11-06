@@ -24,12 +24,12 @@ public class SessionDeviceIdTests
     {
         private readonly Dictionary<string, string> _rows = new();
 
-        public string? Get(string resource, string user) =>
+        public string? Get(string resource) =>
             _rows.TryGetValue(resource, out var v) ? v : null;
 
-        public void Set(string resource, string user, string value) => _rows[resource] = value;
+        public void Set(string resource, string value) => _rows[resource] = value;
 
-        public void Delete(string resource, string user) => _rows.Remove(resource);
+        public void Delete(string resource) => _rows.Remove(resource);
     }
 
     private const string SecretA = "1111111111111111111111111111111111111111111111111111111111111111";

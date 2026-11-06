@@ -2163,6 +2163,7 @@ async fn seed_change(
         Some(fauna_nest::db::RowSignature {
             signature: req.signature.as_deref().expect("signed"),
             signer_key: req.signer_key.as_deref().expect("signed"),
+            deposited_by: None,
         }),
     )
     .await

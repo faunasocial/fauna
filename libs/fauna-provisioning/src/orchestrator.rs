@@ -1096,8 +1096,12 @@ mod tests {
             "{recs:#?}"
         );
 
-        // Canonical 3600s TTL (mail-multidomain.md:152), not 300.
-        assert!(recs.iter().all(|r| r.ttl == 3600), "{recs:#?}");
+        // The shared steady-state TTL (dns-management.md § Records covered).
+        assert!(
+            recs.iter()
+                .all(|r| r.ttl == fauna_mail::dns::per_domain::DEFAULT_TTL_SECS),
+            "{recs:#?}"
+        );
     }
 
     /// Deferred ("Set up later") path: no zone yet, so names stay fully-qualified

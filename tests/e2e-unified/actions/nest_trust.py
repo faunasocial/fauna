@@ -34,40 +34,6 @@ class NestTrustActions:
     def __init__(self, driver: PlatformDriver):
         self.driver = driver
 
-    def require_mint_test_setup_supported(self) -> None:
-        """Skip unless this app builds the SELF Tiers-tab author sections
-        (`subscription-tiers-section` & co.) this test's setup uses to seed a
-        tier (e2e convention 7 — the platform check lives in the action
-        layer, not the test body).
-
-        trust-mint UI itself landed on linux (lead) + web + macos + ios +
-        windows (nests.md § Mint, ratified 2026-07-13); tui built the mint
-        flow too (2026-07-24, unit-proven in settings/nests.rs) and **landed
-        the Tiers author page 2026-08-01** (the tui Tiers author track), so it seeds
-        this test's tier through the same UI every other app does — widened
-        that day, with no other change to the test, exactly as this docstring
-        anticipated. android remains out (its e2e is host-emulator-gated
-        fleet-wide)."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-            or self.driver.is_tui()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the SELF Tiers-tab author sections "
-                        "(subscription-tiers-section & co.)",
-                detail="needed to seed this test's tier; tui's mint flow "
-                       "itself is built and unit-proven, but tui has no "
-                       "Tiers author page yet",
-                tracked="ui-actual-tui.yaml (Tiers author page, future slice)",
-            )
-
     def require_backup_trust_rows_supported(self) -> None:
         """Skip unless this app renders backup-destination trust rows (e2e
         convention 7 — the platform check lives in the action layer, not the
@@ -77,26 +43,11 @@ class NestTrustActions:
         (2026-07-29, shared FaunaKit `LinkedNestsView`) + windows (2026-08-24,
         NestsPanel.xaml `nest-trust-backup-item`) + android (its
         `LinkedNestsScreen.kt` already implements `BackupItem` with all
-        `nest-trust-backup-*` testTags). android is excluded below anyway —
-        its e2e is host-emulator-gated fleet-wide, not a missing feature."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        `nest-trust-backup-*` testTags). android's witnesses are unrun until
+        the emulator venue exists — a harness gap, not a missing feature."""
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="backup-destination trust rows",
-                detail="android has it but is excluded here for the same "
-                       "fleet-wide host-emulator e2e gate as every other "
-                       "android test",
-                tracked="nests.md § Trust facet",
-            )
+        require_surface(self.driver, "backup-destination-trust-rows")
 
     def require_retained_generations_supported(self) -> None:
         """Skip unless this app renders retained-generation rows (e2e
@@ -114,24 +65,9 @@ class NestTrustActions:
         renders it (`LinkedNestsScreen.kt`) but is excluded below anyway —
         its e2e is host-emulator-gated fleet-wide, same as every other
         android test."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="retained-generation rows",
-                detail="android has it but is excluded here for the same "
-                       "fleet-wide host-emulator e2e gate as every other "
-                       "android test",
-                tracked="nests.md § Trust facet — generation recovery",
-            )
+        require_surface(self.driver, "retained-generation-rows")
 
     def lens_toggle_present(self, timeout: float = 8.0) -> bool:
         """True once a nest row's Now/History lens toggle is on screen."""
@@ -294,28 +230,6 @@ class NestTrustActions:
     ONE_OFF_LABEL = S.nests.mint_duration_one_off
     STANDARD_LABEL = S.nests.mint_duration_standard
 
-    def _has_duration_and_blessing(self) -> bool:
-        """tui led; linux, web and android followed (2026-09-28), then macOS
-        and iOS, then windows — every app renders both controls."""
-        d = self.driver
-        return (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-                or d.is_macos() or d.is_ios() or d.is_windows())
-
-    def require_duration_and_blessing_supported(self) -> None:
-        """Skip unless this app renders `nest-trust-mint-duration-select` and
-        `nest-trust-blessed-toggle` and runs the auto-renew tick (convention 7 —
-        the platform check lives here, not in the test body)."""
-        if not self._has_duration_and_blessing():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the mint duration picker and the nest blessing toggle",
-                detail="the shared machine is in place; this app's shell "
-                       "does not render the two controls yet",
-                tracked="nests.md § Implementation status today",
-            )
-
     def select_duration(self, label: str, index: int = 0) -> None:
         """Pick how long the new trust lasts in the open mint form
         (`nest-trust-mint-duration-select`) by its rendered label
@@ -323,13 +237,11 @@ class NestTrustActions:
         self.driver.select("nest-trust-mint-duration-select", label, index=index)
 
     def pick_standard_duration_where_offered(self, index: int = 0) -> None:
-        """Choose the standard ~90-day window in the open mint form — a real
-        pick where the app renders the duration picker, nothing elsewhere:
-        the apps without it always mint the standard window (their shells name
-        it on `Mint`), so the resulting grant is the same. Setup for journeys
-        that need a standing grant, not a skip."""
-        if self._has_duration_and_blessing():
-            self.select_duration(self.STANDARD_LABEL, index=index)
+        """Choose the standard ~90-day window in the open mint form. Setup for
+        journeys that need a standing grant, not a skip: every app renders the
+        duration picker (tui led; linux, web and android 2026-09-28, then macOS
+        and iOS, then windows)."""
+        self.select_duration(self.STANDARD_LABEL, index=index)
 
     def duration_selected(self, index: int = 0) -> str:
         """The duration the open mint form shows — the row's default until
@@ -403,6 +315,44 @@ class NestTrustActions:
             "nest-trust-grant-renew", scope=self._grant_scope(index)
         )
 
+    def has_grant_revoke(self, index: int = 0) -> bool:
+        """Whether the grant row at `index` offers `nest-trust-grant-revoke` —
+        the control a grant must keep however the holder roster reads
+        (`nests.md` § Trust facet — grants → *The holder roster groups the
+        log; it never gates it*)."""
+        return not self.driver.is_absent(
+            "nest-trust-grant-revoke", scope=self._grant_scope(index)
+        )
+
+    def holders_status_text(self, nest_index: int = 0) -> str:
+        """The home row's holder-roster status (`nest-trust-holders-status`):
+        empty while the roster read answered, the unreachable copy when it
+        failed — "could not ask this nest", never "trusted with nothing"."""
+        scope = f"nests-item[{nest_index}]"
+        if self.driver.is_absent("nest-trust-holders-status", scope=scope):
+            return ""
+        return self.driver.get_text("nest-trust-holders-status", scope=scope) or ""
+
+    def wait_for_holders_status(
+        self, expected: str, nest_index: int = 0, timeout: float = 20.0
+    ) -> str:
+        """Deadline-poll `holders_status_text` until it reads `expected`
+        (latency-independent: the facet re-hydrates on the page's own
+        refresh); returns the last reading either way."""
+        deadline = time.monotonic() + timeout
+        text = self.holders_status_text(nest_index)
+        while time.monotonic() < deadline and text != expected:
+            time.sleep(0.3)
+            text = self.holders_status_text(nest_index)
+        return text
+
+    def mint_scope_options(self, index: int = 0) -> list[str] | None:
+        """Every option the open mint form's `nest-trust-mint-scope-select`
+        paints (`PlatformDriver.option_texts`), placeholder included — the
+        whole catalog, so an assertion can name what is NOT offered. `None`
+        when the driver does not serve the `options` attr."""
+        return self.driver.option_texts("nest-trust-mint-scope-select", index=index)
+
     def wait_for_grant_status(
         self, expected: str, index: int = 0, timeout: float = 20.0
     ) -> str:
@@ -432,25 +382,15 @@ class NestTrustActions:
         `fauna_client_capabilities::trust_clock` (e2e convention 7 — the
         platform check lives in the action layer, not the test body).
 
-        The clock itself is shared Rust and already feeds every native leg's
-        fold (and web's grant fold); tui, linux, web, android, macOS, iOS and
+        The clock itself is shared Rust and feeds every leg's folds (on web a
+        copy per wasm chunk, both moved by the one command,
+        `#lib/trust-clock-e2e`); tui, linux, web, android, macOS, iOS and
         windows expose the command (the apple pair through the shared FaunaKit
         `TrustFacetClockTestCommand`; windows through its `TestAgent` arm over
         the UniFFI `set_trust_clock_offset_secs` door)."""
-        d = self.driver
-        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-                or d.is_macos() or d.is_ios() or d.is_windows()):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the trust facet's render-clock agent command "
-                        "(trust_facet_advance_clock)",
-                detail="the shared clock and its UniFFI door are in place; "
-                       "this app's automation agent does not route the "
-                       "command yet",
-                tracked="nests.md § Implementation status today",
-            )
+        require_surface(self.driver, "trust-facet-clock")
 
     def advance_trust_clock(self, offset_secs: int) -> None:
         """Move the trust facet's RENDER clock (grant liveness + custody receipt
@@ -465,36 +405,9 @@ class NestTrustActions:
 
     # ── custody rows + the escrow-holder badge (nests.md § Trust facet —
     # custody rows; participants.md § The participant model). Rendered on every
-    # app (nests.md § Implementation status today); the one
-    # journey that reads them mints its custody through the Devices-page
-    # ceremony, so it gates through `CustodyActions.require_supported()` AND
-    # `require_custody_rows_supported()` below — an app can drive the ceremony
-    # before it renders the custodian-nest row it produces.
-
-    def require_custody_rows_supported(self) -> None:
-        """Skip unless this app renders the custodian-NEST rows
-        (`nest-trust-custody-*`) and the escrow-holder badge on its Nests page
-        (e2e convention 7 — the platform check lives in the action layer).
-
-        tui, linux, web, android, macOS, iOS and windows render them (apple via
-        the shared FaunaKit Nests page, 2026-09-29). An app can drive the custody
-        ceremony before it renders the custodian-nest row it produces, so this
-        gate stays separate from `CustodyActions.require_supported()`."""
-        d = self.driver
-        if not (
-            d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-            or d.is_macos() or d.is_ios() or d.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the Nests page's custodian-nest rows "
-                        "(nest-trust-custody-*) and the escrow-holder badge",
-                detail="the shared fold carries the rows; this app's Nests "
-                       "page does not paint them yet",
-                tracked="nests.md § Implementation status today",
-            )
+    # app (nests.md § Implementation status today). The journey that mints its
+    # custody through the Devices-page ceremony gates through
+    # `CustodyActions.require_supported()`; web reads them as an observing seat.
 
     def custody_count(self) -> int:
         """How many custodian-NEST rows render (`nest-trust-custody-item`)."""
@@ -505,24 +418,17 @@ class NestTrustActions:
 
     def require_custody_restore_supported(self) -> None:
         """Skip unless this app renders the restore-from-a-custodian form
-        (`nests-custody-restore-*`) — tui leads, linux and web follow
-        (android's surfaces are Robolectric-verified, with no device run
-        venue), and the rest follow in their trickle-down rows (e2e
-        convention 7). On web the full cold-device journey still skips at the
-        custody ceremony, a declared absence there (`ui/devices.md` § Where
-        logic lives); `test_custody_restore_honest_arms.py` needs none."""
+        (`nests-custody-restore-*`) — tui leads, linux, web, macOS, iOS and
+        windows follow (iOS shares macOS's FaunaKit view; android's surfaces
+        are Robolectric-verified, with no device run venue; the app set is the
+        surface registry's, e2e convention 7). On web the full
+        cold-device journey still skips at the custody ceremony, a declared
+        absence there (`ui/devices.md` § Where logic lives);
+        `test_custody_restore_honest_arms.py` needs none."""
         d = self.driver
-        if not (d.is_tui() or d.is_linux() or d.is_web()):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                d,
-                surface="the Nests page's restore from a custodian nest "
-                        "(nests-custody-restore-*)",
-                detail="the shared RestoreFromCustodian command is exported; "
-                       "this app's Nests page does not paint the form yet",
-                tracked="nests.md § Implementation status today",
-            )
+        require_surface(d, "nests-custody-restore")
 
     def restore_from_custodian(self, address: str) -> None:
         """Reveal the form, type `address`, submit — the typed-address entry

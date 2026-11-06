@@ -88,8 +88,7 @@ export function setSpamPreferences(spamThreshold?: number, phishingThreshold?: n
  *  its verdict. Best-effort per read — a failure leaves that half as it was
  *  (for the guardian half, clause 1's keep-last-known), so the surface renders
  *  normally: the fail-OPEN is on the READ, while enforcement stays fail-CLOSED
- *  only on a value the client cannot PARSE (`ContentFloor::Unknown → block`,
- *  handled in shared Rust). */
+ *  only on a value the client cannot PARSE (handled in shared Rust). */
 export async function hydrateContentPolicy(secretHex: string): Promise<void> {
   try {
     const { supervision } = await familyStatus(secretHex);

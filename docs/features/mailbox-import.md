@@ -8,14 +8,15 @@ guide: docs/guides/own-your-mail.md § Moving in from your old provider
 
 ## What a user gets
 
-Move your existing mail — from Gmail, Outlook, iCloud or any other IMAP
-server — into your own mailbox without leaving the app. A short wizard asks
-where your mail is, lets you choose which mailboxes to bring and from what
-date, shows you how much is coming before you start, and then shows its
-progress as the mail arrives. Your old provider's password stays in your app:
-your nest never sees it. Mailboxes, dates and read, flagged and answered marks
-come across as they were — a Gmail message filed under several labels lands
-once — and mail you already have is not copied twice.
+Move your existing mail — from Gmail, iCloud or any other IMAP server, and from
+Outlook once your nest's admin has entered a Microsoft app registration — into
+your own mailbox without leaving the app. A short wizard asks where your mail
+is, lets you choose which mailboxes to bring and from what date, shows you how
+much is coming before you start, and then shows its progress as the mail
+arrives. Your old provider's password stays in your app: your nest never sees
+it. Mailboxes, dates and read, flagged and answered marks come across as they
+were — a Gmail message filed under several labels lands once — and mail you
+already have is not copied twice.
 
 ## Coverage contract
 
@@ -151,93 +152,96 @@ Stamped 2026-10-17 at 32c3482b1a.
 57. [app] When an admin has entered their organisation's own Microsoft app registration, the Outlook import signs in with it instead of the default one — `docs/goal/behavior/mailbox-migration.md` § Microsoft sign-in — the device-code grant
     - `tests/e2e-unified/tests/test_mail_import_microsoft_registration.py::test_an_admin_set_microsoft_registration_is_the_client_id_the_sign_in_sends`
     - `tests/e2e-unified/tests/test_admin_mail.py::test_microsoft_registration_save_round_trips`
+58. [app] A finished import is still there when you leave the import page and come back: the same summary, with the skipped list one press away — `docs/goal/behavior/mailbox-migration.md` § Wizard steps
+    - `tests/e2e-unified/tests/test_mail_import.py::test_a_finished_import_survives_leaving_the_page_and_coming_back`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows |  no run recorded | |
-| macos |  no run recorded | |
-| ios |  no run recorded | |
-| android |  no run recorded | |
-| tui | ✅ full | 0.1.4-dev+2a0b03b4 standalone |
+| web | 🚧 unbuilt | 0.1.5 docker |
+| linux | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| windows | ⚠ partial | 0.1.5-dev+3ef45f1b standalone |
+| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| ios | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+3ef45f1b standalone |
+| tui | ✅ full | 0.1.5-dev+3ef45f1b standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_import_wizard_is_reachable_and_opens_on_the_source_step` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_mail_import.py::test_selecting_a_source_kind_seeds_the_host_and_port_drafts` | web (linux): failed, linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_rejected_password_is_surfaced_and_the_user_retries_in_place` | linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` | linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` | linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` | linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_import.py::test_cancel_asks_first_and_keeps_what_already_arrived` | linux (linux): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` | linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_import.py::test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailbox` | linux (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_mail_import.py::test_imported_mail_keeps_its_shape_and_an_unmatched_mailbox_arrives_under_its_own_name` | linux (linux): passed, tui (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_dedup_skip_is_reported_in_the_progress_push` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_append_populates_dedup_index_so_a_later_import_skips` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_mail_import_client_api.py::test_the_old_providers_password_never_reaches_the_nest` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_message_emits_progress_push` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_pushes_are_scoped_to_the_importing_actor` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_batch_emits_exactly_one_progress_push` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_finalize_emits_complete_push` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_fail_session_emits_error_push` | nest (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_provider_that_needs_an_app_password_says_so_and_where_to_make_one` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_mail_import.py::test_outlook_signs_in_with_microsoft_and_imports` | linux (linux): passed, tui (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/api/test_mail_import_client_api.py::test_the_microsoft_token_never_reaches_the_nest` | nest (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_app_never_offers_an_unencrypted_connection` | linux (linux): passed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_unverifiable_certificate_stops_before_the_password_is_sent` | linux (linux): passed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_refused_starttls_stops_before_the_password_is_sent` | linux (linux): passed, tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, tui (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_mail_import.py::test_imported_mail_keeps_its_shape_and_an_unmatched_mailbox_arrives_under_its_own_name` | linux (linux): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_status_size_source_is_estimated_without_reading_its_mailboxes` | linux (linux): passed, tui (linux): passed |
-| 25 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` | linux (linux): passed, tui (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` | linux (linux): passed, tui (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` | linux (linux): passed, tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_mail_import.py::test_cancel_asks_first_and_keeps_what_already_arrived` | linux (linux): passed, tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` | linux (linux): passed, tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_old_providers_server_is_remembered_for_next_time_until_it_is_forgotten` | linux (linux): passed, tui (linux): passed |
-| 30 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_second_import_of_the_same_account_on_another_device_is_refused` | linux (linux): passed, tui (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 32 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_password_refused_part_way_through_stops_the_import_and_asks_for_new_credentials` | linux (linux): passed, tui (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_mailbox_that_vanishes_part_way_through_is_noted_and_the_next_one_continues` | linux (linux): passed, tui (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_mail_import.py::test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailbox` | linux (linux): passed, tui (linux): passed |
-| 34 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_unreadable_message_is_counted_failed_and_the_rest_arrives` | linux (linux): passed, tui (linux): passed |
-| 35 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_source_that_drops_and_stays_down_pauses_the_import_and_resume_carries_on` | tui (linux): passed |
-| 36 | app | `tests/e2e-unified/tests/test_mail_import.py::test_losing_the_nest_connection_mid_import_loses_nothing` | linux (linux): passed, tui (linux): passed |
-| 37 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_that_keeps_failing_stops_itself_with_the_reason` | linux (linux): passed, tui (linux): passed |
-| 38 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_message_someone_else_holds_is_never_skipped_for_you_and_never_shows_they_hold_it` | nest (linux): passed |
-| 39 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_a_stranger_reusing_a_message_id_cannot_make_the_real_message_be_skipped` | nest (linux): passed |
-| 40 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_copy_changed_on_the_way_is_imported_as_its_own_message_not_skipped` | nest (linux): passed |
-| 41 | app | `tests/e2e-unified/tests/test_mail_import.py::test_import_duplicates_anyway_stores_mail_already_in_the_mailbox_a_second_time` | linux (linux): passed, tui (linux): passed |
-| 41 | app | `tests/e2e-unified/tests/test_mail_import.py::test_mail_already_in_the_mailbox_is_skipped_while_import_duplicates_is_off` | linux (linux): passed, tui (linux): passed |
-| 42 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_append_populates_dedup_index_so_a_later_import_skips` | nest (linux): passed |
-| 43 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_message_filed_under_several_labels_lands_only_once` | nest (linux): passed |
-| 44 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_imported_mail_is_there_over_imap_carrying_only_marks_the_nest_wrote` | nest (linux): passed |
-| 45 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_imported_mail_rests_sealed_on_the_nest` | nest (linux): passed |
-| 45 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_an_import_the_nest_cannot_seal_is_refused_and_stores_nothing` | nest (linux): passed |
-| 46 | nest | `tests/e2e-unified/tests/api/test_mail_quota_composition_api.py::test_imported_mail_counts_against_your_mailbox_storage` | nest (linux): passed |
-| 47 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_imported_mail_is_there_over_imap_carrying_only_marks_the_nest_wrote` | nest (linux): passed |
-| 48 | nest | `tests/e2e-unified/tests/api/test_mail_portability_hooks_api.py::test_an_import_untouched_for_thirty_days_is_forgotten` | nest (linux): passed |
-| 49 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_mailbox_the_provider_rebuilt_is_warned_about_and_restarted_without_importing_twice` | linux (linux): passed, tui (linux): passed |
-| 50 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, tui (linux): passed |
-| 51 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_failed_connection_is_explained_in_plain_words_never_the_servers_reply` | tui (linux): passed |
-| 52 | app | `tests/e2e-unified/tests/test_mail_import.py::test_discard_and_duplicate_mailboxes_start_unticked_and_are_never_hidden` | tui (linux): passed |
-| 53 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, tui (linux): passed |
-| 54 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_mail_delivered_to_you_is_not_copied_a_second_time_by_an_import` | nest (linux): passed |
-| 54 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_mail_you_sent_is_not_copied_a_second_time_by_an_import` | nest (linux): passed |
-| 55 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_full_mailbox_pauses_and_skip_the_rest_finishes_without_reading_further` | linux (linux): passed, tui (linux): passed |
-| 55 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_full_mailbox_pauses_and_resume_after_the_admin_makes_room_brings_the_rest` | linux (linux): passed, tui (linux): passed |
-| 56 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_failed_import_shows_as_failed_after_a_restart_and_dismiss_clears_it` | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_import_wizard_is_reachable_and_opens_on_the_source_step` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_mail_import.py::test_selecting_a_source_kind_seeds_the_host_and_port_drafts` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_rejected_password_is_surfaced_and_the_user_retries_in_place` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_import.py::test_cancel_asks_first_and_keeps_what_already_arrived` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` — requires `mail-import-run-journeys-android-apple-windows` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_import.py::test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailbox` — requires `mail-import-review-skipped-log` (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_import.py::test_imported_mail_keeps_its_shape_and_an_unmatched_mailbox_arrives_under_its_own_name` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_dedup_skip_is_reported_in_the_progress_push` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_append_populates_dedup_index_so_a_later_import_skips` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_mail_import_client_api.py::test_the_old_providers_password_never_reaches_the_nest` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_message_emits_progress_push` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_pushes_are_scoped_to_the_importing_actor` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_import_batch_emits_exactly_one_progress_push` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_finalize_emits_complete_push` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/api/test_import_push_api.py::test_fail_session_emits_error_push` | nest (linux): passed, nest (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_provider_that_needs_an_app_password_says_so_and_where_to_make_one` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_import.py::test_outlook_signs_in_with_microsoft_and_imports` — requires `admin-mail-microsoft-registration` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | nest | `tests/e2e-unified/tests/api/test_mail_import_client_api.py::test_the_microsoft_token_never_reaches_the_nest` | nest (linux): passed, nest (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_app_never_offers_an_unencrypted_connection` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_unverifiable_certificate_stops_before_the_password_is_sent` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_refused_starttls_stops_before_the_password_is_sent` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_mail_import.py::test_imported_mail_keeps_its_shape_and_an_unmatched_mailbox_arrives_under_its_own_name` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_status_size_source_is_estimated_without_reading_its_mailboxes` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 25 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 26 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 26 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` — requires `mail-import-run-journeys-android-apple-windows` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_mail_import.py::test_cancel_asks_first_and_keeps_what_already_arrived` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on` — requires `mail-import-run-journeys-android-apple-windows` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_mail_import.py::test_the_old_providers_server_is_remembered_for_next_time_until_it_is_forgotten` — requires `mail-import-run-journeys-android-apple-windows` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_second_import_of_the_same_account_on_another_device_is_refused` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 31 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 32 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_password_refused_part_way_through_stops_the_import_and_asks_for_new_credentials` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 33 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_mailbox_that_vanishes_part_way_through_is_noted_and_the_next_one_continues` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 33 | app | `tests/e2e-unified/tests/test_mail_import.py::test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailbox` — requires `mail-import-review-skipped-log` (not built: web) | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 34 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_unreadable_message_is_counted_failed_and_the_rest_arrives` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 35 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_source_that_drops_and_stays_down_pauses_the_import_and_resume_carries_on` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 36 | app | `tests/e2e-unified/tests/test_mail_import.py::test_losing_the_nest_connection_mid_import_loses_nothing` — requires `mail-import-run-journeys-apple-windows` (not built: web, android) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 37 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_that_keeps_failing_stops_itself_with_the_reason` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 38 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_message_someone_else_holds_is_never_skipped_for_you_and_never_shows_they_hold_it` | nest (linux): passed, nest (macos): passed |
+| 39 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_a_stranger_reusing_a_message_id_cannot_make_the_real_message_be_skipped` | nest (linux): passed, nest (macos): passed |
+| 40 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_copy_changed_on_the_way_is_imported_as_its_own_message_not_skipped` | nest (linux): passed, nest (macos): passed |
+| 41 | app | `tests/e2e-unified/tests/test_mail_import.py::test_import_duplicates_anyway_stores_mail_already_in_the_mailbox_a_second_time` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 41 | app | `tests/e2e-unified/tests/test_mail_import.py::test_mail_already_in_the_mailbox_is_skipped_while_import_duplicates_is_off` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 42 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_append_populates_dedup_index_so_a_later_import_skips` | nest (linux): passed, nest (macos): passed |
+| 43 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_a_message_filed_under_several_labels_lands_only_once` | nest (linux): passed, nest (macos): passed |
+| 44 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_imported_mail_is_there_over_imap_carrying_only_marks_the_nest_wrote` | nest (linux): passed, nest (macos): passed |
+| 45 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_imported_mail_rests_sealed_on_the_nest` | nest (linux): passed, nest (macos): passed |
+| 45 | nest | `tests/e2e-unified/tests/api/test_mail_import_nest_api.py::test_an_import_the_nest_cannot_seal_is_refused_and_stores_nothing` | nest (linux): passed, nest (macos): passed |
+| 46 | nest | `tests/e2e-unified/tests/api/test_mail_quota_composition_api.py::test_imported_mail_counts_against_your_mailbox_storage` | nest (linux): passed, nest (macos): passed |
+| 47 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_imported_mail_is_there_over_imap_carrying_only_marks_the_nest_wrote` | nest (linux): passed, nest (macos): passed |
+| 48 | nest | `tests/e2e-unified/tests/api/test_mail_portability_hooks_api.py::test_an_import_untouched_for_thirty_days_is_forgotten` | nest (linux): passed, nest (macos): passed |
+| 49 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_mailbox_the_provider_rebuilt_is_warned_about_and_restarted_without_importing_twice` — requires `mail-import-run-journeys-android-apple-windows` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 50 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_message_over_the_users_size_limit_is_skipped_as_too_large` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 51 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_failed_connection_is_explained_in_plain_words_never_the_servers_reply` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 52 | app | `tests/e2e-unified/tests/test_mail_import.py::test_discard_and_duplicate_mailboxes_start_unticked_and_are_never_hidden` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 53 | app | `tests/e2e-unified/tests/test_mail_import.py::test_an_import_walks_source_to_done_and_really_reads_the_source` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 54 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_mail_delivered_to_you_is_not_copied_a_second_time_by_an_import` | nest (linux): passed, nest (macos): passed |
+| 54 | nest | `tests/e2e-unified/tests/api/test_mail_import_inbound_seam_api.py::test_mail_you_sent_is_not_copied_a_second_time_by_an_import` | nest (linux): passed, nest (macos): passed |
+| 55 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_full_mailbox_pauses_and_skip_the_rest_finishes_without_reading_further` — requires `mail-import-full-mailbox-notice` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 55 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_full_mailbox_pauses_and_resume_after_the_admin_makes_room_brings_the_rest` — requires `mail-import-full-mailbox-notice` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 56 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_failed_import_shows_as_failed_after_a_restart_and_dismiss_clears_it` — requires `mail-import-failed-record` (not built: web) | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 57 | app | `tests/e2e-unified/tests/test_mail_import_microsoft_registration.py::test_an_admin_set_microsoft_registration_is_the_client_id_the_sign_in_sends` | tui (linux): passed |
-| 57 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_microsoft_registration_save_round_trips` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 57 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_microsoft_registration_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 58 | app | `tests/e2e-unified/tests/test_mail_import.py::test_a_finished_import_survives_leaving_the_page_and_coming_back` — requires `mail-import-review-skipped-log` (not built: web) | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

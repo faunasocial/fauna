@@ -52,8 +52,6 @@ pub mod succession;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod test_conv;
-#[cfg(test)]
-pub(crate) mod test_tracing;
 
 pub use commit_gate::{CommitCatchUp, CommitGateError, GatedCommitSend};
 pub use gate_impl::{BackendCatchUp, BackendChannelSend, FaunaCommitGate, MlsSyncCursor};

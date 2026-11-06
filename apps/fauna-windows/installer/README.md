@@ -96,6 +96,9 @@ cargo build --locked --release -p fauna-sync-agent     --target x86_64-pc-window
 cargo build --locked --release -p fauna-nest-service   --target x86_64-pc-windows-msvc
 cargo build --locked --release -p fauna-bridge-service --target x86_64-pc-windows-msvc
 cargo build --locked --release -p fauna-shell-ext      --target x86_64-pc-windows-msvc
+# The TerminalApp feature: the terminal app + the cli app's device shell (one
+# invocation, as release.yml builds them)
+cargo build --locked --release -p fauna-tui -p fauna-cli-device --target x86_64-pc-windows-msvc
 
 # .NET app
 dotnet publish apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj -c Release -r win-x64
@@ -103,8 +106,8 @@ dotnet publish apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj -c Release -
 # Go mail-bridge MDA (cgo, gnullvm) — see clean-checkout step 6. amd64 leg:
 just windows-mail-bridge-build x86_64-pc-windows-gnullvm amd64
 
-# Stage. NOTE: bin names are set by each crate's [[bin]] (fauna-sync / fauna-nest-svc /
-# fauna-bridge-svc); the shell-ext crate overrides [lib] name = "fauna_shell",
+# Stage. NOTE: bin names are set by each crate's [[bin]] (fauna-sync-agent / fauna-nest-svc /
+# fauna-bridge-svc / fauna-cli); the shell-ext crate overrides [lib] name = "fauna_shell",
 # so the cdylib emits fauna_shell.dll DIRECTLY — stage it under the bare name (no rename).
 # The MSI installs it under a VERSION-STAMPED @Name (fauna_shell_<ver>.dll) set in
 # ShellExt.wxs ($(var.ShellDllName)); -d ShellDll= still points at the bare staged source,
@@ -117,6 +120,8 @@ cp "$rel/fauna-sync-agent.exe"        stage/x64/
 cp "$rel/fauna-nest-svc.exe"    stage/x64/
 cp "$rel/fauna-bridge-svc.exe"  stage/x64/
 cp "$rel/fauna_shell.dll"       stage/x64/fauna_shell.dll
+cp "$rel/fauna-tui.exe"         stage/x64/
+cp "$rel/fauna-cli.exe"         stage/x64/
 # Go MDA + its gnullvm runtime DLLs. These land in the target/ ROOT (no --target
 # triple subdir), NOT in $rel. Ship beside fauna-bridge-svc.exe; the app's MSVC
 # fauna_ffi.dll lands under app/ (different MSI dir) — same name, never collide.
@@ -183,6 +188,7 @@ wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -o Fauna-Setup-x64.msi apps/fauna-windows/installer/*.wxs `
   -d SyncBin=$PWD/stage/x64/fauna-sync-agent.exe `
   -d TuiBin=$PWD/stage/x64/fauna-tui.exe `
+  -d CliBin=$PWD/stage/x64/fauna-cli.exe `
   -d NestBin=$PWD/stage/x64/fauna-nest-svc.exe `
   -d BridgeBin=$PWD/stage/x64/fauna-bridge-svc.exe `
   -d MailBridgeBin=$PWD/stage/x64/fauna-mail-bridge.exe `
@@ -199,6 +205,7 @@ wix build -arch arm64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -o Fauna-Setup-arm64.msi apps/fauna-windows/installer/*.wxs `
   -d SyncBin=$PWD/stage/arm64/fauna-sync-agent.exe `
   -d TuiBin=$PWD/stage/arm64/fauna-tui.exe `
+  -d CliBin=$PWD/stage/arm64/fauna-cli.exe `
   -d NestBin=$PWD/stage/arm64/fauna-nest-svc.exe `
   -d BridgeBin=$PWD/stage/arm64/fauna-bridge-svc.exe `
   -d MailBridgeBin=$PWD/stage/arm64/fauna-mail-bridge.exe `

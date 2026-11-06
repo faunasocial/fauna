@@ -12,6 +12,12 @@ from pathlib import Path
 
 from .base import rolling_log_text
 from .http_bridge import HttpBridgeDriver
+from .local_launch import (
+    descendant_named,
+    local_launch_timeout_report,
+    mark_exit_reported,
+    read_exit_before_close,
+)
 from .port_util import (
     find_free_port,
     popen_group_kwargs,
@@ -112,6 +118,13 @@ def build_launch_env(config: dict, port: int, tmp: str) -> dict:
     # caller-supplied override in `config["environment"]` (merged above) wins —
     # the debounce test pushes it PAST its budget instead.
     env.setdefault("FAUNA_E2E_RESCAN_MS", "30000")
+
+    # The agent's e2e custody hold (`content_keys::custody_reread_held`, the
+    # compile-gated `FAUNA_E2E_CUSTODY_HOLD_FILE` seam): a path in this launch's
+    # scratch dir that does not exist, so the hold is inert until a test creates
+    # the file (`helpers/folder_content.py::hold_custody_reread`) and released
+    # when it is deleted. Read back through the driver's `custody_hold_file`.
+    env.setdefault("FAUNA_E2E_CUSTODY_HOLD_FILE", os.path.join(tmp, "custody-hold"))
 
     if config.get("use_real_keyring"):
         xdg_data = os.path.join(tmp, "data")
@@ -293,6 +306,13 @@ class LinuxBridgeDriver(HttpBridgeDriver):
     # `scroll_to` / offscreen-element retries take the precise path.
     _supports_scroll_into_view = True
 
+    # The shared in-process agent (`fauna-e2e-agent`) serves GET /element/texts,
+    # so a whole column of same-id rows is one find instead of one per row. On
+    # GTK every per-row read walks the whole widget tree, so a full admin Logs
+    # page (thousands of `log-entry` rows) took longer to read once than the
+    # test's wait budget. /element/attrs is not served: its 404 keeps the loop.
+    _supports_bulk_reads = True
+
     # This launch's private D-Bus session bus (`_wants_private_bus`), stopped by
     # `teardown()`. `None` = not launched yet, or this launch keeps the ambient bus.
     _session_bus: PrivateSessionBus | None = None
@@ -367,6 +387,64 @@ class LinuxBridgeDriver(HttpBridgeDriver):
             # close-to-tray-off path. Not an error; the caller checks liveness.
             pass
 
+    def top_level_windows(self) -> list[dict]:
+        """The X server's own list of this app's top-level windows — one
+        ``{"title": str, "is_offscreen": bool}`` per window, empty when the app
+        owns none. The windows driver's twin (``drivers/windows.py``), shaped the
+        same so case J's ``_visible_windows`` reads both.
+
+        The corroborating half of the ``--autostart`` tray-residency assertion
+        (`apps/linux.md` § Auto-start at sign-in): the app publishes its own
+        decision into ``state["launch"]``; this asks the display server, not the
+        app, whether a window is mapped. It reads the launch's Xvfb display (the
+        ``DISPLAY``/``XAUTHORITY`` ``xvfb-run`` handed ``fauna-desktop``, out of its
+        ``/proc`` environ) and keeps the root window's children whose
+        ``_NET_WM_PID`` is the app's own pid — Xvfb runs no window manager, so
+        GTK's toplevels are the root's direct children. ``is_offscreen`` is "not
+        ``IsViewable``". A launch on a real (possibly Wayland) display has no such
+        query, so it raises rather than answer "no windows".
+        """
+        proc = getattr(self, "_app_proc", None)
+        if proc is None or proc.poll() is not None:
+            return []
+        pid = descendant_named(proc.pid, "fauna-desktop")
+        if pid is None:
+            return []
+        raw = Path(f"/proc/{pid}/environ").read_bytes().decode(errors="replace")
+        environ = dict(kv.split("=", 1) for kv in raw.split("\0") if "=" in kv)
+        display = environ.get("DISPLAY")
+        if not display or environ.get("GDK_BACKEND") != "x11":
+            raise RuntimeError(
+                "top_level_windows needs the launch's headless Xvfb display (x11); this "
+                f"launch has DISPLAY={display!r} GDK_BACKEND={environ.get('GDK_BACKEND')!r}"
+            )
+        x_env = {**os.environ, "DISPLAY": display}
+        if environ.get("XAUTHORITY"):
+            x_env["XAUTHORITY"] = environ["XAUTHORITY"]
+
+        def x(*argv: str) -> str:
+            return subprocess.run(
+                argv, env=x_env, capture_output=True, text=True, timeout=10, check=True
+            ).stdout
+
+        windows = []
+        for line in x("xwininfo", "-root", "-children").splitlines():
+            wid = line.strip().split(None, 1)[0] if line.strip() else ""
+            if not wid.startswith("0x"):
+                continue
+            try:
+                wm_pid = x("xprop", "-id", wid, "_NET_WM_PID")
+                info = x("xwininfo", "-id", wid)
+            except subprocess.CalledProcessError:
+                continue  # destroyed since the listing
+            if wm_pid.rsplit("=", 1)[-1].strip() != str(pid):
+                continue
+            # `xwininfo: Window id: 0x… "Title"` — the title is the quoted tail.
+            head = next((ln for ln in info.splitlines() if "Window id:" in ln), "")
+            title = head.split('"', 1)[1].rsplit('"', 1)[0] if head.count('"') >= 2 else ""
+            windows.append({"title": title, "is_offscreen": "Map State: IsViewable" not in info})
+        return windows
+
     def is_app_alive(self) -> bool:
         """True while the launched fauna-desktop process is still running."""
         proc = getattr(self, "_app_proc", None)
@@ -409,6 +487,13 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         if cfg is None:
             raise RuntimeError("config_home accessed before launch()")
         return cfg
+
+    def custody_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's agent from re-reading
+        custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set by `build_launch_env`);
+        None before `launch()`. Driven through
+        `helpers/folder_content.py::hold_custody_reread`."""
+        return getattr(self, "_custody_hold_file", None)
 
     def download_dir(self) -> str | None:
         """Where fauna-desktop saves e2e-mode downloads (no save dialog under e2e).
@@ -526,6 +611,7 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         env.setdefault("FAUNA_E2E_DOWNLOAD_DIR", os.path.join(tmp, "e2e-downloads"))
         os.makedirs(env["FAUNA_E2E_DOWNLOAD_DIR"], exist_ok=True)
         self._download_dir = env["FAUNA_E2E_DOWNLOAD_DIR"]
+        self._custody_hold_file = env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
 
         # Isolate from the box's desktop session bus (see `_wants_private_bus`).
         # `teardown()` stops the bus, so a `recover()`/`hard_reload()` relaunch
@@ -551,6 +637,7 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         self._app_stderr = open(os.path.join(tmp, "app.err"), "w")
         # Group-leader + die-with-parent (PDEATHSIG on Linux): the xvfb-run +
         # fauna-desktop pair dies with this run even on `kill -9` of pytest.
+        posted_at = time.time()
         self._app_proc = subprocess.Popen(
             cmd,
             env=env,
@@ -559,20 +646,45 @@ class LinuxBridgeDriver(HttpBridgeDriver):
             **popen_group_kwargs(),
         )
         track_process(self._app_proc)
+        # What the close rider's read needs: when this launch began, and the
+        # wrapper the handle leads with, whose app it looks for under it.
+        self._app_launched_at = posted_at
+        self._app_wrapper = "xvfb-run" if cmd[:1] == ["xvfb-run"] else None
 
-        deadline = time.monotonic() + 30
+        # Both ends of the gate go through convention 6's launch-timeout builder:
+        # an early exit is its FAULTED verdict, not a second grammar.
+        deadline = time.monotonic() + self._RELAUNCH_READY_BUDGET_S
         while time.monotonic() < deadline:
             if self._app_proc.poll() is not None:
-                err = Path(os.path.join(tmp, "app.err")).read_text(errors="replace")
-                raise RuntimeError(
-                    f"fauna-desktop exited early (rc={self._app_proc.returncode}). "
-                    f"stderr tail: {err[-800:]}"
-                )
+                # The FAULTED verdict carries this exit; the close after it is silent.
+                mark_exit_reported(self._app_proc)
+                raise RuntimeError(self._launch_timeout_report(posted_at))
             if self._agent_health_ok():
                 self._bridge_dead = False
                 return
             time.sleep(0.3)
-        raise RuntimeError(f"in-process agent never became healthy on {self._url}")
+        raise TimeoutError(self._launch_timeout_report(posted_at))
+
+    #: The launch gate's budget: the agent's `/health` answering after the spawn.
+    #: 30 s, the figure the gate already carried; a deadline poll, so a green run
+    #: never pays it (convention 14). Named as windows' twin is, and never
+    #: load-aware (convention 6's launch-timeout rider, its part (3)).
+    _RELAUNCH_READY_BUDGET_S = 30.0
+
+    def _launch_timeout_report(self, posted_at: float) -> str:
+        """Convention 6's launch-timeout report over this launch's witnesses: the
+        handle on `xvfb-run` (or the app), `fauna-desktop`'s own pid under it, the
+        launch's `app.err`, its XDG log and this machine's agent ledger."""
+        tmp = getattr(self, "_tmp_dir", None)
+        return local_launch_timeout_report(
+            proc=self._app_proc,
+            comm="fauna-desktop",
+            budget_s=self._RELAUNCH_READY_BUDGET_S,
+            posted_at=posted_at,
+            stderr_paths=(os.path.join(tmp, "app.err"),) if tmp else (),
+            log_text=self.on_device_log_text(),
+            apps=("linux",),
+        )
 
     def _agent_health_ok(self) -> bool:
         try:
@@ -630,8 +742,24 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         tail = "\n".join(text.splitlines()[-tail_lines:])
         return f"\n--- app.err (last {tail_lines} lines) ---\n{tail}"
 
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider over this launch's handle: `xvfb-run` (or the
+        app), `fauna-desktop`'s own pid under it while the wrapper lives, and, on a
+        crash, the launch's `app.err` and XDG log read before the close reclaims
+        them (`drivers/local_launch.py::read_exit_before_close`)."""
+        read_exit_before_close(
+            getattr(self, "_app_proc", None),
+            close=close,
+            comm="fauna-desktop",
+            launched_at=getattr(self, "_app_launched_at", None),
+            wrapper=getattr(self, "_app_wrapper", None),
+            stderr_text=self.app_stderr_text,
+            log_text=self.on_device_log_text,
+        )
+
     def _stop_app(self) -> None:
         """Kill the app process, its private bus, and close its log files."""
+        self._read_exit_before_close("teardown")
         proc = getattr(self, "_app_proc", None)
         if proc is not None:
             # Group-wide TERM→KILL sweep (xvfb-run + fauna-desktop + any helper).
@@ -709,6 +837,10 @@ class LinuxBridgeDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None)
         if config is None:
             return False
+        # The app it is about to close may already be dead of a crash — the `app`
+        # fixture reaches here when a reset was never acknowledged. The relaunch
+        # goes ahead either way; the death is recorded for the phase.
+        self._read_exit_before_close("the relaunch in recover()")
         self._stop_app()
         try:
             self.launch(config)

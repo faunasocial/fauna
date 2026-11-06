@@ -50,6 +50,32 @@ public class OnboardingViewModelRecoveryKitTests
     }
 
     [Fact]
+    public void FailedMomentOneWrite_KeepsTheWizardOnConfirm_WithTheError()
+    {
+        var registry = new FakeAccountRegistry { ThrowOnConfirmIdentity = true };
+        var vm = new OnboardingViewModel(new FakeOnboardingObserver(), registry);
+        vm.BeginCreateIdentityCommand.Execute(null);
+
+        vm.ConfirmGeneratedIdentityCommand.Execute(null);
+
+        Assert.Equal(OnboardingStep.IdentityCreated, vm.CurrentStep);
+        Assert.Equal(Strings.Get("onboarding/session_error/persist_identity"), vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void FailedMomentOneWrite_OnRestore_IsNotPaintedOverByTheOutcomeLine()
+    {
+        var registry = new FakeAccountRegistry { ThrowOnConfirmIdentity = true };
+        var vm = new OnboardingViewModel(new FakeOnboardingObserver(), registry);
+        vm.BeginCreateIdentityCommand.Execute(null);
+        vm.ConfirmGeneratedIdentityCommand.Execute(null);
+
+        vm.SettleRecoveryEntry(new RecoveryEntryOutcome.Restored());
+
+        Assert.Equal(Strings.Get("onboarding/session_error/persist_identity"), vm.ErrorMessage);
+    }
+
+    [Fact]
     public void Confirm_AndSkip_BothAdvanceToHandleEntry()
     {
         var confirmed = AtKitScreen();

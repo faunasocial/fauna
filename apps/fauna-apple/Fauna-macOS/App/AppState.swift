@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import FaunaKit
+import FaunaFFISwift
 
 /// Single door for the dock-icon-visibility default, read by `AppDelegate`
 /// (before `MacAppState` exists — `applicationDidFinishLaunching` sets
@@ -10,8 +11,8 @@ import FaunaKit
 enum DockIconPreference {
     static let key = "fauna.showDockIcon"
     static var current: Bool {
-        get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
+        get { AppDefaults.store.object(forKey: key) as? Bool ?? true }
+        set { AppDefaults.store.set(newValue, forKey: key) }
     }
 }
 
@@ -129,7 +130,7 @@ enum LaunchGate: Equatable {
     /// prove any identity (`LaunchPhase.identityChanged`; security.md § Transport
     /// trust). BLOCKING, and deliberately **retry-less** — see
     /// `LaunchIdentityChangedView`. The iOS peer is `AppState.identityChanged`.
-    case identityChanged(pinnedHex: String, seenHex: String?)
+    case identityChanged(pinnedHex: String, seenHex: String?, isFork: Bool)
     /// The saved account index at `fauna/index` is present and this build
     /// cannot use it (`LaunchSnapshot.accountIndexRefusal`, carried on the
     /// terminal `Offline{transient:false}` snapshot's side channel;
@@ -142,6 +143,13 @@ enum LaunchGate: Equatable {
     /// account the start-over would erase (`AccountIndexStartOver`), painted
     /// as the page's `error-message` with the confirm still showing.
     case accountIndexUnreadable(refusal: AccountIndexRefusal, confirming: Bool, error: String? = nil)
+    /// The account is locked (`LaunchSnapshot.lockedUntilSecs`, carried on the
+    /// terminal `Offline{transient:false}` snapshot's side channel; `devices.md`
+    /// § The locked state). Terminal, retry-less, no fallthrough — the launch
+    /// machine's own refresh at the unlock time is the way out. The surface's
+    /// state is `MacAppState.lockedLaunch`; see `LaunchAccountLockedView`. The
+    /// iOS peer is `AppState.accountLocked`.
+    case accountLocked(lockedUntilSecs: UInt64)
     /// Launch resolved (either authenticated or wizard); read
     /// `isOnboarded` to pick the rendered scene.
     case ready
@@ -175,7 +183,11 @@ class MacAppState {
         }
     }
 
-    var launchGate: LaunchGate = .ready {
+    /// Starts `.launching` — the value `runLaunch` sets before its first await —
+    /// because the scene paints a frame before the `.task` that runs the launch;
+    /// a `.ready` start paints the wizard for that frame (iOS's `launchPending`
+    /// twin carries the measurement). The initializer runs no `didSet`.
+    var launchGate: LaunchGate = .launching {
         // The hidden auto-start launch settles on the launch's first settled
         // route (`AutoStartWindow`). Deferred one main-actor turn so a write
         // paired with this one (`isOnboarded`) has landed before it is read.
@@ -187,6 +199,9 @@ class MacAppState {
         }
     }
     var isOnboarded: Bool = false
+    /// The locked surface's state while `launchGate` is `.accountLocked` —
+    /// which of its two pages is up and the stolen-identity step's inputs.
+    var lockedLaunch: LockedLaunchModel?
     /// Crossing the boundary *into* the Settings/Admin shell resets that shell's
     /// sub-page to its canonical entry (`docs/goal/ui/README.md` § Navigation
     /// model → *Entering a shell lands on its canonical entry*) — a shell's
@@ -213,6 +228,10 @@ class MacAppState {
     /// (`openProfile`) or the nav-stack `actor_id` (profile.md § Layout & flow →
     /// Another's profile); cleared when the sidebar navigates anywhere else.
     var profileActorId: String?
+    /// The home nest the opener carried for `profileActorId` (a Find User result,
+    /// an author line, a contact row, or the nav patch's `home_nest_url`);
+    /// `nil` = none carried. Cleared with `profileActorId`.
+    var profileHome: String?
     /// A `search-result-item` Contact-arm deep link's target — the CardDAV
     /// card's `uid_hash` to locate and open in the Address Book segment
     /// (`ui/search.md` § Where logic lives → Result navigation (deep link)).
@@ -435,10 +454,24 @@ class MacAppState {
     /// the held lock: the kernel treats a second open of the lock file as a
     /// competing owner, so re-acquiring against ourselves would read as
     /// "another instance" and falsely refuse. Swapped by
-    /// `completeAuthenticatedLaunch` itself and released by `logoutKeepData`,
-    /// so like `boundActorId` it stays off the canonical actor-scoped drop.
+    /// `completeAuthenticatedLaunch` itself and released through
+    /// `releaseInstanceLock` (sign-out, reset, logout), so like `boundActorId` it
+    /// stays off the canonical actor-scoped drop.
     var instanceLock: FfiAccountInstanceLock?
     var instanceLockActorId: String?
+
+    /// This window stops serving the account: let go of the held lock and forget it.
+    /// `release()` rather than a bare `nil`, because a view may still hold the object
+    /// (Settings → Account hands it to `SignOutSection` and `AccountSwitcherVM`) and an
+    /// object kept alive that way keeps its lock up — the next session of the same
+    /// account then meets it at its sign-out probe as "another Fauna window". Called
+    /// by every point the window stops serving: sign-out, reset, logout, and the swap
+    /// to another account's lock.
+    func releaseInstanceLock() {
+        instanceLock?.release()
+        instanceLock = nil
+        instanceLockActorId = nil
+    }
 
     /// The session's push-notification manager (`settings.md` § Push
     /// notifications). Lives here for the same reason `liveClient` does: the
@@ -472,6 +505,20 @@ class MacAppState {
     var conversationsVM: ConversationsVM?
     var feedVM: FeedVM?
 
+    /// The sign-out and switch doors' flush of all three drafts rails, bounded
+    /// (`boundedLeaveFlush`). Mirrors iOS `AppState.flushDraftRails`.
+    @MainActor
+    func flushDraftRails() async {
+        let eventsVM = eventsVM
+        let conversationsVM = conversationsVM
+        let feedVM = feedVM
+        await boundedLeaveFlush {
+            await eventsVM?.flushDraftsNow()
+            await conversationsVM?.flushDraftsNow()
+            await feedVM?.flushDraftsNow()
+        }
+    }
+
     /// Factory-reset re-onboard hook (admin-nest Danger Zone). `FaunaMacApp` sets
     /// this; `AdminShellView` hands it to `AdminNestView`, which calls it with the
     /// post-reset claim code. The closure drops the authed session keeping local
@@ -480,6 +527,18 @@ class MacAppState {
     /// platform glue lives there, not in the shared FaunaKit view). Stored here
     /// (a class) for the same reason as `liveClient`.
     var onFactoryReset: ((String) -> Void)?
+
+    /// `nest_retire` hosting (`nest-retirement.md` § Layout & flow): the page takes
+    /// over the window in place, as the wizard does — over the launch retry surface
+    /// (`launch-retire-button`) or over the live admin session
+    /// (`admin-nest-retire-button`). `FaunaMacApp.openRetire` builds the VM's machine
+    /// and sets `retiring`; `ContentView` paints the page while it is non-nil.
+    /// `onRetire` is the admin entry's hook (`AdminShellView` → `AdminNestView`),
+    /// stored here for the same reason as `onFactoryReset`.
+    var retiring: RetireEntry?
+    /// Built by `FaunaMacApp.openRetire` (main actor) when the page opens.
+    var retireVM: NestRetireVM?
+    var onRetire: (() -> Void)?
 
     /// Account-switch hook (Account settings → the switcher). `FaunaMacApp` sets it;
     /// the shared `AccountSwitcherSection` calls it with the target actor id. The closure
@@ -495,6 +554,13 @@ class MacAppState {
     /// onboarding in **append** mode: same wizard, but cancelling dismisses instead of
     /// quitting the live session, and success registers the new identity and switches to it.
     var onAddAccount: (() -> Void)?
+
+    /// The account-locked hook (Settings → Sessions, a landed 24-hour lock;
+    /// `ui/sessions.md` § User actions). `FaunaMacApp` sets it to tear the session
+    /// down — credentials KEPT, the locked surface's stolen-identity ceremony needs
+    /// the seed — and re-run launch, whose challenge meets `fauna.auth.account_locked`
+    /// and paints the locked notice (leg 2). Same seam as `onSwitchAccount`.
+    var onAccountLocked: (() -> Void)?
 
     /// Sign-out / delete-account teardown hook (`SignOutSection`, `AccountSettingsView`'s
     /// `onAccountReset`). `FaunaMacApp` sets it to the same "drop everything the outgoing
@@ -531,8 +597,11 @@ class MacAppState {
     /// `nil` ⇒ the viewer's own. Sets the target BEFORE selecting the sidebar so
     /// the profile detail view mounts with it. Used by the contact-row tap-through
     /// (mirrors linux `open_profile`).
-    func openProfile(_ actorId: String?) {
+    /// `home` is the opener's carried home nest URL (`profile.md` § Layout & flow →
+    /// *Reaching another actor's profile with their home carried*).
+    func openProfile(_ actorId: String?, home: String? = nil) {
         profileActorId = actorId
+        profileHome = actorId == nil ? nil : home
         selectedSidebar = .profile
     }
 
@@ -565,7 +634,13 @@ class MacAppState {
 /// names that shared shape so `FaunaKit.PostCardBody` can read either
 /// platform's state through one protocol. `AppState`'s own conformance lives in FaunaKit itself
 /// (`PostCardBody.swift`), since it's declared there.
-extension MacAppState: PostCardAppStateProviding {}
+extension MacAppState: PostCardAppStateProviding {
+    /// macOS: the Profile sidebar destination, the author line's door.
+    func openAuthorProfile(actorId: String, home: String?) {
+        openProfile(
+            profileNavTarget(entryActorId: actorId, selfActorId: session.actorId), home: home)
+    }
+}
 
 /// `MacAppState`'s `lastContacts`/`lastKnocks`/`lastEvents`/
 /// `notificationsUnreadCount` e2e-serialization caches are the same shape as

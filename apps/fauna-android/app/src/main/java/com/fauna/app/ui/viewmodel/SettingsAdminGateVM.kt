@@ -37,14 +37,22 @@ class SettingsAdminGateVM @Inject constructor(
     val isAdmin = MutableStateFlow(false)
 
     init {
+        viewModelScope.launch { readGate() }
+        // Reconnect re-read (`transport.md` `admin_gate`): a login read that found no
+        // nest failed closed, and only a re-read shows the entry. A failed read moves
+        // nothing; the auto-default fires on the false→true transition only.
         viewModelScope.launch {
-            try {
-                val admin = api.checkIsAdmin()
-                isAdmin.value = admin
-                if (admin) autoEnableRequireConfirmForActiveAdmin()
-            } catch (_: Exception) {
-                // Fail-closed: leave the entry hidden if the check can't complete.
-            }
+            api.reconnectTick.collect { readGate() }
+        }
+    }
+
+    private suspend fun readGate() {
+        try {
+            val (gate, becameAdmin) = applyAdminGateRead(isAdmin.value, api.readAdminGate())
+            isAdmin.value = gate
+            if (becameAdmin) autoEnableRequireConfirmForActiveAdmin()
+        } catch (_: Exception) {
+            // Fail-closed: leave the entry as it was if the check can't complete.
         }
     }
 
@@ -68,3 +76,11 @@ class SettingsAdminGateVM @Inject constructor(
         }
     }
 }
+
+/**
+ * The admin gate's transition rule (`transport.md` `admin_gate`; tui's `became_admin`,
+ * linux's `admin_gate_passed`): a FAILED read (`null`) moves nothing, and
+ * `becameAdmin` is true only on the false→true transition.
+ */
+internal fun applyAdminGateRead(prev: Boolean, read: Boolean?): Pair<Boolean, Boolean> =
+    if (read == null) prev to false else read to (read && !prev)

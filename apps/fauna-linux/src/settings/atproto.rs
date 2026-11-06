@@ -66,17 +66,12 @@ fn resolve(text: &LocalizedText) -> String {
     text.clone().resolve(crate::i18n::strings::lookup)
 }
 
-/// Bridges `AtprotoSettingsMachine` notifications to the GTK main loop.
-/// Mirrors `GtkLabelerCatalogObserver` (`views/personalization/mod.rs`).
-struct GtkAtprotoSettingsObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl AtprotoSettingsObserver for GtkAtprotoSettingsObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges `AtprotoSettingsMachine` notifications to the GTK main loop.
+    /// Mirrors `GtkLabelerCatalogObserver` (`views/personalization/mod.rs`).
+    GtkAtprotoSettingsObserver,
+    AtprotoSettingsObserver
+);
 
 /// The page's static widgets (built once; list rows + card lines are rebuilt
 /// every render, everything else toggles visibility/state).
@@ -326,7 +321,9 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     let card_lines = gtk::Box::new(gtk::Orientation::Vertical, 6);
     set_test_id(&card_lines, ids::ATPROTO_DEPTH_CONFIRM_CARD);
     card_group.add(&card_lines);
-    let history_backfill = gtk::CheckButton::with_label(BS::HISTORY_BACKFILL_LABEL);
+    // Labelled at render from the card's composed `history_backfill_label` (it names
+    // the count); there is no count-less label to start from.
+    let history_backfill = gtk::CheckButton::new();
     history_backfill.set_visible(false);
     set_test_id(&history_backfill, ids::ATPROTO_HISTORY_BACKFILL);
     card_group.add(&history_backfill);
@@ -1043,8 +1040,12 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
         // Pre-mint: DID-method radio + the either-way handle line.
         w.did_method_box.set_visible(snap.show_did_method_radio);
         if snap.show_did_method_radio {
-            w.did_plc.set_active(snap.did_method == "plc");
-            w.did_web.set_active(snap.did_method == "web");
+            // The `state` attr is the depth rungs' active/inactive, as on every app.
+            for (rung, method) in [(&w.did_plc, "plc"), (&w.did_web, "web")] {
+                let active = snap.did_method == method;
+                rung.set_active(active);
+                set_test_attr(rung, "state", if active { "active" } else { "inactive" });
+            }
             if snap.handle_preview.is_empty() {
                 w.handle_preview.set_visible(false);
             } else {
@@ -1158,8 +1159,13 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
         }
     }
 
-    // The D10 authoring-delegation row: same tear-down/rebuild shape.
-    w.delegation_group.set_visible(at_full);
+    // The D10 authoring-delegation row: same tear-down/rebuild shape. Gated on
+    // the delegation, not the level (`atproto.md` § Layout & flow): a held row
+    // renders at every level, the empty state (which `sync_delegation_row`
+    // renders off `None`) only at full PDS — below it the group is hidden
+    // when nothing is held.
+    w.delegation_group
+        .set_visible(at_full || snap.delegation.is_some());
     sync_delegation_row(ctx, snap.delegation.as_ref());
 }
 

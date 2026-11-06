@@ -230,10 +230,16 @@ def test_no_c_symbol_is_exported_outside_the_gated_cabi_module():
     outside = [
         f"{path.relative_to(_REPO)}:{n}"
         for path in sorted(src.rglob("*.rs"))
-        if path != src / "cabi.rs" and (src / "cabi") not in path.parents
+        if path not in (src / "cabi.rs", src / "e2e_stall.rs")
+        and (src / "cabi") not in path.parents
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if export.search(line)
     ]
+    # `e2e_stall.rs` is the windows app's forced UI-thread stall (convention 11): its
+    # module is gated `debug_assertions` or `test-helpers`, never a shipped release.
+    lib = (src / "lib.rs").read_text(encoding="utf-8")
+    assert ("#[cfg(any(debug_assertions, feature = \"test-helpers\"))]" + "\n"
+            + "pub mod e2e_stall;") in lib.replace("\r\n", "\n")
     assert not outside, (
         "fauna-ffi exports a C symbol outside the `e2e-harness`-gated `cabi` module, "
         f"so it ships in every app flavor: {outside!r}"
@@ -610,8 +616,8 @@ def test_no_consumer_names_ipc_test_helpers_on_a_dep_line(consumer):
 # is caught by `test_shared_crate_seam_gating.py`'s env-seed scan.
 
 _AUTOMATION_PORT_READS = [
-    ("apps/fauna-tui/src/main.rs", "pub fn e2e_mode_enabled"),
-    ("apps/fauna-linux/src/main.rs", "pub fn e2e_mode_enabled"),
+    ("apps/fauna-tui/src/lib.rs", "pub fn e2e_mode_enabled"),
+    ("apps/fauna-linux/src/lib.rs", "pub fn e2e_mode_enabled"),
     ("apps/fauna-linux/src/instance_remote.rs", "fn e2e_child_agent_port"),
 ]
 
@@ -1242,11 +1248,12 @@ def test_windows_debug_and_release_consume_the_matching_ffi_flavor():
 
 
 def test_release_workflow_builds_the_production_windows_ffi_flavor():
-    """The justfile recipe is the DEV path; `release.yml` is what actually builds
-    the shipped MSI (the local recipe is arch-hardcoded, so CI open-codes it). It
-    carried `--features test-helpers` until 2026-08-01, self-rationalised in its
-    own comment as "unused by the shipping app" — so a green `just windows-ffi`
-    would have proved nothing about the artifact users install."""
+    """`release.yml` is what builds the shipped MSI. Its FFI build was open-coded
+    until the release legs went through the recipes, and it carried `--features
+    test-helpers` until 2026-08-01, self-rationalised in its own comment as "unused
+    by the shipping app" — so a green `just windows-ffi` proved nothing about the
+    artifact users install. It now runs the production recipe itself, never the
+    test flavor, and spells no `test-helpers` build of its own."""
     # Shipped from the public-files tree since 2026-08-31 (release-integrity.md
     # § Release signing → *When a release workflow publishes* owns the port).
     # The curated public tree prunes that source directory and injects the file
@@ -1266,6 +1273,11 @@ def test_release_workflow_builds_the_production_windows_ffi_flavor():
         "Windows MSI carries the e2e seams no matter what the local recipe does "
         f"(e2e-automation-surface-gating.md convention 15). Offending line(s): {offenders}"
     )
+    assert re.search(r"^\s*just windows-ffi release \$\{\{ matrix\.rust_target \}\}\s*$", workflow, re.M), (
+        "the release workflow must build the MSI's FFI with the production recipe, "
+        "`just windows-ffi release <target>`"
+    )
+    assert "windows-ffi-test" not in workflow, "the release workflow builds the test FFI flavor"
 
 
 def test_windows_ffi_flavor_marker_records_the_feature_set_not_just_the_profile():
@@ -1585,12 +1597,13 @@ def test_only_the_e2e_recipe_sets_the_bridge_tags():
             f"atproto-bridge-build must not pass {tag} — it builds the "
             "production bridge flavor"
         )
-    assert f"-tags {_E2E_TAGS}" in e2e, (
+    # the tags ride as `_go-cgo-build`'s last argument (the helper owns the `-tags` flag)
+    assert f'"release" "{_E2E_TAGS}"' in e2e, (
         f"atproto-bridge-build-e2e must pass exactly `-tags {_E2E_TAGS}`; a "
         "missing tag leaves that seam's tests running against a binary that "
         "compiled its twin, and the e2e flavor is then part-production"
     )
-    assert "-o fauna-atproto-bridge-e2e" in e2e, (
+    assert '"fauna-atproto-bridge-e2e"' in e2e, (
         "the e2e flavor must write its own path — sharing the production slot is "
         "how a warm tree serves a test binary to a release step"
     )
@@ -1974,6 +1987,8 @@ _PRODUCTION_ENV_ALLOWLIST = {
 #: release dependency graph, so any env read in them is test code by construction.
 _DEV_ONLY_RUST_CRATES = {
     "libs/fauna-pebble-testkit": "the Pebble ACME test container's helper; dev-dependency of fauna-client-dns and fauna-acme-http01 only",
+    "libs/fauna-alloc-probe": "the memory-bound tests' counting allocators; dev-dependency of fauna-archive, fauna-sync-engine and fauna-nest only",
+    "libs/fauna-test-tracing": "the tests' process-global tracing capture; dev-dependency of fauna-client-mls-sync, fauna-provisioning and fauna-onboarding-machine only",
 }
 
 #: A `#[cfg(...)]` that only ever holds under `cargo test` — such code never ships.

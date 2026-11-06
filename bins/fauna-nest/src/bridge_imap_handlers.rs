@@ -46,9 +46,9 @@ use crate::bridge_method_allowlist::CallerClass;
 use crate::db::now_epoch_secs;
 
 use crate::bridge_routing_handlers::{
-    encode_reply, ensure_actor_mail_serving_enabled, held_for_review, internal, malformed,
-    over_quota, permission_denied, placement_journal_diverged, pure_backup_destination,
-    refuse_if_pure_backup, require_class, seal_recipient_blob,
+    encode_reply, ensure_actor_mail_enabled, ensure_actor_mail_serving_enabled, held_for_review,
+    internal, malformed, over_quota, permission_denied, placement_journal_diverged,
+    pure_backup_destination, refuse_if_pure_backup, require_class, seal_recipient_blob,
 };
 use crate::email_handlers::{invalid_params, message_too_large};
 
@@ -165,9 +165,29 @@ pub(crate) async fn enforce_imap_storage_quota(
     Ok(())
 }
 
-/// Refuses to serve IMAP for `target` when either gate fails. Called at the top
+/// Refuses to serve IMAP for `target` when any gate fails. Called at the top
 /// of every IMAP-serving handler in this module (all `BridgeMda`-only, so this
-/// only ever runs for the MDA serving an MUA — never for a user's own client):
+/// only ever runs for the MDA serving an MUA — never for a user's own client)
+/// and by the user's mail-import handlers:
+///
+/// 1. The two placement gates of [`require_local_mail_store`].
+/// 2. **Per-actor mail-off flag** — `target` has turned their mail off (the
+///    user's "Disable mail", default ON; `docs/goal/behavior/mail-credentials.md`
+///    § Trigger taxonomy, the Disable-mail row). Read here and nowhere else, so
+///    the CalDAV, CardDAV and WebDAV handlers keep serving the same credential.
+pub(crate) async fn require_local_mail_serving(
+    state: &std::sync::Arc<crate::routes::AppState>,
+    target: &[u8; 32],
+) -> Result<(), fauna_protocol::RpcError> {
+    require_local_mail_store(state, target).await?;
+    ensure_actor_mail_enabled(state, target).await?;
+    Ok(())
+}
+
+/// Refuses when this nest cannot or will not serve `target`'s mail store —
+/// the placement gates without the mail-off flag. The user's own mail export
+/// (`mail-export.md`) calls this one: turning mail off keeps the user's earlier
+/// mail, and it stays theirs to export.
 ///
 /// 1. **Pure-backup destination** — this nest holds opaque chunks only for
 ///    `target`'s `__mail` folder; IMAP cannot serve from opaque chunks
@@ -178,7 +198,7 @@ pub(crate) async fn enforce_imap_storage_quota(
 ///    e.g. a paired residential nest). Other actors are unaffected
 ///    (`docs/goal/architecture/nest/deployment-home-with-public-relay.md`
 ///    § MUA reach).
-pub(crate) async fn require_local_mail_serving(
+pub(crate) async fn require_local_mail_store(
     state: &std::sync::Arc<crate::routes::AppState>,
     target: &[u8; 32],
 ) -> Result<(), fauna_protocol::RpcError> {
@@ -1457,8 +1477,11 @@ fn append_message_handler() -> crate::rpc_router::RpcHandler {
             // S6.12b structural seal gate: the MDA seals both halves before
             // the APPEND RPC (imap/append.go), unconditionally, both modes —
             // prove it at the wire edge rather than trust the caller class.
-            let sealed_body = fauna_mls::wrapped_blob::SealedRecordBytes::verify(body_bytes)
-                .map_err(|_| malformed("encrypted_body is not a sealed recipient envelope"))?;
+            let sealed_body = fauna_mls::wrapped_blob::SealedRecordBytes::verify_of_kind(
+                body_bytes,
+                fauna_mls::wrapped_blob::RecordKind::Mail,
+            )
+            .map_err(|_| malformed("encrypted_body is not a sealed mail record"))?;
             let sealed_hint = fauna_mls::wrapped_blob::SealedRecordBytes::verify(
                 req.encrypted_index_hint.clone(),
             )
@@ -2050,6 +2073,7 @@ pub(crate) fn fetch_spam_model_handler() -> crate::rpc_router::RpcHandler {
                         .map_err(internal)?
                         .ok_or_else(|| invalid_params("actor has no encryption key on file"))?;
                     let sealed = seal_recipient_blob(
+                        fauna_mls::wrapped_blob::RecordKind::Mail,
                         &seed,
                         &seal_key.mls_pubkey,
                         Some(seal_key.mlkem_ek.as_slice()),
@@ -12827,6 +12851,37 @@ pub(crate) mod tests {
         list_mailboxes_handler()(state2, mda, payload_a2)
             .await
             .expect("actor A is served again after re-enabling");
+    }
+
+    /// Turning mail off stops reading (`mail-credentials.md` § Trigger
+    /// taxonomy, the Disable-mail row): with the actor's mail-off flag set the
+    /// MDA's IMAP operations for that actor refuse with the distinct
+    /// `mail_disabled_by_user` code, and serve again once it is back on.
+    #[tokio::test]
+    async fn imap_refuses_while_the_actors_mail_is_off_and_serves_when_on() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let mda = [0xEDu8; 32];
+        approve_bridge(&db, &mda, BridgeRole::Mda).await;
+        let a = [0xA2u8; 32];
+        let list = |actor: [u8; 32]| {
+            let req = ListMailboxesRequest {
+                actor_id: actor.to_vec(),
+                ..Default::default()
+            };
+            Bytes::from(encode_canonical(&req).unwrap().to_vec())
+        };
+
+        db.set_actor_mail_enabled(&a, false).await.unwrap();
+        let err = list_mailboxes_handler()(state.clone(), mda, list(a))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.mail_disabled_by_user");
+
+        db.set_actor_mail_enabled(&a, true).await.unwrap();
+        list_mailboxes_handler()(state, mda, list(a))
+            .await
+            .expect("A is served again once mail is back on");
     }
 
     // ── I5 Phase D.7 — SUBSCRIBE / UNSUBSCRIBE handler tests ──────────

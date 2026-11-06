@@ -4,25 +4,24 @@
 //!
 //! Every signed-in app hosting the account's conversations engine may serve
 //! the account's door, and exactly one does: the endpoint is taken under the
-//! agent's single-instance shape — a kernel-arbitrated exclusive `flock` on
-//! `<socket>.lock` ([`fauna_ipc::unix_transport::InstanceLock`]) — per (OS
-//! user, account), since the socket path carries both. First come; released
-//! when that app signs out, exits, or loses its engine role, and a second app
-//! takes it over on its next [`DoorKeeper::tick`].
+//! agent's single-instance shape ([`OracleEndpoint::lock`]) — a
+//! kernel-arbitrated exclusive `flock` on `<socket>.lock` on unix, the door's
+//! own named mutex on windows — per (OS user, account), since the endpoint
+//! name carries both. First come; released when that app signs out, exits,
+//! or loses its engine role, and a second app takes it over on its next
+//! [`DoorKeeper::tick`].
 
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fauna_ipc::oracle::OracleEndpoint;
-use fauna_ipc::unix_transport::InstanceLock;
+use fauna_ipc::oracle::{EndpointLock, OracleEndpoint, OracleListener};
 
 use crate::{ConversationsCustodian, CustodianAccount};
 
 /// A door this app is serving: the endpoint lock, and the server task.
 pub struct ServingDoor {
-    _lock: InstanceLock,
+    _lock: EndpointLock,
     shutdown: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<io::Result<()>>,
 }
@@ -36,26 +35,34 @@ impl ServingDoor {
             Err(e) => tracing::warn!("the oracle door's server task ended abnormally: {e}"),
             Ok(Ok(())) => {}
         }
-        // `_lock` drops here, after the socket is gone.
+        // `_lock` drops here, after the endpoint is gone.
+    }
+
+    /// Whether the server ended without being asked to — an accept that
+    /// failed; the keeper then gives the endpoint up and takes it afresh.
+    fn has_ended(&self) -> bool {
+        self.task.is_finished()
     }
 }
 
 /// Take the account's door if no other app holds it: `Ok(None)` when another
-/// app serves it already. Needs a tokio runtime.
+/// app serves it already. The endpoint is bound before this answers, so a
+/// principal reaches the door from then on. Needs a tokio runtime.
 pub fn try_serve<A: CustodianAccount>(
-    socket_path: PathBuf,
+    endpoint: &OracleEndpoint,
     custodian: Arc<ConversationsCustodian<A>>,
 ) -> io::Result<Option<ServingDoor>> {
-    let lock = match InstanceLock::acquire(&socket_path) {
+    let lock = match endpoint.lock() {
         Ok(lock) => lock,
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => return Ok(None),
         Err(e) => return Err(e),
     };
+    // Bound under the lock: the unix stale-socket unlink is safe only there.
+    // On windows a name held from another logon session (this user's app
+    // there) or by another account fails this, and the lock goes with it.
+    let listener = OracleListener::bind(endpoint)?;
     let (shutdown, rx) = tokio::sync::watch::channel(false);
-    let task =
-        tokio::spawn(
-            async move { fauna_ipc::oracle::serve_unix(&socket_path, custodian, rx).await },
-        );
+    let task = tokio::spawn(listener.serve(custodian, rx));
     Ok(Some(ServingDoor {
         _lock: lock,
         shutdown,
@@ -70,7 +77,7 @@ pub const DOOR_TICK: Duration = Duration::from_secs(5);
 /// What an app's account runtime ticks to keep the account's door served for
 /// as long as it may serve it.
 pub struct DoorKeeper<A: CustodianAccount> {
-    socket_path: PathBuf,
+    endpoint: OracleEndpoint,
     custodian: Arc<ConversationsCustodian<A>>,
     serving: Option<ServingDoor>,
 }
@@ -78,16 +85,15 @@ pub struct DoorKeeper<A: CustodianAccount> {
 impl<A: CustodianAccount> DoorKeeper<A> {
     /// The keeper of `custodian`'s account's door, at the account's endpoint.
     pub fn new(custodian: Arc<ConversationsCustodian<A>>) -> io::Result<Self> {
-        let OracleEndpoint::Unix(socket_path) =
-            OracleEndpoint::for_account(&custodian.account().actor_id())?;
-        Ok(Self::at(socket_path, custodian))
+        let endpoint = OracleEndpoint::for_account(&custodian.account().actor_id())?;
+        Ok(Self::at(endpoint, custodian))
     }
 
-    /// A keeper at an explicit socket path (tests, and a harness-isolated
-    /// launch whose agent dir moved with its runtime dir).
-    pub fn at(socket_path: PathBuf, custodian: Arc<ConversationsCustodian<A>>) -> Self {
+    /// A keeper at an explicit endpoint (tests, and a harness-isolated launch
+    /// whose agent dir moved with its runtime dir).
+    pub fn at(endpoint: OracleEndpoint, custodian: Arc<ConversationsCustodian<A>>) -> Self {
         Self {
-            socket_path,
+            endpoint,
             custodian,
             serving: None,
         }
@@ -102,8 +108,13 @@ impl<A: CustodianAccount> DoorKeeper<A> {
     /// conversations engine) and the endpoint is free; stop the moment it is
     /// not. Answers whether this app serves the door after the tick.
     pub async fn tick(&mut self, may_serve: bool) -> bool {
+        if self.serving.as_ref().is_some_and(ServingDoor::has_ended)
+            && let Some(ended) = self.serving.take()
+        {
+            ended.stop().await;
+        }
         match (may_serve, self.serving.is_some()) {
-            (true, false) => match try_serve(self.socket_path.clone(), self.custodian.clone()) {
+            (true, false) => match try_serve(&self.endpoint, self.custodian.clone()) {
                 Ok(serving) => self.serving = serving,
                 Err(e) => tracing::warn!("taking the oracle door failed: {e}"),
             },

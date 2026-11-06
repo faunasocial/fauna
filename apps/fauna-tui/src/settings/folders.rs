@@ -86,10 +86,16 @@ pub struct FoldersUiState {
     /// `find_and_expand_folder` toggles exactly one row and the unindexed body
     /// widgets then resolve uniquely to it).
     pub expanded: Option<usize>,
+    /// The group sets' review lists, as the sync agent's status poll last read
+    /// them (`crate::sync_agent::SyncAgentState::rendered_set_conflicts`).
+    pub group_conflicts: crate::sync_agent::GroupConflicts,
     /// The default-conflict-policy refusal a store-change re-read put on
     /// `error-message`, so the next good re-read retires that one and never a
     /// folder gesture's (`PageErrors::retire_own`).
     pub read_error: Option<String>,
+    /// What the expanded row's own background reads put on `error-message`,
+    /// each retired by that read's next good answer.
+    pub row_read_errors: fauna_devices_machine::RowReadErrors,
     /// The expanded row's `folder-include-paths` buffer, pre-filled from
     /// `FolderSummary::include_paths` on expand; committed on
     /// `folder-save-paths`, never written live per keystroke (unlike the
@@ -702,13 +708,11 @@ pub(super) async fn load_roster(
         .and_then(|hex| channel_id_from_group_id_hex(hex).ok())
         .map(|c| c.to_string());
     let files = fauna_client_folders::FoldersClient::new(nest);
-    match files.actor_members_list(name).await {
-        Ok(reply) => Ok((reply.members, channel_id)),
-        Err(fauna_client::NestClientError::Rpc(ref e)) if e.code == "fauna.folders.not_shared" => {
-            Ok((Vec::new(), channel_id))
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    let members = files
+        .row_actor_members(name)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((members, channel_id))
 }
 
 /// The expanded row's DEVICE roster — `fauna.folders.members.list`, the rows
@@ -721,13 +725,10 @@ pub(super) async fn load_device_places(
     name: String,
 ) -> Result<Vec<fauna_protocol::folders::FolderMember>, String> {
     let folders = fauna_client_folders::FoldersClient::new(nest);
-    match folders.members_list(name).await {
-        Ok(reply) => Ok(reply.members),
-        Err(fauna_client::NestClientError::Rpc(ref e)) if e.code == "fauna.folders.not_found" => {
-            Ok(Vec::new())
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    folders
+        .row_device_members(name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// One enrolled backup destination, marked attached-or-not for the expanded
@@ -852,16 +853,43 @@ pub(super) async fn unfollow_public(
         .map_err(|e| e.to_string())
 }
 
+/// Resolve a typed share recipient to the member's actor id and, for a person on
+/// another nest, that nest's URL (see [`share_set`]). A refusal or unknown handle
+/// is the one error the share surface shows.
+pub(super) async fn resolve_share_recipient(
+    nest: &std::sync::Arc<fauna_client::NestClient>,
+    recipient: &str,
+) -> Result<(fauna_core::identity::ActorId, Option<String>), String> {
+    use fauna_anon_client::AnonymousNestClient;
+    use fauna_client_core::find_user::RecipientError;
+    let (actor_hex, nest_url) = fauna_client_core::find_user::resolve_recipient_across_nests(
+        nest.as_ref(),
+        recipient,
+        |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+        |url| async move { AnonymousNestClient::connect(&url).await },
+    )
+    .await
+    .map_err(|e| match e {
+        RecipientError::Invalid => fauna_i18n::strings::contacts::HANDLE_OR_ACTOR_ID.to_string(),
+        RecipientError::Lookup(msg) => msg,
+    })?;
+    let member = fauna_core::identity::ActorId::from_hex(&actor_hex).map_err(|e| e.to_string())?;
+    Ok((member, nest_url))
+}
+
 /// Resolve the typed recipient, share the set (`FoldersAuthor::share_set`), then
 /// re-read the roster.
 ///
-/// **The recipient string is accepted in EITHER shape** — a bare 64-hex actor id
-/// is classified locally (no network), anything else resolves as a bare
-/// local-part handle through `fauna.actor.by_handle`. linux's `do_share_folder`
-/// only ever does the handle lookup and apple only ever takes the actor id
-/// (`actions/backups.py::share_recipient` records the split as a live priority-#1
-/// divergence); taking both is the superset of the two, so tui adds no third
-/// shape and works under either arm of the shared helper.
+/// **The recipient is classified and resolved exactly as the contacts find
+/// does** (`contacts.md` § Layout & flow, region 3): the shared
+/// `classify_recipient` takes a bare 64-hex actor id offline (a home-nest
+/// member — an id names no domain to route on), and a handle — a bare localpart
+/// or a `user@domain` — goes through the shared `find_user_across_nests`, which
+/// probes the home nest and, for a foreign domain, dials the peer. The found
+/// `nest_url` (`None` for a home-nest actor) rides as `member_nest_url`, so a
+/// person on another nest is shared with cross-nest (`ui/folders.md` § Sharing a
+/// folder, the *Cross-nest members* bullet): the owner fetches their KeyPackage
+/// from their own nest and the Welcome is relayed there.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn share_set(
     nest: std::sync::Arc<fauna_client::NestClient>,
@@ -888,20 +916,9 @@ pub(super) async fn share_set(
     );
     let convs = fauna_client_conversations::ConversationsClient::new(std::sync::Arc::clone(&nest));
     let recipient = recipient.trim();
-    let member = match fauna_core::identity::ActorId::from_hex(recipient) {
-        Ok(id) => id,
-        Err(_) => {
-            let resolved = convs
-                .actor_by_handle(recipient.to_string())
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("no actor for handle '{recipient}'"))?;
-            fauna_core::identity::ActorId::from_hex(&resolved.actor_id)
-                .map_err(|e| e.to_string())?
-        }
-    };
+    let (member, member_nest_url) = resolve_share_recipient(&nest, recipient).await?;
     let outcome = author
-        .share_set(&convs, &name, member, None, access)
+        .share_set(&convs, &name, member, member_nest_url, access)
         .await
         .map_err(|e| e.to_string())?;
     let channel_id = fauna_mls::types::ChannelId(outcome.channel_id).to_string();
@@ -1202,15 +1219,16 @@ pub(super) fn folders_elements(
     }
 
     // Group scopes are sets like any other, so they are `folder-row`s like any
-    // other — appended after the M2 sets, continuing the index. They carry no
-    // per-row body in v1: a group scope has no local seat config to edit and
-    // no name to rename (naming kinds arrive with group content-kind sealing),
-    // so what a row owes is exactly what it can honestly show — the set, and
-    // who it is shared with.
+    // other — appended after the M2 sets, continuing the index. Expanded, a
+    // group row's body is the device-local binding section (`group-set.md`
+    // § Build design — the group set, decision 7); its review rows join the
+    // page's flat conflict list below (decision 9).
     #[cfg(feature = "p2p-share")]
     els.extend(group_scope_row_elements(
         &state.folders.group_shares.scopes,
         folders.len(),
+        &state.folders,
+        locations,
     ));
 
     // "Folders you follow", below the user's OWN folders: these are somebody
@@ -1224,8 +1242,16 @@ pub(super) fn folders_elements(
 
     let conflicts = snapshot.map(|s| s.conflicts.as_slice()).unwrap_or(&[]);
     for c in conflicts {
-        els.extend(conflict_elements(c));
+        els.extend(conflict_elements(
+            c,
+            Gesture::Settings(Action::UseOtherVersion(c.id)),
+        ));
     }
+    #[cfg(feature = "p2p-share")]
+    els.extend(group_conflict_elements(
+        &state.folders.group_shares.scopes,
+        &state.folders.group_conflicts,
+    ));
 
     // `settings-nav-back` — Esc already returns to the Settings hub
     // (`Action::NavBack => state.sub = SubPage::Root`, app.rs), but a live user
@@ -1916,7 +1942,7 @@ fn folder_row_elements(
                     t::ACCESS_REVOKED_WARNING,
                 ));
             }
-            body.extend(location_elements(fs, ui, locations));
+            body.extend(location_elements(&fs.name, ui, locations));
         }
         els.extend(body.into_iter().map(|e| e.within(ids::FOLDER_ROW, i)));
     }
@@ -2182,35 +2208,125 @@ fn group_invitation_elements(
 /// One `folder-row` per shared set whose machinery this device actually holds,
 /// continuing the M2 set list's index from `first_index`.
 ///
-/// A row here is deliberately thin, and every absence is a fact rather than a
-/// gap: no conflict-policy select (a group scope has no local scan seat yet),
-/// no expander body (nothing to configure), no leave button (severance is the
-/// authority's mint, not a self-scoped roster drop — `account-data-plane.md`
-/// § The recipient-set scheme, the severance bullet). What it does carry is
-/// the set's identity and its `folder-shared-badge`, in the same two readings
+/// The row expands like an M2 set's, and its body is the device-local
+/// `folder-location-*` binding section alone (`group-set.md` § Build design —
+/// the group set, decision 7; v1 sets are all-writer, decision 5, so every
+/// row gets it): the agent binds the folder under the scope through the same
+/// `AddLocation` door. Every other absence is a fact rather than a gap: no
+/// conflict-policy select (a group set has no nest row to arbitrate one), no
+/// leave button (severance is the authority's mint, not a self-scoped roster
+/// drop — `account-data-plane.md` § The recipient-set scheme, the severance
+/// bullet). The header carries the set's label — its recorded name, else its
+/// short scope id — and its `folder-shared-badge`, in the same two readings
 /// the M2 rows use: "Shared by ‹them›" on someone else's scope, "Shared · N"
 /// on your own.
 #[cfg(feature = "p2p-share")]
 fn group_scope_row_elements(
     scopes: &[crate::offline_share::GroupScopeView],
     first_index: usize,
+    ui: &FoldersUiState,
+    locations: &[RenderedLocationBinding],
 ) -> Vec<Element> {
     let mut els = Vec::new();
     for (offset, scope) in scopes.iter().enumerate() {
         let i = first_index + offset;
-        // Not a gesture: toggling expands a body this row does not have. A
-        // button that visibly does nothing is worse than a label.
-        els.push(Element::label(
+        let label = group_scope_label(scope);
+        els.push(Element::gesture_button(
             ids::FOLDER_ROW,
-            fs_strings::offline_share_set(&scope.short_id),
+            label,
+            true,
+            Gesture::Settings(Action::ToggleFolderRow(i)),
         ));
         let badge = match &scope.shared_by {
             Some(who) => t::shared_by(who),
             None => t::shared_badge(&scope.member_count.to_string()),
         };
         els.push(Element::label(ids::FOLDER_SHARED_BADGE, badge).within(ids::FOLDER_ROW, i));
+        if ui.expanded == Some(i) {
+            // Keyed by the scope's ref, never its label: a name can change
+            // and can equal an M2 set's, the ref can do neither.
+            els.extend(
+                location_elements(&scope.folder_id(), ui, locations)
+                    .into_iter()
+                    .map(|e| e.within(ids::FOLDER_ROW, i)),
+            );
+        }
     }
     els
+}
+
+/// A group set's label on the page: its recorded name, else its short scope id.
+#[cfg(feature = "p2p-share")]
+fn group_scope_label(scope: &crate::offline_share::GroupScopeView) -> String {
+    scope
+        .name
+        .clone()
+        .unwrap_or_else(|| fs_strings::offline_share_set(&scope.short_id))
+}
+
+/// Each group set's review rows, the page's flat conflict list continued
+/// (`group-set.md` § Build design — the group set, decision 9): the same trio
+/// through the same fold, `conflict-file-info` naming the set. The button runs
+/// on the agent, keyed by the set and the row's local id.
+#[cfg(feature = "p2p-share")]
+fn group_conflict_elements(
+    scopes: &[crate::offline_share::GroupScopeView],
+    conflicts: &crate::sync_agent::GroupConflicts,
+) -> Vec<Element> {
+    let mut els = Vec::new();
+    for scope in scopes {
+        let folder_id = scope.folder_id();
+        let label = group_scope_label(scope);
+        for row in conflicts.get(&folder_id).into_iter().flatten() {
+            els.extend(conflict_elements(
+                &ConflictSummary::of_retained(&label, row),
+                Gesture::Settings(Action::UseRetainedVersion {
+                    folder_id: folder_id.clone(),
+                    conflict_id: row.id,
+                }),
+            ));
+        }
+    }
+    els
+}
+
+/// What `folder-location-add-button` binds for the expanded row `i`: the
+/// binding's set label and its `FolderRef` wire form. An M2 row binds under
+/// its name and the shared `folder_ref_for_row` identity (`None` when the row
+/// yields none — the caller refuses it on `error-message`); a group row,
+/// continuing the index past the M2 sets, binds under its scope's ref, which
+/// is also its label. `None` when no row sits at `i`.
+pub(super) fn location_bind_target(
+    state: &SettingsState,
+    i: usize,
+) -> Option<(String, Option<String>)> {
+    let folders = state
+        .devices
+        .snapshot
+        .as_ref()
+        .map(|s| s.folders.as_slice())
+        .unwrap_or(&[]);
+    if let Some(summary) = folders.get(i) {
+        let folder_id = fauna_client_folders::engine_binding::folder_ref_for_row(
+            summary.id,
+            summary.mls_group_id.as_deref(),
+            summary.home_nest_url.as_deref(),
+        )
+        .map(|r| r.to_wire());
+        return Some((summary.name.clone(), folder_id));
+    }
+    #[cfg(feature = "p2p-share")]
+    {
+        let scope = state
+            .folders
+            .group_shares
+            .scopes
+            .get(i.checked_sub(folders.len())?)?;
+        let folder_id = scope.folder_id();
+        Some((folder_id.clone(), Some(folder_id)))
+    }
+    #[cfg(not(feature = "p2p-share"))]
+    None
 }
 
 /// The owner-side "Shared with" section for the ONE expanded owner row
@@ -2588,9 +2704,10 @@ fn device_activity_elements(fs: &FolderSummary, ui: &FoldersUiState) -> Vec<Elem
 /// within the row like the remove button.
 ///
 /// `locations` is the whole rendered set (empty before the sync agent installs / on
-/// non-unix); filtering by `fs.name` here — the set-name key the shared
+/// non-unix); filtering by `set` here — the set key the shared
 /// `LocationBindingsModel` uses — is what makes each expanded row show only its own
-/// folders. Remove is keyed by the set name (the model's only remove API), so it
+/// folders (an M2 set's name; a group set's `group:` ref, its binding label). Remove is
+/// keyed by that set key (the model's only remove API), so it
 /// targets this set's bindings, matching linux.
 ///
 /// The elements come back with only their INNER scope (`folder-location-row[k]` for a
@@ -2598,7 +2715,7 @@ fn device_activity_elements(fs: &FolderSummary, ui: &FoldersUiState) -> Vec<Elem
 /// the registry paths end up `folder-row[i] / folder-location-row[k]` — the nesting
 /// the shared suite queries.
 fn location_elements(
-    fs: &FolderSummary,
+    set: &str,
     ui: &FoldersUiState,
     locations: &[RenderedLocationBinding],
 ) -> Vec<Element> {
@@ -2606,7 +2723,7 @@ fn location_elements(
         ids::FOLDER_LOCATION_LIST,
         sp::SYNCED_LOCATIONS,
     )];
-    for (k, binding) in locations.iter().filter(|b| b.folder == fs.name).enumerate() {
+    for (k, binding) in locations.iter().filter(|b| b.folder == set).enumerate() {
         // The row anchor carries the path as its text (so a scope-less
         // `get_text("folder-location-row")` still reads it), with the path repeated as
         // an addressable `folder-location-path` child scoped within the row — the
@@ -2624,7 +2741,7 @@ fn location_elements(
                 ids::FOLDER_LOCATION_REMOVE_BUTTON,
                 common::REMOVE,
                 true,
-                Gesture::Settings(Action::RemoveLocation(fs.name.clone())),
+                Gesture::Settings(Action::RemoveLocation(set.to_string())),
             )
             .within(ids::FOLDER_LOCATION_ROW, k),
         );
@@ -2720,7 +2837,7 @@ fn location_elements(
                     // The SET, never the count above: the agent re-derives what
                     // is actually missing at click time, so a confirm racing a
                     // remount deletes nothing.
-                    Gesture::Settings(Action::ApplyHeldDeletes(fs.name.clone())),
+                    Gesture::Settings(Action::ApplyHeldDeletes(set.to_string())),
                 )
                 .within(ids::FOLDER_LOCATION_ROW, k),
             );
@@ -2762,9 +2879,11 @@ fn location_elements(
 /// `conflict-resolve-button` only for an auto-resolved row that retains a
 /// non-winning candidate (`folders.md` § Conflicts). Mirrors linux
 /// `conflicts.rs::build_conflict_row` exactly (same shared
-/// `conflict_badge_label` + the same `(winning_manifest_hash, has_other_version)`
-/// match).
-fn conflict_elements(c: &ConflictSummary) -> Vec<Element> {
+/// `conflict_badge_label`). `has_other_version` alone gates the button: a nest
+/// row derives it true only with a winning head, and a group set's row whose
+/// winner is a delete has no head and still retains the edit. `resolve` is the
+/// button's gesture, the one thing the two families do not share.
+fn conflict_elements(c: &ConflictSummary, resolve: Gesture) -> Vec<Element> {
     let mut els = vec![
         Element::label(
             ids::CONFLICT_TYPE_BADGE,
@@ -2773,12 +2892,12 @@ fn conflict_elements(c: &ConflictSummary) -> Vec<Element> {
         ),
         Element::label(ids::CONFLICT_FILE_INFO, c.file_info.clone()),
     ];
-    if c.winning_manifest_hash.is_some() && c.has_other_version {
+    if c.has_other_version {
         els.push(Element::gesture_button(
             ids::CONFLICT_RESOLVE_BUTTON,
             t::conflicts::USE_OTHER_VERSION,
             true,
-            Gesture::Settings(Action::UseOtherVersion(c.id)),
+            resolve,
         ));
     }
     els
@@ -5621,6 +5740,8 @@ mod tests {
 
         fn scope_view(scope: u8, shared_by: Option<&str>) -> crate::offline_share::GroupScopeView {
             crate::offline_share::GroupScopeView {
+                scope_id: [scope; 32],
+                name: None,
                 short_id: format!("{scope:02x}").repeat(4),
                 member_count: 2,
                 shared_by: shared_by.map(str::to_string),
@@ -5770,6 +5891,164 @@ mod tests {
                 1,
                 "the group row is the SECOND row, and its badge says so"
             );
+        }
+
+        /// A set with a recorded name is labelled by it; the short id is the
+        /// nameless set's label only (`ui/folders.md`, the offline-share entry).
+        #[test]
+        fn a_named_group_scope_is_labelled_by_its_name() {
+            let mut state = available_state();
+            let mut named = scope_view(0x39, None);
+            named.name = Some("Holiday photos".into());
+            state.folders.group_shares.scopes = vec![named];
+            let els = folders_elements(&state, &[]);
+            assert_eq!(all(&els, "folder-row")[0].text, "Holiday photos");
+        }
+
+        /// The group row expands like any set's row — its header is the same
+        /// toggle, addressed by its own continued index.
+        #[test]
+        fn a_group_row_header_toggles_its_own_row() {
+            let mut state = available_state();
+            state.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
+            state.folders.group_shares.scopes = vec![scope_view(0x4A, None)];
+            let els = folders_elements(&state, &[]);
+            match &all(&els, "folder-row")[1].role {
+                crate::element::Role::Button(crate::element::Gesture::Settings(
+                    Action::ToggleFolderRow(i),
+                )) => assert_eq!(*i, 1),
+                other => panic!("the group row must toggle itself: {other:?}"),
+            }
+        }
+
+        /// Decision 7's app leg: the expanded group row carries the binding
+        /// section, nested under its own row, listing only the folders bound
+        /// under ITS scope — an M2 set wearing the same text as a label lists
+        /// nowhere here. No conflict-policy select and no leave button.
+        #[test]
+        fn an_expanded_group_row_carries_the_location_binding_section() {
+            let mut state = available_state();
+            state.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
+            let scope = scope_view(0x5B, None);
+            let key = scope.folder_id();
+            state.folders.group_shares.scopes = vec![scope];
+
+            let locations = vec![
+                binding("/home/u/Shared", &key),
+                binding("/home/u/Docs", "docs"),
+            ];
+            let collapsed = folders_elements(&state, &locations);
+            assert!(
+                all(&collapsed, "folder-location-list").is_empty(),
+                "collapsed, the row paints no body"
+            );
+
+            state.folders.expanded = Some(1);
+            let els = folders_elements(&state, &locations);
+            for id in [
+                "folder-location-list",
+                "folder-location-path-input",
+                "folder-location-add-button",
+            ] {
+                let found = all(&els, id);
+                assert_eq!(found.len(), 1, "{id} paints once");
+                assert_eq!(found[0].path[0].1, 1, "{id} nests under folder-row[1]");
+            }
+            let rows = all(&els, "folder-location-row");
+            assert_eq!(rows.len(), 1, "only the scope's own binding lists");
+            assert_eq!(rows[0].text, "/home/u/Shared");
+            match &all(&els, "folder-location-remove-button")[0].role {
+                crate::element::Role::Button(crate::element::Gesture::Settings(
+                    Action::RemoveLocation(set),
+                )) => assert_eq!(set, &key, "remove targets the scope's bindings"),
+                other => panic!("remove must carry the scope's ref: {other:?}"),
+            }
+            assert!(
+                !all(&els, "folder-conflict-policy-select").iter().any(|e| e
+                    .path
+                    .first()
+                    .map(|p| p.1)
+                    == Some(1)),
+                "a group row has no conflict-policy select"
+            );
+        }
+
+        /// A group set's review row: the shared trio, its button running on the
+        /// agent and keyed by the set, never the nest machine's conflict id
+        /// (`group-set.md` § Build design — the group set, decision 9).
+        #[test]
+        fn a_group_review_row_paints_the_trio_and_restores_through_the_agent() {
+            let mut state = available_state();
+            let scope = scope_view(0x71, None);
+            let folder_id = scope.folder_id();
+            state.folders.group_shares.scopes = vec![scope];
+            state.folders.group_conflicts.insert(
+                folder_id.clone(),
+                vec![fauna_core::sync::RetainedConflict {
+                    id: 9,
+                    path: "same.txt".into(),
+                    winner_manifest: Some("abcdef0123456789".into()),
+                    ..Default::default()
+                }],
+            );
+            let els = folders_elements(&state, &[]);
+            assert!(
+                el(&els, "conflict-file-info")
+                    .is_some_and(|e| e.text.contains("same.txt → abcdef01")),
+                "the row names the path and the winning head"
+            );
+            assert!(el(&els, "conflict-type-badge").is_some());
+            match &el(&els, "conflict-resolve-button")
+                .expect("the gesture")
+                .role
+            {
+                crate::element::Role::Button(crate::element::Gesture::Settings(
+                    Action::UseRetainedVersion {
+                        folder_id: f,
+                        conflict_id: 9,
+                    },
+                )) => assert_eq!(f, &folder_id),
+                other => panic!("a group row runs on the agent, keyed by set: {other:?}"),
+            }
+        }
+
+        /// A winning delete leaves no head, and the edit is retained all the same.
+        #[test]
+        fn a_group_review_row_over_a_winning_delete_keeps_the_gesture() {
+            let mut state = available_state();
+            let scope = scope_view(0x72, None);
+            state.folders.group_conflicts.insert(
+                scope.folder_id(),
+                vec![fauna_core::sync::RetainedConflict {
+                    id: 3,
+                    path: "gone.txt".into(),
+                    ..Default::default()
+                }],
+            );
+            state.folders.group_shares.scopes = vec![scope];
+            let els = folders_elements(&state, &[]);
+            assert!(el(&els, "conflict-resolve-button").is_some());
+        }
+
+        /// What the add button binds: a group row past the M2 sets binds under
+        /// its scope's `FolderRef::Group`, label and identity both; an M2 row
+        /// keeps binding under its own name; past the last row, nothing.
+        #[test]
+        fn the_add_button_binds_a_group_row_under_its_scope_ref() {
+            let mut state = available_state();
+            state.devices.snapshot = Some(snapshot_with_folders(vec![folder("docs")]));
+            state.folders.group_shares.scopes = vec![scope_view(0x6C, None)];
+
+            let want = format!("group:{}", "6c".repeat(32));
+            assert_eq!(
+                location_bind_target(&state, 1),
+                Some((want.clone(), Some(want)))
+            );
+            assert_eq!(
+                location_bind_target(&state, 0).map(|t| t.0),
+                Some("docs".into())
+            );
+            assert_eq!(location_bind_target(&state, 2), None);
         }
 
         /// Nothing shared, nothing offered: the ceremony adds no rows at all.

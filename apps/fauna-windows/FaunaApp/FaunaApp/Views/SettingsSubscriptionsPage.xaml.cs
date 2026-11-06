@@ -87,7 +87,7 @@ public sealed partial class SettingsSubscriptionsPage : Page
     {
         if (_vm is null) return;
         if (sender is not FrameworkElement { Tag: SubscriptionMineRow row }) return;
-        await _vm.UnsubscribeAsync(row.AuthorId);
+        await _vm.UnsubscribeAsync(row.AuthorId, row.Tier, row.HomeNestUrl);
         RenderError(_vm.ErrorMessage);
         UpdatePlaceholder();
     }

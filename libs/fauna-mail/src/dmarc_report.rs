@@ -267,6 +267,8 @@ pub fn extract_report_xml(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
         .parse(raw_message)
         .ok_or_else(|| malformed("message does not parse as RFC 5322"))?;
     let mut last_err = malformed("no report attachment");
+    // One inflate budget for the whole message, not one per candidate part.
+    let mut budget = InflateBudget::new(MAX_DECOMPRESSED_BYTES);
     for part in &msg.parts {
         let body: &[u8] = match &part.body {
             PartType::Binary(b) | PartType::InlineBinary(b) => b,
@@ -276,7 +278,7 @@ pub fn extract_report_xml(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
         if !is_report_candidate(part.content_type(), part.attachment_name()) {
             continue;
         }
-        match unpack(body) {
+        match unpack_bounded(body, MAX_COMPRESSED_BYTES, &mut budget) {
             Ok(xml) => return Ok(xml),
             Err(ReportError::Oversize) => return Err(ReportError::Oversize),
             Err(e) => last_err = e,
@@ -312,21 +314,25 @@ fn is_report_candidate(ct: Option<&mail_parser::ContentType<'_>>, name: Option<&
 /// the first file) or bare XML — under the size bounds.
 #[cfg(feature = "dmarc-report")]
 pub fn unpack(body: &[u8]) -> Result<Vec<u8>, ReportError> {
-    unpack_bounded(body, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES)
+    unpack_bounded(
+        body,
+        MAX_COMPRESSED_BYTES,
+        &mut InflateBudget::new(MAX_DECOMPRESSED_BYTES),
+    )
 }
 
 #[cfg(feature = "dmarc-report")]
 fn unpack_bounded(
     body: &[u8],
     max_compressed: usize,
-    max_decompressed: usize,
+    budget: &mut InflateBudget,
 ) -> Result<Vec<u8>, ReportError> {
     if body.len() > max_compressed {
         return Err(ReportError::Oversize);
     }
     if body.starts_with(&[0x1f, 0x8b]) {
         let decoder = flate2::read::MultiGzDecoder::new(body);
-        return read_bounded(decoder, max_decompressed);
+        return budget.read(decoder);
     }
     if body.starts_with(b"PK\x03\x04") {
         let mut archive = zip::ZipArchive::new(Cursor::new(body))
@@ -352,7 +358,7 @@ fn unpack_bounded(
         let entry = archive
             .by_index(i)
             .map_err(|e| malformed(format!("zip entry: {e}")))?;
-        return read_bounded(entry, max_decompressed);
+        return budget.read(entry);
     }
     let start = body
         .iter()
@@ -360,9 +366,7 @@ fn unpack_bounded(
         .unwrap_or(body.len());
     let rest = &body[start..];
     if rest.starts_with(b"<") || rest.starts_with(b"\xef\xbb\xbf<") {
-        if body.len() > max_decompressed {
-            return Err(ReportError::Oversize);
-        }
+        budget.charge(body.len())?;
         return Ok(body.to_vec());
     }
     Err(malformed("attachment is not gzip, zip or XML"))
@@ -371,14 +375,51 @@ fn unpack_bounded(
 /// Read a decompressing stream to its end, refusing past `max` bytes (one
 /// byte over is enough to know).
 pub(crate) fn read_bounded(r: impl Read, max: usize) -> Result<Vec<u8>, ReportError> {
-    let mut out = Vec::new();
-    r.take(max as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|e| malformed(format!("decompression: {e}")))?;
-    if out.len() > max {
-        return Err(ReportError::Oversize);
+    InflateBudget::new(max).read(r)
+}
+
+/// The bytes one inbound message may inflate, across EVERY candidate part the
+/// report extractors try — shared by the DMARC aggregate and the TLSRPT
+/// extractor. A stranger's attachment is inflated once per port-25 message
+/// (`dmarc-reporting.md` § XML validation step 1): without one budget per
+/// message, a message of many small gzip streams that each inflate to just
+/// under the per-report cap and then fail their CRC would cost the cap once per
+/// part. Every read is charged what it produced, success or failure.
+#[derive(Debug)]
+pub(crate) struct InflateBudget {
+    remaining: usize,
+}
+
+impl InflateBudget {
+    pub(crate) fn new(max: usize) -> Self {
+        Self { remaining: max }
     }
-    Ok(out)
+
+    /// Read a decompressing stream to its end under what is left; `Oversize`
+    /// past it.
+    pub(crate) fn read(&mut self, r: impl Read) -> Result<Vec<u8>, ReportError> {
+        let mut out = Vec::new();
+        let read = r.take(self.remaining as u64 + 1).read_to_end(&mut out);
+        // `read_to_end` keeps what it read before an error: a stream that
+        // fails its CRC after inflating is charged in full.
+        self.charge(out.len())?;
+        read.map_err(|e| malformed(format!("decompression: {e}")))?;
+        Ok(out)
+    }
+
+    /// Charge `n` bytes taken as they are (an uncompressed report part).
+    #[cfg_attr(
+        not(any(feature = "dmarc-report", feature = "tlsrpt-report")),
+        allow(dead_code)
+    )]
+    pub(crate) fn charge(&mut self, n: usize) -> Result<(), ReportError> {
+        if n > self.remaining {
+            self.remaining = 0;
+            return Err(ReportError::Oversize);
+        }
+        self.remaining -= n;
+        Ok(())
+    }
 }
 
 /// Gzip the report XML for the `payload_xml_gz` archive column.
@@ -969,14 +1010,78 @@ mod tests {
         let (max_c, max_d) = (MAX_COMPRESSED_BYTES / 1000, MAX_DECOMPRESSED_BYTES / 1000);
         let bomb = gzip_xml(&vec![0u8; max_d + 1]);
         assert!(bomb.len() < max_c);
+        let budget = || InflateBudget::new(max_d);
         assert_eq!(
-            unpack_bounded(&bomb, max_c, max_d),
+            unpack_bounded(&bomb, max_c, &mut budget()),
             Err(ReportError::Oversize)
         );
         let fits = gzip_xml(&vec![0u8; max_d]);
-        assert!(unpack_bounded(&fits, max_c, max_d).is_ok());
+        assert!(unpack_bounded(&fits, max_c, &mut budget()).is_ok());
         assert_eq!(
-            unpack_bounded(&vec![0x1f; max_c + 1], max_c, max_d),
+            unpack_bounded(&vec![0x1f; max_c + 1], max_c, &mut budget()),
+            Err(ReportError::Oversize)
+        );
+    }
+
+    /// A gzip stream whose CRC is wrong: inflates `n` zero bytes in full, then
+    /// fails.
+    fn bad_crc_gzip(n: usize) -> Vec<u8> {
+        let mut gz = gzip_xml(&vec![0u8; n]);
+        let crc_at = gz.len() - 8;
+        gz[crc_at] ^= 0xff;
+        gz
+    }
+
+    /// The budget is per message: a failing stream is charged what it
+    /// inflated, so the parts after it share what is left and the message's
+    /// total inflate is the one cap, however many parts it carries.
+    #[test]
+    fn failing_parts_share_one_inflate_budget() {
+        let part = 1000;
+        let mut budget = InflateBudget::new(part * 3);
+        for _ in 0..3 {
+            assert!(matches!(
+                unpack_bounded(&bad_crc_gzip(part), MAX_COMPRESSED_BYTES, &mut budget),
+                Err(ReportError::Malformed(_))
+            ));
+        }
+        assert_eq!(
+            unpack_bounded(&bad_crc_gzip(part), MAX_COMPRESSED_BYTES, &mut budget),
+            Err(ReportError::Oversize),
+            "the fourth part finds the budget spent"
+        );
+    }
+
+    /// Through the extractor: a message of many failing-CRC candidates stops
+    /// once their inflated bytes reach the per-message cap, instead of
+    /// inflating every part. Each part here inflates a quarter of the cap, so
+    /// the fifth one finds the budget spent and the extractor answers
+    /// `Oversize` without reaching the valid report behind them.
+    #[cfg(feature = "outbound")]
+    #[test]
+    fn many_failing_candidates_are_bounded_per_message() {
+        use base64::Engine as _;
+        let quarter = MAX_DECOMPRESSED_BYTES / 4;
+        let bad = base64::engine::general_purpose::STANDARD.encode(bad_crc_gzip(quarter));
+        let good =
+            base64::engine::general_purpose::STANDARD.encode(gzip_xml(b"<feedback></feedback>"));
+        let mut msg = String::from(
+            "From: r@reporter.test\r\nTo: dmarc-report@fauna.test\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n",
+        );
+        for i in 0..5 {
+            msg.push_str(&format!(
+                "--b\r\nContent-Type: application/gzip\r\n\
+                 Content-Disposition: attachment; filename=\"r{i}.xml.gz\"\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\n{bad}\r\n"
+            ));
+        }
+        msg.push_str(&format!(
+            "--b\r\nContent-Type: application/gzip\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{good}\r\n--b--\r\n"
+        ));
+        assert_eq!(
+            extract_report_xml(msg.as_bytes()),
             Err(ReportError::Oversize)
         );
     }

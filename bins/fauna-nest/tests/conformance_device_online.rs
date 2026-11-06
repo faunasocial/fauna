@@ -25,8 +25,11 @@
 //! - the custody handshake's overloaded `minted_by_device` (the custodian's
 //!   own actor id) never becomes a binding;
 //! - `last_seen_at` is touched, on the actor's own row, by the bound upgrade;
-//! - and, over a real socket, the HTTP upgrade itself carries the key from
-//!   the validated bearer onto the connection.
+//! - over a real socket, the HTTP upgrade itself carries the key from the
+//!   validated bearer onto the connection;
+//! - and the second door, `fauna.auth.device_bind`: a seed-minted connection
+//!   binds in band to a device of its own actor, once, with a proof that is
+//!   single-use, and falls under device removal's socket sweep from then on.
 //!
 //! Tier: tier_3 (real handlers + real token store + real DB; the last pin
 //! drives a real axum server). Every assertion is on latency-independent state
@@ -42,7 +45,7 @@ use ed25519_dalek::Signer;
 use fauna_core::identity::ActorKeypair;
 use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
-use fauna_nest::{auth_core, db::CacheDb, session_handlers, sync_handlers};
+use fauna_nest::{auth_core, auth_handlers, db::CacheDb, session_handlers, sync_handlers};
 use fauna_protocol::encode_canonical;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
@@ -55,6 +58,7 @@ async fn nest() -> (RpcRouter, Arc<AppState>, ActorKeypair) {
     let mut b = RpcRouter::builder();
     sync_handlers::register_sync_handlers(&mut b);
     session_handlers::register_sessions_handlers(&mut b);
+    auth_handlers::register_auth_handlers(&mut b);
     let account = ActorKeypair::generate();
     common::seed_dispatch_actor(&state.db, &account.actor_id().0).await;
     (b.build(), state, account)
@@ -249,7 +253,7 @@ async fn a_seed_minted_session_binds_no_device() {
         state.ws.has_connections(&account.actor_id().0),
         "the seed session is connected"
     );
-    assert!(conn.bound_device_key.is_none());
+    assert!(conn.bound_device_key().is_none());
     assert!(
         !online(&router, &state, &account, &device_id_hex).await,
         "a seed-minted session names an identity, not a device — it binds nothing"
@@ -426,5 +430,339 @@ async fn a_real_upgrade_with_a_device_minted_bearer_binds_the_connection() {
     assert!(
         online(&router, &state, &account, &device_id_hex).await,
         "the device the real socket's bearer was minted under is online"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The second door — `fauna.auth.device_bind` (`devices.md` § Listing Devices →
+// *The binding* → *Web binds its one socket in band*)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A seed-minted session's live connection — what web's one socket is.
+async fn seed_socket(
+    state: &Arc<AppState>,
+    account: &ActorKeypair,
+) -> Arc<fauna_nest::ws::RpcConnection> {
+    let token = state
+        .auth
+        .token_store
+        .insert(account.actor_id(), auth_core::TOKEN_TTL_SECS)
+        .await;
+    upgrade_with(state, &token).await
+}
+
+/// A `fauna.auth.device_bind` request naming `actor`, signed by `seed` over the
+/// production message for this nest.
+fn bind_request(
+    state: &Arc<AppState>,
+    actor: &[u8; 32],
+    seed: &[u8; 32],
+    nonce: &[u8],
+) -> fauna_protocol::auth::DeviceBindRequest {
+    let signing = ed25519_dalek::SigningKey::from_bytes(seed);
+    let device_key = signing.verifying_key().to_bytes();
+    let timestamp = fauna_core::data::Timestamp::now_millis();
+    let msg = fauna_protocol::auth::device_bind_signed_message(
+        actor,
+        &device_key,
+        timestamp,
+        &state.bound_identity(),
+        nonce,
+    );
+    fauna_protocol::auth::DeviceBindRequest {
+        actor_id: fauna_core::hex32::encode(actor),
+        device_key: fauna_core::hex32::encode(&device_key),
+        timestamp,
+        nonce: nonce.to_vec().into(),
+        signature: hex::encode(signing.sign(&msg).to_bytes()),
+        extra: Default::default(),
+    }
+}
+
+/// Send a bind over `conn`, as the dispatcher does: the real registered
+/// handler, as the connection's actor, inside the connection's caller scope.
+async fn send_bind(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    conn: &fauna_nest::ws::RpcConnection,
+    request: &fauna_protocol::auth::DeviceBindRequest,
+) -> Result<fauna_protocol::auth::DeviceBindReply, fauna_protocol::RpcError> {
+    let caller = fauna_nest::dispatch_core::CallerRef {
+        conn_id: conn.conn_id,
+        correlation_id: 1,
+        peer_ip: None,
+        loopback_peer: false,
+        served_name: None,
+    };
+    fauna_nest::dispatch_core::scope_caller(
+        caller,
+        dispatch(
+            router,
+            state,
+            conn.actor_id,
+            fauna_protocol::auth::DEVICE_BIND_KIND,
+            request.clone(),
+        ),
+    )
+    .await
+}
+
+/// `fauna.sync.devices.delete` over the production handler, as the owner.
+async fn delete_device(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    account: &ActorKeypair,
+    device_id_hex: &str,
+) {
+    let _: fauna_protocol::sync::SyncDeviceDeleteReply = dispatch(
+        router,
+        state,
+        account.actor_id().0,
+        "fauna.sync.devices.delete",
+        fauna_protocol::sync::SyncDeviceDeleteRequest {
+            device_id: device_id_hex.to_string(),
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect("the device deletes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seed_minted_socket_reads_online_once_bound_in_band() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x61; 32]);
+    let (seed, key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let conn = seed_socket(&state, &account).await;
+    assert!(
+        !online(&router, &state, &account, &device_id_hex).await,
+        "a seed-minted socket binds nothing on its own"
+    );
+
+    let actor = account.actor_id().0;
+    let request = bind_request(&state, &actor, &seed, b"nonce-bind-online");
+    send_bind(&router, &state, &conn, &request)
+        .await
+        .expect("the connection binds a device of its own actor");
+
+    assert_eq!(conn.bound_device_key(), Some(key));
+    assert!(
+        online(&router, &state, &account, &device_id_hex).await,
+        "the bound socket paints its device online"
+    );
+    state.ws.remove(&actor, conn.conn_id);
+    assert!(
+        !online(&router, &state, &account, &device_id_hex).await,
+        "the binding dies with the socket"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bind_naming_another_actors_device_is_refused_and_binds_nothing() {
+    let (router, state, account) = nest().await;
+    let other = ActorKeypair::generate();
+    common::seed_dispatch_actor(&state.db, &other.actor_id().0).await;
+    let other_device = fauna_core::hex32::encode(&[0x62; 32]);
+    let (other_seed, _) = enroll(&router, &state, &other, &other_device).await;
+    let conn = seed_socket(&state, &account).await;
+
+    // Everything about the request is genuine: B's device key signs B's actor.
+    // Only the connection it rode in on is A's.
+    let request = bind_request(&state, &other.actor_id().0, &other_seed, b"nonce-cross");
+    let refused = send_bind(&router, &state, &conn, &request)
+        .await
+        .expect_err("a connection binds only a device of its own actor");
+    assert_eq!(refused.code, "fauna.auth.not_registered");
+    assert_eq!(conn.bound_device_key(), None);
+
+    // The same refusal whether or not the key means anything, so the door is
+    // no oracle over another actor's grants.
+    let unknown = bind_request(
+        &state,
+        &other.actor_id().0,
+        &[0x77; 32],
+        b"nonce-cross-unknown",
+    );
+    let opaque = send_bind(&router, &state, &conn, &unknown)
+        .await
+        .expect_err("an unknown key of another actor is refused too");
+    assert_eq!(opaque.code, refused.code);
+    assert_eq!(opaque.details, refused.details);
+
+    // Naming A while presenting B's key finds no grant under A.
+    let actor = account.actor_id().0;
+    let request = bind_request(&state, &actor, &other_seed, b"nonce-cross-own");
+    let refused = send_bind(&router, &state, &conn, &request)
+        .await
+        .expect_err("B's key has no grant under A");
+    assert_eq!(refused.code, "fauna.auth.not_registered");
+    assert_eq!(conn.bound_device_key(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_executed_bind_is_refused_closed() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x63; 32]);
+    let (seed, _key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let actor = account.actor_id().0;
+    let request = bind_request(&state, &actor, &seed, b"nonce-replay");
+
+    let first = seed_socket(&state, &account).await;
+    send_bind(&router, &state, &first, &request)
+        .await
+        .expect("the first use binds");
+
+    // A captured request re-executed on another socket of the same account —
+    // past the per-connection idempotency cache, which only ever replays a
+    // reply on the connection that earned it.
+    let second = seed_socket(&state, &account).await;
+    let replayed = send_bind(&router, &state, &second, &request)
+        .await
+        .expect_err("the signature is single-use");
+    assert_eq!(replayed.code, "fauna.auth.signature_failed");
+    assert_eq!(second.bound_device_key(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handshake_signature_never_serves_as_a_bind() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x68; 32]);
+    let (seed, key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let actor = account.actor_id().0;
+    let conn = seed_socket(&state, &account).await;
+
+    let mut request = bind_request(&state, &actor, &seed, b"nonce-cross-context");
+    let handshake_message = fauna_protocol::auth::device_handshake_signed_message(
+        &actor,
+        &key,
+        request.timestamp,
+        &state.bound_identity(),
+        &request.nonce,
+    );
+    let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+    request.signature = hex::encode(signing.sign(&handshake_message).to_bytes());
+
+    let refused = send_bind(&router, &state, &conn, &request)
+        .await
+        .expect_err("the two signatures live under different tags");
+    assert_eq!(refused.code, "fauna.auth.signature_failed");
+    assert_eq!(conn.bound_device_key(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_binds_once_and_a_repeat_with_the_same_key_is_idempotent() {
+    let (router, state, account) = nest().await;
+    let first_device = fauna_core::hex32::encode(&[0x64; 32]);
+    let second_device = fauna_core::hex32::encode(&[0x65; 32]);
+    let (first_seed, first_key) = enroll(&router, &state, &account, &first_device).await;
+    let (second_seed, _) = enroll(&router, &state, &account, &second_device).await;
+    let actor = account.actor_id().0;
+    let conn = seed_socket(&state, &account).await;
+
+    let request = bind_request(&state, &actor, &first_seed, b"nonce-once-1");
+    send_bind(&router, &state, &conn, &request)
+        .await
+        .expect("the first bind lands");
+
+    let repeat = bind_request(&state, &actor, &first_seed, b"nonce-once-2");
+    send_bind(&router, &state, &conn, &repeat)
+        .await
+        .expect("a repeat naming the same key is idempotent");
+
+    let other = bind_request(&state, &actor, &second_seed, b"nonce-once-3");
+    let refused = send_bind(&router, &state, &conn, &other)
+        .await
+        .expect_err("another key on a bound connection is refused");
+    assert_eq!(
+        refused.code,
+        fauna_protocol::RpcError::CODE_AUTH_DEVICE_BIND_ALREADY_BOUND
+    );
+    assert_eq!(conn.bound_device_key(), Some(first_key));
+    assert!(!online(&router, &state, &account, &second_device).await);
+
+    // One rule for both doors: a bearer-bound socket is a bound connection.
+    let minted = mint_via_handshake(&state, &account, &first_seed, b"nonce-once-4").await;
+    let bearer_bound = upgrade_with(&state, &minted.token).await;
+    let other = bind_request(&state, &actor, &second_seed, b"nonce-once-5");
+    let refused = send_bind(&router, &state, &bearer_bound, &other)
+        .await
+        .expect_err("a bearer-bound connection is bound too");
+    assert_eq!(
+        refused.code,
+        fauna_protocol::RpcError::CODE_AUTH_DEVICE_BIND_ALREADY_BOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_removal_closes_a_bound_in_band_socket_and_leaves_the_rest_open() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x66; 32]);
+    let (seed, _key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let actor = account.actor_id().0;
+    let bound = seed_socket(&state, &account).await;
+    let other = seed_socket(&state, &account).await;
+    let request = bind_request(&state, &actor, &seed, b"nonce-removal");
+    send_bind(&router, &state, &bound, &request)
+        .await
+        .expect("the socket binds");
+
+    delete_device(&router, &state, &account, &device_id_hex).await;
+
+    assert!(
+        bound.is_revoked(),
+        "the removal's sweep closes the bound-in-band socket (4401)"
+    );
+    assert!(
+        !other.is_revoked(),
+        "the actor's other sockets carry on: the sweep follows the binding"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_devices_key_never_binds() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x69; 32]);
+    let (seed, _key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let actor = account.actor_id().0;
+    delete_device(&router, &state, &account, &device_id_hex).await;
+
+    let conn = seed_socket(&state, &account).await;
+    let request = bind_request(&state, &actor, &seed, b"nonce-tombstoned");
+    let refused = send_bind(&router, &state, &conn, &request)
+        .await
+        .expect_err("the removed device's key verifies no bind");
+    assert_eq!(refused.code, "fauna.auth.not_registered");
+    assert_eq!(conn.bound_device_key(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bind_touches_last_seen_on_the_actors_own_row() {
+    let (router, state, account) = nest().await;
+    let device_id_hex = fauna_core::hex32::encode(&[0x67; 32]);
+    let (seed, _key) = enroll(&router, &state, &account, &device_id_hex).await;
+    let actor = account.actor_id().0;
+
+    // Backdate the row, so a touch inside this same instant is still visible.
+    state
+        .db
+        .conn()
+        .await
+        .execute("UPDATE sync_devices SET last_seen = 1", [])
+        .expect("backdate");
+
+    let conn = seed_socket(&state, &account).await;
+    let request = bind_request(&state, &actor, &seed, b"nonce-last-seen");
+    send_bind(&router, &state, &conn, &request)
+        .await
+        .expect("the socket binds");
+
+    let row = roster(&router, &state, &account)
+        .await
+        .into_iter()
+        .find(|d| d.device_id == device_id_hex)
+        .unwrap();
+    assert!(
+        row.last_seen_at >= row.registered_at,
+        "the bind is this row's moment, as the bound upgrade is"
     );
 }

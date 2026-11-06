@@ -88,15 +88,34 @@ def open_carrier(alice_app, bob_app, bob: dict, custodian: dict) -> None:
     receive_once(bob_app)
 
 
-def poll_devices(app, predicate, *, what: str, budget_s: float = CUSTODY_S) -> None:
+def _read(probe) -> str:
+    """One diagnostic reading; a probe that throws says so instead of masking
+    the assertion it explains (convention 6)."""
+    try:
+        return repr(probe())
+    except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
+        return f"(unreadable: {type(e).__name__}: {e})"
+
+
+def poll_devices(app, predicate, *, what: str, budget_s: float = CUSTODY_S, detail=None) -> None:
     """Deadline-poll a Devices-page predicate, a receive cycle poked and the
-    page re-entered each try (the facet folds on the nav edge)."""
+    page re-entered each try (the facet folds on the nav edge). ``detail``,
+    when given, returns the state the failure message names beside ``what``."""
     def ready() -> bool:
         receive_once(app)
         app.backups.navigate_devices()
         return predicate()
 
-    wait_until(ready, budget_s, interval=0.5, diagnose=lambda: f"never observed: {what}")
+    def diagnose() -> str:
+        message = f"never observed: {what}"
+        if detail is not None:
+            try:
+                message += f"; {detail()}"
+            except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
+                message += f"; (detail unreadable: {type(e).__name__}: {e})"
+        return message
+
+    wait_until(ready, budget_s, interval=0.5, diagnose=diagnose)
 
 
 def pump_until(rig: dict, predicate, *, what: str) -> dict:
@@ -141,5 +160,15 @@ def mint_nest_custody(rig: dict) -> None:
         lambda: bob_app.custody.offer_count() >= 1
         and bob_app.custody.offer_has_nest_choice(0),
         what="the consent card WITH the nest choice on bob's Devices page",
+        # Which half never came — the offer itself (the cross-nest carrier) or
+        # the nest choice on it (bob's pinned nest identity) — and what each
+        # seat's custody drive logged.
+        detail=lambda: (
+            f"bob's offer cards {_read(bob_app.custody.offer_count)}, "
+            f"nest choice on the first {_read(lambda: bob_app.custody.offer_has_nest_choice(0))}, "
+            f"bob's error surface {_read(bob_app.error_text)}"
+            f"\n--- bob's custody log ---\n{custody_log_tail(bob_app)}"
+            f"\n--- alice's custody log ---\n{custody_log_tail(alice_app)}"
+        ),
     )
     bob_app.custody.accept_offer_on_nest(0)

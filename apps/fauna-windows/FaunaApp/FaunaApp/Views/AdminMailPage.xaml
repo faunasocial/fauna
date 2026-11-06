@@ -62,8 +62,16 @@
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailEnabledToggle}"
                               Toggled="EnabledToggle_Toggled"
                               Header="{loc:Localize Key=admin/mail_page/enabled_label}" />
-                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                <TextBlock x:Name="EnabledSubtitle" Opacity="0.6" TextWrapping="Wrap"
                            Text="{loc:Localize Key=admin/mail_page/enabled_subtitle}" />
+                <!-- A box that cannot enable mail (admin.md § 6 Mail): the toggle is
+                     disabled with state "unavailable" and this notice, the user page's
+                     sentence, sits directly under it in place of the subtitle (read
+                     from the shared snapshot's mail_unavailable_here, never re-derived). -->
+                <TextBlock x:Name="UnavailableNotice"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailUnavailableNotice}"
+                           Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed"
+                           Text="{loc:Localize Key=mail_settings/unavailable_notice}" />
             </StackPanel>
 
             <!-- Auto-enable mail for new users (set_auto_enable_mail_for_new_users;
@@ -114,6 +122,13 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                <!-- Static help naming the two receivers' own sender dashboards, with one
+                     link per receiver (Gmail, then Outlook) from the shared
+                     sender_dashboard_links(); the links are painted in RenderHealth. -->
+                <TextBlock x:Name="HealthSenderDashboardsNote" Opacity="0.7" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthSenderDashboardsNote}"
+                           Text="{loc:Localize Key=admin/mail_page/health_sender_dashboards_note}" />
+                <StackPanel x:Name="HealthSenderDashboardLinks" Orientation="Horizontal" Spacing="8" />
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <HyperlinkButton x:Name="HealthDelistLink" Visibility="Collapsed"
                                      AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthDelistLink}"
@@ -544,6 +559,118 @@
                         Click="AliasSaveButton_Click"
                         HorizontalAlignment="Left"
                         Content="{loc:Localize Key=admin/mail_page/alias_save}" />
+            </StackPanel>
+
+            <!-- ════ DMARC reports (put_dmarc_policy; its own get_dmarc_policy twin) ════
+                 dmarc-reporting.md § Forensic-report receive → Default off, § Retention.
+                 Four edited fields over the persisted DmarcPolicyValues; every other record
+                 tag is carried through unchanged. The PII warning is always rendered. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/dmarc_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/dmarc_group_desc}" />
+
+                <ToggleSwitch x:Name="DmarcRufPublishToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcRufPublishToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/dmarc_ruf_publish_label}" />
+                <TextBlock x:Name="DmarcRufWarning" Opacity="0.7" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcRufWarning}"
+                           Text="{loc:Localize Key=admin/mail_page/dmarc_ruf_warning}" />
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/dmarc_fo_mode_label}" />
+                    <!-- Items populated in code-behind from the shared
+                         DmarcForensicModeOptions() catalog (PopulateSelect). -->
+                    <ComboBox x:Name="DmarcFoModeSelect"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcFoModeSelect}"
+                              HorizontalAlignment="Left" MinWidth="180" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/dmarc_aggregate_retention_label}" />
+                    <TextBox x:Name="DmarcAggregateRetentionInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcAggregateRetentionInput}"
+                             Width="120" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/dmarc_forensic_retention_label}" />
+                    <TextBox x:Name="DmarcForensicRetentionInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcForensicRetentionInput}"
+                             TextChanged="DmarcForensicRetentionInput_TextChanged"
+                             Width="120" HorizontalAlignment="Left" />
+                    <!-- Shown while the typed window is past 30 days
+                         (shared dmarc_forensic_retention_warns). -->
+                    <TextBlock x:Name="DmarcForensicRetentionWarning" Visibility="Collapsed"
+                               Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/dmarc_forensic_retention_warning}" />
+                </StackPanel>
+                <ToggleSwitch x:Name="DmarcOutboundAggregateToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcOutboundAggregateToggle}"
+                              Header="{loc:Localize Key=admin/mail_page/dmarc_outbound_aggregate_label}" />
+                <Button x:Name="DmarcSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailDmarcSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="DmarcSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/dmarc_save}" />
+            </StackPanel>
+
+            <!-- ════ Secrets (rotate_list_unsubscribe_secret / rotate_srs_secret) ════
+                 mail-mass-mailing.md § Secret rotation, mail-forwarding.md § SRS scheme.
+                 Two actions, no knob: each button is the same-button two-press whose arm
+                 the shared machine holds (an armed button reads its confirm sentence,
+                 RenderState relabels it); the last rotation's outcome is the untagged
+                 line under them, worded by the shared secret_rotation_text. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/secrets_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/secrets_group_desc}" />
+                <Button x:Name="ListUnsubscribeSecretRotateButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailListUnsubscribeSecretRotateButton}"
+                        Click="ListUnsubscribeSecretRotateButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/list_unsubscribe_secret_rotate}" />
+                <Button x:Name="ForwardSrsSecretRotateButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailForwardSrsSecretRotateButton}"
+                        Click="ForwardSrsSecretRotateButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/forward_srs_secret_rotate}" />
+                <TextBlock x:Name="SecretRotationResult" Opacity="0.7" FontSize="12"
+                           TextWrapping="Wrap" Visibility="Collapsed" />
+            </StackPanel>
+
+            <!-- ════ Microsoft registration for the Outlook import (set_microsoft_registration;
+                 read back via fauna.setup.status) ════ mailbox-migration.md § Microsoft
+                 sign-in → An admin-supplied registration. Both drafts go out as typed; the
+                 shared machine checks them and refuses a bad pair onto error-message. -->
+            <StackPanel Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/microsoft_group_title}" />
+                <TextBlock Opacity="0.7" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/microsoft_group_desc}" />
+                <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/mail_page/microsoft_requirements}" />
+                <TextBlock x:Name="MicrosoftStatus" Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/microsoft_client_id_label}" />
+                    <TextBox x:Name="MicrosoftClientIdInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailMicrosoftClientIdInput}"
+                             MinWidth="320" HorizontalAlignment="Left" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="{loc:Localize Key=admin/mail_page/microsoft_tenant_label}" />
+                    <TextBox x:Name="MicrosoftTenantInput"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailMicrosoftTenantInput}"
+                             MinWidth="320" HorizontalAlignment="Left" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/microsoft_tenant_subtitle}" />
+                </StackPanel>
+                <Button x:Name="MicrosoftSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailMicrosoftSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="MicrosoftSaveButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/mail_page/microsoft_save}" />
             </StackPanel>
 
         </StackPanel>

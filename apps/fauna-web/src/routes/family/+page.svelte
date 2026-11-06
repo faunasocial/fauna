@@ -120,16 +120,12 @@
    *  GTK-style signal guard needed here). */
   let policyUnknownPeerDmEdited = $state(false);
 
-  // The v1.x content-policy pillar (family-safety.md § Content policy) — a
-  // per-category guardian floor + the Notify toggle, edited in the same shared
-  // editor. Same label-not-wire <select> contract as the two reach knobs above.
-  // Default `inherit` = the unsupervised-equivalent (the ward's own thresholds
-  // decide); default Notify off.
+  // The v1.x content-policy pillar (family-safety.md § Content policy) — the
+  // guardian's rule document + the Notify toggle (default off).
   // The guardian's mounting of the shared rule editor (`family-policy-rules-section`,
-  // nest-rules.md § The shared rule editor (b)) — it superseded the four
-  // content-floor selects. Re-opened on every load of the selected ward, over the
-  // ward's content policy (its rule document, with every floor still set shown as
-  // a rule beside it); its own save writes the content pillar and nothing else.
+  // nest-rules.md § The shared rule editor (b)). Re-opened on every load of the
+  // selected ward, over the ward's content policy (its rule document); its own
+  // save writes the content pillar and nothing else.
   let rulesEditor = $state<RuleEditorHandle | null>(null);
   let rulesKey = $state(0);
   let rulesStatus = $state('');
@@ -213,7 +209,7 @@
   let unknownPeerDmOptionLabels = $state<string[]>([]);
 
   /** The supervised side's read-only `family-policy-summary` — the four reach
-   *  knobs PLUS each non-inherit content floor and, when on, the Notify line, as
+   *  knobs PLUS each guardian content category a rule acts on and, when on, the Notify line, as
    *  "{label}: {value}" lines, over the shared `ReachPolicy::summary_lines()`
    *  (family-safety.md § Content policy — ward transparency). */
   /** `usageTodayMinutes` folds the ward's own screen-time readout into this same
@@ -294,8 +290,8 @@
     // fail-closed `hold` (see `unknownPeerDmLabel`'s doc comment).
     policyUnknownPeerDmLabel = unknownPeerDmLabel(w.policy.unknown_peer_dm ?? 'allow');
     policyUnknownPeerDmEdited = false;
-    // An absent content_policy is the all-inherit unsupervised-equivalent default:
-    // an editor with no rules.
+    // An absent content_policy is the unsupervised-equivalent default: an editor
+    // with no rules.
     rulesEditor = openRuleEditorForGuardian(w.policy.content_policy ?? null);
     rulesKey += 1;
     policyContentNotify = w.policy.content_notify ?? false;
@@ -786,8 +782,7 @@
           </label>
 
           <!-- ── Content rules (family-safety.md § App surface → *Content rules*):
-               the guardian's mounting of the shared rule editor, where the four
-               per-category floor selects stood. Its own save; the policy form's
+               the guardian's mounting of the shared rule editor. Its own save; the policy form's
                save below sends the content pillar absent. -->
           <div class="content-rules" data-testid={IDS.FAMILY_POLICY_RULES_SECTION}>
             <h3>{t.rule_editor.family_section}</h3>
@@ -817,6 +812,10 @@
             data-state={policyContentNotify ? 'on' : 'off'}
             onclick={() => (policyContentNotify = !policyContentNotify)}
           >{t.family.policy_content_notify_label}</button>
+          <!-- The honest bound on content categories (family-client-enforcement.md
+               § Content policy → Where it binds): the apps do not detect adult
+               content or ads yet, so a limit on them waits for a label. -->
+          <p class="caveat" data-testid={IDS.FAMILY_POLICY_CONTENT_HINT}>{t.family.policy_content_hint}</p>
 
           <!-- Screen time (family-safety.md § Screen time, Slice E). The usage
                WINDOW is the hours the ward may use the account (so "no device

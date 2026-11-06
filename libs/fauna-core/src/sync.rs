@@ -2,6 +2,32 @@
 //! fauna-nest (server): path normalization and hashing, and the reserved
 //! folder-name convention.
 
+/// One row of a group set's review list as the replica holding it reports it
+/// (`group-set.md` § Build design — the group set, decision 9): a concurrent
+/// loss whose edit this device retains. A group set has no nest row, so this is
+/// what crosses from the set's own `sync_conflicts` to the app — over the sync
+/// agent's IPC on a desktop, in process on a phone — and it lives here so both
+/// doors carry the one shape into the one review-row mapping
+/// (`fauna_devices_machine::ConflictSummary::of_retained`).
+///
+/// `Default` is deliberate: the shape grows additively, so a fixture or an
+/// older sender leaves a new field at its default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RetainedConflict {
+    /// The row's id in this set's state DB — local to this device and set; the
+    /// restore addresses the row by (set, id).
+    pub id: i64,
+    pub path: String,
+    pub details: Option<String>,
+    /// When this replica recorded the loss, epoch seconds.
+    pub created_at: i64,
+    /// The winning row's device, hex.
+    pub winner_device: Option<String>,
+    /// The winning row's manifest, hex; `None` = the winner is a delete.
+    pub winner_manifest: Option<String>,
+}
+
 /// Normalize an already-folder-relative path to the canonical forward-slash
 /// form that [`path_hash`] hashes.
 ///

@@ -27,18 +27,27 @@
          supervised indicator; transport-connection.md § Connection-status indicator).
          It is not the NavigationView's PaneHeader, the visual "top of sidebar":
          WinUI does not reliably realize PaneHeader in the UIA tree, so FlaUI can't
-         read it there, and the Auto pane mode hides the whole pane below 641 DIP
-         (the 600 DIP minimum window), where an always-visible indicator still has
-         to show. -->
+         read it there, and at the 600 DIP default window the pane is a 48 DIP
+         icon rail with no room for status text. -->
     <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
+        <!-- CompactModeThresholdWidth="0": the primary tabs keep a persistent rail
+             at every window width the app allows (ui/README.md § Navigation model:
+             desktop carries "a persistent sidebar/rail"). The default Auto pane
+             drops to LeftMinimal below 641 DIP, hiding the rail behind a hamburger
+             whose toggle floats over the page, and the app's minimum and default
+             window is 600 DIP (App.xaml.cs MinWindowDip), so the app opened that
+             way. With the threshold at 0 Auto never picks Minimal: the LeftCompact
+             icon rail below ExpandedModeThresholdWidth (1008 DIP), the expanded
+             Left pane above it. Witness: test_windows_nav_rail_persistent.py. -->
         <NavigationView
             Grid.Row="1"
             x:Name="NavView"
+            CompactModeThresholdWidth="0"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             SelectionChanged="NavView_SelectionChanged"
@@ -347,6 +356,20 @@
                         Visibility="Collapsed"
                         Click="SupervisedIndicatorButton_Click" />
             </Grid>
+
+            <!-- The one-line notice that the session nest changed its rules (nest-rules.md
+                 § Acceptance at joining, and a change of rules → A change is announced):
+                 names the nest, and a click is the way to the rules surface —
+                 Settings → Status, where opening the surface reads the change and clears
+                 it (NestRulesHost.DismissNotice). Mounted with the shell's other global
+                 chrome, as android's and web's; ui.yaml adds no id for it, so it carries
+                 none (the `nest_rules_changed_notice` state field is the e2e witness).
+                 Collapsed while there is no change to announce; painted in code-behind
+                 (MainPage.PaintNestRulesNotice). -->
+            <HyperlinkButton x:Name="NestRulesChangedNotice"
+                             Visibility="Collapsed"
+                             Margin="12,2,12,2" Padding="4,2" FontSize="12"
+                             Click="NestRulesChangedNotice_Click" />
 
             <!-- Global test message elements, under the status line. Uses TextBox
                  (ReadOnly) because TextBlock doesn't always create UIA peers, and

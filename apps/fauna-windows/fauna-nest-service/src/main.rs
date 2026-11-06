@@ -25,6 +25,14 @@ struct Args {
     foreground: bool,
 
     /// Override HTTP listen port (default: 7450).
+    ///
+    /// Foreground/debug only, and NOT a user or admin knob (principles.md §
+    /// One configuration surface): SCM service mode ignores every flag and
+    /// binds the fixed serving port, and the user-chosen port lives in nest
+    /// state / `device.toml`. The flag exists as a TEST SEAM — the
+    /// `--foreground` e2e nest (`tests/e2e-unified/helpers/windows_caldav_nest.py`)
+    /// passes a free ephemeral loopback port so parallel runs never collide —
+    /// so it stays; 7450 is only the foreground fallback.
     #[arg(long, default_value_t = 7450)]
     port: u16,
 
@@ -34,6 +42,9 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The commit this binary was compiled from, handed to the embedded nest
+    // before it serves health (`fauna_nest::build_identity` owns why).
+    fauna_nest::build_identity::stamp(fauna_build_commit::commit!());
     let args = Args::parse();
 
     // Install the shared logging stack: the in-memory ring (backs the admin Logs

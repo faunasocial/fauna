@@ -608,6 +608,69 @@ pub struct DeviceHandshakeRequest {
 // shape as the direct-auth mint; a distinct reply type would restate it field
 // for field.
 
+// ── fauna.auth.device_bind (in-band device binding) ──────────────────────────
+
+/// The post-auth kind that binds the calling connection to a device of its own
+/// actor, carrying the proof a [`DEVICE_HANDSHAKE_KIND`] mint carries and
+/// minting nothing — the second door to the binding, for web's one seed-minted
+/// socket (`docs/goal/behavior/devices.md` § Listing Devices → *The binding* →
+/// *Web binds its one socket in band*). It confers no authority: the connection
+/// already dispatches as its actor. Additive 2026-10-31.
+pub const DEVICE_BIND_KIND: &str = "fauna.auth.device_bind";
+
+/// The exact bytes a `fauna.auth.device_bind` request signs (and the nest
+/// verifies): `DEVICE_BIND_V1 ‖ actor_id ‖ device_key ‖ timestamp_be ‖ nest_id ‖
+/// nonce` — the [`device_handshake_signed_message`] layout under its own domain
+/// tag, so neither signature ever serves as the other. Single source of the
+/// signed-message contract for the client-side signer and the nest verifier.
+pub fn device_bind_signed_message(
+    actor_id: &[u8; 32],
+    device_key: &[u8; 32],
+    timestamp_ms: u64,
+    nest_id: &[u8; 32],
+    nonce: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(104 + nonce.len());
+    body.extend_from_slice(actor_id);
+    body.extend_from_slice(device_key);
+    body.extend_from_slice(&timestamp_ms.to_be_bytes());
+    body.extend_from_slice(nest_id);
+    body.extend_from_slice(nonce);
+    crate::sig_domain::domain_separated(crate::sig_domain::DEVICE_BIND_V1, &body)
+}
+
+/// In-band device bind. Signed message is [`device_bind_signed_message`] over
+/// the identity of the nest the connection is open on, so no request field
+/// names it; the timestamp must be within ±30 s of server time, and the signing
+/// key is the device key a stored `RenewBearer`-scoped `DeviceAuthorization` of
+/// the connection's own actor authorizes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceBindRequest {
+    /// 64-char hex of the owner's 32-byte Ed25519 public key — refused unless
+    /// it is the connection's own actor.
+    pub actor_id: String,
+    /// 64-char hex of the device public key the stored grant authorizes.
+    pub device_key: String,
+    /// Milliseconds since the Unix epoch (the signed `timestamp_be`).
+    pub timestamp: u64,
+    /// Fresh per-request 32-byte random nonce, folded into the signature: it
+    /// uniquifies the deterministic Ed25519 signature for the replay guard, so
+    /// the bind every reconnect sends is never its predecessor's replay.
+    pub nonce: ByteBuf,
+    /// 128-char hex of the 64-byte Ed25519 signature by the device key over
+    /// [`device_bind_signed_message`].
+    pub signature: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `{}` on success: the verdict is the connection's, read on the roster.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DeviceBindReply {
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── fauna.auth.custody_handshake (custody-session bearer mint) ───────────────
 
 /// The pre-identity kind that mints a CUSTODIAN session bearer against a
@@ -974,17 +1037,36 @@ impl Default for VerifyReply {
 /// `domain` is the **handle's** domain as the nest reports it, never the
 /// dialled host (`conversations.md` § *Self-address: live, never baked*).
 /// `handle` is empty when the account has none yet.
+///
+/// **It names the actor it was minted for.** A launch machine outlives one
+/// account (tui's long-lived machine, Android's singleton), so a follower that
+/// checked "the bearer mints for my actor" and then read the watch could read
+/// the NEXT account's identity in between. `actor_id` travels with the value,
+/// and every follower compares against the value it actually read
+/// ([`Self::is_for`]), never against a separate, earlier check.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MintedIdentity {
+    /// The actor the confirming mint signed as (its ed25519 public key).
+    pub actor_id: [u8; 32],
     pub handle: String,
     pub domain: String,
     pub tier: String,
 }
 
+impl MintedIdentity {
+    /// Whether this identity was minted for `actor_id` — the one test a
+    /// follower applies before writing it to that actor's account row.
+    pub fn is_for(&self, actor_id: &[u8; 32]) -> bool {
+        self.actor_id == *actor_id
+    }
+}
+
 impl VerifyReply {
-    /// The identity this reply confirmed (see [`MintedIdentity`]).
-    pub fn identity(&self) -> MintedIdentity {
+    /// The identity this reply confirmed (see [`MintedIdentity`]) for
+    /// `actor_id`, the actor whose key signed the challenge it answers.
+    pub fn identity(&self, actor_id: [u8; 32]) -> MintedIdentity {
         MintedIdentity {
+            actor_id,
             handle: self.handle.clone(),
             domain: self.domain.clone(),
             tier: self.tier.clone(),
@@ -1576,6 +1658,15 @@ mod tests {
         );
         // Same layout, different tag — the standing tag-per-context rule.
         assert_ne!(d, c);
+        // The bind: the handshake's layout and key, a connection narrowed
+        // instead of a bearer minted, so a captured handshake never binds.
+        let b = device_bind_signed_message(&actor, &key, ts, &nest_a, &nonce);
+        assert!(b.starts_with(crate::sig_domain::DEVICE_BIND_V1));
+        assert_ne!(b, d);
+        assert_ne!(
+            b,
+            device_bind_signed_message(&actor, &key, ts, &nest_b, &nonce)
+        );
         // The fleet twin: same layout as the custody PoP, its own tag, so a
         // custody signature never replays as a fleet one.
         let f = custodied_fleet_handshake_signed_message(&actor, &key, ts, &nest_a, &nonce);

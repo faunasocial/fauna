@@ -181,9 +181,18 @@ class FfiOnDemandSource @Inject constructor(
         )
     }
 
-    /** The device-local toggle store the plan and the page share. */
-    private fun prefsStore() =
-        FfiOnDemandPrefsStore(File(accountStores.syncStateDir(), PREFS_FILE).absolutePath)
+    /**
+     * The device-local toggle store the plan and the page share — the active
+     * account's, carried from a predecessor scope first after an identity
+     * succession ([carriedOnDemandPrefs]).
+     */
+    private fun prefsStore(): FfiOnDemandPrefsStore {
+        val actorHex = accountStores.activeActorHex()
+            ?: return FfiOnDemandPrefsStore(File(accountStores.syncStateDir(), ON_DEMAND_PREFS_FILE).absolutePath)
+        return carriedOnDemandPrefs(actorHex, accountStores.predecessorsOf(actorHex)) {
+            File(accountStores.syncStateDirFor(it), ON_DEMAND_PREFS_FILE)
+        }
+    }
 
     /** The bare refs a watched-directory ingress feeds — a stronger presence the plan leaves out. */
     private suspend fun strongerRefs(): List<String> = runCatching {
@@ -207,10 +216,11 @@ class FfiOnDemandSource @Inject constructor(
         // (`capability_host_presence_sets`; `on-demand-files-shared-sets.md` § Shared sets
         // on a capability host, decision 3): an own folder is a delivery seat
         // where THIS device's place accepts, a folder shared with the account
-        // once its share was accepted, read-only unless a writer. It reads the
-        // custody the hosts read, with the hosts' own capability. A read that
-        // fails throws: skip this reconcile rather than tearing down presences
-        // on a state we could not see.
+        // once its share was accepted, read-only unless a writer; a group set
+        // from the app's ring mirror in the hosts' state dir (`group-set.md`
+        // § decision 12). It reads the custody the hosts read, with the hosts'
+        // own capability. A read that fails throws: skip this reconcile
+        // rather than tearing down presences on a state we could not see.
         val sets = capabilityHostPresenceSets(
             nest.folders(),
             acct.dialUrl,
@@ -219,6 +229,7 @@ class FfiOnDemandSource @Inject constructor(
             acct.backupKey,
             bearerProvider(acct),
             acct.signer,
+            accountStores.syncStateDir(),
         )
         val plan = onDemandPresencePlan(acct.actorHex, sets, strongerRefs(), prefsStore(), hosts.keys.toList(), null)
         for (removal in plan.remove) hosts.remove(removal.identifier)?.close()
@@ -319,10 +330,14 @@ class FfiOnDemandSource @Inject constructor(
         private fun FfiFileProviderAck.toAck() = OnDemandAck(acked, contentChanged, excluded)
     }
 
-    private companion object {
-        const val TAG = "FfiOnDemandSource"
+    companion object {
+        private const val TAG = "FfiOnDemandSource"
+
+        /**
+         * Android's **app default** (`devices.md` § Device names, class (2)):
+         * the label every register leg of this app passes — the engine hosts
+         * and the account runtime's enrollment ceremony alike.
+         */
         const val DEVICE_LABEL = "fauna-android"
-        /** The device-local "show on demand" toggle store (internal wiring, never a user choice). */
-        const val PREFS_FILE = "on-demand-prefs.json"
     }
 }

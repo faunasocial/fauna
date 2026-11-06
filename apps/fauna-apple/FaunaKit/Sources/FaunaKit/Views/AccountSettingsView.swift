@@ -48,6 +48,9 @@ public struct AccountSettingsView: View {
     /// — see the type doc comment above). macOS sets `isOnboarded = false`;
     /// iOS sets `isOnboarding = true`.
     private let onAccountReset: () -> Void
+    /// The app state's bounded drafts flush — threaded straight through to
+    /// `SignOutSection`, which runs it while the session is still alive.
+    private let flushDraftRails: @MainActor () async -> Void
     /// Activate another identity held on this install. The app root tears the
     /// authenticated session down and rebuilds it (`long-term-store.md` § Multi-account
     /// evolution — switch-first); this view only names the target. The Bool is the
@@ -61,12 +64,14 @@ public struct AccountSettingsView: View {
     public init(
         session: SessionState,
         ownLock: FfiAccountInstanceLock? = nil,
+        flushDraftRails: @escaping @MainActor () async -> Void,
         onAccountReset: @escaping () -> Void,
         onSwitchAccount: @escaping @MainActor (String, Bool) async throws -> Void,
         onAddAccount: @escaping () -> Void
     ) {
         self.session = session
         self.ownLock = ownLock
+        self.flushDraftRails = flushDraftRails
         self.onAccountReset = onAccountReset
         self.onSwitchAccount = onSwitchAccount
         self.onAddAccount = onAddAccount
@@ -171,6 +176,9 @@ public struct AccountSettingsView: View {
                         Text(L.settings.icloudBackup.footer)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let error = vm.iCloudBackupError {
+                            ErrorBanner(message: error)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -231,7 +239,9 @@ public struct AccountSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                SignOutSection(session: session, ownLock: ownLock, onSignedOut: onAccountReset)
+                SignOutSection(
+                    session: session, ownLock: ownLock, flushDraftRails: flushDraftRails,
+                    onSignedOut: onAccountReset)
 
                 GroupBox(L.common.dangerZone) {
                     // ── Type-to-confirm, the DECLARED cross-app idiom (ui.yaml

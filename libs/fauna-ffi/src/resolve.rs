@@ -262,9 +262,22 @@ mod tests {
     }
 
     #[test]
-    fn malformed_is_invalid() {
+    fn bare_localpart_is_a_handle_with_an_empty_domain_slot() {
         assert_eq!(
             classify_recipient("justtext".to_string()),
+            vec![
+                "handle".to_string(),
+                String::new(),
+                "justtext".to_string(),
+                String::new()
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_is_invalid() {
+        assert_eq!(
+            classify_recipient("two words".to_string()),
             vec![
                 "invalid".to_string(),
                 String::new(),

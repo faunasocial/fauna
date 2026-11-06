@@ -4,7 +4,10 @@
 
 #![cfg(any(test, feature = "test-helpers"))]
 
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use fauna_client_bridges::HolderInfo;
 
@@ -36,6 +39,50 @@ pub enum FakeCall {
     ContentProcessorHolders,
 }
 
+#[derive(Debug, Default)]
+struct ListHoldState {
+    started: bool,
+    released: bool,
+    waker: Option<Waker>,
+}
+
+/// A `list` held in flight: it reads the catalog when it is CALLED (the
+/// nest's answer as of then) and returns it only once [`Self::release`]d —
+/// a read that started before a write and comes back after it.
+#[derive(Debug, Clone, Default)]
+pub struct ListHold(Arc<Mutex<ListHoldState>>);
+
+impl ListHold {
+    /// Whether the held `list` has been called (and read its answer).
+    pub fn started(&self) -> bool {
+        self.0.lock().unwrap().started
+    }
+
+    /// Let the held `list` return.
+    pub fn release(&self) {
+        let mut s = self.0.lock().unwrap();
+        s.released = true;
+        if let Some(w) = s.waker.take() {
+            w.wake();
+        }
+    }
+}
+
+struct ListHoldWait(ListHold);
+
+impl Future for ListHoldWait {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut s = (self.0).0.lock().unwrap();
+        if s.released {
+            Poll::Ready(())
+        } else {
+            s.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
 /// One fixtured `inspect` response, keyed by the `labeler_id` it answers for.
 type InspectFixture = (Vec<u8>, Result<InspectResult, LabelerCatalogApiError>);
 
@@ -48,6 +95,8 @@ pub struct FakeLabelerCatalogNestApi {
     unsubscribe_response: Mutex<Option<Result<(), LabelerCatalogApiError>>>,
     /// `Some` makes `list` fail (refresh-error path).
     list_response: Mutex<Option<LabelerCatalogApiError>>,
+    /// `Some` holds the next `list` in flight ([`ListHold`]).
+    list_hold: Mutex<Option<ListHold>>,
     /// The content-processor roster `content_processor_holders` answers with
     /// (empty by default — no holder enrolled).
     holders: Mutex<Vec<HolderInfo>>,
@@ -63,6 +112,12 @@ impl FakeLabelerCatalogNestApi {
 
     pub fn set_entries(&self, entries: Vec<LabelerCatalogEntry>) {
         *self.entries.lock().unwrap() = entries;
+    }
+    /// Hold the next `list` in flight until the returned handle is released.
+    pub fn hold_next_list(&self) -> ListHold {
+        let hold = ListHold::default();
+        *self.list_hold.lock().unwrap() = Some(hold.clone());
+        hold
     }
     pub fn fail_list(&self, err: LabelerCatalogApiError) {
         *self.list_response.lock().unwrap() = Some(err);
@@ -101,10 +156,16 @@ impl FakeLabelerCatalogNestApi {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl LabelerCatalogNestApi for FakeLabelerCatalogNestApi {
     async fn list(&self) -> Result<Vec<LabelerCatalogEntry>, LabelerCatalogApiError> {
-        match self.list_response.lock().unwrap().clone() {
+        let answer = match self.list_response.lock().unwrap().clone() {
             Some(e) => Err(e),
             None => Ok(self.entries.lock().unwrap().clone()),
+        };
+        let hold = self.list_hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            hold.0.lock().unwrap().started = true;
+            ListHoldWait(hold).await;
         }
+        answer
     }
 
     async fn inspect(&self, labeler_id: Vec<u8>) -> Result<InspectResult, LabelerCatalogApiError> {

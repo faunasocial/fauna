@@ -321,6 +321,18 @@ pub struct WriterGrantRegisterRequest {
     /// Absent = a plain registration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub succeeds: Option<String>,
+    /// Write only over a seat in force: when the owner's seat here is revoked,
+    /// the registration changes nothing and the reply says so
+    /// ([`WriterGrantRegisterReply::seat_revoked`]) instead of re-granting it.
+    /// The device's automatic seat carry always sets it, so an owner's revoke
+    /// landing between the carry's seat read and its handover is never undone:
+    /// the check is the destination's, inside the registration's own
+    /// transaction (`segment-backup-protocol.md` § Cross-location backup
+    /// protocol → *The writer seat*, *How the seat moves*). An enrollment,
+    /// whose confirm is the owner's gesture, leaves it unset and keeps the
+    /// re-grant. Additive: absent = `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_force_only: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -333,6 +345,11 @@ pub const WRITER_SEAT_HELD_HOLDER: &str = "holder_nest_id";
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WriterGrantRegisterReply {
     pub ok: bool,
+    /// The request set [`WriterGrantRegisterRequest::in_force_only`] and the
+    /// owner's seat here is revoked: nothing changed and `ok` is `false`; the
+    /// seat still names its holder, revoked. Additive: absent = `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seat_revoked: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

@@ -96,6 +96,7 @@ struct HandleEntryView: View {
             // The by-continuing notice only while Continue signs in — the
             // shared `terms_notice_visible` (true iff `AlreadyOnNest`).
             if snap.termsNoticeVisible {
+                JoiningNestRules(summary: vm.joiningNestRules)
                 TermsNotice()
             }
 

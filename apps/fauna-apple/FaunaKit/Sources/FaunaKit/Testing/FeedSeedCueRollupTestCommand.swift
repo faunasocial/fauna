@@ -51,7 +51,7 @@ public enum FeedSeedCueRollupTestCommand {
             return "feed_seed_cue_rollup_for_test: no live client or session secret, so the "
                 + "cue rollup cannot be sealed or PUT to the nest"
         }
-        await feedVM.configure(api: api, secretHex: secret)
+        await feedVM.configure(api: api, secretHex: secret, deviceIdHex: client?.deviceId ?? "")
         guard let mgr = feedVM.manager else {
             return "feed_seed_cue_rollup_for_test: feedVM manager unavailable after configure"
         }

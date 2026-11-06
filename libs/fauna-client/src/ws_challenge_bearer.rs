@@ -1033,6 +1033,7 @@ mod tests {
                 handle: handle.into(),
                 domain: "nest.example".into(),
                 tier: "free".into(),
+                ..Default::default()
             }),
         }
     }

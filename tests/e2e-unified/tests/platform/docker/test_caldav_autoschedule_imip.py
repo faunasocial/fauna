@@ -87,6 +87,7 @@ from .helpers import (
     remove_container,
     remove_network,
     start_container_with_ports,
+    start_fake_scanner_sidecars,
     start_stub_mx_sidecar,
     wait_for_health,
 )
@@ -276,11 +277,16 @@ def docker_image():
 def stub_mx(docker_image):
     """A stub external SMTP MX on a user-defined network the nest joins, the
     outbound relay target for ``external.test`` (the attendee domain). Each
-    delivered message lands as a ``.eml`` in the mounted out-dir. Yields
-    ``{network, mx_target, out_dir}``."""
+    delivered message lands as a ``.eml`` in the mounted out-dir. The fake
+    clamd + rspamd sidecars share the network: a public box wired with no content
+    scanners refuses ``set_mail_enabled(true)`` (``mail-bridge-lifecycle.md``
+    § Default-off on first claim), so the nest container carries ``scan_env``.
+    Yields ``{network, mx_target, out_dir, scan_env}``."""
     suffix = find_free_ports(1)[0]
     network = f"fauna-autosched-net-{suffix}"
     stub_name = f"fauna-autosched-stubmx-{suffix}"
+    clamd_name = f"fauna-autosched-clamd-{suffix}"
+    rspamd_name = f"fauna-autosched-rspamd-{suffix}"
     helpers_dir = str(get_repo_root() / "tests" / "e2e-unified" / "helpers")
     out_dir = tempfile.mkdtemp(prefix="fauna-autosched-stubmx-")
     # World-writable: the sidecar (root, maybe userns-remapped) writes through the
@@ -289,8 +295,16 @@ def stub_mx(docker_image):
     create_network(network)
     try:
         mx_target = start_stub_mx_sidecar(network, helpers_dir, out_dir, name=stub_name)
-        yield {"network": network, "mx_target": mx_target, "out_dir": out_dir}
+        scan = start_fake_scanner_sidecars(
+            network, str(get_repo_root() / "tests" / "e2e-unified" / "fakes"),
+            clamd_name=clamd_name, rspamd_name=rspamd_name)
+        scan_env = {"FAUNA_CLAMD_ADDR": scan["clamd_addr"],
+                    "FAUNA_RSPAMD_URL": scan["rspamd_url"]}
+        yield {"network": network, "mx_target": mx_target, "out_dir": out_dir,
+               "scan_env": scan_env}
     finally:
+        remove_container(clamd_name)
+        remove_container(rspamd_name)
         remove_container(stub_name)
         remove_network(network)
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -317,6 +331,7 @@ def autosched_nest(docker_image, stub_mx, run_seal_helper):
             "FAUNA_PORT": "3000",
             # Relay the attendees' external domain to the stub MX (by IP:port).
             "FAUNA_MTA_MX_OVERRIDE": f"{EXTERNAL_DOMAIN}={stub_mx['mx_target']}",
+            **stub_mx["scan_env"],
         },
         network=stub_mx["network"],
     )

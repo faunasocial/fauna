@@ -26,14 +26,14 @@ import org.robolectric.annotation.Config
  * (family-safety.md § Content policy, ratified 2026-08-02): **a failed read
  * keeps the last-known state in force** — "read failed" and "read says
  * unsupervised" are different facts, and only the second (or an identity
- * change) may clear a loaded guardian floor. This is the android arm of the
- * probe shape: load a floor, fail the next read, assert the
- * verdict inputs still carry the floor.
+ * change) may clear a loaded guardian policy. This is the android arm of the
+ * probe shape: load a policy, fail the next read, assert the
+ * verdict inputs still carry the policy.
  *
  * Latency-independence (testing.md convention 14): the negative assert ("the
  * failed refresh did not clear") anchors on a causal barrier — the same
  * refresh's *other* half returns changed thresholds, so observing them proves
- * the refresh ran to completion before the floor is inspected. Budgets are
+ * the refresh ran to completion before the policy is inspected. Budgets are
  * generous ceilings, not expected latencies.
  */
 @RunWith(FaunaRobolectricTestRunner::class)
@@ -44,19 +44,24 @@ class ContentPolicyStoreTest {
         const val BUDGET_MS = 10_000L
     }
 
-    private fun floors(nsfw: String = "block") =
-        FfiContentPolicy(nsfw = nsfw, spam = "inherit", phishing = "inherit", commercial = "inherit")
+    /** A guardian policy tagged [tag]. The store moves the guardian's rule
+     *  document as opaque bytes and never parses it, so the tag stands in for
+     *  a real document and [tagOf] reads back which one is in force — no FFI
+     *  call needed. */
+    private fun policy(tag: String = "block") = FfiContentPolicy(document = tag.encodeToByteArray())
+
+    private fun tagOf(policy: FfiContentPolicy?): String? = policy?.document?.decodeToString()
 
     private val guardian = FfiFamilyGuardianInfo(actorId = ByteArray(32) { 2 }, handle = "guardian")
 
-    private fun supervisedStatus(floor: FfiContentPolicy?) = FfiFamilyStatus(
+    private fun supervisedStatus(guardianPolicy: FfiContentPolicy?) = FfiFamilyStatus(
         supervisedBy = guardian,
         policy = FfiReachPolicy(
             contactApproval = false,
             unknownSenderMail = "allow",
             federationContact = true,
             feedSources = "allow",
-            contentPolicy = floor,
+            contentPolicy = guardianPolicy,
             screenTime = null,
             contentNotify = true,
             unknownPeerDm = null,
@@ -67,13 +72,13 @@ class ContentPolicyStoreTest {
         contactRequests = emptyList(),
         feedRequests = emptyList(),
         // family-safety.md § The account age band — this file's subject is the
-        // content-policy floor, which no band participates in.
+        // content policy, which no band participates in.
         ageBand = null,
         // The gated fold shared Rust attaches to every real reply
         // (`FfiFamilyStatus.supervision`) — the half this store reads.
         supervision = FfiSupervisionSnapshot(
             supervisedBy = guardian,
-            contentPolicy = floor,
+            contentPolicy = guardianPolicy,
             contentNotify = true,
             screenTime = null,
         ),
@@ -109,7 +114,7 @@ class ContentPolicyStoreTest {
         val api = mock(ApiClient::class.java)
         val accountStores = mock(AccountStores::class.java)
         val state = ApiState(
-            status = Result.success(supervisedStatus(floors())),
+            status = Result.success(supervisedStatus(policy())),
             prefs = Result.success(prefs(100, 100)),
         )
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
@@ -121,11 +126,11 @@ class ContentPolicyStoreTest {
     }
 
     @Test
-    fun `construction restores the persisted floor before any read succeeds`() = runBlocking {
+    fun `construction restores the persisted policy before any read succeeds`() = runBlocking {
         val api = mock(ApiClient::class.java)
         val accountStores = mock(AccountStores::class.java)
         // The status read FAILS for the whole test — the persisted snapshot is
-        // the only possible source of the floor asserted below (clause 2:
+        // the only possible source of the policy asserted below (clause 2:
         // "loaded at launch ahead of the first read"; the cold-offline-launch
         // case the ruling exists for).
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
@@ -136,7 +141,7 @@ class ContentPolicyStoreTest {
         whenever(accountStores.supervisionSnapshot()).thenReturn(
             com.fauna.ffi.FfiSupervisionSnapshot(
                 supervisedBy = FfiFamilyGuardianInfo(actorId = ByteArray(3) { 1 }, handle = "guardian"),
-                contentPolicy = floors(),
+                contentPolicy = policy(),
                 contentNotify = true,
                 screenTime = null,
             ),
@@ -144,18 +149,18 @@ class ContentPolicyStoreTest {
 
         val store = ContentPolicyStore(api, accountStores)
         // Causal barrier: the prefs half landing proves construction's refresh
-        // ran to completion — so the floor observed below was restored AND
+        // ran to completion — so the policy observed below was restored AND
         // kept across the failed read, not merely not-yet-cleared.
         val after = withTimeout(BUDGET_MS) {
             store.inputs.first { it.ownSpamPermille == 700.toUShort() }
         }
 
         assertNotNull(
-            "the restored floor must bind before/without a successful read " +
+            "the restored policy must bind before/without a successful read " +
                 "(family-safety.md § Content policy, unfetched-policy clause 2)",
             after.contentPolicy,
         )
-        assertEquals("block", after.contentPolicy!!.nsfw)
+        assertEquals("block", tagOf(after.contentPolicy))
         assertEquals(
             "content_notify restores too — the field tui's mutation run proved uncovered",
             true,
@@ -164,12 +169,12 @@ class ContentPolicyStoreTest {
     }
 
     @Test
-    fun `a failed status read keeps the loaded guardian floor`() = runBlocking {
+    fun `a failed status read keeps the loaded guardian policy`() = runBlocking {
         val (store, state, _) = makeLoaded()
 
         // The status read now fails while the prefs read returns NEW values —
         // observing the changed thresholds is the causal barrier proving the
-        // failed refresh completed before the floor is inspected.
+        // failed refresh completed before the policy is inspected.
         state.status = Result.failure(RuntimeException("nest unreachable"))
         state.prefs = Result.success(prefs(700, 900))
         store.refresh()
@@ -178,16 +183,16 @@ class ContentPolicyStoreTest {
         }
 
         assertNotNull(
-            "a failed status read must keep the loaded floor " +
+            "a failed status read must keep the loaded policy " +
                 "(family-safety.md § Content policy, unfetched-policy clause 1)",
             after.contentPolicy,
         )
-        assertEquals("block", after.contentPolicy!!.nsfw)
+        assertEquals("block", tagOf(after.contentPolicy))
         assertEquals("the Notify knob keeps its last-known value too", true, after.contentNotify)
     }
 
     @Test
-    fun `a successful unsupervised read clears the floor`() = runBlocking {
+    fun `a successful unsupervised read clears the policy`() = runBlocking {
         val (store, state, _) = makeLoaded()
 
         // Same status shape a graduated/unsupervised viewer gets: success, no
@@ -211,28 +216,28 @@ class ContentPolicyStoreTest {
             store.inputs.first { it.ownSpamPermille == 700.toUShort() }
         }
 
-        assertNull("a successful read reporting unsupervised clears the floor", after.contentPolicy)
+        assertNull("a successful read reporting unsupervised clears the policy", after.contentPolicy)
         assertEquals(false, after.contentNotify)
     }
 
     @Test
-    fun `a successful read whose policy names no guardian binds no floor`() = runBlocking {
+    fun `a successful read whose policy names no guardian binds no policy`() = runBlocking {
         val (store, state, _) = makeLoaded()
 
         // A reply that still carries a policy document but names NO guardian.
         // No current nest sends one, but a client must stay correct against
         // nests of other versions, and shared Rust's gated fold hands this
         // reply no supervision at all. Reading the raw `policy` would bind its
-        // floor to an unsupervised viewer — the shape linux and web were fixed
+        // policy to an unsupervised viewer — the shape linux and web were fixed
         // away from (family-client-enforcement.md § Implementation status today).
-        state.status = Result.success(supervisedStatus(floors()).copy(supervisedBy = null, supervision = null))
+        state.status = Result.success(supervisedStatus(policy()).copy(supervisedBy = null, supervision = null))
         state.prefs = Result.success(prefs(700, 900))
         store.refresh()
         val after = withTimeout(BUDGET_MS) {
             store.inputs.first { it.ownSpamPermille == 700.toUShort() }
         }
 
-        assertNull("a policy naming no guardian binds no floor", after.contentPolicy)
+        assertNull("a policy naming no guardian binds no policy", after.contentPolicy)
         assertEquals("nor Guardian Notify counting", false, after.contentNotify)
     }
 
@@ -241,14 +246,14 @@ class ContentPolicyStoreTest {
         val (store, _, _) = makeLoaded()
 
         // FamilyVM's own successful read hands its fold here (web's Family
-        // page feeds its floor the same way): a fold naming nothing
+        // page feeds its policy the same way): a fold naming nothing
         // enforceable clears the half, a new one replaces it.
         store.applySupervision(null)
         assertNull(store.inputs.value.contentPolicy)
         assertEquals(false, store.inputs.value.contentNotify)
 
         store.applySupervision(snapshotFor("collapse"))
-        assertEquals("collapse", store.inputs.value.contentPolicy?.nsfw)
+        assertEquals("collapse", tagOf(store.inputs.value.contentPolicy))
         assertEquals(true, store.inputs.value.contentNotify)
         assertEquals(
             "the page read leaves the viewer's own thresholds alone",
@@ -274,7 +279,7 @@ class ContentPolicyStoreTest {
 
         // Keep-on-failure makes this reset load-bearing: without it a failed
         // re-read after an account switch would render the next account
-        // against the previous ward's floor (account-scoping.md § The scoping
+        // against the previous ward's policy (account-scoping.md § The scoping
         // taxonomy, the switch/sign-out isolation contract).
         assertEquals(ContentPolicyInputs(), store.inputs.value)
     }
@@ -287,9 +292,9 @@ class ContentPolicyStoreTest {
      */
     private class AccountState(var activeActor: String?, var snapshot: com.fauna.ffi.FfiSupervisionSnapshot?)
 
-    private fun snapshotFor(nsfw: String) = com.fauna.ffi.FfiSupervisionSnapshot(
+    private fun snapshotFor(tag: String) = com.fauna.ffi.FfiSupervisionSnapshot(
         supervisedBy = FfiFamilyGuardianInfo(actorId = ByteArray(32) { 5 }, handle = "guardian"),
-        contentPolicy = floors(nsfw),
+        contentPolicy = policy(tag),
         contentNotify = true,
         screenTime = null,
     )
@@ -316,7 +321,7 @@ class ContentPolicyStoreTest {
     }
 
     @Test
-    fun `an offline switch re-seeds the incoming actor's persisted floor`() = runBlocking {
+    fun `an offline switch re-seeds the incoming actor's persisted policy`() = runBlocking {
         val (store, state, accountStores) = makeSwitchable(initialActor = "actor-a", initialSnapshot = null)
         assertNull("actor A has no persisted snapshot at construction", store.inputs.value.contentPolicy)
 
@@ -331,10 +336,10 @@ class ContentPolicyStoreTest {
 
         assertEquals(
             "an offline in-process switch must re-seed the INCOMING actor's " +
-                "persisted floor, not leave it unsupervised until a read " +
+                "persisted policy, not leave it unsupervised until a read " +
                 "succeeds (family-safety.md § Content policy, clause 2)",
             "collapse",
-            store.inputs.value.contentPolicy?.nsfw,
+            tagOf(store.inputs.value.contentPolicy),
         )
         assertEquals(true, store.inputs.value.contentNotify)
     }
@@ -345,7 +350,7 @@ class ContentPolicyStoreTest {
             initialActor = "actor-a",
             initialSnapshot = snapshotFor("block"),
         )
-        assertNotNull("actor A's restored floor must load at construction", store.inputs.value.contentPolicy)
+        assertNotNull("actor A's restored policy must load at construction", store.inputs.value.contentPolicy)
 
         val closer = closerOf(accountStores)
         state.activeActor = "actor-b"
@@ -354,19 +359,19 @@ class ContentPolicyStoreTest {
 
         assertNull(
             "an unsupervised incoming actor must render unsupervised, not the " +
-                "outgoing ward's own floor",
+                "outgoing ward's own policy",
             store.inputs.value.contentPolicy,
         )
         assertEquals(false, store.inputs.value.contentNotify)
     }
 
     @Test
-    fun `a same-actor drop does not resurrect the outgoing actor's own floor`() = runBlocking {
+    fun `a same-actor drop does not resurrect the outgoing actor's own policy`() = runBlocking {
         val (store, _, accountStores) = makeSwitchable(
             initialActor = "actor-a",
             initialSnapshot = snapshotFor("block"),
         )
-        assertNotNull("actor A's restored floor must load at construction", store.inputs.value.contentPolicy)
+        assertNotNull("actor A's restored policy must load at construction", store.inputs.value.contentPolicy)
 
         // A debug `TestAgent` `reset`/`logout` arm whose credential wipe does
         // not reach the registry (`FileSecretBackend` e2e mode: `SecureStorage
@@ -378,7 +383,7 @@ class ContentPolicyStoreTest {
 
         assertNull(
             "a same-actor drop must land blank, never resurrect the SAME " +
-                "actor's own last-known floor under what is supposed to be a " +
+                "actor's own last-known policy under what is supposed to be a " +
                 "blank reset",
             store.inputs.value.contentPolicy,
         )

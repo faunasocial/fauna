@@ -11,6 +11,11 @@
 //!
 //! Get and put only. The delete is raw SQL inside materialize's commit
 //! transaction, so the marker cannot outlive the commit or leave before it.
+//!
+//! Beside the marker, `materialize_deleted_collections` names each collection a
+//! door deleted while the marker stood ([`note_collection_deleted_in_flight`],
+//! written inside the door's own transaction); the commit deletes those rows in
+//! the same statement group as the marker.
 
 use anyhow::{Context as _, Result, anyhow};
 use rusqlite::OptionalExtension;
@@ -124,4 +129,69 @@ impl CacheDb {
         .context("write materialize_in_flight")?;
         Ok(())
     }
+
+    /// The collections a door deleted while the marker for `(actor, kind)`
+    /// stood ([`note_collection_deleted_in_flight`]).
+    pub async fn materialize_deleted_collections(
+        &self,
+        actor: &[u8; 32],
+        kind: &str,
+    ) -> Result<Vec<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        deleted_collections_in_flight(&conn, actor, kind)
+    }
+}
+
+/// The collections a door deleted while the marker for `(actor, kind)` stood,
+/// read on `conn` (a transaction derefs to one).
+pub(crate) fn deleted_collections_in_flight(
+    conn: &rusqlite::Connection,
+    actor: &[u8; 32],
+    kind: &str,
+) -> Result<Vec<[u8; 32]>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT collection_id FROM materialize_deleted_collections
+             WHERE actor_id = ?1 AND kind = ?2 ORDER BY collection_id",
+        )
+        .context("prepare the deleted-collections read")?;
+    let rows = stmt
+        .query_map(rusqlite::params![actor.as_slice(), kind], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .context("read materialize_deleted_collections")?;
+    let mut out = Vec::new();
+    for row in rows {
+        let bytes = row.context("read a deleted collection id")?;
+        out.push(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+            anyhow!(
+                "materialize_deleted_collections.collection_id of {} bytes, not 32",
+                bytes.len()
+            )
+        })?);
+    }
+    Ok(out)
+}
+
+/// **A door's collection deletion while the flip is torn, recorded for the
+/// retry** (`backup-destinations.md` § *the in-flight marker*: a retry keeps
+/// post-gesture activity, never undoes it). Called by a collection delete door
+/// inside the transaction that deletes the collection; writes a row only when
+/// the marker for `(actor, kind)` stands, so outside a flip it is a no-op. The
+/// retry then neither re-inserts the collection from the corpus nor keeps the
+/// corpus's version of it in the adopted journal.
+pub(crate) fn note_collection_deleted_in_flight(
+    tx: &rusqlite::Transaction<'_>,
+    actor: &[u8; 32],
+    kind: &str,
+    collection_id: &[u8; 32],
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO materialize_deleted_collections (actor_id, kind, collection_id)
+         SELECT ?1, ?2, ?3
+         WHERE EXISTS (SELECT 1 FROM materialize_in_flight WHERE actor_id = ?1 AND kind = ?2)",
+        rusqlite::params![actor.as_slice(), kind, collection_id.as_slice()],
+    )
+    .context("record a collection deleted while the flip is in flight")?;
+    Ok(())
 }

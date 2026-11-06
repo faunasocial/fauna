@@ -8,9 +8,14 @@ guide: docs/guides/calendar-and-contacts.md § Contacts: two different address b
 
 ## What a user gets
 
-Any CardDAV contacts app connects with the same address and app password,
-finds your address book from the server name alone, and reads and writes cards that
-rest sealed on your nest.
+Any CardDAV contacts app connects with the same address and app password, finds
+your address book from the server name alone, and reads and writes cards stored
+encrypted on your nest, which opens them with the password of a mail, calendar,
+contacts or file app you connect, and only for that app's signed-in session;
+beyond that, no permission you give your nest lets it read your address book.
+Your nest also sees what any server that delivers your messages must: who you're
+connected to — your contacts, whom you follow, the groups you're in — and when
+and how much you send.
 
 ## Coverage contract
 
@@ -64,36 +69,36 @@ Stamped 2026-09-23 at 6605debcb9.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.3-dev+862c7d57 standalone |
-| linux | ✅ full | 0.1.3-dev+862c7d57 standalone |
-| windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
-| macos | ✅ full | 0.1.2-dev+96eae039 standalone |
-| ios | ✅ full | 0.1.2-dev+96eae039 standalone |
+| web | ✅ full | 0.1.5-dev+8755c14e standalone |
+| linux | ✅ full | 0.1.5-dev+8755c14e standalone |
+| windows | ✅ full | 0.1.5-dev+8755c14e standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+8755c14e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+8755c14e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_host_only_autodiscovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_host_only_autodiscovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_cards_from_a_contacts_app_never_become_fauna_contacts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_away_too_long_is_sent_to_a_full_resync` | nest (linux): passed, nest (windows): passed |
-| 9 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_editing_or_deleting_from_an_out_of_date_copy_is_refused` | nest (linux): passed, nest (windows): passed |
-| 10 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_both_vcard_formats_are_accepted_and_a_malformed_card_is_refused` | nest (linux): passed, nest (windows): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_creates_another_address_book_beside_the_default` | nest (linux): passed, nest (windows): passed |
-| 12 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_renaming_an_address_book_and_its_description_is_kept` | nest (linux): passed, nest (windows): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_searches_the_address_book_by_field` | nest (linux): passed, nest (windows): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_given_only_an_email_address_a_contacts_app_finds_the_address_book` | nest (linux): passed, nest (windows): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_signing_in_with_just_the_username_is_let_in` | nest (linux): passed, nest (windows): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_without_the_password_nothing_is_served_and_repeated_guessing_is_braked` | nest (linux): passed, nest (windows): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_contacts_keep_working_with_mail_turned_off` | nest (linux): passed, nest (windows): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_switching_contacts_off_closes_the_door_and_the_signpost` | nest (linux): passed, nest (windows): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_on_a_home_nest_with_no_domain_contacts_are_reached_by_the_bare_address` | nest (linux): passed, nest (windows): passed |
-| 20 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_another_user_can_never_reach_your_address_book_even_with_the_same_name` | nest (linux): passed, nest (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_host_only_autodiscovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_host_only_autodiscovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_cards_from_a_contacts_app_never_become_fauna_contacts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_away_too_long_is_sent_to_a_full_resync` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 9 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_editing_or_deleting_from_an_out_of_date_copy_is_refused` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 10 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_both_vcard_formats_are_accepted_and_a_malformed_card_is_refused` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_creates_another_address_book_beside_the_default` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_renaming_an_address_book_and_its_description_is_kept` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_searches_the_address_book_by_field` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_given_only_an_email_address_a_contacts_app_finds_the_address_book` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_signing_in_with_just_the_username_is_let_in` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_without_the_password_nothing_is_served_and_repeated_guessing_is_braked` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_contacts_keep_working_with_mail_turned_off` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_switching_contacts_off_closes_the_door_and_the_signpost` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_on_a_home_nest_with_no_domain_contacts_are_reached_by_the_bare_address` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_another_user_can_never_reach_your_address_book_even_with_the_same_name` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 <!-- features-render:end -->

@@ -75,12 +75,18 @@ from helpers.waiting import session_generation
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui, pytest.mark.web,
-    pytest.mark.macos, pytest.mark.ios,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.windows,
 ]
 
 #: Clients that render ``launch_identity_changed`` and can persist a pin across a
-#: relaunch. android/windows join by growing a ``launch_harness`` leg — the bridge
-#: seam they need is already all-app.
+#: relaunch. windows joined 2026-11-02 on its existing ``launch_harness`` leg
+#: (it also serves ``test_nest_identity_pin_post_auth.py`` and
+#: ``test_nest_identity_pin_webpki.py``): this list and the ``pytestmark``
+#: marker plus a run. android joined with no new harness code: its
+#: ``LaunchIdentityChangedScreen`` paints the warning and trust button, its
+#: launch harness and ``self_signed_nest`` legs already serve other android
+#: tests, and ``call_machine_method`` reaches the shared onboarding machine's pin
+#: seam through the Hilt ``OnboardingHost``.
 #:
 #: macos/ios joined 2026-08-01 with **no new harness code**: the apple legs of
 #: every piece already existed — ``AppleFileCredStore`` (``common/cred_store.py``,
@@ -92,7 +98,7 @@ pytestmark = [
 #: bugs there were fixed 2026-07-18 — ``onboarding.md`` § E2E bridge contract).
 #: Joining was therefore this list + the ``pytestmark`` markers + iOS's
 #: ``ios_setup`` fixture shape below.
-_SUPPORTED_APPS = ("linux", "tui", "web", "macos", "ios")
+_SUPPORTED_APPS = ("linux", "tui", "web", "macos", "ios", "android", "windows")
 
 # Element IDs (tests/e2e-unified/ui.yaml § launch_identity_changed + § launch).
 IDENTITY_WARNING = "nest-identity-changed-warning"

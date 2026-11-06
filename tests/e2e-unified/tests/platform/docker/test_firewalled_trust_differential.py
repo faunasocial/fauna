@@ -61,7 +61,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import require_surface
 
 from .helpers import (
     claim_admin_api,
@@ -114,40 +114,13 @@ def self_signed_floor_nest(app):
     # inline below is how they do it — it is module-cached, a no-op re-check
     # once the tag is fresh, so the retired fixture bought nothing.
     #
-    # Web is not unbuilt debt here, and calling it that would be a standing
-    # invitation to "close the gap" — there is no gap to close. This test is
-    # the NATIVE half by construction (see the module docstring): it asserts a
-    # client reaches ``Connected`` **because** it can TOFU. A browser
-    # permanently cannot, and the owner doc says so in as many words — "the
-    # difference is structural, not a gap to close later: a browser exposes no
-    # received certificate to WASM, so there is no SPKI to compare the
-    # signature against and Axis 1's channel binding cannot be completed."
-    # Web's own leg is the OPPOSITE assertion (the box it cannot talk to), a
-    # separate image-gated test the module docstring already scopes — declaring
-    # the absence here does not stand in for it.
-    if app.driver.is_web():
-        declared_absence(
-            app.driver,
-            capability="TOFU first-contact trust — a browser exposes no "
-            "received certificate to WASM, so Axis 1's channel binding "
-            "cannot be completed and web is strictly weaker than native "
-            "by construction",
-            doc="docs/goal/architecture/security.md § Transport trust — "
-            "authenticating a nest's TLS without a public CA (the "
-            "first-connect table's self-hosted-pre-claim row)",
-        )
-
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the native/TOFU trust-differential drive",
-            detail="proven on linux; the remaining NATIVE apps (tui, windows, "
-            "macos, ios) are ordinary cross-app trickle-down — they share "
-            "trust.rs's TOFU model, so each one's leg is a driver swap, not "
-            "new trust work. Every leg needs a fresh nest image on a "
-            "docker-capable box, which is the actual gate here",
-            tracked="",
-        )
+    # Native-only by construction (see the module docstring): the test asserts
+    # a client reaches ``Connected`` **because** it can TOFU, which a browser
+    # structurally cannot (docs/goal/architecture/security.md § Transport
+    # trust). The test function therefore carries no ``web`` mark, so web is
+    # never collected for it and no web skip or absence is recorded. Web's own
+    # leg is the OPPOSITE assertion, a separate image-gated test.
+    require_surface(app.driver, "firewalled-trust-differential-drive")
 
     # This tree's keyed image (built on `FAUNA_ALLOW_NEST_IMAGE_BUILD=1`), or a
     # pulled one named in `FAUNA_NEST_TEST_IMAGE`; this call is a no-op re-check
@@ -218,6 +191,12 @@ def _wait_for_status(app, predicate, timeout: float) -> str | None:
 
 
 @pytest.mark.feature("connect-and-sign-in")
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_native_tofu_client_reaches_connected_and_admin_on_self_signed_floor(app, self_signed_floor_nest):
     """native half.
 

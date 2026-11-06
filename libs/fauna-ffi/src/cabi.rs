@@ -1531,13 +1531,15 @@ unsafe fn owner_model_seal_keys(
 /// bare folder-plane scopes by the card's `folder` choice
 /// (`ext_consent::approved_scopes`; `folder` 0 = no choice), collect the
 /// deposit folders (`ext_consent::folder_deposit_ids`), and mint one keyless
-/// `deposit` tuple per folder held by `holder_x25519`, owned by the actor
+/// `deposit` tuple per folder held by `holder_x25519` and confined to the
+/// principal's attested writer key `writer_ed25519` (`folder-deposit.md`
+/// § The depositor signs, the owner's device verifies), owned by the actor
 /// `identity_seed` derives. A row naming no deposit scope is refused.
 ///
 /// # Safety
 ///
-/// `identity_seed` (32), `grant_id` (16) and `holder_x25519` (32) must point
-/// to the stated byte counts; `scopes` must be a valid NUL-terminated C
+/// `identity_seed` (32), `grant_id` (16), `holder_x25519` (32) and
+/// `writer_ed25519` (32) must point to the stated byte counts; `scopes` must be a valid NUL-terminated C
 /// string; `out` must be a valid, aligned, writable `FfiBuffer` pointer. All
 /// pointers must remain valid for the call.
 #[unsafe(no_mangle)]
@@ -1545,6 +1547,7 @@ pub unsafe extern "C" fn fauna_capability_build_consent_deposit_grant(
     identity_seed: *const u8,
     grant_id: *const u8,
     holder_x25519: *const u8,
+    writer_ed25519: *const u8,
     epoch_start: u64,
     epoch_end: u64,
     scopes: *const c_char,
@@ -1564,6 +1567,7 @@ pub unsafe extern "C" fn fauna_capability_build_consent_deposit_grant(
                     msg: "grant_id must be 16 bytes".into(),
                 })?;
         let holder = read_32(holder_x25519, "holder_x25519")?;
+        let writer = read_32(writer_ed25519, "writer_ed25519")?;
         let scopes: Vec<String> = cstr_to_string(scopes)?
             .lines()
             .filter(|l| !l.is_empty())
@@ -1585,6 +1589,7 @@ pub unsafe extern "C" fn fauna_capability_build_consent_deposit_grant(
             &keypair.actor_id().0,
             &grant_a,
             &holder,
+            &writer,
             GrantWindow(epoch_start, epoch_end),
             &folders,
         )

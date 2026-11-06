@@ -1,5 +1,5 @@
 """Feed post image — ``image-lightbox`` (full-screen viewer): web, macos, ios,
-linux, tui, windows.
+linux, tui, windows, android.
 
 ``tests/e2e-unified/ui.yaml`` ``image-lightbox`` (inside ``post-card``,
 ``feed.post_detail``). ``C2paImage.svelte`` (feed's ``post-image``) opens the
@@ -74,6 +74,7 @@ pytestmark = [
     pytest.mark.linux,
     pytest.mark.tui,
     pytest.mark.windows,
+    pytest.mark.android,
 ]
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"

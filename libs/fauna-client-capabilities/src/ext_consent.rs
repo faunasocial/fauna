@@ -41,8 +41,13 @@
 //! deposit ingress) rides the consent's one grant too: one keyless `deposit`
 //! tuple per folder ([`crate::folder_deposit_scope_wraps`]), wrapping nothing
 //! — the audit + revocation record the nest's deposit door re-resolves at
-//! every deposit. The account's ownership of the folder is the nest's check;
-//! here a deposit needs only an attested holder key to name.
+//! every deposit — each confined to the principal's attested writer key, the
+//! key every deposit is signed with (`folder-deposit.md` § The depositor
+//! signs, the owner's device verifies). The account's ownership of the folder
+//! is the nest's check; here a deposit needs an attested holder key to name
+//! and an attested writer key to confine it to, and is refused with
+//! [`ExtConsentError::NoWriterKey`] without one — a deposit scope is never
+//! minted blind of its writer.
 //!
 //! A bare folder-plane scope (`fauna:folder:deposit`, `fauna:folder:read` —
 //! the folder plane's qualifier is the user's, `authorization-server.md`
@@ -102,6 +107,11 @@ pub enum ExtConsentError {
     /// The ceremony attested no holder key, so nothing can be wrapped to it.
     #[error("the app attested no key to receive the records' keys")]
     NoHolderKey,
+    /// The request asks to deposit into a folder, but the ceremony attested
+    /// no writer key for the deposits to be signed with (`folder-deposit.md`
+    /// § The depositor signs, the owner's device verifies) — fail-closed.
+    #[error("the app attested no key to sign its deposits with")]
+    NoWriterKey,
     /// The request names records but the document carries no manifest.
     #[error("the app's document declares no record kinds")]
     NoManifest,
@@ -497,6 +507,16 @@ pub async fn prepare_ext_consent_grant(
         None => key32(consent.holder_x25519.as_deref().map(Vec::as_slice))
             .ok_or(ExtConsentError::NoHolderKey)?,
     };
+    // A deposit is signed with the principal's attested writer key, and its
+    // tuple is confined to that key: no writer, no deposit scope.
+    let deposit_writer = if deposit_ids.is_empty() {
+        None
+    } else {
+        Some(
+            key32(consent.writer_ed25519.as_deref().map(Vec::as_slice))
+                .ok_or(ExtConsentError::NoWriterKey)?,
+        )
+    };
     let twins = plan_folder_reads(&folder_ids, folders)?;
 
     let mut planned = Vec::with_capacity(1 + twins.len());
@@ -517,7 +537,9 @@ pub async fn prepare_ext_consent_grant(
     if personalization {
         consent_scopes.extend(personalization_scope_wraps(owner.delegable));
     }
-    consent_scopes.extend(folder_deposit_scope_wraps(&deposit_ids));
+    if let Some(writer) = &deposit_writer {
+        consent_scopes.extend(folder_deposit_scope_wraps(&deposit_ids, writer));
+    }
     // The oracle's keyless tuples end with the principal too.
     consent_scopes.extend(op_scopes);
     if !consent_scopes.is_empty() {
@@ -1433,15 +1455,18 @@ mod tests {
     // the keyless tuple rides the consent's one grant) ──
 
     const DEPOSIT: &str = "fauna:folder:deposit:7";
+    /// The depositor's attested writer key.
+    const DEPOSIT_WRITER: [u8; 32] = [0x5D; 32];
 
-    /// A consent naming a deposit scope and an attested holder key plans one
-    /// keyless `deposit` tuple over the folder into the consent's one grant —
-    /// under the caller's id, one recorded `Mint`, no manifest, no wraps.
+    /// A consent naming a deposit scope and attested holder and writer keys
+    /// plans one keyless `deposit` tuple over the folder, confined to the
+    /// writer, into the consent's one grant — under the caller's id, one
+    /// recorded `Mint`, no manifest, no wraps.
     #[tokio::test]
     async fn a_deposit_scope_plans_one_keyless_tuple_into_the_consents_grant() {
         let owner = Owner::new();
         let (_, holder_pk) = generate_x25519_keypair();
-        let mut c = consent(&[DEPOSIT, DEPOSIT], holder_pk, None);
+        let mut c = consent(&[DEPOSIT, DEPOSIT], holder_pk, Some(DEPOSIT_WRITER));
         c.fauna_manifest = None;
 
         let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
@@ -1453,8 +1478,15 @@ mod tests {
         assert_eq!(owner.minted(), [vec![9u8; 16]]);
         assert!(owner.manifests.row(CLIENT).is_none(), "no manifest row");
         let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
-        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7)]);
+        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7, &DEPOSIT_WRITER)]);
         assert!(blob.wrapped_keys.is_empty(), "deposit is keyless");
+        // The log twin names the folder and the writer, and reads back.
+        let authority =
+            fauna_core::grant_event::deposit_authorizations(&owner.ledger.current().grant_events);
+        assert_eq!(
+            authority,
+            BTreeMap::from([(7, std::collections::BTreeSet::from([DEPOSIT_WRITER]))])
+        );
     }
 
     /// Beside records, the deposit tuples ride the records grant — one blob,
@@ -1470,7 +1502,7 @@ mod tests {
                 DEPOSIT,
             ],
             holder_pk,
-            None,
+            Some(DEPOSIT_WRITER),
         );
 
         let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
@@ -1486,12 +1518,39 @@ mod tests {
         assert_eq!(
             deposits,
             [
-                &ScopeTuple::folder_deposit(7),
-                &ScopeTuple::folder_deposit(9)
+                &ScopeTuple::folder_deposit(7, &DEPOSIT_WRITER),
+                &ScopeTuple::folder_deposit(9, &DEPOSIT_WRITER)
             ],
             "one tuple per folder, in folder-id order"
         );
-        assert_eq!(blob.scope.len(), 4, "2 kinds' reads + 2 deposits");
+        assert_eq!(
+            blob.scope.len(),
+            6,
+            "2 kinds' reads + 2 kinds' writes + 2 deposits"
+        );
+    }
+
+    /// No attested writer key → a deposit scope cannot be granted: the
+    /// deposits could not be signed, so the planner fails closed and nothing
+    /// is recorded (`folder-deposit.md` § The depositor signs, the owner's
+    /// device verifies).
+    #[tokio::test]
+    async fn a_deposit_arm_without_a_writer_key_is_refused() {
+        let owner = Owner::new();
+        let (_, holder_pk) = generate_x25519_keypair();
+        for scopes in [
+            vec![DEPOSIT],
+            vec!["fauna:records:rw:ext.app.example.*", DEPOSIT],
+        ] {
+            let c = consent(&scopes, holder_pk, None);
+            let err = owner.prepare(&c, &BTreeMap::new()).await.unwrap_err();
+            assert!(
+                matches!(err, ExtConsentError::NoWriterKey),
+                "{scopes:?}: {err:?}"
+            );
+            assert!(owner.ledger.current().grant_events.is_empty());
+            assert!(owner.minted().is_empty());
+        }
     }
 
     /// No attested holder key → the consent cannot be granted, the records

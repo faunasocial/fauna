@@ -207,13 +207,9 @@ pub fn populate_creds_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver};
+    use fauna_onboarding_machine::OnboardingMachine;
+    use fauna_onboarding_machine::observer::NullObserver;
     use fauna_provisioning::{PROVIDERS, ProviderId};
-
-    struct NopObs;
-    impl OnboardingObserver for NopObs {
-        fn on_changed(&self) {}
-    }
 
     /// Walk the container subtree collecting every `gtk::Entry`.
     fn collect_entries(root: &gtk::Box) -> Vec<gtk::Entry> {
@@ -254,7 +250,7 @@ mod tests {
             // for porkbun's all-Dns fields, so taking them all is correct).
             let visible: Vec<FieldMetaPlain> =
                 porkbun.fields.iter().map(FieldMetaPlain::from).collect();
-            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let m = OnboardingMachine::new(Arc::new(NullObserver));
             let (form, _handles) = build_creds_only(&visible, m, "dns");
             let entries = collect_entries(&form);
             assert_eq!(entries.len(), porkbun.fields.len(), "one Entry per field");

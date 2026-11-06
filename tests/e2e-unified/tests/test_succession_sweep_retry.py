@@ -139,6 +139,7 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
     pytest.mark.web,
 ]
 
@@ -208,7 +209,7 @@ def test_a_half_done_sweep_renders_the_retry_and_the_press_is_honoured(
     # does not have.
     app.settings._navigate_subpage("status")
     old_actor = app.settings.actor_id()
-    app.settings.open_recovery_kit_or_skip()
+    app.settings.open_recovery_kit()
     assert len(old_actor) == _SECRET_HEX_LEN, (
         f"the pre-ceremony actor id must render; got {old_actor!r}, error "
         f"surface: {app.error_text()!r}"

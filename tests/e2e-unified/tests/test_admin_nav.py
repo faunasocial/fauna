@@ -25,8 +25,6 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
-
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 # macos built the shell + admin-nav-back 2026-06-08 (a macos admin-users follow-up) and
 # the three shell-exit tests below are green --client macos (2026-06-08), so they
@@ -259,20 +257,6 @@ def test_admin_area_navigation_switches_between_admin_pages(admin_main_app):
     atop the shell (the terminal-idiomatic equivalent, same point) and mobile
     keeps its platform nav, so that half is desktop-only."""
     app = admin_main_app
-    if not (
-        app.driver.is_tui()
-        or app.driver.is_web()
-        or app.driver.is_linux()
-        or app.driver.is_android()
-        or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nav-row[<page id>]",
-            detail="the admin rail rows carry their ids on tui, web, linux, android and windows; the other two "
-            "gain them in their trickle-down rows",
-            tracked="ui.yaml navigation.sub_page_nav_rows",
-        )
     app.admin.enter_by_click()
     app.driver.wait_for("admin-dashboard-heading", timeout=15.0)
     if not (app.driver.is_tui() or app.driver.is_mobile()):
@@ -285,7 +269,14 @@ def test_admin_area_navigation_switches_between_admin_pages(admin_main_app):
         ("admin-users", "admin-users-heading"),
         ("admin-logs", "admin-logs-heading"),
     ):
-        app.driver.click(f"admin-nav-row[{page_id}]")
+        row = f"admin-nav-row[{page_id}]"
+        if app.driver.count(row) == 0:
+            # A single-pane push stack (iOS) paints the rail on the dashboard
+            # root only, so the previous page covers it: return to the root
+            # the way `AdminActions.reopen_custody_hosting` does.
+            app.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+            app.driver.wait_for("admin-dashboard-heading", timeout=15.0)
+        app.driver.click(row)
         app.driver.wait_for(heading, timeout=15.0)
         assert app.driver.is_absent("admin-dashboard-heading"), (
             f"the {page_id} rail row should replace the dashboard, not stack on "

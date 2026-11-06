@@ -459,7 +459,7 @@ fn retain_custody_generation_in_conn(
 pub(crate) const SYNC_CHANGE_COLUMNS: &str = "seq, path_hash, manifest_hash, size_bytes, change_type, \
      created_at, path, device_id, content_key_version, thumbnail_hash, actor_id, path_sealed, \
      derived_through, is_resolution, is_retention, item_class, origin_writer, origin_seq, \
-     entry_sealed, signature, signer_key";
+     entry_sealed, signature, signer_key, deposited_by";
 
 /// Map one [`SYNC_CHANGE_COLUMNS`] row.
 pub(crate) fn sync_change_row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<SyncChangeRow> {
@@ -485,6 +485,7 @@ pub(crate) fn sync_change_row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<
         entry_sealed: row.get(18)?,
         signature: row.get(19)?,
         signer_key: row.get(20)?,
+        deposited_by: row.get(21)?,
     })
 }
 
@@ -890,6 +891,22 @@ impl std::fmt::Display for DeviceQuotaError {
 /// blob directly; anything else is a `ChunkManifest` reference the GC walk
 /// must decode. A hash referenced from both kinds classifies as a manifest —
 /// decoding it will fail loudly rather than silently skipping a chunk walk.
+/// Decode `sync_changes.thumbnail_hash` values (32-byte hex) to digests,
+/// deduplicated — case variants of one hash are one reference. A value that
+/// does not decode addresses no blob, so it is dropped rather than failing
+/// the walk.
+fn decode_thumbnail_refs(
+    rows: impl Iterator<Item = rusqlite::Result<String>>,
+) -> Result<Vec<Vec<u8>>> {
+    let mut hashes = std::collections::HashSet::new();
+    for row in rows {
+        if let Ok(digest) = fauna_core::hex32::decode(&row?) {
+            hashes.insert(digest.to_vec());
+        }
+    }
+    Ok(hashes.into_iter().collect())
+}
+
 fn fold_direct_blob_refs(pairs: Vec<(Vec<u8>, String)>) -> Vec<(Vec<u8>, bool)> {
     let mut folded: std::collections::HashMap<Vec<u8>, bool> = std::collections::HashMap::new();
     for (hash, name) in pairs {
@@ -1104,6 +1121,11 @@ pub struct RowSignature<'a> {
     /// The 32-byte key it verifies under (device principal key, or the actor id
     /// for a direct signature).
     pub signer_key: &'a [u8],
+    /// The depositor's 32-byte writer key — a field of the signed statement
+    /// that is not row content the record door already takes (`folder-deposit.md`
+    /// ruling 3): it rides with the signature that covers it, so only a
+    /// verified record ever stores one. `None` on every non-adoption row.
+    pub deposited_by: Option<&'a [u8]>,
 }
 
 /// The verified signatures a resolved conflict report carries, one per row it
@@ -1308,6 +1330,7 @@ impl CacheDb {
             is_retention: row
                 .get::<_, Option<i64>>(18)?
                 .and_then(|v| (v != 0).then_some(true)),
+            deposited_by: row.get(19)?,
         })
     }
 
@@ -1360,7 +1383,7 @@ impl CacheDb {
                 "SELECT path_hash, seq, manifest_hash, size_bytes, created_at,
                         folder_id, content_key_version, actor_id, pruned_at, purge_after,
                         device_id, change_type, path_sealed, thumbnail_hash, derived_through,
-                        is_resolution, signature, signer_key, is_retention
+                        is_resolution, signature, signer_key, is_retention, deposited_by
                  FROM sync_changes
                  WHERE path_hash = ?1
                    AND folder_id IN ({ids_csv})
@@ -1400,7 +1423,7 @@ impl CacheDb {
             "SELECT path_hash, seq, manifest_hash, size_bytes, created_at,
                     folder_id, content_key_version, actor_id, pruned_at, purge_after,
                         device_id, change_type, path_sealed, thumbnail_hash, derived_through,
-                        is_resolution, signature, signer_key, is_retention
+                        is_resolution, signature, signer_key, is_retention, deposited_by
              FROM sync_changes
              WHERE path_hash = ?1 AND seq = ?2
                AND manifest_hash IS NOT NULL
@@ -1666,16 +1689,18 @@ impl CacheDb {
     ) -> std::result::Result<(), DeviceQuotaError> {
         let actor_id = *actor_id;
         let device_id = *device_id;
-        // S9 flip: the plaintext label column rests only for the three
-        // machine-authored synthetic labels (frozen constants — sealing them
-        // protects nothing). A user-chosen label rests sealed-only; a sealless
+        // S9 flip: the plaintext label column rests only for the
+        // machine-authored synthetic labels — the WebDAV pseudo-device, the
+        // `fauna` placeholder and the six app defaults (frozen constants —
+        // sealing them protects nothing). A user-chosen label rests sealed-only; a sealless
         // register rests no label at all (the ratified Omit degrade — the
         // device re-labels on its next keyed register). For a writer that
         // never sends a keyed register the row rests nameless PERMANENTLY,
         // and that is accepted (user ruling 2026-08-02: no pre-expand alpha
         // clients are assumed to remain in the field, so no re-stamp path
         // exists or is owed — `file-sync.md` § Sealed names & paths).
-        let label = if fauna_core::label_custody::is_synthetic_device_label(label) {
+        let synthetic = fauna_core::label_custody::is_synthetic_device_label(label);
+        let label = if synthetic {
             label.to_string()
         } else {
             String::new()
@@ -1734,12 +1759,23 @@ impl CacheDb {
         // nothing failing. Post-flip there is no plaintext for any backfill to
         // re-stamp from; the transient namelessness is the accepted degrade
         // (`file-sync.md` § Sealed names & paths, incl. the 2026-08-02 ruling).
+        //
+        // Rule (b) (`devices.md` § Device names): a machine-authored label
+        // (`?8`) never displaces a user-chosen one — when the row already
+        // carries a seal, the pair stays as it is. The engine host and the
+        // provisioner re-register under the app default on every start, so
+        // without this each start would rename the machine back. A synthetic
+        // label over a seal-less row (the `fauna` placeholder, rule (a))
+        // still supersedes it. SQLite evaluates every SET expression against
+        // the pre-update row, so both CASEs read the same old `label_sealed`.
         conn.execute(
             "INSERT INTO sync_devices (actor_id, device_id, label, label_sealed, registered_at, last_seen, capabilities)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (actor_id, device_id) DO UPDATE SET
-                 label = excluded.label,
-                 label_sealed = excluded.label_sealed,
+                 label = CASE WHEN ?8 AND sync_devices.label_sealed IS NOT NULL
+                              THEN sync_devices.label ELSE excluded.label END,
+                 label_sealed = CASE WHEN ?8 AND sync_devices.label_sealed IS NOT NULL
+                              THEN sync_devices.label_sealed ELSE excluded.label_sealed END,
                  registered_at = excluded.registered_at,
                  last_seen = excluded.last_seen,
                  capabilities = excluded.capabilities",
@@ -1750,7 +1786,8 @@ impl CacheDb {
                 label_sealed,
                 now,
                 now,
-                capabilities
+                capabilities,
+                synthetic
             ],
         )
         .context("register sync device")
@@ -2535,8 +2572,8 @@ impl CacheDb {
         )?;
 
         conn.execute(
-            "INSERT INTO sync_changes (actor_id, path_hash, manifest_hash, size_bytes, change_type, created_at, folder_id, device_id, path, content_key_version, thumbnail_hash, path_sealed, derived_through, is_resolution, signature, signer_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO sync_changes (actor_id, path_hash, manifest_hash, size_bytes, change_type, created_at, folder_id, device_id, path, content_key_version, thumbnail_hash, path_sealed, derived_through, is_resolution, signature, signer_key, deposited_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             rusqlite::params![
                 actor_id.as_slice(),
                 path_hash.as_slice(),
@@ -2554,6 +2591,7 @@ impl CacheDb {
                 is_resolution.map(i64::from),
                 new_signature,
                 signature.map(|s| s.signer_key),
+                signature.and_then(|s| s.deposited_by),
             ],
         )
         .context("record sync change (metered)")?;
@@ -2663,6 +2701,65 @@ pub(crate) fn settle_row_charge_in_conn(
         )?;
     }
     apply_charge_in_conn(conn, owner, recorder, member_channel, charge.size_bytes)
+}
+
+/// Whether a choose-winner may mint its head row under the winning
+/// candidate's `device_id`. The row is minted under the chooser's
+/// actor, and a device takes a row as its own echo when both its device and
+/// its actor match (`row_is_own`, `libs/fauna-sync-engine/src/engine.rs`) — so
+/// a candidate naming one of the CHOOSER's devices is an attribution only that
+/// device can make. Candidate devices are unbound at the report door (they
+/// name the devices whose versions diverged, and a writer member may file the
+/// report), so the binding lives here, where the candidate becomes attribution:
+/// such a candidate is attested by the conflict's own reporting device (bound
+/// to its reporter at the door — a device naming its own local version) when
+/// the reporter recorded on the conflict row IS the chooser, or by a change
+/// row that device recorded under the chooser's actor in this set for this
+/// very (path, manifest). The reporting-device arm is bound to the reporter's
+/// actor and not to the device bytes alone: `sync_devices` is
+/// keyed `(actor, device)`, so a writer member may register the chooser's
+/// device id under its own actor and report "from" it. A conflict row with no
+/// reporter recorded falls through to the change-row arm. A candidate naming
+/// any other actor's device never reads as the chooser's own and passes
+/// unchanged.
+#[allow(clippy::too_many_arguments)]
+fn candidate_attribution_attested_in_conn(
+    conn: &rusqlite::Connection,
+    chooser: &[u8],
+    folder_id: i64,
+    reporting_device: &[u8],
+    reporter_actor: Option<&[u8]>,
+    path_hash: &[u8],
+    manifest_hash: &[u8],
+    candidate_device: &[u8],
+) -> Result<bool> {
+    if candidate_device == reporting_device && reporter_actor == Some(chooser) {
+        return Ok(true);
+    }
+    let choosers_own: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_devices WHERE actor_id = ?1 AND device_id = ?2)",
+            rusqlite::params![chooser, candidate_device],
+            |r| r.get(0),
+        )
+        .context("is the candidate's device the chooser's")?;
+    if !choosers_own {
+        return Ok(true);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_changes
+             WHERE folder_id = ?1 AND path_hash = ?2 AND manifest_hash = ?3
+               AND device_id = ?4 AND actor_id = ?5)",
+        rusqlite::params![
+            folder_id,
+            path_hash,
+            manifest_hash,
+            candidate_device,
+            chooser
+        ],
+        |r| r.get(0),
+    )
+    .context("did the candidate's device record this version")
 }
 
 /// The manifest the path's content head holds — the newest row of the path
@@ -3259,11 +3356,34 @@ impl CacheDb {
     // 2026-08-18): its only writer was an admin verb no app or daemon ever
     // called, so every production read saw an empty list.
 
+    /// The set's WHOLE change log above `since_seq` — every row, unbounded.
+    /// For tests and nest-internal maintenance only: a reader-facing page
+    /// reads [`Self::get_sync_changes_for_folder_page`], which bounds the load
+    /// under the one DB lock.
     pub async fn get_sync_changes_for_folder(
         &self,
         folder_id: i64,
         since_seq: i64,
         exclude_device_id: Option<&[u8; 32]>,
+    ) -> Result<Vec<SyncChangeRow>> {
+        // SQLite reads a negative LIMIT as "no limit".
+        self.get_sync_changes_for_folder_page(folder_id, since_seq, exclude_device_id, -1)
+            .await
+    }
+
+    /// At most `max_rows` rows of the set's change log above `since_seq`, in
+    /// seq order — the cut pushed into the query, so a page read loads a page
+    /// of rows under `CacheDb`'s single connection lock, never the whole
+    /// remaining tail (a reader may repeat `since = 0` at will). The rows the
+    /// cap leaves behind are the next page's by the `since` cursor: close
+    /// early, never skip (`transport.md` § Max frame). A negative `max_rows`
+    /// is unbounded ([`Self::get_sync_changes_for_folder`]).
+    pub async fn get_sync_changes_for_folder_page(
+        &self,
+        folder_id: i64,
+        since_seq: i64,
+        exclude_device_id: Option<&[u8; 32]>,
+        max_rows: i64,
     ) -> Result<Vec<SyncChangeRow>> {
         let exclude = exclude_device_id.copied();
         let conn = self.conn.lock().await;
@@ -3276,10 +3396,11 @@ impl CacheDb {
                  WHERE folder_id = ?1 AND seq > ?2 AND (device_id IS NULL OR device_id != ?3)
                    AND superseded_at IS NULL
                    AND (item_class IS NULL OR item_class != ?4)
-                 ORDER BY seq",
+                 ORDER BY seq
+                 LIMIT ?5",
             ))?;
             let rows = stmt.query_map(
-                rusqlite::params![folder_id, since_seq, excl.as_slice(), state_entry],
+                rusqlite::params![folder_id, since_seq, excl.as_slice(), state_entry, max_rows],
                 sync_change_row_from_sql,
             )?;
             let mut out = Vec::new();
@@ -3293,10 +3414,11 @@ impl CacheDb {
                  FROM sync_changes
                  WHERE folder_id = ?1 AND seq > ?2 AND superseded_at IS NULL
                    AND (item_class IS NULL OR item_class != ?3)
-                 ORDER BY seq",
+                 ORDER BY seq
+                 LIMIT ?4",
             ))?;
             let rows = stmt.query_map(
-                rusqlite::params![folder_id, since_seq, state_entry],
+                rusqlite::params![folder_id, since_seq, state_entry, max_rows],
                 sync_change_row_from_sql,
             )?;
             let mut out = Vec::new();
@@ -3597,7 +3719,7 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT sc.path, sc.manifest_hash, sc.size_bytes, sc.created_at, sc.thumbnail_hash, sc.content_key_version, sc.path_sealed, sc.path_hash,
-                    sc.device_id, sc.actor_id, sc.change_type, sc.derived_through, sc.is_resolution, sc.signature, sc.signer_key
+                    sc.device_id, sc.actor_id, sc.change_type, sc.derived_through, sc.is_resolution, sc.signature, sc.signer_key, sc.deposited_by
              FROM sync_changes sc
              INNER JOIN (
                  SELECT path_hash, MAX(seq) as max_seq
@@ -3625,6 +3747,7 @@ impl CacheDb {
                 is_resolution: row.get::<_, Option<i64>>(12)?.map(|v| v != 0),
                 signature: row.get(13)?,
                 signer_key: row.get(14)?,
+                deposited_by: row.get(15)?,
             })
         })?;
         let mut out = Vec::new();
@@ -4976,6 +5099,66 @@ impl CacheDb {
         Ok(fold_direct_blob_refs(pairs))
     }
 
+    /// Every distinct `thumbnail_hash` under exactly the liveness and
+    /// exclusion rules of [`Self::sync_change_manifest_refs`] — the GC's step
+    /// 2b pins a file's thumbnail for as long as it pins the file
+    /// (`backup-restore.md` § 9 step 2). A thumbnail enters through
+    /// `POST /api/v1/blob` with no `sync_changes` row of its own, so this
+    /// column is its only reference. Stored as the 32-byte hex the signed
+    /// record carries; a value that does not decode addresses no blob and
+    /// pins nothing.
+    pub async fn sync_change_thumbnail_refs(
+        &self,
+        superseded_before_millis: i64,
+        exclude_folder_ids: &[i64],
+    ) -> Result<Vec<Vec<u8>>> {
+        let exclude_clause = if exclude_folder_ids.is_empty() {
+            String::new()
+        } else {
+            let csv = exclude_folder_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND (folder_id IS NULL OR folder_id NOT IN ({csv}))")
+        };
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT thumbnail_hash FROM sync_changes
+             WHERE thumbnail_hash IS NOT NULL
+               AND (superseded_at IS NULL OR superseded_at > ?1)
+               {exclude_clause}"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![superseded_before_millis], |row| {
+            row.get::<_, String>(0)
+        })?;
+        decode_thumbnail_refs(rows)
+    }
+
+    /// [`Self::all_sync_change_manifest_hashes_for_folders`] for the thumbnail
+    /// column: every thumbnail the named folders' rows ever named, live and
+    /// superseded alike — the metadata-only folders' pin-only extras.
+    pub async fn all_sync_change_thumbnail_hashes_for_folders(
+        &self,
+        folder_ids: &[i64],
+    ) -> Result<Vec<Vec<u8>>> {
+        if folder_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let csv = folder_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT thumbnail_hash FROM sync_changes
+             WHERE thumbnail_hash IS NOT NULL AND folder_id IN ({csv})"
+        ))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        decode_thumbnail_refs(rows)
+    }
+
     /// Ids of every folder whose owner opted into metadata-only content
     /// residency (phase 5 — `file-sync.md` § Content residency). The GC's
     /// residency arm and the flip-time chunk drop key on this set: these
@@ -5998,6 +6181,7 @@ impl CacheDb {
                 Some(RowSignature {
                     signature: signature.signature,
                     signer_key: signature.signer_key,
+                    deposited_by: None,
                 }),
             )?;
             rehomed += 1;
@@ -6718,6 +6902,29 @@ impl CacheDb {
         Ok(n > 0)
     }
 
+    /// `fauna.sync.devices.rename` (`devices.md` § Device names, rule (1)):
+    /// write the row's label pair and nothing else — the user-chosen name
+    /// rests sealed-only, so the plaintext column is emptied as the register
+    /// upsert empties it for a non-synthetic label. `capabilities`,
+    /// `registered_at` and every other column stay untouched. Returns whether
+    /// a row of `actor_id` matched.
+    pub async fn rename_sync_device(
+        &self,
+        actor_id: &[u8; 32],
+        device_id: &[u8; 32],
+        label_sealed: &[u8],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE sync_devices SET label = '', label_sealed = ?3
+                  WHERE actor_id = ?1 AND device_id = ?2",
+                rusqlite::params![actor_id.as_slice(), device_id.as_slice(), label_sealed],
+            )
+            .context("rename sync device")?;
+        Ok(n > 0)
+    }
+
     /// The owner arm: another of the account's devices asks this one to turn
     /// its peer listeners off. Raises the pending brake and nothing else —
     /// the reported column stays the device's own word until it folds and
@@ -7299,10 +7506,10 @@ impl CacheDb {
             }
         }
         tx.execute(
-            "INSERT INTO sync_conflicts (folder_id, device_id, path, conflict_type, details, created_at, resolved_at, resolution, winning_manifest_hash, path_hash, path_sealed, details_sealed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO sync_conflicts (folder_id, device_id, path, conflict_type, details, created_at, resolved_at, resolution, winning_manifest_hash, path_hash, path_sealed, details_sealed, reporter_actor_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![folder_id, device_id, rest_path, conflict_type, rest_details, now, resolved_at, resolution_kind, winner,
-                path_hash.as_slice(), sealed.path_sealed, sealed.details_sealed],
+                path_hash.as_slice(), sealed.path_sealed, sealed.details_sealed, actor_id],
         ).context("report sync conflict")?;
         let conflict_id = tx.last_insert_rowid();
         for c in &candidates {
@@ -7528,7 +7735,11 @@ impl CacheDb {
     /// `docs/goal/behavior/file-sync.md` § Conflicts). The propagated change is
     /// attributed to the **winning candidate's device** so that device treats
     /// it as a self-echo (no redundant re-download) while every other device
-    /// downloads the winner. The whole thing is one transaction.
+    /// downloads the winner. A candidate naming one of the chooser's own
+    /// devices is minted only when that device's word attests it (the
+    /// conflict's reporting device, or a change row it recorded for this path
+    /// and manifest), else [`ResolveWinner::UnattestedCandidate`]. The whole
+    /// thing is one transaction.
     pub async fn resolve_conflict_choose_winner(
         &self,
         actor_id: &[u8; 32],
@@ -7554,17 +7765,27 @@ impl CacheDb {
     ) -> Result<Option<ConflictWinnerFacts>> {
         let conn = self.conn.lock().await;
         #[allow(clippy::type_complexity)]
-        let conflict: Option<(i64, Vec<u8>, Option<Vec<u8>>)> = conn
+        let conflict: Option<(i64, Vec<u8>, Option<Vec<u8>>, Vec<u8>, Option<Vec<u8>>)> = conn
             .query_row(
-                "SELECT folder_id, path_hash, path_sealed FROM sync_conflicts
+                "SELECT folder_id, path_hash, path_sealed, device_id, reporter_actor_id
+                 FROM sync_conflicts
                  WHERE id = ?1 AND resolved_at IS NULL
                    AND folder_id IN (SELECT id FROM folders WHERE actor_id = ?2)",
                 rusqlite::params![id, actor_id.as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .context("lookup conflict for winner facts")?;
-        let Some((folder_id, path_hash, path_sealed)) = conflict else {
+        let Some((folder_id, path_hash, path_sealed, reporting_device, reporter_actor)) = conflict
+        else {
             return Ok(None);
         };
         let candidate: Option<(Vec<u8>, i64, Option<i64>)> = conn
@@ -7579,6 +7800,20 @@ impl CacheDb {
         let Some((device_id, size_bytes, content_key_version)) = candidate else {
             return Ok(None);
         };
+        // A candidate the resolve will refuse as unattested has no head row to
+        // sign (the resolve answers `UnattestedCandidate` itself).
+        if !candidate_attribution_attested_in_conn(
+            &conn,
+            actor_id,
+            folder_id,
+            &reporting_device,
+            reporter_actor.as_deref(),
+            &path_hash,
+            winning_manifest_hash,
+            &device_id,
+        )? {
+            return Ok(None);
+        }
         // The same routing key step 4 of the resolve propagates.
         Ok(Some(ConflictWinnerFacts {
             folder_id,
@@ -7588,6 +7823,50 @@ impl CacheDb {
             size_bytes,
             content_key_version,
         }))
+    }
+
+    /// The head row a choose-winner resolve mints for a conflict — the shape of
+    /// step 4 of [`Self::resolve_conflict_choose_winner_signed`]'s insert, as a
+    /// reader is served it. One builder for both doors that measure it against
+    /// the serve-page cap (`sync_handlers::unservable_change_len`): the
+    /// unresolved `fauna.sync.conflicts.report` that writes the conflict a later
+    /// choose mints from, and the choose itself.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn choose_winner_change_row(
+        chooser: &[u8],
+        path_hash: &[u8],
+        winning_manifest_hash: &[u8],
+        size_bytes: i64,
+        rest_path: Option<&str>,
+        winner_device_id: &[u8],
+        content_key_version: Option<i64>,
+        path_sealed: Option<&[u8]>,
+        signature: Option<RowSignature<'_>>,
+    ) -> SyncChangeRow {
+        SyncChangeRow {
+            seq: 0,
+            path_hash: path_hash.to_vec(),
+            manifest_hash: Some(winning_manifest_hash.to_vec()),
+            size_bytes,
+            change_type: "modify".to_string(),
+            created_at: 0,
+            path: rest_path.map(str::to_string),
+            device_id: Some(winner_device_id.to_vec()),
+            content_key_version,
+            thumbnail_hash: None,
+            actor_id: chooser.to_vec(),
+            path_sealed: path_sealed.map(<[u8]>::to_vec),
+            derived_through: None,
+            is_resolution: None,
+            is_retention: None,
+            item_class: None,
+            origin_writer: None,
+            origin_seq: None,
+            entry_sealed: None,
+            signature: signature.map(|s| s.signature.to_vec()),
+            signer_key: signature.map(|s| s.signer_key.to_vec()),
+            deposited_by: None,
+        }
     }
 
     /// [`Self::resolve_conflict_choose_winner`] carrying the chooser's verified
@@ -7616,20 +7895,38 @@ impl CacheDb {
         //    non-owner who guesses it must see `NotFound`, not resolve a victim's
         //    conflict). Mirrors `list_conflicts_for_actor`.
         #[allow(clippy::type_complexity)]
-        let conflict: Option<(i64, String, Vec<u8>, Option<Vec<u8>>)> = tx
+        let conflict: Option<(
+            i64,
+            String,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+        )> = tx
             .query_row(
-                "SELECT folder_id, path, path_hash, path_sealed FROM sync_conflicts
+                "SELECT folder_id, path, path_hash, path_sealed, device_id, reporter_actor_id
+                 FROM sync_conflicts
                  WHERE id = ?1 AND resolved_at IS NULL
                    AND folder_id IN (SELECT id FROM folders WHERE actor_id = ?2)",
                 rusqlite::params![id, actor_id.as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .optional()
             .context("lookup conflict for resolve")?;
-        let (folder_id, path, path_hash, path_sealed) = match conflict {
-            Some(c) => c,
-            None => return Ok(ResolveWinner::NotFound),
-        };
+        let (folder_id, path, path_hash, path_sealed, reporting_device, reporter_actor) =
+            match conflict {
+                Some(c) => c,
+                None => return Ok(ResolveWinner::NotFound),
+            };
 
         // 2. The chosen winner must be one of the recorded candidates; the
         //    candidate carries the display metadata (device, size) we attribute
@@ -7647,6 +7944,23 @@ impl CacheDb {
             Some(c) => c,
             None => return Ok(ResolveWinner::BadCandidate),
         };
+        // The head row is minted under the chooser's actor, so a candidate
+        // naming one of the chooser's own devices must be that device's word
+        // (`candidate_attribution_attested_in_conn`): a writer
+        // member's report cannot make the owner's device take a version as its
+        // own echo.
+        if !candidate_attribution_attested_in_conn(
+            &tx,
+            actor_id,
+            folder_id,
+            &reporting_device,
+            reporter_actor.as_deref(),
+            &path_hash,
+            winning_manifest_hash,
+            &winner_device_id,
+        )? {
+            return Ok(ResolveWinner::UnattestedCandidate);
+        }
         // The head row below is a charged version minted at the candidate's
         // report-time declaration: refuse it the way the record door refuses
         // its own (a negative size would credit the owner; one past the
@@ -7655,6 +7969,26 @@ impl CacheDb {
         // is data at rest, so the mint re-checks it.
         if size_bytes < 0 {
             return Err(StorageQuotaError::NegativeSize { size_bytes });
+        }
+        // A head row no change-log page could serve would end every reader's
+        // walk of the set at its seq (`sync_handlers::unservable_change_len`).
+        // The unresolved report refuses the conflict that would mint one, but
+        // a conflict row is data at rest — it may predate that refusal — so
+        // the mint re-measures and leaves the conflict open.
+        if let Some(len) =
+            crate::sync_handlers::unservable_change_len(Self::choose_winner_change_row(
+                actor_id,
+                &path_hash,
+                winning_manifest_hash,
+                size_bytes,
+                (!path.is_empty()).then_some(path.as_str()),
+                &winner_device_id,
+                winner_ckv,
+                path_sealed.as_deref(),
+                signature,
+            ))
+        {
+            return Ok(ResolveWinner::TooLarge { len });
         }
         // Owner-scoped (step 1), so the chooser IS the owner: no member half.
         // The winning candidate is normally a version the path already holds
@@ -8633,7 +8967,7 @@ mod custody_grace_window_tests {
         db.backdate_backup_custody_generations_for_test(60)
             .await
             .unwrap();
-        db.register_backup_writer(&owner, &[0x51u8; 32], None)
+        db.register_backup_writer(&owner, &[0x51u8; 32], None, false)
             .await
             .unwrap();
 
@@ -11656,6 +11990,312 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "owner resolution clears the conflict"
+        );
+    }
+
+    /// A choose-winner head row is minted under the chooser's actor,
+    /// so a candidate naming one of the CHOOSER's own devices becomes that
+    /// device's self-echo (`row_is_own` matches device and actor). Candidate
+    /// devices are unbound at the report door — a writer member reports them —
+    /// so the mint binds them: a candidate naming a device registered to the
+    /// chooser is attested only by the conflict's own (door-bound) reporting
+    /// device, or by a change row that device recorded under the chooser's
+    /// actor for that very (path, manifest). Anything else is refused, the
+    /// conflict left open and nothing minted. A candidate naming a device of
+    /// another actor can never read as the chooser's own and mints as before.
+    #[tokio::test]
+    async fn choose_winner_binds_a_candidate_naming_the_choosers_own_device() {
+        use crate::db::ConflictCandidateRow;
+
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xa1u8; 32];
+        let member = [0xb2u8; 32];
+        let owner_dev = [0xd1u8; 32];
+        let owner_dev2 = [0xd2u8; 32];
+        let member_dev = [0xe1u8; 32];
+        let forged = [0x31u8; 32];
+        let recorded = [0x32u8; 32];
+        let own_local = [0x33u8; 32];
+        let member_version = [0x34u8; 32];
+        for (actor, dev) in [
+            (owner, owner_dev),
+            (owner, owner_dev2),
+            (member, member_dev),
+        ] {
+            db.register_sync_device(&actor, &dev, "d", None, "read,write")
+                .await
+                .unwrap();
+        }
+        let fs_id = db.create_folder("shared", &owner).await.unwrap();
+        let cand = |m: [u8; 32], d: [u8; 32]| ConflictCandidateRow {
+            manifest_hash: m.to_vec(),
+            device_id: d.to_vec(),
+            size_bytes: 10,
+            created_at: 0,
+            content_key_version: None,
+        };
+        async fn report(
+            db: &CacheDb,
+            fs_id: i64,
+            reporter: [u8; 32],
+            dev: [u8; 32],
+            path: &str,
+            cands: Vec<ConflictCandidateRow>,
+        ) -> i64 {
+            db.report_conflict(
+                &reporter,
+                fs_id,
+                &dev,
+                path,
+                "modify-modify",
+                None,
+                &cands,
+                None,
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap()
+        }
+        async fn head_device(db: &CacheDb, seq: i64) -> Vec<u8> {
+            let conn = db.conn.lock().await;
+            conn.query_row(
+                "SELECT device_id FROM sync_changes WHERE seq = ?1",
+                [seq],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+
+        // The attack: a writer member's unresolved report claims the owner's
+        // device wrote a version it never recorded.
+        let planted = report(
+            &db,
+            fs_id,
+            member,
+            member_dev,
+            "a.txt",
+            vec![cand(forged, owner_dev), cand(member_version, member_dev)],
+        )
+        .await;
+        assert!(
+            db.conflict_winner_facts(&owner, planted, &forged)
+                .await
+                .unwrap()
+                .is_none(),
+            "no signable facts for a forged own-device candidate"
+        );
+        assert!(
+            matches!(
+                db.resolve_conflict_choose_winner(&owner, planted, &forged)
+                    .await
+                    .unwrap(),
+                ResolveWinner::UnattestedCandidate
+            ),
+            "the owner's choose of a forged own-device candidate is refused"
+        );
+        assert_eq!(
+            db.list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the refused choose leaves the conflict open"
+        );
+        // The member's own version names the member's device: it can never
+        // read as the owner's own, so it mints under that device as before.
+        let Ok(ResolveWinner::Resolved { change_seq }) = db
+            .resolve_conflict_choose_winner(&owner, planted, &member_version)
+            .await
+        else {
+            panic!("a candidate on another actor's device mints");
+        };
+        assert_eq!(head_device(&db, change_seq).await, member_dev.to_vec());
+
+        // Genuine: the owner's device reported its own local version.
+        let own = report(
+            &db,
+            fs_id,
+            owner,
+            owner_dev,
+            "b.txt",
+            vec![cand(own_local, owner_dev)],
+        )
+        .await;
+        let Ok(ResolveWinner::Resolved { change_seq }) = db
+            .resolve_conflict_choose_winner(&owner, own, &own_local)
+            .await
+        else {
+            panic!("the reporting device's own version mints");
+        };
+        assert_eq!(
+            head_device(&db, change_seq).await,
+            owner_dev.to_vec(),
+            "it stays that device's self-echo"
+        );
+
+        // Genuine: another owner device recorded the version it is named for —
+        // even when a writer member filed the report.
+        let ph = fauna_core::sync::path_hash("c.txt");
+        db.record_sync_change(
+            &owner,
+            &ph,
+            Some(&recorded),
+            10,
+            "modify",
+            Some(fs_id),
+            Some(&owner_dev2),
+            None,
+        )
+        .await
+        .unwrap();
+        let seen = report(
+            &db,
+            fs_id,
+            member,
+            member_dev,
+            "c.txt",
+            vec![cand(recorded, owner_dev2), cand(member_version, member_dev)],
+        )
+        .await;
+        assert!(
+            db.conflict_winner_facts(&owner, seen, &recorded)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let Ok(ResolveWinner::Resolved { change_seq }) = db
+            .resolve_conflict_choose_winner(&owner, seen, &recorded)
+            .await
+        else {
+            panic!("a version the named device recorded mints");
+        };
+        assert_eq!(head_device(&db, change_seq).await, owner_dev2.to_vec());
+
+        // That recorded row attests ONLY its own (path, manifest): the same
+        // device named for another manifest on that path is refused.
+        let other = report(
+            &db,
+            fs_id,
+            member,
+            member_dev,
+            "c.txt",
+            vec![cand(forged, owner_dev2), cand(member_version, member_dev)],
+        )
+        .await;
+        assert!(matches!(
+            db.resolve_conflict_choose_winner(&owner, other, &forged)
+                .await
+                .unwrap(),
+            ResolveWinner::UnattestedCandidate
+        ));
+    }
+
+    /// The reporting-device shortcut is bound to the reporter's ACTOR, not only
+    /// the device bytes. `sync_devices` is keyed by `(actor,
+    /// device)`, so a writer member may register the owner's device id under
+    /// the member's own actor and file a report "from" it. The conflict's
+    /// reporting device then equals the forged candidate's device, yet that is
+    /// not the owner's device speaking: the owner's choose must refuse it,
+    /// leave the conflict open and offer no signable facts. The owner's own
+    /// device reporting its own local version still mints.
+    #[tokio::test]
+    async fn choose_winner_reporting_device_shortcut_is_bound_to_the_reporters_actor() {
+        use crate::db::ConflictCandidateRow;
+
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xa1u8; 32];
+        let member = [0xb2u8; 32];
+        let owner_dev = [0xd1u8; 32];
+        let member_dev = [0xe1u8; 32];
+        let forged = [0x41u8; 32];
+        let member_version = [0x42u8; 32];
+        let own_local = [0x43u8; 32];
+        for (actor, dev) in [
+            (owner, owner_dev),
+            (member, member_dev),
+            (member, owner_dev),
+        ] {
+            db.register_sync_device(&actor, &dev, "d", None, "read,write")
+                .await
+                .unwrap();
+        }
+        let fs_id = db.create_folder("shared", &owner).await.unwrap();
+        let cand = |m: [u8; 32], d: [u8; 32]| ConflictCandidateRow {
+            manifest_hash: m.to_vec(),
+            device_id: d.to_vec(),
+            size_bytes: 10,
+            created_at: 0,
+            content_key_version: None,
+        };
+        let report = |reporter: [u8; 32],
+                      dev: [u8; 32],
+                      path: &'static str,
+                      cands: Vec<ConflictCandidateRow>| {
+            let db = &db;
+            async move {
+                db.report_conflict(
+                    &reporter,
+                    fs_id,
+                    &dev,
+                    path,
+                    "modify-modify",
+                    None,
+                    &cands,
+                    None,
+                    Default::default(),
+                    false,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // The member reports from the owner's device bytes, registered under
+        // the member's own actor, naming that device for a version it never
+        // recorded.
+        let planted = report(
+            member,
+            owner_dev,
+            "a.txt",
+            vec![cand(forged, owner_dev), cand(member_version, member_dev)],
+        )
+        .await;
+        assert!(
+            db.conflict_winner_facts(&owner, planted, &forged)
+                .await
+                .unwrap()
+                .is_none(),
+            "no signable facts for a candidate a borrowed device id attests"
+        );
+        assert!(
+            matches!(
+                db.resolve_conflict_choose_winner(&owner, planted, &forged)
+                    .await
+                    .unwrap(),
+                ResolveWinner::UnattestedCandidate
+            ),
+            "the member's report from the owner's device bytes is not that device's word"
+        );
+        assert_eq!(
+            db.list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the refused choose leaves the conflict open"
+        );
+
+        // Genuine: the owner's device reports its own local version.
+        let own = report(owner, owner_dev, "b.txt", vec![cand(own_local, owner_dev)]).await;
+        assert!(
+            matches!(
+                db.resolve_conflict_choose_winner(&owner, own, &own_local)
+                    .await
+                    .unwrap(),
+                ResolveWinner::Resolved { .. }
+            ),
+            "the chooser's own device naming its own version mints"
         );
     }
 

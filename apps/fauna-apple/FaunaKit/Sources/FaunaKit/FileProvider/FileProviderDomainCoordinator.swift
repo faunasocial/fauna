@@ -167,6 +167,25 @@ import Foundation
             }
         }
 
+        /// The registered domains with the enablement the OS reports for each —
+        /// `userEnabled` is read-only, and `false` until the person turns Fauna
+        /// on in the Files app or System Settings. A read: no domain changes.
+        static func listPresences() async throws -> [RegisteredPresence] {
+            try await withCheckedThrowingContinuation { cont in
+                NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else {
+                        cont.resume(
+                            returning: domains.map {
+                                RegisteredPresence(
+                                    identifier: $0.identifier.rawValue, userEnabled: $0.userEnabled)
+                            })
+                    }
+                }
+            }
+        }
+
         /// The registered domains a `fauna.sync.changed` push names
         /// (file-sync.md § Remote-change nudge): every held set the push names
         /// — matched by its own name or name hash through the shared rule
@@ -320,6 +339,29 @@ import Foundation
                 registered: registered, owners: FileProviderDomainOwners.all(at: url))
         }
 
+        /// Carry the toggle across an identity succession (sync-agent.md § The
+        /// per-actor scope follows the account across a succession): the
+        /// predecessors' off toggles are re-keyed to this account in the
+        /// shared-Rust store, once per reconcile before its plan; a no-op for
+        /// an identity that never succeeded. Best-effort like the reconcile:
+        /// a failure logs and leaves the toggle to be set again.
+        static func carryOnDemandPrefs(
+            actorHex: String, predecessors: [String], prefs: FfiOnDemandPrefsStore
+        ) {
+            guard !predecessors.isEmpty else { return }
+            do {
+                if try prefs.carryFromPredecessors(successorHex: actorHex, predecessorsHex: predecessors) {
+                    logMessage(
+                        level: .info, target: "fauna.fileprovider",
+                        message: "[fp] on-demand toggles carried from \(predecessors.count) predecessor(s)")
+                }
+            } catch {
+                logMessage(
+                    level: .warn, target: "fauna.fileprovider",
+                    message: "[fp] on-demand toggle carry failed: \(error)")
+            }
+        }
+
         /// Write the plan's backfill records — the reconcile's one owner-record
         /// write that needs no OS call, split out so the headless pin drives
         /// the real store (`at:` is `FileProviderDomainOwners`' test seam).
@@ -387,6 +429,11 @@ import Foundation
                 return
             }
 
+            carryOnDemandPrefs(
+                actorHex: actorHex,
+                predecessors: FaunaAccounts.registry().predecessorsOf(actorId: actorHex),
+                prefs: FileProviderDomainPrefs.shared)
+
             let plan: PresencePlan
             do {
                 plan = try self.plan(
@@ -450,6 +497,7 @@ import Foundation
                         message: "[fp] remove domain \(domainId) failed: \(error)")
                 }
             }
+            await refreshOSEnableNotices(actorHex: actorHex, boundSets: boundSets) { sets }
         }
 
         /// Bound-folder pickup: remove one set's FP domain (by its bare
@@ -503,6 +551,7 @@ import Foundation
                 }
             }
             held.clear()
+            await FileProviderOSEnableNotices.shared.publish([])
             if !drainPending {
                 await FileProviderSignerWatch.shared.stop()
                 FileProviderCredentialStore.revoke()
@@ -533,6 +582,7 @@ import Foundation
                 bearer: bearer.token,
                 signer: FileProviderSignerWatch.machineSigner(actorId: actorId)
             )
+            FileProviderSignerWatch.mirrorRetainedKeys(actorId: actorId)
             // Intra-process read-back guard, the same one the FP test CLI runs:
             // the writer swallows `SecItemAdd`'s status, and the one failure that
             // matters here — the data-protection keychain refusing the app-group
@@ -586,6 +636,20 @@ import Foundation
             }
         }
 
+        /// Mirror the machine slot's retained generation keys into the
+        /// extension's custody item (decision 1′, `on-demand-files-shared-sets.md`).
+        /// A slot that cannot be read mirrors nothing (logged).
+        static func mirrorRetainedKeys(actorId: Data) {
+            do {
+                FileProviderCredentialStore.mirrorGenerationKeys(
+                    try machineRetainedGenerationKeys(actorId: actorId))
+            } catch {
+                logMessage(
+                    level: .warn, target: "fauna.fileprovider",
+                    message: "[fp] retained keys unreadable from the machine slot: \(error)")
+            }
+        }
+
         /// Start re-provisioning `actorId`'s signer on every slot write
         /// (idempotent for the account already watched).
         func watch(actorId: Data) {
@@ -601,6 +665,7 @@ import Foundation
                     guard FileProviderCredentialStore.load()?.actorId == actorId else { return }
                     let signer = Self.machineSigner(actorId: actorId)
                     FileProviderCredentialStore.provisionSigner(signer)
+                    Self.mirrorRetainedKeys(actorId: actorId)
                     logMessage(
                         level: .info, target: "fauna.fileprovider",
                         message: signer == nil

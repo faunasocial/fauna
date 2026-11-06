@@ -33,7 +33,8 @@ import urllib.request
 import pytest
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
-from common.auth import create_actor_and_register, register_handled_actor
+from common.auth import create_actor_and_register
+from helpers.admin_wire import admit_adult
 from tests.api import ws_api
 from tests.api.bare import sign_and_encode_post
 
@@ -104,7 +105,7 @@ def test_subdomain_serves_via_host_header(subdomain_nest):
     # A handled user — the handle keys the subdomain — web-publishes a post (firing
     # the render trigger → a default index.html) and opts into subdomain hosting.
     handle = "alice"
-    actor = register_handled_actor(port, handle=handle, domain=SUBDOMAIN_NEST_DOMAIN)
+    actor = admit_adult(subdomain_nest, handle, domain=SUBDOMAIN_NEST_DOMAIN, token=True)
     # Title kept apostrophe-free: the default index HTML-escapes it (e.g.
     # `Alice&#x27;s`), which would defeat a literal substring assertion.
     post_bytes = sign_and_encode_post(

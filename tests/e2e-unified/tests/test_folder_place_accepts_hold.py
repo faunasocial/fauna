@@ -63,14 +63,16 @@ from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui is the lead app. linux, windows and macOS ride the per-app
-    # trickle-down (web, ios and android are the page's declared absences);
-    # each arrives with its marker AND an `_SUPPORTED_APPS` entry.
+    # tui is the lead app, macOS and linux followed; windows rides the per-app
+    # trickle-down (web, ios and android are the page's declared absences). Each
+    # arrives with its marker AND a `built` entry on the
+    # `folder-place-accepts-hold` surface. macOS' production spawner is launchd,
+    # so its seats run an agent only under `real_sync_agent`.
     pytest.mark.tui,
+    pytest.mark.macos,
+    pytest.mark.linux,
+    pytest.mark.real_sync_agent,
 ]
-
-#: Apps whose leg has landed. Grow this — and the markers above — together.
-_SUPPORTED_APPS = ("tui",)
 
 #: Device B's id — `alice_second_device`'s own constant.
 _DEVICE_B = "fedcba9876543210" * 4
@@ -104,16 +106,10 @@ def test_a_device_told_not_to_take_changes_resumes_exactly_where_it_stopped(
     request, logged_in_app, nest_instance, test_user, tmp_path
 ):
     """`local-folder-sync` outcome 15, on one user's two devices."""
-    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.app_surface import app_name, require_surface
 
     device_a = logged_in_app
-    if app_name(device_a.driver) not in _SUPPORTED_APPS:
-        skip_unbuilt(
-            device_a.driver,
-            surface="the place-accepts hold journey",
-            detail="this app's leg of the journey has not landed",
-            tracked="docs/features/local-folder-sync.md outcome 15 (per-app trickle-down)",
-        )
+    require_surface(device_a.driver, "folder-place-accepts-hold")
 
     device_b, _driver_b = request.getfixturevalue("alice_second_device")
     request.addfinalizer(lambda: print(_agent_diagnosis(device_b, "device B")))
@@ -167,7 +163,7 @@ def test_a_device_told_not_to_take_changes_resumes_exactly_where_it_stopped(
     b.navigate_folders()
 
     def _set_listed_on_b() -> bool:
-        titles = [b.folder_title(i) for i in range(b.folder_count())]
+        titles = b.folder_titles()
         if any(set_name in t for t in titles):
             return True
         b.navigate_devices()

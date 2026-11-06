@@ -780,12 +780,14 @@ fn regenerate_peer_sync_folder_corpus() {
         change: row.clone(),
         sequenced: true,
         signer_cert: None,
+        group_base: None,
         extra: BTreeMap::new(),
     };
     let pending = PeerChangeRow {
         change: fauna_protocol::sync::SyncChange { seq: 0, ..row },
         sequenced: false,
         signer_cert: None,
+        group_base: None,
         extra: BTreeMap::new(),
     };
     write(
@@ -918,6 +920,12 @@ mod p2p_share {
                 "group_share_deliver" => {
                     fauna_core::encoding::canonical_decode::<GroupShareDeliver>(&entry).is_ok()
                 }
+                "sync_changes_list_request" => {
+                    decode_strict::<fauna_protocol::sync::SyncChangesListRequest>(&entry).is_ok()
+                }
+                "sync_changes_list_reply" => {
+                    decode_strict::<fauna_protocol::sync::SyncChangesListReply>(&entry).is_ok()
+                }
                 other => panic!("{TARGET} corpus entry {name} has unknown type prefix {other}"),
             };
             assert!(
@@ -973,7 +981,11 @@ mod p2p_share {
     ///
     /// `fauna.peer.node_info` is deliberately exempt: it is a `fauna.peer.*`
     /// kind, hardened by the BASE table (`peer_node_info_*` stems), and the
-    /// share serve set only re-serves it as the pre-witness probe.
+    /// share serve set only re-serves it as the pre-witness probe. The group
+    /// plane's feed (`fauna.sync.changes.list`) is the one named non-share kind
+    /// that IS covered here: the share serve set answers it for a `group:`
+    /// scope (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 6), so this plane's corpus records it too.
     #[test]
     fn share_allowlist_and_hardening_table_stay_tied() {
         let declared: std::collections::BTreeSet<&str> = KIND_PAYLOAD_COVERAGE_P2P_SHARE
@@ -981,7 +993,9 @@ mod p2p_share {
             .map(|(kind, _)| *kind)
             .collect();
         for kind in fauna_peer_share::server::allowlisted_kinds() {
-            if !kind.starts_with("fauna.peer.share.") {
+            if !kind.starts_with("fauna.peer.share.")
+                && kind != fauna_peer_share::server::KIND_SYNC_CHANGES_LIST
+            {
                 assert_eq!(
                     kind,
                     fauna_protocol::peer::KIND_PEER_NODE_INFO,
@@ -1090,6 +1104,7 @@ mod p2p_share {
             change: row.clone(),
             sequenced: true,
             signer_cert: None,
+            group_base: None,
             extra: BTreeMap::new(),
         };
         // The own-pending arm: no author stamp, not sequenced — the shape the
@@ -1102,6 +1117,7 @@ mod p2p_share {
             },
             sequenced: false,
             signer_cert: None,
+            group_base: None,
             extra: BTreeMap::new(),
         };
         write(
@@ -1277,6 +1293,7 @@ mod p2p_share {
                 machinery_snapshot: vec![GroupPlaneRow {
                     kind: "fauna.group.birth".into(),
                     key: "birth".into(),
+                    merge_meta: None,
                     value: canonical_encode(&birth).unwrap().to_vec(),
                 }],
                 delivered_at: Timestamp(3_000),
@@ -1378,6 +1395,45 @@ mod p2p_share {
                     scope_id: ByteBuf::from(scope_id.to_vec()),
                     entry: ByteBuf::from(enrolled),
                     extra: BTreeMap::new(),
+                })
+                .unwrap(),
+            );
+        }
+
+        // ── The group plane's feed (decision 6) — the account plane's own
+        // structs, shaped as the share channel carries them: a `group:` scope
+        // walked by a per-writer frontier, answered with a relay row (the
+        // `store_serve` row shape: writer coordinates and the sealed entry).
+        {
+            use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
+            let scope = format!("group:{}", "5c".repeat(32));
+            let writer = "a1".repeat(32);
+            write(
+                "sync_changes_list_request-1.bin",
+                encode_canonical(&SyncChangesListRequest {
+                    since: 0,
+                    item_class: Some("state-entry".into()),
+                    scope: Some(scope.clone()),
+                    frontier: Some(BTreeMap::from([(writer.clone(), 3)])),
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+            write(
+                "sync_changes_list_reply-1.bin",
+                encode_canonical(&SyncChangesListReply {
+                    changes: vec![SyncChange {
+                        seq: 4,
+                        path_hash: "1f".repeat(32),
+                        change_type: "state-put".into(),
+                        size_bytes: 96,
+                        item_class: Some("state-entry".into()),
+                        origin_writer: Some(writer),
+                        origin_seq: Some(4),
+                        entry: Some(ByteBuf::from(vec![0xE4; 96])),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
                 })
                 .unwrap(),
             );

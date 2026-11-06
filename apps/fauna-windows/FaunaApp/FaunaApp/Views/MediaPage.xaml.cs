@@ -43,6 +43,9 @@ public sealed partial class MediaPage : Page
     private INestRpcClient? _rpc;
     private ICryptoService? _crypto;
     private ISessionAccount? _account;
+    // The client's one per-actor ConversationsSession — the media machine's
+    // member-row join-filter reads it (BuildMediaMachineAsync wires it).
+    private uniffi.fauna_conversations.ConversationsSession? _convSession;
     // search.md § User actions (SearchNav.File) — set when SearchResultsPage
     // routed a File search hit here; consumed once in Page_Loaded, after the
     // machine's own list has loaded (LocateFile answers from ITS snapshot,
@@ -105,7 +108,6 @@ public sealed partial class MediaPage : Page
 
         MediaTitle.Text = S.Get("media/title");
         EmptyText.Text = S.Get("media/no_media_yet");
-        ImageLightboxDialog.CloseButtonText = S.Get("common/close");
 
         // media-item-detail / file-version-restore-confirm-modal static labels.
         VersionsTitle.Text = S.Get("media/versions_title");
@@ -133,6 +135,21 @@ public sealed partial class MediaPage : Page
         }
         SortCombo.SelectedIndex = 0;
 
+        // Sort-direction ComboBox — ascending (default) / descending; label from
+        // shared Rust (fauna-core::format::media_sort_direction_label). The tag is
+        // the stable option value (also the automation name, as for SortCombo).
+        foreach (var tag in new[] { "ascending", "descending" })
+        {
+            var item = new ComboBoxItem
+            {
+                Content = S.Resolve(FaunaFfiMethods.MediaSortDirectionLabel(tag == "descending")),
+                Tag = tag,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, tag);
+            SortDirectionCombo.Items.Add(item);
+        }
+        SortDirectionCombo.SelectedIndex = 0;
+
         // The two share gestures the offline gate can desensitize — create and
         // revoke are OnlineOnly (share-links.md § Create). The list button's
         // `fauna.share.list` is a Read, which a windows gate may not declare
@@ -149,6 +166,7 @@ public sealed partial class MediaPage : Page
             _rpc = clients.Rpc;
             _crypto = clients.Crypto;
             _account = clients.Account;
+            _convSession = clients.ConvSession;
             _deepLinkFile = clients.DeepLinkFile;
             // Live refresh while the page is open (media.md § State & data shape →
             // *Staying live while the page is open*; file-sync.md § Remote-change
@@ -194,7 +212,7 @@ public sealed partial class MediaPage : Page
     /// to match against: any push while this page is open means SOME readable
     /// set changed, and the aggregate itself is what needs re-reading (mirrors
     /// linux's `media_page_is_visible` gate / tui's `StaleSurfaces::media`).</summary>
-    private void OnFolderChangedPushed(string folder) => RefreshMedia();
+    private void OnFolderChangedPushed(string folder, byte[]? folderHash) => RefreshMedia();
 
     /// <summary>Reconnect-sweep arm (transport.md § Which surfaces a push
     /// invalidates, windows-leg audit): a reconnect or ResyncRequired may have
@@ -222,7 +240,7 @@ public sealed partial class MediaPage : Page
             // Build the page machine bound to the session WS-RPC requester; the
             // observer ticks the UI thread (MediaNotifyObserver) → RenderPage.
             _observer = new MediaNotifyObserver(RenderPage);
-            _machine = await _rpc.BuildMediaMachineAsync(_observer);
+            _machine = await _rpc.BuildMediaMachineAsync(_observer, _convSession);
             // The followed-public-folder source, injected right after the build
             // (media.md § Followed public folders). Without it snapshot.followed
             // is permanently empty and the filter offers no followed scope — a
@@ -324,12 +342,18 @@ public sealed partial class MediaPage : Page
 
             // Sort + filter selects reflect the snapshot's active state.
             SelectComboByTag(SortCombo, snap.sort);
-            // The followed browse scopes ride AFTER the own-set options, and the
-            // ACTIVE filter is either an own set (snap.filter) or a followed
-            // scope (snap.followedScope) — never both, so one nullable read
-            // picks the selection (media.md § Followed public folders).
+            SelectComboByTag(SortDirectionCombo, snap.descending ? "descending" : "ascending");
+            // One option per offered set ROW (snap.folderOptions — a same-named
+            // own / shared pair is two options), then the followed browse scopes;
+            // the ACTIVE filter is either a set's value (snap.filter) or a
+            // followed scope (snap.followedScope) — never both, so one nullable
+            // read picks the selection (media.md § Encryption at rest → The
+            // filter and the upload target address the row; § Followed public
+            // folders).
             _followedValues = snap.followed.Select(f => f.value).ToHashSet();
-            RebuildFilterCombo(snap.folders, snap.followed, snap.followedScope?.value ?? snap.filter);
+            RebuildFilterCombo(
+                MediaFilterOptions.Build(snap.folderOptions, snap.followed, S.Get("media/filter_all")),
+                snap.followedScope?.value ?? snap.filter);
 
             // A followed browse scope is READ-ONLY, structurally: the upload
             // affordance is removed from the tree rather than disabled, because a
@@ -375,6 +399,7 @@ public sealed partial class MediaPage : Page
         Name: s.name,
         Path: s.path,
         Folder: s.folder,
+        FilterValue: s.filterValue,
         SizeBytes: (ulong)s.sizeBytes,
         UpdatedAt: (ulong)s.updatedAt,
         ThumbnailHash: s.thumbnailHash,
@@ -395,54 +420,40 @@ public sealed partial class MediaPage : Page
         }
     }
 
-    private void RebuildFilterCombo(
-        IReadOnlyList<string> folders,
-        IReadOnlyList<FollowedScopeOption> followed,
-        string? activeFilter)
+    private void RebuildFilterCombo(IReadOnlyList<MediaFilterEntry> desired, string? activeFilter)
     {
-        // "__all__" (cross-set all-media default) + one entry per browsable set the
-        // client knows, empty ones included (snapshot.folders — media.md § Layout &
-        // flow), then the followed browse scopes AFTER the own sets. Mirror linux:
-        // rebuild only when the tag set
-        // changed, so a newly-populated set appears without clobbering an in-flight
-        // selection. "__all__" is the canonical sentinel (actions/media.py
-        // MEDIA_FILTER_ALL; reserved __*-prefixed so it can't collide with a set
-        // name). media.md § O-4.
-        var desired = new List<string> { "__all__" };
-        desired.AddRange(folders);
-        // Both halves of a followed option are shared-Rust minted: the value is
-        // opaque and disjoint from every set name by construction, the label
-        // already carries the owner disambiguator. Never parse the value — the
-        // MACHINE says which values are followed, and the routing below asks it.
-        desired.AddRange(followed.Select(f => f.value));
-
+        // "__all__" (cross-set all-media default) + one entry per offered set row,
+        // empty ones included (media.md § Layout & flow), then the followed browse
+        // scopes — both halves of every option minted in shared Rust
+        // (MediaFilterOptions). Never parse a value: the MACHINE says which values
+        // are followed, and the routing in FilterCombo_SelectionChanged asks it.
+        // Mirror linux: rebuild only when an option's value or label changed, so a
+        // newly-populated set appears without clobbering an in-flight selection,
+        // and a shared set whose owner label resolves later repaints. media.md § O-4.
         var current = FilterCombo.Items
             .OfType<ComboBoxItem>()
-            .Select(it => it.Tag as string)
+            .Select(it => (it.Tag as string, it.Content as string))
             .ToList();
 
-        if (!current.SequenceEqual(desired))
+        if (!current.SequenceEqual(desired.Select(e => ((string?)e.Value, (string?)e.Label))))
         {
-            // A followed scope's value is an OPAQUE address; painting it would
-            // put the raw address on screen. A WinUI ComboBoxItem carries the
-            // display and the drive-key on separate properties — Content is the
-            // minted label, the UIA Name is the value the cross-app
-            // select(id, value) contract addresses — so windows needs no
-            // value→label side map of the sort GTK and Compose keep.
-            var labels = followed.ToDictionary(f => f.value, f => f.label);
+            // A WinUI ComboBoxItem carries the display and the drive-key on
+            // separate properties — Content is the minted label, Tag and the UIA
+            // AutomationId the value the cross-app select(id, value) contract
+            // addresses (the bridge matches the AutomationId first), the UIA Name
+            // the label the options attr lists — so windows needs no value→label
+            // side map of the sort GTK and Compose keep.
             FilterCombo.Items.Clear();
-            foreach (var tag in desired)
+            foreach (var entry in desired)
             {
-                var label = tag == "__all__"
-                    ? S.Get("media/filter_all")
-                    : labels.TryGetValue(tag, out var minted) ? minted : tag;
-                var item = new ComboBoxItem { Content = label, Tag = tag };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, tag);
+                var item = new ComboBoxItem { Content = entry.Label, Tag = entry.Value };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, entry.AutomationName);
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, entry.Value);
                 FilterCombo.Items.Add(item);
             }
         }
 
-        SelectComboByTag(FilterCombo, activeFilter ?? "__all__");
+        SelectComboByTag(FilterCombo, activeFilter ?? MediaFilterOptions.AllValue);
     }
 
     // ── Explorer chrome event handlers (gestures → machine) ─────────────────
@@ -461,6 +472,13 @@ public sealed partial class MediaPage : Page
             _machine.SetSort(tag);
     }
 
+    private void SortDirectionCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_machine is null || _rendering) return;
+        if (SortDirectionCombo.SelectedItem is ComboBoxItem { Tag: string tag })
+            _machine.SetDescending(tag == "descending");
+    }
+
     private async void FilterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_machine is null || _rendering) return;
@@ -475,8 +493,10 @@ public sealed partial class MediaPage : Page
             await _machine.SelectFollowedScope(tag);
             return;
         }
-        // "__all__" ⇒ the cross-set all-media view (null filter).
-        _machine.SetFilter(tag == "__all__" ? null : tag);
+        // "__all__" ⇒ the cross-set all-media view (null filter); any other tag is
+        // an option's shared-Rust value (an own set's name or a shared set's
+        // `local:<id>`), handed back verbatim.
+        _machine.SetFilter(tag == MediaFilterOptions.AllValue ? null : tag);
     }
 
     // ── media-item-detail + file-version-history ─────────────────────────────
@@ -565,7 +585,10 @@ public sealed partial class MediaPage : Page
         FileVersionSummary[] versions;
         try
         {
-            versions = await _machine.FileVersions(item.Folder, item.Path, _includePruned);
+            // The item's filter value, not its folder name: a shared set's file
+            // lists ITS row's history beside an own namesake (media.md § Encryption
+            // at rest → The filter and the upload target address the row).
+            versions = await _machine.FileVersions(item.FilterValue, item.Path, _includePruned);
         }
         catch (Exception ex)
         {
@@ -785,7 +808,10 @@ public sealed partial class MediaPage : Page
         // snapshot.error and returns; on success it refreshes (the observer
         // repaints the explorer without the tombstoned row). The snapshot is
         // therefore the success signal, exactly like linux.
-        await _machine.Delete(item.Folder, deviceId!, item.Path);
+        // The item's filter value: a shared set's tombstone names its row, never
+        // an own set of the same name (set-addressing.md; media.md § Encryption at
+        // rest → The filter and the upload target address the row).
+        await _machine.Delete(item.FilterValue, deviceId!, item.Path);
 
         if (!ReferenceEquals(_detailItem, item)) return;
 
@@ -1147,15 +1173,4 @@ public sealed partial class MediaPage : Page
     /// date + time string (value-formatting.md § Absolute local timestamp display).</summary>
     public static string FormatTimestamp(ulong unixSecs) =>
         uniffi.fauna_ffi.FaunaFfiMethods.FormatUnixLocal((long)unixSecs);
-
-    /// <summary>Open the image lightbox for a blob URL. Unwired: a media-item tap now
-    /// opens <c>media-item-detail</c>; an in-sheet preview is a sanctioned later
-    /// extension of that surface (media.md § Element IDs — additions go through
-    /// ui.yaml approval).</summary>
-    public async void ShowImageLightbox(string imageUrl)
-    {
-        ImageLightboxDialog.XamlRoot = this.XamlRoot;
-        await Controls.Dialogs.ShowAsync(ImageLightboxDialog, prepare: () =>
-            LightboxImage.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(imageUrl)));
-    }
 }

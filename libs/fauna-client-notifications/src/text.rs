@@ -57,6 +57,37 @@ pub fn notification_text(item: &NotifItem) -> NotificationText {
     decide(item.body.as_ref(), &item.summary)
 }
 
+/// [`notification_text`], with a fauna-native row's sender named as the viewer
+/// calls them (`behavior/notifications.md` § Localized body → *the sender
+/// arg*). The nest fills a fauna-native row's `{sender}` (a knock, a like) with
+/// the 8-hex prefix of `sender_id`, because it cannot know the viewer's
+/// nickname for them; `name_sender` answers what the viewer calls that actor id
+/// (`fauna_conversations::ContactsCache::known_peer_label` — the one
+/// `peer_display_label` chain over the nickname and the contact roster's
+/// handle), and `None` keeps the prefix. Only the nest's own prefix is
+/// replaced: a sender arg holding anything else (a bridged author's display
+/// name) is the nest's answer and stands.
+pub fn notification_text_naming(
+    item: &NotifItem,
+    name_sender: impl FnOnce(&str) -> Option<String>,
+) -> NotificationText {
+    let text = notification_text(item);
+    let NotificationText::Localized(mut localized) = text else {
+        return text;
+    };
+    if item.source == "fauna"
+        && let Some(sender_id) = item.sender_id.as_deref()
+        && let Some(prefix) = sender_id.get(..KNOCK_SENDER_PREFIX)
+        && let Some(arg) = localized.args.get_mut("sender")
+        && arg.eq_ignore_ascii_case(prefix)
+        && let Some(name) = name_sender(sender_id)
+        && !name.trim().is_empty()
+    {
+        *arg = fauna_core::control_chars::sanitize_plain_line(&name, ARG_MAX_CHARS);
+    }
+    NotificationText::Localized(localized)
+}
+
 /// The same decision for a `fauna.notification` push, whose `body` and
 /// `summary` are the row's own: an OS-level notification an app raises off the
 /// push says exactly what the row it announces says.
@@ -428,6 +459,78 @@ mod tests {
         assert_eq!(
             text.resolve(fauna_i18n::strings::lookup),
             "a1b2c3d4 wants to connect"
+        );
+    }
+
+    /// A fauna-native row's `{sender}` is the nest's 8-hex prefix; the app names
+    /// the person as it does everywhere else when it knows them, and keeps the
+    /// prefix when it does not. A bridged row's sender is the nest's answer.
+    #[test]
+    fn a_known_sender_is_named_over_the_nest_prefix() {
+        let sender_id = format!("ec939a84{}", "0".repeat(56));
+        let knock = NotifItem {
+            notif_type: "knock".into(),
+            source: "fauna".into(),
+            sender_id: Some(sender_id.clone()),
+            summary: "ec939a84 wants to connect: Knock".into(),
+            body: Some(
+                WireText::new("notifications.row_knock")
+                    .with_arg("sender", "ec939a84")
+                    .with_arg("message", "Knock"),
+            ),
+            ..Default::default()
+        };
+        let said = |t: NotificationText| match t {
+            NotificationText::Localized(l) => l.resolve(fauna_i18n::strings::lookup),
+            NotificationText::Verbatim(v) => v,
+        };
+        assert_eq!(
+            said(notification_text_naming(&knock, |id| {
+                assert_eq!(id, sender_id);
+                Some("tester".into())
+            })),
+            "tester wants to connect: Knock"
+        );
+        assert_eq!(
+            said(notification_text_naming(&knock, |_| None)),
+            "ec939a84 wants to connect: Knock",
+            "an unknown sender keeps the prefix"
+        );
+        // The name the app supplies is a roster handle or a nickname — text the
+        // viewer may not have written — and passes the same plain-line
+        // reduction as every other arg (§ Localized body → *The sender arg*).
+        assert_eq!(
+            said(notification_text_naming(&knock, |_| Some(format!(
+                "eve\u{202E}\nmallory{}",
+                "x".repeat(400)
+            )))),
+            format!(
+                "eve mallory{}… wants to connect: Knock",
+                "x".repeat(ARG_MAX_CHARS - 1 - "eve mallory".chars().count())
+            ),
+            "a supplied name is one plain capped line"
+        );
+
+        let bridged = NotifItem {
+            source: "bluesky".into(),
+            ..knock.clone()
+        };
+        assert_eq!(
+            said(notification_text_naming(&bridged, |_| Some(
+                "tester".into()
+            ))),
+            "ec939a84 wants to connect: Knock",
+            "only a fauna-native row's prefix is the client's to replace"
+        );
+        let named_by_nest = NotifItem {
+            body: Some(WireText::new("notifications.row_like").with_arg("sender", "alice")),
+            ..knock
+        };
+        assert_eq!(
+            said(notification_text_naming(&named_by_nest, |_| Some(
+                "tester".into()
+            ))),
+            "alice liked your post"
         );
     }
 }

@@ -2,6 +2,7 @@ import FaunaFFISwift
 import Foundation
 
 #if DEBUG && canImport(FileProvider)
+    import CryptoKit
     import FileProvider
 
     /// The hidden File Provider test-arg path — the headless driver behind the
@@ -14,13 +15,13 @@ import Foundation
     /// which is why this hangs off the app binary rather than a separate tool.
     ///
     /// `run` returns `nil` for argv it does not own (normal GUI launch — including
-    /// zero args), else the process exit code. Only the six exact FP verbs are
+    /// zero args), else the process exit code. Only the nine exact FP verbs are
     /// intercepted, so ordinary app argv (URLs, Finder flags) falls through.
     ///
     /// **DEBUG-only, and it must be** (convention 15,
     /// `e2e-automation-surface-gating.md` § The convention): `provision` writes a
     /// nest URL, bearer and backup key from argv into the File Provider credential
-    /// store, and `revoke`/`register`/`remove`/`signal` act on the user's domain, so
+    /// store, and `revoke`/`register`/`remove`/`signal`/`evict`/`read`/`write` act on the user's domain, so
     /// in a Release build any process running as the user could repoint or revoke
     /// that user's File Provider through the signed binary. There is deliberately NO
     /// `#else` twin: the Release build receives nothing from this file, and the one
@@ -36,11 +37,18 @@ import Foundation
                 return domainCommand(
                     mode,
                     arguments.count > 1 ? arguments[1] : nil,
-                    arguments.count > 2 ? arguments[2] : nil)
+                    arguments.count > 2 ? arguments[2] : nil,
+                    alwaysEnabled: arguments.count > 3 && arguments[3] == "always-enabled")
             case "signal":
                 return signalCommand(
                     arguments.count > 1 ? arguments[1] : nil,
                     arguments.count > 2 ? arguments[2] : nil)
+            case "evict":
+                return evictCommand(Array(arguments.dropFirst()))
+            case "read":
+                return readCommand(Array(arguments.dropFirst()))
+            case "write":
+                return writeCommand(Array(arguments.dropFirst()))
             default:
                 return nil
             }
@@ -140,8 +148,17 @@ import Foundation
         /// e2e drives serves the production identifier grammar, never a bare
         /// ref it refuses). A non-ref id (the M0 smoke's `fauna-m0-test`) is
         /// registered raw — the packaging smoke needs no set at all.
+        ///
+        /// `register <ref> <name> always-enabled` adds the domain with the
+        /// `.alwaysEnabled` testing mode: the OS adds a fresh domain disabled
+        /// until a person enables it in the Files app (iOS) or System Settings
+        /// (macOS), and serves nothing until then (FP -2011), so a headless run
+        /// needs the mode to launch the extension at all. The mode is honoured
+        /// only for a build signed with the
+        /// `com.apple.developer.fileprovider.testing-mode` entitlement.
         private static func domainCommand(
-            _ mode: String, _ idArg: String?, _ displayNameArg: String?
+            _ mode: String, _ idArg: String?, _ displayNameArg: String?,
+            alwaysEnabled: Bool
         ) -> Int32 {
             let id: String
             if let ref = idArg, folderRefIsValid(wire: ref) {
@@ -171,6 +188,7 @@ import Foundation
 
             switch mode {
             case "register":
+                if alwaysEnabled { domain.testingModes = [.alwaysEnabled] }
                 NSFileProviderManager.add(domain) { error in
                     if let error {
                         stderrLine("register FAILED: \(error)")
@@ -197,6 +215,12 @@ import Foundation
                         exitCode = 1
                     } else {
                         print("domains: " + domains.map(\.identifier.rawValue).joined(separator: ","))
+                        // The Files-app / System Settings enablement the OS holds
+                        // per domain — the observable behind `fileproviderd`'s
+                        // `(disabled,…)` and its -2011 "Sync is not enabled".
+                        for domain in domains {
+                            print("domain \(domain.identifier.rawValue) userEnabled=\(domain.userEnabled)")
+                        }
                     }
                     done.signal()
                 }
@@ -204,6 +228,152 @@ import Foundation
 
             done.wait()
             return exitCode
+        }
+
+        /// `evict <set-ref> <set-name> <rel>` — ask the OS to evict one item of the
+        /// set's domain (`NSFileProviderManager.evictItem`), the programmatic twin
+        /// of the user's *Remove Download*: the headless probe for whether the OS
+        /// lets a kept own record go (`on-demand-files-apple.md` § Apple File
+        /// Provider binding, *An own record the nest took no bytes of is kept
+        /// downloaded*). Prints the OS's answer either way; the exit code is 0
+        /// when the OS accepted the eviction and 1 when it refused, so the caller
+        /// reads the refusal as a measurement, not a crash. The domain is resolved
+        /// exactly as `register` scopes it, so `provision` runs first.
+        private static func evictCommand(_ args: [String]) -> Int32 {
+            guard args.count == 3 else {
+                stderrLine("usage: Fauna evict <set-ref> <set-name> <rel>")
+                return 2
+            }
+            let (ref, setName, rel) = (args[0], args[1], args[2])
+            guard let manager = setManager("evict", ref, setName) else { return 2 }
+            var exitCode: Int32 = 0
+            let done = DispatchSemaphore(value: 0)
+            manager.evictItem(identifier: NSFileProviderItemIdentifier(rawValue: rel)) { error in
+                if let error {
+                    print("evict REFUSED: \(rel): \(error)")
+                    exitCode = 1
+                } else {
+                    print("evict OK: \(rel)")
+                }
+                done.signal()
+            }
+            done.wait()
+            return exitCode
+        }
+
+        /// The manager of `<set-ref>`'s domain, resolved exactly as `register`
+        /// scopes it (so `provision` runs first); nil after printing why.
+        private static func setManager(_ verb: String, _ ref: String, _ setName: String)
+            -> NSFileProviderManager?
+        {
+            guard let creds = FileProviderCredentialStore.load(),
+                let identity = FileProviderDomainIdentity(
+                    actorIdHex: data_to_hex(creds.actorId), folderId: ref)
+            else {
+                stderrLine(
+                    "\(verb) FAILED: a set's domain is scoped to the provisioned account — run `provision` first"
+                )
+                return nil
+            }
+            let domain = NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier(rawValue: identity.domainId),
+                displayName: setName)
+            guard let manager = NSFileProviderManager(for: domain) else {
+                stderrLine("\(verb) FAILED: no manager for \(identity.domainId)")
+                return nil
+            }
+            return manager
+        }
+
+        /// `read <set-ref> <set-name> <rel>` — open one file of the set's domain
+        /// the way a person's app does: list the domain root (which drives the
+        /// OS to enumerate), then a plain read of `<root>/<rel>`, which hydrates
+        /// a dataless item through `fetchContents`. Prints whether the item was
+        /// dataless before the read (`SF_DATALESS`), the byte count and the
+        /// SHA-256 of what came back. On the iOS simulator the app is the only
+        /// process that can read a domain's files (`simctl spawn` runs no
+        /// `cat`), so this is the eviction probe's hydrate and its re-open
+        /// (`on-demand-files-apple.md` § Apple File Provider binding). Exit 0 on
+        /// a read, 1 when the item never listed or the read failed.
+        private static func readCommand(_ args: [String]) -> Int32 {
+            guard args.count == 3 else {
+                stderrLine("usage: Fauna read <set-ref> <set-name> <rel>")
+                return 2
+            }
+            let (ref, setName, rel) = (args[0], args[1], args[2])
+            guard let manager = setManager("read", ref, setName) else { return 2 }
+            guard let root = rootURL("read", manager) else { return 1 }
+            let item = root.appendingPathComponent(rel)
+            let deadline = Date().addingTimeInterval(30)
+            while !FileManager.default.fileExists(atPath: item.path) {
+                _ = try? FileManager.default.contentsOfDirectory(atPath: root.path)
+                guard Date() < deadline else {
+                    stderrLine("read FAILED: \(rel) never listed under \(root.path)")
+                    return 1
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            var info = stat()
+            let dataless = stat(item.path, &info) == 0 && (info.st_flags & UInt32(SF_DATALESS)) != 0
+            do {
+                let bytes = try Data(contentsOf: item)
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                print("read OK: \(rel) dataless-before=\(dataless) bytes=\(bytes.count) sha256=\(digest)")
+                return 0
+            } catch {
+                print("read FAILED: \(rel) dataless-before=\(dataless): \(error)")
+                return 1
+            }
+        }
+
+        /// The user-visible root of `manager`'s domain; nil after printing why.
+        private static func rootURL(_ verb: String, _ manager: NSFileProviderManager) -> URL? {
+            var root: URL?
+            let done = DispatchSemaphore(value: 0)
+            manager.getUserVisibleURL(for: .rootContainer) { url, error in
+                if let error { stderrLine("\(verb) FAILED: no root URL: \(error)") }
+                root = url
+                done.signal()
+            }
+            done.wait()
+            return root
+        }
+
+        /// `write <set-ref> <set-name> <rel> <text>` — create one file in the set's
+        /// domain the way a person's app does: a coordinated write of `<text>`
+        /// (UTF-8) to `<root>/<rel>`, which the OS hands the extension as
+        /// `createItem` — ingest, then a record signed by the provisioned
+        /// principal. The own-record leg of the eviction probe
+        /// (`on-demand-files-apple.md` § Apple File Provider binding): on the iOS
+        /// simulator the app is the only process that can write into a domain.
+        /// Returns once the bytes are on disk; the record lands asynchronously,
+        /// so the caller waits on the nest for it. Exit 0 on a write, 1 on failure.
+        private static func writeCommand(_ args: [String]) -> Int32 {
+            guard args.count == 4 else {
+                stderrLine("usage: Fauna write <set-ref> <set-name> <rel> <text>")
+                return 2
+            }
+            let (ref, setName, rel, text) = (args[0], args[1], args[2], args[3])
+            guard let manager = setManager("write", ref, setName) else { return 2 }
+            guard let root = rootURL("write", manager) else { return 1 }
+            // Listing the root drives the OS to enumerate the domain first.
+            _ = try? FileManager.default.contentsOfDirectory(atPath: root.path)
+            let item = root.appendingPathComponent(rel)
+            let bytes = Data(text.utf8)
+            var coordinationError: NSError?
+            var writeError: Error?
+            NSFileCoordinator().coordinate(
+                writingItemAt: item, options: .forReplacing, error: &coordinationError
+            ) { url in
+                do { try bytes.write(to: url) } catch { writeError = error }
+            }
+            if let error = coordinationError ?? writeError.map({ $0 as NSError }) {
+                print("write FAILED: \(rel): \(error)")
+                return 1
+            }
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            print("write OK: \(rel) bytes=\(bytes.count) sha256=\(digest)")
+            return 0
         }
 
         /// Drive the nudge `FaunaClient.swift`'s push observer runs on a

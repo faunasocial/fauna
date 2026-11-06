@@ -59,6 +59,7 @@
             <NavigationViewItem x:Name="SubSettings" Tag="settings" Content="{loc:Localize Key=admin/settings_page/title}" />
             <NavigationViewItem x:Name="SubNest" Tag="admin-nest" Content="{loc:Localize Key=admin/nest_page/title}" />
             <NavigationViewItem x:Name="SubMail" Tag="admin-mail" Content="{loc:Localize Key=admin/mail_page/title}" />
+            <NavigationViewItem x:Name="SubMailReports" Tag="admin-mail-reports" Content="{loc:Localize Key=admin/mail_reports_page/title}" />
             <NavigationViewItem x:Name="SubCalendar" Tag="admin-calendar" Content="{loc:Localize Key=admin/calendar_page/title}" />
             <NavigationViewItem x:Name="SubContacts" Tag="admin-contacts" Content="{loc:Localize Key=admin/contacts_page/title}" />
             <NavigationViewItem x:Name="SubFiles" Tag="admin-files" Content="{loc:Localize Key=admin/files_page/title}" />

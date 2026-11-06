@@ -43,6 +43,11 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.web,
+    pytest.mark.android,
+    pytest.mark.ios,
+    pytest.mark.macos,
+    pytest.mark.windows,
+    pytest.mark.real_conversations,
 ]
 
 SENDER = "sender@external.test"

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import secrets
 
 import pytest
@@ -66,22 +67,28 @@ from common.nest import (
 from conftest import (
     _seeded_environment,
     _serve_spa_proxy,
+    _get_ios_second_seat_udid,
     _start_dedicated_nest,
     _trust_seeder,
     get_available_apps,
 )
 from helpers.app_launch import app_launch_config
 from helpers.crash_recovery import launch_surface_dump, setup_status
-from helpers.registry_store import describe_registry, read_store_slot
+from helpers.registry_store import (
+    credential_store_path,
+    describe_registry,
+    read_registry_index,
+    read_store_slot,
+)
 from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
-    pytest.mark.destructive,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.destructive,
 ]
 
-_CLIENTS = ("tui", "linux", "web")
+_CLIENTS = ("tui", "linux", "web", "macos", "ios")
 
 # tests/e2e-unified/ui.yaml — the claim page, the launch surfaces, the shell.
 CLAIM_CODE_INPUT = "claim-code-input"
@@ -107,6 +114,8 @@ _NEST_FRESH_S = 120.0
 _CLAIM_S = 60.0
 #: A launch routing onto a wizard page or a launch surface.
 _ROUTE_S = 60.0
+#: The claim page's field taking its prefill once the page is up.
+_PREFILL_S = 15.0
 #: A running app's reconnect meeting the wiped box: the WS drop, the
 #: supervisor's backoff (1 s doubling, 60 s cap), the refused re-mint.
 _RECONNECT_REFUSED_S = 150.0
@@ -127,20 +136,26 @@ def reset_client(request):
 
 
 @contextlib.contextmanager
-def _seat(request, client, tmp_path, nest):
+def _seat(request, client, tmp_path, nest, *, second_seat=False):
     """A launch harness for ``client`` on ``nest``, and the url that app dials
     (and pins the nest's identity by): the nest's own on native, the SPA
     proxy's on web — a browser reaches a nest only through one
     (``conftest._serve_spa_proxy``). Native launches are file-backed, so the
-    pending-factory-reset slot is readable at rest (module docstring)."""
+    pending-factory-reset slot is readable at rest (module docstring).
+    ``second_seat`` puts an iOS seat on a simulator of its own: a launch on the
+    first seat's device would tear that seat's app down."""
     server = None
     if client == "web":
         node_url, server = _serve_spa_proxy(request.getfixturevalue("static_dir"), nest["url"])
         harness = make_launch_harness("web", spa_url=node_url)
     else:
+        launch = app_launch_config(client, request)
+        if second_seat and client == "ios":
+            launch["udid"] = _get_ios_second_seat_udid()
+            assert launch["udid"], "could not allocate a second iOS simulator"
         harness = make_launch_harness(
             client, tmp_path=tmp_path, file_backed=True,
-            **app_launch_config(client, request), seed_trust=_trust_seeder(request),
+            **launch, seed_trust=_trust_seeder(request),
         )
         node_url = nest["url"]
     try:
@@ -223,6 +238,17 @@ def _auth_log_lines(driver, limit: int = 25) -> list[str]:
     return lines[-limit:]
 
 
+def _launch_log_lines(driver, limit: int = 40) -> list[str]:
+    """The app's own log lines about routing a launch and a switch — which row
+    the launch took reaches no element, so a failure quotes them."""
+    keep = ("[launch]", "[account-switch]", "onboarding", "factory", "wizard")
+    lines = [
+        line[:240] for line in (driver.app_stderr_text() or "").splitlines()
+        if any(k in line.lower() for k in keep)
+    ]
+    return lines[-limit:]
+
+
 def _nest_id(nest_url) -> str:
     from clients.ws_rpc_anon_client import WsRpcAnonClient
 
@@ -250,10 +276,14 @@ def _await_prefilled_claim(app, want_code: str, what: str) -> None:
             f"{what}: the app never opened the claim page; "
             f"error={app.error_text()!r} launch surface: {launch_surface_dump(app)}"
         ) from exc
-    shown = app.driver.get_text(CLAIM_CODE_INPUT)
-    assert shown == want_code, (
-        f"{what}: the claim page must carry the code minted before the reset — "
-        f"shows {shown!r}, minted {want_code!r}; error={app.error_text()!r}"
+    # The page can mount a beat before its field takes the prefill, so the
+    # code is awaited, not read once.
+    wait_until(
+        lambda: app.driver.get_text(CLAIM_CODE_INPUT) == want_code,
+        _PREFILL_S,
+        diagnose=lambda: f"{what}: the claim page must carry the code minted before "
+        f"the reset — shows {app.driver.get_text(CLAIM_CODE_INPUT)!r}, minted "
+        f"{want_code!r}; error={app.error_text()!r}; app log: {_launch_log_lines(app.driver)}",
     )
 
 
@@ -470,6 +500,61 @@ def test_reopening_while_the_reset_nest_is_down_keeps_the_reclaim(
         )
 
 
+@pytest.mark.feature("factory-reset")
+def test_a_reset_right_after_a_wizard_claim_keeps_its_claim_code(
+    request, reset_client, reset_nest, tmp_path
+):
+    """Outcome 1 again, from the place the dev-nest journey reached it: the
+    admin resets the box seconds after claiming it THROUGH THE WIZARD in the
+    same app process. The claim page must still open with the new code in it,
+    and the pending-reset slot must still be in the store — the code exists
+    nowhere else (``nest/common.md`` § Client-state recoverability, CR-1).
+
+    Non-vacuous: the first reset and its wizard re-claim are what leave the
+    finished wizard behind in the running app; the other journeys reset from an
+    account that never went through the wizard, which is why they stayed green
+    while a reset after a wizard claim lost its code (the finished wizard
+    signed the account straight back in on the reset's sign-out, spending the
+    slot as a claim terminal)."""
+    nest = reset_nest
+    actor, secret_hex = _admin_hex(nest)
+    with _seat(request, reset_client, tmp_path, nest) as (harness, node_url):
+        driver = harness.launch_and_route(secret_hex=secret_hex, node_url=node_url, trust=nest)
+        reached_authenticated_app(driver, timeout=_APP_S)
+        assert driver.preserve_state_across_relaunch()
+        app = ActionLayer(driver)
+
+        # Arrangement through the UI: reset once and re-claim through the wizard.
+        app.admin.factory_reset_via_ui()
+        resume_after_self_exit(nest)
+        _wait_nest_fresh(nest["url"], timeout=_NEST_FRESH_S)
+        _claim_through_the_wizard(app, nest, "the first re-claim")
+        reached_authenticated_app(driver, timeout=_APP_S)
+
+        # The journey under test: reset again at once.
+        try:
+            code = app.admin.factory_reset_via_ui()
+        except (AssertionError, TimeoutError) as exc:
+            raise AssertionError(
+                f"{exc} — slot at rest: {_slot_code(driver, actor)!r}; "
+                f"store: {describe_registry(driver)}; app log: {_auth_log_lines(driver)}"
+            ) from exc
+        assert _slot_code(driver, actor) == code, (
+            "the pending-reset slot must hold the pre-filled code until the "
+            f"re-claim lands: {describe_registry(driver)}; "
+            f"app log: {_auth_log_lines(driver)}"
+        )
+        resume_after_self_exit(nest)
+        _wait_nest_fresh(nest["url"], timeout=_NEST_FRESH_S)
+        with open(f"{nest['tmp_dir']}/claim-code") as f:
+            booted = f.read().strip()
+        assert code == booted, (
+            f"the pre-filled code must be the one the wiped box booted with: "
+            f"prefilled {code!r}, booted {booted!r}"
+        )
+        _claim_through_the_wizard(app, nest, "the second re-claim")
+
+
 # ---------------------------------------------------------------------------
 # Outcome 12 — two accounts on one device, each with its own pending reset
 # ---------------------------------------------------------------------------
@@ -484,7 +569,13 @@ class _NativeAccountSeats:
     """The native shape of "one device, two accounts": one app process, reopened
     bound to an account — ``FAUNA_BOUND_ACCOUNT`` on the launch, the command
     Settings copies for "open as new instance" — or as the primary instance.
-    Each account dials its own nest directly."""
+    Each account dials its own nest directly.
+
+    iOS has no bound launch and one process at a time (``account-scoping.md``
+    § Concurrent instances), and the claim page A's reset ends on offers no
+    switcher, so the harness moves the store's active pointer between launches
+    instead: the journey under test is each account's reset, not the way the
+    app came to serve B."""
 
     def __init__(self, request, client, nest_a, nest_b):
         from drivers import create_driver
@@ -492,11 +583,14 @@ class _NativeAccountSeats:
         self.urls = (nest_a["url"], nest_b["url"])
         self._environment = _seeded_environment(request, nest_a, nest_b)
         self._config = {
-            "app_path": app_launch_config(client, request)["app_path"],
+            **app_launch_config(client, request),
             "url": nest_a["url"],
             "environment": self._environment,
         }
         self.driver = create_driver(client)
+        self._client = client
+        self._has_bound_launch = client != "ios"
+        self._primary_actor = None
 
     # Not `start`: `helpers/kind_reach.py` merges public names across the tree,
     # so a `start` here would hand this relaunch's reach to every `.start()`.
@@ -504,6 +598,7 @@ class _NativeAccountSeats:
         self._config["seed_credentials"] = seed
         self.driver.launch(self._config)
         assert self.driver.preserve_state_across_relaunch()
+        self._primary_actor = read_registry_index(self.driver)["active"]
         # The seed was the install's starting state; every later launch reads
         # back what the app itself wrote since.
         self._config.pop("seed_credentials")
@@ -511,12 +606,32 @@ class _NativeAccountSeats:
 
     def _reopen(self, actor: str | None):
         self.driver.teardown()
-        if actor is None:
+        if not self._has_bound_launch:
+            self._set_active_at_rest(actor or self._primary_actor)
+        elif actor is None:
             self._environment.pop("FAUNA_BOUND_ACCOUNT", None)
         else:
             self._environment["FAUNA_BOUND_ACCOUNT"] = actor
         self.driver.launch(self._config)
         return self.driver
+
+    def approve_reauth(self) -> None:
+        """apple's activation re-auth is the OS sheet, behind the ``reauth-result``
+        verdict file the app reads per prompt (``AccountReauth``); the other
+        native apps draw a prompt the journey answers."""
+        if self._client in ("macos", "ios"):
+            with open(os.path.join(self.driver._cred_dir, "reauth-result"), "w") as f:
+                f.write("approve")
+
+    def _set_active_at_rest(self, actor: str) -> None:
+        path = credential_store_path(self.driver)
+        with open(path) as f:
+            store = json.load(f)
+        index = json.loads(store["fauna/index"])
+        index["active"] = actor
+        store["fauna/index"] = json.dumps(index)
+        with open(path, "w") as f:
+            json.dump(store, f)
 
     def open_bound(self, actor: str):
         return self._reopen(actor)
@@ -592,6 +707,9 @@ class _WebAccountSeats:
             diagnose=lambda: f"the tab's pin reads {self._pin(tab)!r}, wanted {actor!r}",
         )
         return tab
+
+    def approve_reauth(self) -> None:
+        """web draws a prompt the journey answers."""
 
     def describe(self, tab) -> str:
         """The tab's page path, its pin and the tail of its console ring — a
@@ -714,6 +832,7 @@ def test_each_account_keeps_its_own_pending_reset(
         driver.wait_for(ACCOUNT_SWITCHER_LIST, timeout=_ROUTE_S)
         wait_until(lambda: driver.count(ACCOUNT_SWITCHER_ITEM) >= 2, _ROUTE_S)
         # The switcher lists accounts in the order they were added: A, then B.
+        seats.approve_reauth()
         driver.click(ACCOUNT_SWITCHER_ITEM, index=1)
         # An admin account asks to confirm before it is switched to.
         wait_until(
@@ -763,7 +882,9 @@ def test_a_member_whose_nest_was_reset_is_told_and_offered_a_fresh_start(
         (tmp_path / seat).mkdir()
     with (
         _seat(request, reset_client, tmp_path / "member", nest) as (member_seat, member_url),
-        _seat(request, reset_client, tmp_path / "admin", nest) as (admin_seat, admin_url),
+        _seat(
+            request, reset_client, tmp_path / "admin", nest, second_seat=True,
+        ) as (admin_seat, admin_url),
     ):
         member = member_seat.launch_and_route(
             secret_hex=member_secret, node_url=member_url, trust=nest)

@@ -233,16 +233,14 @@ pub fn nostr_event_to_fauna(
             text_to_post_body(&event.content)
         }
         kind::REACTION => {
+            // Resolved exactly as a reply's or a quote's target: an unmapped
+            // one drops the reference, never a synthetic id no row carries
+            // (`docs/goal/ui/feed.md` § Layout & flow → *Reaction posts count
+            // and paint*, ruling 5).
             if let Some((target_id, emoji)) = nip25::parse_reaction(event)
-                && let Ok(bytes) = hex::decode(&target_id)
-                && bytes.len() == 32
+                && let Some(post_id) = resolve_local(&target_id)
             {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                references.push(Reference::React {
-                    post_id: synthetic_cid(arr),
-                    emoji,
-                });
+                references.push(Reference::React { post_id, emoji });
             }
             PostBody::Text {
                 content: event.content.clone(),
@@ -752,10 +750,23 @@ mod tests {
             content: "❤️".into(),
             sig: "s".repeat(128),
         };
+        // Unmapped target → no reference: never a synthetic id no row carries.
         let (_, refs) = nostr_event_to_fauna(&event, &no_local_post).unwrap();
+        assert!(
+            refs.is_empty(),
+            "an unmapped kind-7 target drops the reference"
+        );
+        // Mapped target → the local post the nest holds for it.
+        let local = fauna_cbor::Cid::from_digest_dag_cbor([9u8; 32]);
+        let target = "c".repeat(64);
+        let resolve = |id: &str| (id == target).then_some(local);
+        let (_, refs) = nostr_event_to_fauna(&event, &resolve).unwrap();
         assert_eq!(refs.len(), 1);
         match &refs[0] {
-            Reference::React { emoji, .. } => assert_eq!(emoji, "❤️"),
+            Reference::React { post_id, emoji } => {
+                assert_eq!(emoji, "❤️");
+                assert_eq!(*post_id, local);
+            }
             _ => panic!("expected React"),
         }
     }

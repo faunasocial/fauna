@@ -9,15 +9,20 @@ using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Views;
 
-/// <summary>Picks the Button-root row for a notification with a destination, the plain
-/// text row for one without.</summary>
+/// <summary>Picks the collapsed row for a notification a muted word collapses, else the
+/// Button-root row for one with a destination, the plain text row for one without.</summary>
 public sealed class NotificationRowTemplateSelector : DataTemplateSelector
 {
     public DataTemplate? Navigable { get; set; }
     public DataTemplate? Inert { get; set; }
+    public DataTemplate? Muted { get; set; }
 
-    protected override DataTemplate? SelectTemplateCore(object item)
-        => item is NotificationItem { IsNavigable: true } ? Navigable : Inert;
+    protected override DataTemplate? SelectTemplateCore(object item) => item switch
+    {
+        NotificationItem { IsMuted: true } => Muted,
+        NotificationItem { IsNavigable: true } => Navigable,
+        _ => Inert,
+    };
 
     protected override DataTemplate? SelectTemplateCore(object item, DependencyObject container)
         => SelectTemplateCore(item);
@@ -33,6 +38,8 @@ public sealed partial class NotificationsPage : Page
         this.InitializeComponent();
         NotificationsTitle.Text = S.Get("common/notifications");
         MarkReadButton.Content = S.Get("bridges/mark_all_read");
+        ClearAllButton.Content = S.Get("notifications/clear_all");
+        ClearAllButton.IsEnabled = false;
         LoadMoreButton.Content = S.Get("common/load_more");
     }
 
@@ -44,12 +51,22 @@ public sealed partial class NotificationsPage : Page
             _clients = clients;
             _viewModel = new NotificationsViewModel(clients.Rpc!, CanNavigate);
             _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            // Re-name the listed rows when the private overlay's projection moves
+            // (a Save here, a sibling device's edit, the first load after a launch).
+            ContactOverlayNames.Moved += OnOverlayMoved;
         }
     }
+
+    private void OnOverlayMoved() =>
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            if (_viewModel is { } vm) await vm.LoadCommand.ExecuteAsync(null);
+        });
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
+        ContactOverlayNames.Moved -= OnOverlayMoved;
         // Unsubscribe the VM's reconnect re-hydrate handler (the INestRpcClient
         // seam is app-lifetime, so an un-cleaned VM would leak).
         _viewModel?.CleanupReconnect();
@@ -62,6 +79,7 @@ public sealed partial class NotificationsPage : Page
         LoadProgress.Visibility = Visibility.Visible;
         await _viewModel.LoadCommand.ExecuteAsync(null);
         NotificationsList.ItemsSource = _viewModel.Notifications;
+        ClearAllButton.IsEnabled = _viewModel.Notifications.Count > 0;
         LoadProgress.IsActive = false;
         LoadProgress.Visibility = Visibility.Collapsed;
         LoadMoreButton.Visibility = _viewModel.HasMore ? Visibility.Visible : Visibility.Collapsed;
@@ -142,12 +160,43 @@ public sealed partial class NotificationsPage : Page
         }
     }
 
+    /// <summary>Reveal one muted-collapsed row for the session (the mute stays).</summary>
+    private void MutedReveal_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: NotificationItem item }) _viewModel?.RevealMuted(item);
+    }
+
     private async void MarkRead_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is not null) await _viewModel.MarkReadCommand.ExecuteAsync(null);
         // Mark-all-read is a MUTATION of the very count the shell publishes, so the
         // shell has to re-read it — otherwise `data.notifications.unread_count` keeps
         // reporting the pre-mark value until the next push.
+        MainPage.Current?.RefreshUnreadNotificationCount();
+    }
+
+    private async void Dismiss_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not Button { Tag: NotificationItem item }) return;
+        await _viewModel.DismissCommand.ExecuteAsync(item);
+        AfterDelete();
+    }
+
+    private async void ClearAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.ClearAllCommand.ExecuteAsync(null);
+        AfterDelete();
+    }
+
+    /// <summary>A delete changes the count the shell publishes and may empty the list.</summary>
+    private void AfterDelete()
+    {
+        if (_viewModel is not null)
+        {
+            ClearAllButton.IsEnabled = _viewModel.Notifications.Count > 0;
+            LoadMoreButton.Visibility = _viewModel.HasMore ? Visibility.Visible : Visibility.Collapsed;
+        }
         MainPage.Current?.RefreshUnreadNotificationCount();
     }
 

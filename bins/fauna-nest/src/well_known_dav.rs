@@ -80,7 +80,7 @@ impl DavProtocol {
 /// arrived on (its `Host` header, port dropped) at the admin-set DAV `port`.
 /// `None` when a direct listener's request carries no plain host — the nest
 /// knows no other name for its LAN listener.
-fn dav_origin(
+pub(crate) fn dav_origin(
     primary_domain: &str,
     direct_listener: Option<bool>,
     request_host: Option<&str>,

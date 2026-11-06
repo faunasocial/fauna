@@ -41,6 +41,8 @@
 
 use fauna_core::web_lock::{WebLockAsk, WebLockHold};
 
+pub use crate::lock_outcome::LockOutcome;
+
 /// The Web Locks name of `store_name`'s engine-singleton role — one lock per
 /// store, the web analogue of `<store dir>/engine.lock`.
 pub fn engine_lock_name(store_name: &str) -> String {
@@ -53,20 +55,8 @@ pub fn seed_legs_lock_name(store_name: &str) -> String {
     format!("fauna.account-store.seed-legs/{store_name}")
 }
 
-/// Result of [`EngineLock::try_acquire`] — the native leg's outcome, arm for
-/// arm.
-#[derive(Debug)]
-pub enum EngineLockOutcome {
-    /// This tab now holds the engine-singleton role; it releases when the
-    /// value drops (or [`EngineLock::release`]s), or when the tab goes away.
-    Held(EngineLock),
-    /// Another holder has the role — another tab, or another runtime in this
-    /// one. Run as a plain reader/writer and re-try on the backstop cadence.
-    Refused,
-    /// The lock could not be asked for (no Web Locks API in this context, or
-    /// the browser refused the request). The caller owns what this means.
-    Degraded(std::io::Error),
-}
+/// Result of [`EngineLock::try_acquire`] — [`LockOutcome`] over the held role.
+pub type EngineLockOutcome = LockOutcome<EngineLock>;
 
 /// A held engine-singleton role; RAII — dropping releases.
 pub struct EngineLock(WebLockHold);
@@ -96,19 +86,8 @@ impl EngineLock {
     }
 }
 
-/// Result of [`SeedLegLock::try_acquire`] — [`EngineLockOutcome`]'s arms, for
-/// the store's other role.
-#[derive(Debug)]
-pub enum SeedLegLockOutcome {
-    /// This tab now holds the seed-leg role; it releases when the value drops
-    /// (or [`SeedLegLock::release`]s), or when the tab goes away.
-    Held(SeedLegLock),
-    /// Another holder has the role — another tab, or another runtime in this
-    /// one. Run no seed-only leg and re-try on the backstop cadence.
-    Refused,
-    /// The lock could not be asked for. The caller owns what this means.
-    Degraded(std::io::Error),
-}
+/// Result of [`SeedLegLock::try_acquire`] — [`LockOutcome`] over the held role.
+pub type SeedLegLockOutcome = LockOutcome<SeedLegLock>;
 
 /// A held seed-leg role; RAII — dropping releases.
 pub struct SeedLegLock(WebLockHold);

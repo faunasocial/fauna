@@ -183,7 +183,10 @@ def _published(relay, user, predicate, what) -> dict:
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("nostr")
 def test_a_reply_to_a_nostr_post_reaches_nostr_threaded_under_it(
     request, app, nostr_reply_nest, publish_relay, author_relay,
@@ -220,7 +223,10 @@ def test_a_reply_to_a_nostr_post_reaches_nostr_threaded_under_it(
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("nostr")
 def test_a_quote_of_a_nostr_post_reaches_nostr_linking_it(
     request, app, nostr_reply_nest, publish_relay, author_relay,
@@ -258,7 +264,10 @@ def test_a_quote_of_a_nostr_post_reaches_nostr_linking_it(
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("nostr")
 @pytest.mark.parametrize("kind", ["reply", "quote"])
 def test_replying_or_quoting_with_no_relays_is_refused_naming_the_nostr_page(

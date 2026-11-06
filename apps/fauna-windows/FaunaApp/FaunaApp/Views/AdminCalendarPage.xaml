@@ -81,7 +81,8 @@
                             Click="SaveCaldavPortButton_Click"
                             Content="{loc:Localize Key=admin/calendar_page/caldav_port_save}" />
                 </StackPanel>
-                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminCalendarCaldavPortHelpText}"
+                           Opacity="0.6" TextWrapping="Wrap"
                            Text="{loc:Localize Key=admin/calendar_page/caldav_port_desc}" />
             </StackPanel>
 

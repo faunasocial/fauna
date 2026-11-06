@@ -108,15 +108,26 @@ use win_credman::{
 /// always pins a per-launch namespace (`FAUNA_KEYRING_APP`, set by every e2e
 /// driver and never by `cargo test`), so a binary that a `cargo test` happened
 /// to build keeps working under the harness's private Secret Service; and the
-/// `allow-live-keyring` feature, forwarded only by the opt-in live suites
-/// (`live-keychain`, `fauna-linux/live-secret-service`).
-#[cfg(all(feature = "no-live-keyring", not(feature = "allow-live-keyring")))]
+/// opt-in live suites (`live-keychain`, `live-credman`,
+/// `fauna-linux/live-secret-service`), which need BOTH the `allow-live-keyring`
+/// feature they forward AND [`LIVE_SUITE_ENV`] set in the process. The feature
+/// alone is not enough on purpose: cargo features are additive, so
+/// `--all-features` under workspace feature unification
+/// (`.cargo/config.toml`) switches a live suite's feature on for every unit
+/// test of the workspace — the runtime opt-in keeps those runs off the
+/// developer's desktop keyring.
+#[cfg(feature = "no-live-keyring")]
 pub fn live_keyring_allowed() -> bool {
     keyring_app_override().is_some()
+        || (cfg!(feature = "allow-live-keyring") && std::env::var_os(LIVE_SUITE_ENV).is_some())
 }
 
-/// Shipped-build twin (and the live suites'): the keyring is always reachable.
-#[cfg(not(all(feature = "no-live-keyring", not(feature = "allow-live-keyring"))))]
+/// The environment variable a live suite's run sets (any value) to reach the
+/// real keyring in a test build that also carries `allow-live-keyring`.
+pub const LIVE_SUITE_ENV: &str = "FAUNA_LIVE_KEYRING_SUITE";
+
+/// Shipped-build twin: the keyring is always reachable.
+#[cfg(not(feature = "no-live-keyring"))]
 pub fn live_keyring_allowed() -> bool {
     true
 }
@@ -1399,11 +1410,22 @@ impl CredentialStore {
     /// resolution arm ⑤ of [`Self::new_with_headless_fallback`] when no OS
     /// store answered ([`HeadlessArmCause::KeyringAbsent`]).
     pub fn with_sealed_backend(app: impl Into<String>, dir: PathBuf) -> Self {
+        Self::with_sealed_backend_cause(app, dir, HeadlessArmCause::KeyringAbsent)
+    }
+
+    /// [`Self::with_sealed_backend`] with the resolution's cause named — for
+    /// tests of what a client tells the person per cause
+    /// ([`Self::sealed_arm_cause`]), e.g. tui's locked-keyring notice.
+    pub fn with_sealed_backend_cause(
+        app: impl Into<String>,
+        dir: PathBuf,
+        cause: HeadlessArmCause,
+    ) -> Self {
         let app = app.into();
         Self {
             backend: SecretStoreBackend::Sealed(
                 sealed::SealedFileStore::new(app.clone(), dir),
-                HeadlessArmCause::KeyringAbsent,
+                cause,
             ),
             app,
             _scratch: None,
@@ -2386,29 +2408,17 @@ mod tests {
         );
     }
 
-    /// The tui headless-fallback resolution over the REAL Windows Credential
-    /// Manager arm (`apps/sync-agent.md` A2 win-verification rider,
-    /// `apps/tui.md` § Credential storage): a fresh dir with no sealed file
-    /// resolves to keyring (the credman probe arm resolves, no fallback), and
-    /// once a sealed file exists — even though the probe would still succeed —
-    /// it wins (data-present-wins, `new_with_headless_fallback`'s doc order).
-    /// Neither construction touches a real credential item: `win_credman`'s
-    /// probe is a constant `true` (Credential Manager has no lock state), and
-    /// [`sealed_exists`](Self::new_with_headless_fallback) short-circuits the
-    /// probe once a sealed file is present — so this is deterministic, no D-Bus
-    /// / registry cleanup needed, unlike the libsecret arm's tests.
+    /// Data-present-wins over the Windows Credential Manager arm
+    /// (`apps/tui.md` § Credential storage, `new_with_headless_fallback`'s doc
+    /// order): once a sealed file exists it wins, decided before the keyring
+    /// probe runs, so this holds in a test build (`no-live-keyring`) where the
+    /// probe reads absent. The keyring-resolves half needs the live arm and is
+    /// `windows_credman_fresh_dir_resolves_to_keyring`.
     #[test]
     #[cfg(target_os = "windows")]
-    fn windows_credman_resolves_and_an_existing_sealed_file_still_wins() {
+    fn windows_an_existing_sealed_file_wins() {
         let dir = fresh_dir();
         let app = format!("fauna-credman-headless-test-{}", std::process::id());
-
-        let fresh = CredentialStore::new_with_headless_fallback(&app, dir.clone());
-        assert!(
-            fresh.sealed_backend().is_none(),
-            "no sealed file yet: the credman probe arm resolves to keyring"
-        );
-        assert!(!fresh.needs_unlock(), "the keyring arm never needs unlock");
 
         sealed::SealedFileStore::new(app.clone(), dir.clone())
             .create("test-passphrase")
@@ -2423,6 +2433,32 @@ mod tests {
             with_sealed.needs_unlock(),
             "a freshly-constructed store over an existing sealed file starts locked"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tui headless-fallback resolution over the REAL Windows Credential
+    /// Manager arm (`apps/sync-agent.md` A2 win-verification rider,
+    /// `apps/tui.md` § Credential storage): a fresh dir with no sealed file
+    /// resolves to keyring (the credman probe arm resolves, no fallback). Live
+    /// suite only: a test build never reaches the live keyring
+    /// (`live_keyring_allowed`), so without the feature the probe reads absent.
+    /// Run: `cmd //c "scripts\cargo-win.cmd test -p fauna-credential-store
+    /// --lib --features live-credman windows_credman_fresh_dir"` (under a build
+    /// slot). Creates no credential item: `win_credman`'s probe is a constant
+    /// `true` (Credential Manager has no lock state).
+    #[test]
+    #[cfg(all(target_os = "windows", feature = "live-credman"))]
+    fn windows_credman_fresh_dir_resolves_to_keyring() {
+        let dir = fresh_dir();
+        let app = format!("fauna-credman-headless-test-{}", std::process::id());
+
+        let fresh = CredentialStore::new_with_headless_fallback(&app, dir.clone());
+        assert!(
+            fresh.sealed_backend().is_none(),
+            "no sealed file yet: the credman probe arm resolves to keyring"
+        );
+        assert!(!fresh.needs_unlock(), "the keyring arm never needs unlock");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -108,17 +108,12 @@ pub fn wake_sweep() -> bool {
     }
 }
 
-/// Bridges registry notifications (which may fire on a tokio worker) to the
-/// GTK main loop — the `GtkAtprotoSettingsObserver` idiom.
-struct ChannelObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl CriticalAlertsObserver for ChannelObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges registry notifications (which may fire on a tokio worker) to the
+    /// GTK main loop — the `GtkAtprotoSettingsObserver` idiom.
+    ChannelObserver,
+    CriticalAlertsObserver
+);
 
 /// Build the banner strip. Mounted once, above the content stack; hidden
 /// while no alert is active.

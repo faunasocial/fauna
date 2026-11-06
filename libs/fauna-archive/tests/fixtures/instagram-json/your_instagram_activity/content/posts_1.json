@@ -1,0 +1,48 @@
+[
+  {
+    "media": [
+      {
+        "uri": "media/posts/202009/photo_1.jpg",
+        "creation_timestamp": 1600000000,
+        "media_metadata": {
+          "photo_metadata": {
+            "exif_data": [{ "latitude": 59.91, "longitude": 10.75 }]
+          }
+        },
+        "title": "CafÃ© morning",
+        "cross_post_source": { "source_app": "FB" }
+      }
+    ]
+  },
+  {
+    "media": [
+      {
+        "uri": "media/posts/202101/photo_2.jpg",
+        "creation_timestamp": 1610000000,
+        "title": "",
+        "cross_post_source": { "source_app": "FB" }
+      },
+      {
+        "uri": "media/posts/202101/photo_3.jpg",
+        "creation_timestamp": 1610000000,
+        "title": "",
+        "cross_post_source": { "source_app": "FB" }
+      }
+    ],
+    "title": "At the lake",
+    "creation_timestamp": 1610000000
+  },
+  {
+    "media": [
+      {
+        "uri": "media/posts/202102/not_in_the_export.jpg",
+        "creation_timestamp": 1612000000,
+        "title": "Referenced but not included"
+      }
+    ]
+  },
+  {
+    "media": [],
+    "title": "A record with no timestamp"
+  }
+]

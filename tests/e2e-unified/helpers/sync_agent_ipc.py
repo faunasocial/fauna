@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import functools
 import struct
 import time
 from contextlib import contextmanager
@@ -130,7 +131,36 @@ def reconcile_account_runtime_request(req_id: int) -> dict:
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _OPEN_EXISTING = 3
-_INVALID_HANDLE_VALUES = (-1, 0xFFFFFFFFFFFFFFFF)
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PIPE_BUSY = 231
+
+
+@functools.lru_cache(maxsize=1)
+def _kernel32():
+    """kernel32 loaded with ``use_last_error=True``, its pipe calls typed.
+
+    ``ctypes.get_last_error()`` reads only a ``use_last_error`` handle's private
+    copy of the thread's last error: after a call through ``ctypes.windll`` it
+    reads 0, so a failed open used to report "Win32 error 0" whatever the cause
+    (convention 6 — a failure names its own cause). Typed so a ``HANDLE`` is
+    passed and returned at full pointer width. Lazy, because the unix twin
+    (``sync_agent_ipc_unix``) imports this module where there is no kernel32.
+    """
+    w = ctypes.wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = w.HANDLE
+    k32.CreateFileW.argtypes = [
+        w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE,
+    ]
+    k32.ReadFile.restype = w.BOOL
+    k32.ReadFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+    k32.WriteFile.restype = w.BOOL
+    k32.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+    k32.CloseHandle.restype = w.BOOL
+    k32.CloseHandle.argtypes = [w.HANDLE]
+    k32.WaitNamedPipeW.restype = w.BOOL
+    k32.WaitNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD]
+    return k32
 
 
 def wait_for_pipe(pipe_path: str, timeout: float = 10.0) -> None:
@@ -144,14 +174,11 @@ def wait_for_pipe(pipe_path: str, timeout: float = 10.0) -> None:
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = ctypes.windll.kernel32.WaitNamedPipeW(pipe_path, 100)
+        result = _kernel32().WaitNamedPipeW(pipe_path, 100)
         if result:
             return
         time.sleep(0.1)
     raise TimeoutError(f"Pipe {pipe_path!r} not ready within {timeout}s")
-
-
-_ERROR_PIPE_BUSY = 231
 
 
 def pipe_server_pid(pipe_path: str, timeout: float = 10.0) -> int:
@@ -219,7 +246,8 @@ def _read_frame(handle, pipe_path: str) -> bytes:
     """Read one length-prefixed (u32 LE) frame's payload off ``handle``."""
     len_buf = (ctypes.c_char * 4)()
     read_count = ctypes.wintypes.DWORD()
-    ok = ctypes.windll.kernel32.ReadFile(handle, len_buf, 4, ctypes.byref(read_count), None)
+    k32 = _kernel32()
+    ok = k32.ReadFile(handle, len_buf, 4, ctypes.byref(read_count), None)
     if not ok or read_count.value != 4:
         err = ctypes.get_last_error()
         raise OSError(
@@ -228,7 +256,7 @@ def _read_frame(handle, pipe_path: str) -> bytes:
         )
     length = struct.unpack("<I", bytes(len_buf))[0]
     buf = (ctypes.c_char * length)()
-    ok = ctypes.windll.kernel32.ReadFile(handle, buf, length, ctypes.byref(read_count), None)
+    ok = k32.ReadFile(handle, buf, length, ctypes.byref(read_count), None)
     if not ok or read_count.value != length:
         err = ctypes.get_last_error()
         raise OSError(
@@ -238,29 +266,49 @@ def _read_frame(handle, pipe_path: str) -> bytes:
     return bytes(buf)
 
 
-def _open_pipe(pipe_path: str):
-    """Open one client connection to ``pipe_path``; raises OSError on failure."""
-    handle = ctypes.windll.kernel32.CreateFileW(
-        pipe_path,
-        _GENERIC_READ | _GENERIC_WRITE,
-        0,
-        None,
-        _OPEN_EXISTING,
-        0,
-        None,
-    )
-    if handle in _INVALID_HANDLE_VALUES:
+def _open_pipe(pipe_path: str, timeout: float = 10.0):
+    """Open one client connection to ``pipe_path``, retrying inside ``timeout``
+    while every server instance is busy or none is listening yet.
+
+    The agent's accept loop mints each next server instance asynchronously, so an
+    open that races it — right after :func:`pipe_server_pid` took an instance for
+    an instant, or beside the app's own status polls — finds every instance busy
+    (``ERROR_PIPE_BUSY``), or, before the agent's first instance stands, no pipe at
+    all (``ERROR_FILE_NOT_FOUND``). Both are waited out here, the one retry every
+    request shares (convention 14: the open asserts the agent answers, not that
+    it won a race). Any other error, or either one past the deadline, raises.
+
+    Raises:
+        OSError: carrying the open's real Win32 error number.
+    """
+    k32 = _kernel32()
+    invalid = ctypes.wintypes.HANDLE(-1).value
+    deadline = time.monotonic() + timeout
+    while True:
+        handle = k32.CreateFileW(
+            pipe_path, _GENERIC_READ | _GENERIC_WRITE, 0, None, _OPEN_EXISTING, 0, None
+        )
+        if handle is not None and handle != invalid:
+            return handle
         err = ctypes.get_last_error()
-        raise OSError(f"Cannot open pipe {pipe_path!r}: Win32 error {err}")
-    return handle
+        if err not in (_ERROR_PIPE_BUSY, _ERROR_FILE_NOT_FOUND):
+            raise OSError(err, f"Cannot open pipe {pipe_path!r}: Win32 error {err}")
+        if time.monotonic() >= deadline:
+            raise OSError(
+                err,
+                f"Cannot open pipe {pipe_path!r} within {timeout}s: Win32 error {err} "
+                f"({'every server instance stayed busy' if err == _ERROR_PIPE_BUSY else 'no server instance was listening'})",
+            )
+        if err == _ERROR_PIPE_BUSY:
+            k32.WaitNamedPipeW(pipe_path, 100)
+        else:
+            time.sleep(0.1)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
 
 
 def _exchange(handle, pipe_path: str, frame: bytes) -> dict:
     """Write ``frame`` on an open connection and return its decoded Response."""
     written = ctypes.wintypes.DWORD()
-    ok = ctypes.windll.kernel32.WriteFile(
-        handle, frame, len(frame), ctypes.byref(written), None
-    )
+    ok = _kernel32().WriteFile(handle, frame, len(frame), ctypes.byref(written), None)
     if not ok:
         err = ctypes.get_last_error()
         raise OSError(f"WriteFile failed on {pipe_path!r}: Win32 error {err}")
@@ -290,24 +338,25 @@ def send_request(pipe_path: str, frame: bytes, timeout: float = 10.0) -> dict:
     Args:
         pipe_path: Full Win32 pipe path, e.g. ``r'\\\\.\\pipe\\fauna-sync-test-a'``.
         frame: A pre-built length-prefixed frame (from encode_frame).
-        timeout: Not used for the Win32 synchronous call (kept for API parity
-                 with the T3 test harness signature).
+        timeout: Seconds the open may wait out a busy or not-yet-listening
+                 pipe (:func:`_open_pipe`); the exchange itself is synchronous.
 
     Returns:
         Decoded Response dict: {"id": <int>, "result": {"Ok": ...} | {"Err": str}}
 
     Raises:
-        OSError: On any Win32 failure (bad handle, WriteFile, ReadFile).
+        OSError: On any Win32 failure (open, WriteFile, ReadFile), carrying its
+            real Win32 error number.
     """
-    handle = _open_pipe(pipe_path)
+    handle = _open_pipe(pipe_path, timeout)
     try:
         return _exchange(handle, pipe_path, frame)
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        _kernel32().CloseHandle(handle)
 
 
 @contextmanager
-def held_request(pipe_path: str, frame: bytes):
+def held_request(pipe_path: str, frame: bytes, timeout: float = 10.0):
     """Send a framed request and keep its connection open past the reply.
 
     Yields the decoded Response; the connection closes when the ``with`` body
@@ -316,13 +365,15 @@ def held_request(pipe_path: str, frame: bytes):
     connection closes (a crash included).
 
     Raises:
-        OSError: On any Win32 failure opening, writing or reading.
+        OSError: On any Win32 failure opening, writing or reading. The open waits
+            out a busy or not-yet-listening pipe inside ``timeout``, as
+            :func:`send_request`'s does.
     """
-    handle = _open_pipe(pipe_path)
+    handle = _open_pipe(pipe_path, timeout)
     try:
         yield _exchange(handle, pipe_path, frame)
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        _kernel32().CloseHandle(handle)
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +488,41 @@ class SyncAgentClient:
         resp = send_request(self.pipe_path, encode_frame(req), timeout=self.timeout)
         ok_payload = unwrap_ok(resp)
         return ok_payload["ServiceStatus"]
+
+    # -- the peer-leg probe arm (test-only verbs, `fauna_ipc::sync`) --------
+
+    def call(self, method) -> object:
+        """One request whose ``Ok`` payload is returned as-is: ``method`` is
+        the serde form of a ``RequestMethod`` — a bare name for a unit verb,
+        ``{name: argument}`` for a verb that carries one."""
+        frame = encode_frame({"id": self._req_id(), "method": method})
+        return unwrap_ok(send_request(self.pipe_path, frame, timeout=self.timeout))
+
+    def share_serve_info(self) -> list:
+        """Each bound folder's ``{folder, folder_id, watch_dir, db_path}``
+        (``GetShareServeInfo``) — ``folder_id`` is the folder's ``FolderRef``
+        wire string."""
+        return self.call("GetShareServeInfo")["ShareServeInfo"]
+
+    def peer_leg_dial_target(self) -> dict:
+        """Where this agent's same-account peer leg listens:
+        ``{node_id, lan_endpoints}`` (test-only ``GetPeerLegDialTarget``)."""
+        return self.call("GetPeerLegDialTarget")["PeerLegDialTarget"]
+
+    def probe_peer_leg(self, target: dict, folder: str, *, relative_path=None,
+                       store_keys=None) -> dict:
+        """Dial ``target``'s peer leg as this agent's device and report what it
+        served (test-only ``ProbePeerLeg``;
+        ``fauna_ipc::sync::PeerLegProbeReport``)."""
+        return self.call({"ProbePeerLeg": {
+            "target": target,
+            "folder": folder,
+            "relative_path": relative_path,
+            "store_keys": list(store_keys or []),
+        }})["PeerLegProbe"]
+
+    def arm_peer_serve_fault(self, bodies: int) -> None:
+        """Make this agent's same-account serve door forge the next ``bodies``
+        distinct chunk bodies it serves a sibling, one byte flipped in each
+        (test-only ``ArmPeerServeFault``)."""
+        self.call({"ArmPeerServeFault": {"bodies": int(bodies)}})

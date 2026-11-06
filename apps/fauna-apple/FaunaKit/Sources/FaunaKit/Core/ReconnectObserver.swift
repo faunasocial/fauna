@@ -24,6 +24,14 @@ public extension View {
         onFaunaNotification(.faunaReconnected, action: action)
     }
 
+    /// Re-run `action` whenever the `devices` surface goes stale
+    /// (`.faunaDevicesStale`, from `FfiStaleSurfaces.devices`): after a reconnect
+    /// and after `ResyncRequired`, and never from one push kind alone. Narrower
+    /// than `onReconnect`, which several push kinds also post to.
+    func onDevicesStale(_ action: @escaping () async -> Void) -> some View {
+        onFaunaNotification(.faunaDevicesStale, action: action)
+    }
+
     /// Run `action` when a client's WS-RPC supervisor stops on a session-ending
     /// verdict (`.faunaSessionEnding`, posted by `FaunaClient`'s connection-state
     /// observer). Attached once, at the app root, where the per-platform
@@ -128,6 +136,22 @@ public extension View {
     /// view receives it, which is the page gate.
     func onMailSpamChanged(_ action: @escaping () async -> Void) -> some View {
         onFaunaNotification(.faunaMailSpamChanged, action: action)
+    }
+
+    /// Re-run `action` whenever an export of this account changes on another
+    /// device (`.faunaMailExportChanged`, from `FfiStaleSurfaces.mail_export`).
+    /// The Export page attaches a `Refresh` dispatch; only a mounted view
+    /// receives it, which is the page gate.
+    func onMailExportChanged(_ action: @escaping () async -> Void) -> some View {
+        onFaunaNotification(.faunaMailExportChanged, action: action)
+    }
+
+    /// Re-run `action` whenever an import of this account changes on another
+    /// device (`.faunaMailImportChanged`, from `FfiStaleSurfaces.mail_import`).
+    /// The Import page attaches a re-read of its session; only a mounted view
+    /// receives it, which is the page gate.
+    func onMailImportChanged(_ action: @escaping () async -> Void) -> some View {
+        onFaunaNotification(.faunaMailImportChanged, action: action)
     }
 
     /// Re-run `action` whenever the account registry is mutated from outside the

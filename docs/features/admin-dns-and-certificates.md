@@ -107,7 +107,7 @@ Stamped 2026-10-01 at 308c995169.
 37. [nest] Mail to a domain's postmaster, abuse, noc or security address reaches the member the admin delegated it to on that domain — `docs/goal/behavior/mail-multidomain.md` § Per-domain override
     - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_delegated_role_address_mail_reaches_the_delegated_member`
 38. [nest] A domain the admin adds starts with its mail transport-security policy in testing, and the nest moves it to enforced by itself once the mail certificate is trusted and seven days have passed; no one sets it by hand — `docs/goal/behavior/mail-multidomain.md` § Wizard steps
-    - (none)
+    - `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_new_domains_mta_sts_policy_starts_in_testing_and_the_nest_enforces_it_itself`
 39. [app] Starting a rename, the admin chooses how long the old and new domains both keep working, from one to thirty days, seven by default — `docs/goal/behavior/mail-primary-domain-rename.md` § Goal
     - `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_rename_grace_period_is_chosen_at_the_start`
 40. [app] While a rename is under way the page shows its progress and lets the admin finish early, extend the grace period or abort, each naming its cost first — `docs/goal/behavior/mail-primary-domain-rename.md` § UX surface
@@ -172,104 +172,112 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row`
 68. [app] When the nest's own certificate request fails, the page says so once, above the domains: which request, when, and the certificate authority's own explanation, shown as plain text; the line goes once that request succeeds — `docs/goal/architecture/nest/tls-certificates.md` § Keeping the cert alive
     - `tests/e2e-unified/tests/test_admin_dns_cert_issuance_error.py::test_admin_dns_shows_the_cas_error_for_a_failing_order`
+69. [app] A domain added from the page appears with its records and each record's status straight away — not after a refresh, and not after the page's own periodic re-check — `docs/goal/behavior/mail-multidomain.md` § Adding a new local domain (the admin workflow)
+    - `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_added_domain_shows_its_records_without_a_tick`
+70. [app] A domain whose trusted certificate is live shows that on its badge, and one coming up for renewal shows that it is due; auto-renew starts on for a domain whose DNS credential the nest holds, not only for a delegated one — `docs/goal/architecture/nest/tls-certificates.md` § B. Trusted-cert acquisition
+    - `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on`
+    - `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_on_web_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| android | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| linux | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| windows | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| macos | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| ios | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| android | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
+| tui | ⚠ partial | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_ptr_row_shows_provider_note` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_remove_restore_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_credentials_list_and_refresh` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_credential_shows_provider_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_toggle_managed_without_credential_shows_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_publish_success` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_admin_catch_all.py::test_admin_catch_all_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_admin_role_address.py::test_admin_role_address_designate_merge_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert.py::test_admin_dns_cert_status_renders_on_floor` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issue.py::test_admin_dns_cert_issue_button_renders_per_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_domain_records` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_ptr_row_shows_provider_note` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_remove_restore_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_credentials_list_and_refresh` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_add_credential_shows_provider_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_toggle_managed_without_credential_shows_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_publish_success` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_admin_catch_all.py::test_admin_catch_all_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_admin_role_address.py::test_admin_role_address_designate_merge_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert.py::test_admin_dns_cert_status_renders_on_floor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issue.py::test_admin_dns_cert_issue_button_renders_per_domain` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_auto_renew.py::test_admin_dns_auto_renew_default_on_and_toggles` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_dns_cert_delegate.py::test_admin_dns_cert_delegate_and_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` | tui (linux): failed |
-| 7 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rename_sheet_opens_and_cancels` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_adds_and_lists_local_domain_over_wire` | nest (linux): passed, nest (windows): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_non_admin_denied_on_local_domain_kind` | nest (linux): passed, nest (windows): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_real_domain_registers_primary_and_dns` | nest (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py::test_dns01_reissues_the_nest_certificate_through_the_client_ui` — requires `live-drive-onboarding-bridge` (test harness) (not built: android) | tui (linux): failed |
+| 7 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rename_sheet_opens_and_cancels` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_adds_and_lists_local_domain_over_wire` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_non_admin_denied_on_local_domain_kind` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_claim_primary_domain.py::test_claim_real_domain_registers_primary_and_dns` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_domainless_add_domain_acquires_acme_cert_and_serves_mail` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/test_primary_domain_rename.py::test_start_refuses_bogus_target_over_wire` | nest (linux): passed, nest (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_dns_pickers_stay_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/test_primary_domain_rename.py::test_start_refuses_bogus_target_over_wire` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_dns_pickers_stay_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_dns_pickers_offer_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rechecks_on_demand_and_by_itself_while_open` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_record_value_copies_to_the_clipboard` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_another_admin_reads_manual_for_a_domain_the_first_manages` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 20 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_credential_added_on_one_device_is_on_the_other` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_failed_publish_says_why_and_stays_managed` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_records_republished_and_superseded_policy_taken_down` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_records_republished_and_superseded_policy_taken_down` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 24 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_record_list_carries_the_nest_and_mail_host_addresses_separately` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_identity_record_listed_on_every_public_domain_and_on_no_other` | nest (linux): passed |
-| 26 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_approving_the_bluesky_server_adds_its_address_record` | nest (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 14 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_rechecks_on_demand_and_by_itself_while_open` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_record_value_copies_to_the_clipboard` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 17 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_another_admin_reads_manual_for_a_domain_the_first_manages` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_manage_all_and_the_credential_that_makes_it_actionable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 20 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_credential_added_on_one_device_is_on_the_other` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_failed_publish_says_why_and_stays_managed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_records_republished_and_superseded_policy_taken_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_admin_dns_managed.py::test_admin_dns_managed_records_republished_and_superseded_policy_taken_down` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_record_list_carries_the_nest_and_mail_host_addresses_separately` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_identity_record_listed_on_every_public_domain_and_on_no_other` | nest (linux): passed, nest (macos): passed |
+| 26 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_approving_the_bluesky_server_adds_its_address_record` | nest (linux): passed, nest (macos): passed |
 | 26 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_a_connected_relay_adds_its_address_record_to_the_primary` | nest (linux): passed |
-| 27 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_each_domain_publishes_a_strict_reject_dmarc_policy_reporting_to_the_nest` | nest (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_primary_domain_is_marked_and_cannot_be_removed` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_first_domain_add_warns_it_becomes_the_permanent_primary` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 30 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_adding_a_recently_removed_domain_is_refused_toward_restore` | nest (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_removing_a_domain_asks_to_confirm_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 32 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mta_local_domains_hot_reloads_without_restart` | nest (linux): passed |
-| 33 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_removed_domain_addresses_stop_receiving_and_restore_brings_them_back` | nest (linux): passed |
-| 34 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_restored_domain_publishes_the_same_signing_key` | nest (linux): passed |
-| 35 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_removed_domain_is_restorable_for_thirty_days_then_gone` | nest (linux): passed |
-| 36 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_catch_all_is_cleared_when_its_member_is_succeeded` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 37 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_delegated_role_address_mail_reaches_the_delegated_member` | nest (linux): passed |
-| 38 | nest | (none) | — |
-| 39 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_rename_grace_period_is_chosen_at_the_start` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_an_in_flight_rename_shows_its_banner_and_aborts_from_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_a_rename_in_its_grace_period_extends_and_finishes_early_from_the_banner` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 27 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_each_domain_publishes_a_strict_reject_dmarc_policy_reporting_to_the_nest` | nest (linux): passed, nest (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_primary_domain_is_marked_and_cannot_be_removed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 29 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_first_domain_add_warns_it_becomes_the_permanent_primary` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_adding_a_recently_removed_domain_is_refused_toward_restore` | nest (linux): passed, nest (macos): passed |
+| 31 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_removing_a_domain_asks_to_confirm_first` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 32 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_mta_local_domains_hot_reloads_without_restart` | nest (linux): passed, nest (macos): passed |
+| 33 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_removed_domain_addresses_stop_receiving_and_restore_brings_them_back` | nest (linux): passed, nest (macos): passed |
+| 34 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_restored_domain_publishes_the_same_signing_key` | nest (linux): passed, nest (macos): passed |
+| 35 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_removed_domain_is_restorable_for_thirty_days_then_gone` | nest (linux): passed, nest (macos): passed |
+| 36 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_catch_all_is_cleared_when_its_member_is_succeeded` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 37 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_delegated_role_address_mail_reaches_the_delegated_member` | nest (linux): passed, nest (macos): passed |
+| 38 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_a_new_domains_mta_sts_policy_starts_in_testing_and_the_nest_enforces_it_itself` | nest (linux): passed, nest (macos): passed |
+| 39 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_rename_grace_period_is_chosen_at_the_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_an_in_flight_rename_shows_its_banner_and_aborts_from_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 40 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_a_rename_in_its_grace_period_extends_and_finishes_early_from_the_banner` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 41 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
 | 42 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_aborting_a_rename_during_grace_makes_the_old_domain_primary_again` | nest (linux): passed |
 | 43 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
 | 44 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
 | 45 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_during_grace_the_old_mail_host_delivers_and_old_unsubscribe_links_keep_working` | nest (linux): passed |
 | 46 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_during_grace_the_old_mail_host_delivers_and_old_unsubscribe_links_keep_working` | nest (linux): passed |
-| 47 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 47 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_after_a_rename_the_profile_shows_the_handle_on_the_new_primary` — requires `profile-handle-primary-domain` (not built: windows) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_finished_rename_keeps_the_old_domain_and_its_addresses_and_moves_signups` | nest (linux): passed |
-| 49 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_neither_domain_of_an_unfinished_rename_can_be_removed` | nest (linux): passed |
-| 50 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_a_rename_onto_a_weaker_tls_posture_is_refused_until_it_catches_up` | nest (linux): passed |
+| 49 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_neither_domain_of_an_unfinished_rename_can_be_removed` | nest (linux): passed, nest (macos): passed |
+| 50 | nest | `tests/e2e-unified/tests/api/test_primary_domain_rename_lifecycle.py::test_a_rename_onto_a_weaker_tls_posture_is_refused_until_it_catches_up` | nest (linux): passed, nest (macos): passed |
 | 51 | nest | `tests/e2e-unified/tests/platform/docker/test_primary_domain_rename_flip.py::test_a_rename_away_from_a_dead_primary_completes` | nest (linux): passed |
-| 52 | nest | `tests/e2e-unified/tests/test_primary_domain_rename.py::test_non_admin_denied_on_rename_kind` | nest (linux): passed |
-| 53 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_shows_the_challenge_record_to_paste_and_cancel_clears_it` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_survives_an_app_restart_with_the_same_record` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_is_waiting_with_the_same_record_on_another_device` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_a_failed_manual_completion_keeps_the_card_for_a_retry` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 55 | app | `tests/e2e-unified/tests/test_admin_dns_cert_auto_renew_tick.py::test_a_managed_domain_on_the_floor_is_issued_by_the_tick_with_no_tap` | linux (linux): passed, tui (linux): passed |
-| 56 | nest | `tests/e2e-unified/tests/api/test_dns_cert_issue_covers_listener_api.py::test_issuing_for_a_second_domain_orders_every_listener_name` | nest (linux): passed |
+| 52 | nest | `tests/e2e-unified/tests/test_primary_domain_rename.py::test_non_admin_denied_on_rename_kind` | nest (linux): passed, nest (macos): passed |
+| 53 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_shows_the_challenge_record_to_paste_and_cancel_clears_it` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_survives_an_app_restart_with_the_same_record` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_issue_is_waiting_with_the_same_record_on_another_device` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 54 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_a_failed_manual_completion_keeps_the_card_for_a_retry` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 55 | app | `tests/e2e-unified/tests/test_admin_dns_cert_auto_renew_tick.py::test_a_managed_domain_on_the_floor_is_issued_by_the_tick_with_no_tap` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 56 | nest | `tests/e2e-unified/tests/api/test_dns_cert_issue_covers_listener_api.py::test_issuing_for_a_second_domain_orders_every_listener_name` | nest (linux): passed, nest (macos): error |
 | 57 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_a_second_domain_not_pointing_here_never_breaks_the_primarys_certificate` | nest (linux): passed |
-| 58 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_the_first_domain_added_to_a_domainless_nest_becomes_its_name_at_once` | nest (linux): passed |
-| 59 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_complete_waits_for_the_name_servers_then_issues` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 60 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_never_lists_the_issuance_challenge_record_as_a_standing_record` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 60 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_complete_waits_for_the_name_servers_then_issues` | linux (linux): passed, android (linux): error, tui (linux): passed |
-| 61 | app | `tests/e2e-unified/tests/test_admin_dns_host_address_lan.py::test_an_admin_on_the_home_network_never_publishes_its_private_address` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 62 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 63 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_row_shows_where_catch_all_and_role_addresses_go` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 64 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_primary_row_is_the_one_that_offers_the_rename` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 58 | nest | `tests/e2e-unified/tests/api/test_admin_domain_lifecycle.py::test_the_first_domain_added_to_a_domainless_nest_becomes_its_name_at_once` | nest (linux): passed, nest (macos): passed |
+| 59 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_complete_waits_for_the_name_servers_then_issues` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 60 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_never_lists_the_issuance_challenge_record_as_a_standing_record` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 60 | app | `tests/e2e-unified/tests/test_admin_dns_cert_manual_issue.py::test_manual_complete_waits_for_the_name_servers_then_issues` | web (linux): passed, linux (linux): passed, android (linux): error, tui (linux): passed |
+| 61 | app | `tests/e2e-unified/tests/test_admin_dns_host_address_lan.py::test_an_admin_on_the_home_network_never_publishes_its_private_address` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): error, tui (linux): passed |
+| 62 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_lists_every_record_with_type_value_and_live_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 63 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_row_shows_where_catch_all_and_role_addresses_go` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 64 | app | `tests/e2e-unified/tests/test_admin_dns_domain_lifecycle.py::test_the_primary_row_is_the_one_that_offers_the_rename` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 65 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_a_domain_added_after_install_receives_mail_once_its_certificate_is_in_place` | nest (linux): passed |
-| 66 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_softens_one_domains_dmarc_policy_over_wire` | nest (linux): passed |
-| 67 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 68 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issuance_error.py::test_admin_dns_shows_the_cas_error_for_a_failing_order` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 66 | nest | `tests/e2e-unified/tests/test_mail_admin_local_domains.py::test_admin_softens_one_domains_dmarc_policy_over_wire` | nest (linux): passed, nest (macos): passed |
+| 67 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_softens_one_domains_dmarc_policy_from_its_row` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 68 | app | `tests/e2e-unified/tests/test_admin_dns_cert_issuance_error.py::test_admin_dns_shows_the_cas_error_for_a_failing_order` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 69 | app | `tests/e2e-unified/tests/test_admin_dns.py::test_admin_dns_added_domain_shows_its_records_without_a_tick` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 70 | app | `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on` | web (linux): skipped, linux (linux): passed, ios (macos): error, tui (linux): passed |
+| 70 | app | `tests/e2e-unified/tests/test_admin_dns_cert_badge_live_then_due.py::test_on_web_a_managed_domains_badge_reads_live_then_due_and_auto_renew_starts_on` | web (linux): passed |
 <!-- features-render:end -->

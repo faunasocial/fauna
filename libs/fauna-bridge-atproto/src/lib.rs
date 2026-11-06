@@ -26,6 +26,8 @@ pub mod client_assertion;
 #[cfg(feature = "client")]
 pub mod chat;
 pub mod db;
+#[cfg(feature = "client")]
+pub mod dial_guard;
 /// F4 — DPoP proof validation (RFC 9449): does this caller hold the key it
 /// claims to? Pure + wasm-clean, in the always-on core beside [`oauth_par`].
 /// It decides everything about a proof except the three things that need a

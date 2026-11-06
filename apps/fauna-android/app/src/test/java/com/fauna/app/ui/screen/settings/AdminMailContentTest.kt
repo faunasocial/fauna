@@ -112,6 +112,7 @@ class AdminMailContentTest {
         riSeconds = 86400u,
         aggregateRetentionDays = 90u,
         forensicRetentionDays = 30u,
+        outboundAggregateEnabled = true,
     )
 
     private fun microsoft() = MicrosoftRegistrationView(clientId = "", tenant = "", isDefault = true)

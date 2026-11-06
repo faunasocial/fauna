@@ -130,10 +130,15 @@ public struct PersonalizationView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(subscribedEntries) { pair in
+                        // `position` is the row's place on THIS page — its
+                        // scope index — while `pair.index` addresses the full
+                        // catalog for the VM's gestures. `.id` ties the row's
+                        // identity to both (registration rule 4).
+                        ForEach(Array(subscribedEntries.enumerated()), id: \.element.id) { position, pair in
                             LabelerCatalogRow(
-                                entry: pair.entry, index: pair.index,
+                                entry: pair.entry, index: pair.index, position: position,
                                 showInspectSubscribe: false, vm: vm)
+                            .id("\(position)-\(pair.entry.labelerId)")
                         }
                     }
                     .accessibilityIdentifier(Ids.personalizationLabelersList)

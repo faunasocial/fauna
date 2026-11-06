@@ -2617,8 +2617,8 @@ struct ComposedGrant {
 /// the card's composition (fence and wording alike), shared by this page and
 /// the connected-apps page's Requests tray (`docs/goal/ui/connected-apps.md`
 /// § Architectural rules: "the consent card here is the built card").
-/// `folder_names` is the owner's own name for each folder a `folder:read`
-/// scope names, as the folder seam resolved it
+/// `folder_names` is the owner's own name for each folder a qualified
+/// `folder:deposit` or `folder:read` scope names, as the folder seam resolved it
 /// (`consent_grant::consent_folder_names`) — empty when it has none.
 pub fn consent_card_row(
     c: NestConsentRow,
@@ -2627,17 +2627,18 @@ pub fn consent_card_row(
     // A `records` scope is worded from what this device knows about the
     // request — the publisher, how many kinds the verified manifest
     // declares under it, and whether a writer key was attested
-    // (`records_scope_row`); a `folder:read` scope names the folder when
-    // the owner's custody resolves it (`fauna_scope::folder_read_card_row`);
-    // every other scope through `describe_scope`.
+    // (`records_scope_row`); a qualified `folder:deposit` or `folder:read`
+    // scope names the folder when the owner's custody resolves it
+    // (`fauna_scope::folder_card_row`); every other scope through
+    // `describe_scope`.
     let scope_descriptions = c
         .scopes
         .iter()
         .map(|s| {
             records_scope_row(s, &c)
                 .or_else(|| {
-                    let id = fauna_bridge_atproto::fauna_scope::folder_read_qualifier(s)?;
-                    fauna_bridge_atproto::fauna_scope::folder_read_card_row(
+                    let id = fauna_bridge_atproto::fauna_scope::folder_qualifier(s)?;
+                    fauna_bridge_atproto::fauna_scope::folder_card_row(
                         s,
                         folder_names.get(&id).map(String::as_str),
                     )

@@ -376,6 +376,15 @@ pub const KIND_PAYLOAD_COVERAGE_P2P_SHARE: &[(&str, &[&str])] = &[
             "group_share_deliver",
         ],
     ),
+    // The group plane's feed (`p2p-shared-set-build.md` § Build design — the
+    // group set, decision 6): the account plane's own feed kind, served on
+    // the share channel for a `group:` scope only. Same structs and same
+    // stems as the base table's row for the kind — one wire shape, recorded
+    // in this plane's own corpus dir so the share smoke replays it.
+    (
+        "fauna.sync.changes.list",
+        &["sync_changes_list_request", "sync_changes_list_reply"],
+    ),
 ];
 
 /// Target 3's share-plane twin: arbitrary bytes through strict decode of
@@ -419,6 +428,9 @@ pub fn check_p2p_share_payload_decode(data: &[u8]) -> usize {
     try_decode!(PeerShareCeremonyAcceptPollRequest);
     try_decode!(PeerShareCeremonyAcceptPollReply);
     try_decode!(fauna_protocol::peer_share::PeerShareGroupWitness);
+    // The group feed's request and reply — the account plane's own structs.
+    try_decode!(fauna_protocol::sync::SyncChangesListRequest);
+    try_decode!(fauna_protocol::sync::SyncChangesListReply);
     // The carried certificate's own decode — fauna-core's canonical decode,
     // the evaluator's production parse path.
     if fauna_core::encoding::canonical_decode::<fauna_core::group_scope::GroupRosterRecord>(data)

@@ -283,7 +283,7 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   roster check, side-effect free). The 2026-07-18 rule — only the claimant may
   append a Commit — was found mutually unsatisfiable with two other ratified
   rules: members MUST send application traffic
-  on the set's channel (`p2p.md` § Cross-user shared-set transfer — the
+  on the set's channel (`p2p-shared-set.md` § Cross-user shared-set transfer — the
   advertisement/custody carriage), and the device-owned-epoch invariant
   (`devices.md` § Cross-device MLS group-state sync) makes every member device
   post a bare self-`Update` takeover Commit before its first application send —
@@ -553,9 +553,17 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
     Names the member, one of its devices, and whether that device serves the
     folder. Gate: the write gate — foreign-member-bound-to-home-`nest_id` plus
     `access == 'writer'`. The home nest keeps the result in memory only, bounded
-    in count, on a lease of a hard-coded length that the member's nest renews;
-    an announce that says *no longer serving*, a lapsed lease, and the member's
-    removal or demotion each drop it.
+    in count — per folder, per member within a folder (a few devices'
+    worth, so one member's nest cannot fill a folder with made-up device
+    ids), and whole — on a lease of a hard-coded length that the member's nest
+    renews; an announce that says *no longer serving*, a lapsed lease, and the
+    member's removal or demotion each drop it. The member's nest is bounded
+    too, since the home nest URL each entry names is the caller's to choose:
+    one client announce forwards to at most a small constant of distinct home
+    nests, each forwarded home nest spends one event of a per-actor meter, a
+    home nest not reached is not dialed again for the announce's other
+    entries, and the lease a reply states is clamped between a floor and the
+    hard-coded length before it sets the renewal period.
   - **`fauna.federation.folder.chunk.wanted`** (home nest → member's nest — the
     one folder kind besides the Welcome that the HOME nest originates). Carries
     the member, the device, a request id and a store key. The member's nest
@@ -662,7 +670,7 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
     the *Recipient-side access discovery* bullet; on the Welcome the
     recipient's own nest delivers `home_nest_actor_id` as the origin it
     verified on the channel, not the home's word,
-    `transport-trust.md` § The post arm). It adds the owner's handle
+    `transport-trust.md` § Transport trust, the *post arm* paragraph). It adds the owner's handle
     and domain, joined from its own `users` row and `handle_domain_if_set()`
     — never client-asserted — as two additive fields on each: the
     `fauna.federation.welcome.deliver` request (`owner_handle` /
@@ -687,7 +695,11 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
     authenticated origin: the handshake-verified `origin_nest_id` on the
     relay, the pool's verified identity behind `peer_url`
     (`resolve_peer_nest_id`) on the read. A mismatch forwards nothing and is
-    logged as the signal it is. The `shared_by` actor id stays unstamped
+    logged as the signal it is. An asserted domain whose host is loopback is
+    never dialled: the binding dials at a stranger peer's word, unattended, so
+    a production nest refuses it before any dial, here and on the announce
+    alike — only test state, whose in-process nests share one host, binds one
+    (2026-11-04). The `shared_by` actor id stays unstamped
     cross-nest, so the contact gate still reads every cross-nest arrival as a
     knock (`../ui/folders.md` § Sharing) — the label names, never admits. The
     client's trust rule is one line: a handle with a domain beside it is a
@@ -883,6 +895,7 @@ deliberately-closed kind inventory admits, and why the member-gated family above
 
 The entries below moved verbatim from [`federation.md`](federation.md) § Implementation status today on 2026-10-17; each carries its own landing date. The carrier, auth and serving entries they build on stay there.
 
+- **Relay serving across nests — the bounds BUILT 2026-11-05:** the member's nest forwards one announce to at most `sync_handlers::SERVE_ANNOUNCE_MAX_FOREIGN_NESTS` distinct home nests under the per-actor `FOREIGN_FORWARD_METER`, stops dialing a home nest it did not reach, and renews at half of `clamp_peer_lease` of the shortest reply; the home nest's `chunk_relay::ForeignSeats` refuses a member's seat past `FOREIGN_SEATS_PER_MEMBER` (`LeaseRefused::MemberFull`). Pinned by `sync_handlers::foreign_forward_bound_tests` and `chunk_relay`'s `one_member_holds_at_most_its_share_of_a_folders_seats`.
 - **Relay serving across nests (ruled 2026-10-01) — the read direction BUILT
   2026-10-03, the stamp and the serving kinds BUILT 2026-10-04, the seat
   BUILT 2026-10-09** (§ Cross-nest shared folders + channel

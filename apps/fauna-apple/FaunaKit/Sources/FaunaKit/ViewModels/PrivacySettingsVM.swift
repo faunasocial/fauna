@@ -1,5 +1,30 @@
 import SwiftUI
 
+/// Everything the shared email-filter form collects (`email-filters.md` § Email
+/// filter rules): the name, the condition's inputs, the action's inputs, the
+/// order as typed and the `continue` flag. The shared encoders turn it into the
+/// wire rule on submit.
+public struct EmailFilterDraft: Equatable {
+    public var name: String
+    public var rule: FfiFilterRuleInputs
+    public var action: FfiFilterActionInputs
+    public var priority: String
+    public var continueOnMatch: Bool
+
+    public init(name: String = "",
+                rule: FfiFilterRuleInputs = FfiFilterRuleInputs(kind: "SenderIs", value: ""),
+                action: FfiFilterActionInputs = FfiFilterActionInputs(
+                    kind: "Allow", rejectReason: "", forwardAddress: "", keepLocalCopy: true),
+                priority: String = "",
+                continueOnMatch: Bool = false) {
+        self.name = name
+        self.rule = rule
+        self.action = action
+        self.priority = priority
+        self.continueOnMatch = continueOnMatch
+    }
+}
+
 @MainActor @Observable
 public class PrivacySettingsVM {
     // Inbox mode. `nil` until `loadAll()`'s fetch resolves — the selector must
@@ -94,22 +119,24 @@ public class PrivacySettingsVM {
         }
     }
 
-    public func createFilter(name: String, ruleType: String, ruleValue: String,
-                      action: FfiFilterActionInputs) async {
+    public func createFilter(_ draft: EmailFilterDraft) async {
         guard let api else { return }
         creatingFilter = true
         emailFilterError = nil
         defer { creatingFilter = false }
         do {
-            // Single source of truth: the shared `fauna_protocol::email` encoder
-            // (UniFFI free funcs) builds the typed rule/action from the whole
-            // form inputs. Empty `rejectReason` → the canonical "Rejected by
-            // filter" default; an unknown rule kind or an invalid Forward
-            // destination throws (caught below) instead of a malformed rule.
-            let rule = try encodeEmailFilterRule(kind: ruleType, value: ruleValue)
-            let act = try encodeEmailFilterActionInputs(inputs: action)
-            try await api.createEmailFilter(name: name, rules: [rule], combination: "all",
-                                            action: act, priority: 0)
+            // Single source of truth: the shared `fauna_protocol::email` encoders
+            // (UniFFI free funcs) build the typed rule/action and parse the order
+            // from the whole form inputs. Empty `rejectReason` → the canonical
+            // "Rejected by filter" default; an unknown rule kind, an invalid
+            // Forward destination or a non-numeric order throws (caught below)
+            // instead of a malformed rule.
+            let rule = try encodeEmailFilterRuleInputs(inputs: draft.rule)
+            let act = try encodeEmailFilterActionInputs(inputs: draft.action)
+            let priority = try parseEmailFilterPriority(text: draft.priority)
+            try await api.createEmailFilter(name: draft.name, rules: [rule], combination: "all",
+                                            action: act, priority: Int(priority),
+                                            continueOnMatch: draft.continueOnMatch)
             emailFilters = try await api.listEmailFilters()
             showFilterForm = false
         } catch {
@@ -160,20 +187,19 @@ public class PrivacySettingsVM {
 
     /// Open the shared form pre-populated for editing `id` (`filter-edit`).
     /// Fetches fresh (not the cached row) via `filtersGet`, then decodes back
-    /// to the create-dialog's `(kind, value)` pair and the whole action inputs
-    /// (a Forward's destination and copy mode, a Reject's reason) via the
-    /// shared `describeEmailFilterRule`/`describeEmailFilterActionInputs` — the
-    /// exact reverse of `createFilter`'s encode. The caller's `filter-edit` gate
-    /// (`emailFilterIsEditableFor`) should already guarantee a decodable shape;
-    /// a `nil` here surfaces an error rather than opening a form that would
-    /// silently narrow an unsupported filter on save.
-    public func beginEditFilter(id: Int64) async -> (name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs)? {
+    /// to the whole rule inputs, action inputs, order and `continue` flag via the
+    /// shared `describeEmailFilterRuleInputs`/`describeEmailFilterActionInputs` —
+    /// the exact reverse of `createFilter`'s encode. The caller's `filter-edit`
+    /// gate (`emailFilterIsEditable`) should already guarantee a decodable
+    /// shape; a `nil` here surfaces an error rather than opening a form that
+    /// would silently narrow an unsupported filter on save.
+    public func beginEditFilter(id: Int64) async -> EmailFilterDraft? {
         guard let api else { return nil }
         emailFilterError = nil
         do {
             let filter = try await api.getEmailFilter(id: id)
             guard let rule = filter.rules.first,
-                  let describedRule = describeEmailFilterRule(rule: rule),
+                  let ruleInputs = describeEmailFilterRuleInputs(rule: rule),
                   let actionInputs = describeEmailFilterActionInputs(action: filter.action)
             else {
                 emailFilterError = L.errors.httpError(detail: "unsupported filter shape")
@@ -181,8 +207,9 @@ public class PrivacySettingsVM {
             }
             editingFilterId = id
             showFilterForm = true
-            return (name: filter.name, ruleType: describedRule.kind,
-                    ruleValue: describedRule.value, action: actionInputs)
+            return EmailFilterDraft(name: filter.name, rule: ruleInputs, action: actionInputs,
+                                    priority: String(filter.priority),
+                                    continueOnMatch: filter.continueOnMatch)
         } catch {
             emailFilterError = DisplayError.http(error)
             return nil
@@ -190,19 +217,20 @@ public class PrivacySettingsVM {
     }
 
     /// Submit an edit to `editingFilterId` (`save-filter`) — same
-    /// kind/value/action composition as `createFilter`, single source of
+    /// rule/action/order composition as `createFilter`, single source of
     /// truth in the shared encoder.
-    public func updateFilter(id: Int64, name: String, ruleType: String, ruleValue: String,
-                      action: FfiFilterActionInputs) async {
+    public func updateFilter(id: Int64, _ draft: EmailFilterDraft) async {
         guard let api else { return }
         creatingFilter = true
         emailFilterError = nil
         defer { creatingFilter = false }
         do {
-            let rule = try encodeEmailFilterRule(kind: ruleType, value: ruleValue)
-            let act = try encodeEmailFilterActionInputs(inputs: action)
-            try await api.updateEmailFilter(id: id, name: name, rules: [rule], combination: "all",
-                                            action: act, priority: 0)
+            let rule = try encodeEmailFilterRuleInputs(inputs: draft.rule)
+            let act = try encodeEmailFilterActionInputs(inputs: draft.action)
+            let priority = try parseEmailFilterPriority(text: draft.priority)
+            try await api.updateEmailFilter(id: id, name: draft.name, rules: [rule], combination: "all",
+                                            action: act, priority: Int(priority),
+                                            continueOnMatch: draft.continueOnMatch)
             emailFilters = try await api.listEmailFilters()
             showFilterForm = false
             editingFilterId = nil
@@ -211,7 +239,10 @@ public class PrivacySettingsVM {
         }
     }
 
-    public func saveSpamPreferences() async {
+    /// Save the thresholds, then re-bind them into `contentPolicy` so the feed
+    /// and conversations render against them at once
+    /// (``ContentPolicyStore/setOwnThresholds(spamPermille:phishingPermille:scope:)``).
+    public func saveSpamPreferences(rebinding contentPolicy: ContentPolicyStore? = nil) async {
         guard let api else { return }
         spamPrefsLoading = true
         spamPrefsError = nil
@@ -222,7 +253,14 @@ public class PrivacySettingsVM {
                 spamThreshold: spamThreshold,
                 phishingThreshold: phishingThreshold
             )
+            let scope = contentPolicy?.scope
             try await api.updateSpamPreferences(prefs)
+            if let contentPolicy, let scope {
+                contentPolicy.setOwnThresholds(
+                    spamPermille: SpamOptions.perMille(prefs.spamThreshold),
+                    phishingPermille: SpamOptions.perMille(prefs.phishingThreshold),
+                    scope: scope)
+            }
             spamPrefsSaved = true
         } catch {
             spamPrefsError = DisplayError.http(error)

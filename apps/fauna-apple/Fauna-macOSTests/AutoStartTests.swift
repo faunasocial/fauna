@@ -50,7 +50,7 @@ import Testing
             .retrying(error: "offline"),
             .needsUpdate(message: "outdated"),
             .signInRefused(message: "refused"),
-            .identityChanged(pinnedHex: "aa", seenHex: nil),
+            .identityChanged(pinnedHex: "aa", seenHex: nil, isFork: false),
         ]
         for gate in blocking {
             #expect(AutoStart.route(gate: gate, isOnboarded: true) == .needsUser)

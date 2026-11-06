@@ -42,27 +42,27 @@ Stamped 2026-09-19 at e9152e3330.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.6-dev+aa0b8e99 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.3-dev+8b195137 standalone |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_reply_shows_quote_of_parent` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_non_reply_has_no_quote` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_missing_parent_hides_quote` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_reply_seeds_to_line_with_sender_and_chip_removes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_mail_thread_offers_reply_all` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_fauna_thread_hides_to_line_and_reply_all` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_smtp_subject_routes_to_subject_keyed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_re_prefix_normalized` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_smtp_in_reply_to_overrides_subject` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_subject_divider.py::test_divider_appears_on_subject_change` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_reply_preview_shows_the_message_answered_and_cancel_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_mail_header_chips_are_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_reply_shows_quote_of_parent` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_non_reply_has_no_quote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_reply_quote.py::test_missing_parent_hides_quote` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_reply_seeds_to_line_with_sender_and_chip_removes` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_mail_thread_offers_reply_all` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_conversations_reply_recipients.py::test_fauna_thread_hides_to_line_and_reply_all` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_smtp_subject_routes_to_subject_keyed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_re_prefix_normalized` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_keying.py::test_smtp_in_reply_to_overrides_subject` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_subject_divider.py::test_divider_appears_on_subject_change` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_reply_preview_shows_the_message_answered_and_cancel_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_conversations_reply_chrome.py::test_mail_header_chips_are_informational` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_mail_client_send.py::test_client_driven_send_relays_to_external_mx` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

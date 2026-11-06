@@ -22,7 +22,7 @@ import { identity } from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
 import { eventDrafts } from './rpc';
-import { autosaveDebounceMs, ensureWasm, logMessage } from './wasm';
+import { draftSaveDebounceMs, ensureWasm, fillEventDraft, logMessage } from './wasm';
 import type { WasmEventDrafts } from '../../static/fauna_wasm.js';
 
 /** The five user-authored `event-form` inputs the rail rests — the JS mirror of
@@ -51,15 +51,29 @@ let facePromise: Promise<WasmEventDrafts> | null = null;
  *  `apps/fauna-tui/src/events/drafts.rs`). */
 let current: EventDraft | null = null;
 
-/** Build (once) the events-rail face for the logged-in actor and run the launch
- *  restore, remembering what came back for {@link resumeEventDraft}.
+/** Called whenever the launch restore has filled {@link current} — the page's
+ *  door for painting a restore that lands after it mounted (the load retries a
+ *  read lost to the transport for minutes, so it routinely does). */
+const restoredListeners = new Set<() => void>();
+
+/** Subscribe to {@link restoredListeners}; returns the unsubscribe. */
+export function onEventDraftRestored(listener: () => void): () => void {
+  restoredListeners.add(listener);
+  return () => restoredListeners.delete(listener);
+}
+
+/** Build (once) the events-rail face for the logged-in actor and start the
+ *  launch restore, filling what comes back into {@link current} for
+ *  {@link resumeEventDraft}.
  *
- *  Awaited by the Events page on mount, before any save can run — so an
- *  in-progress event survives a restart and appears on the user's other devices.
- *  A transient/seal failure is logged + swallowed (the page must still open);
- *  the wasm side's shared `DraftsSync` keeps its save gate closed until a
- *  restore *succeeds*, so a later save cannot clobber an unread (incl.
- *  undecryptable) blob — the next launch retries the load. */
+ *  The restore is NOT awaited: the shared `DraftsSync` retries a launch read
+ *  lost to the transport for minutes (`conversation-drafts.md` § Persistence),
+ *  and a build held that long would trip its settle deadline. It FILLS whenever
+ *  it lands — it never overwrites a draft the user has started meanwhile
+ *  (`fillEventDraft`) — and tells {@link onEventDraftRestored}'s listeners. A
+ *  transient/seal failure is logged + swallowed (the page must still open); the
+ *  save gate stays closed until a restore *succeeds*, so a later save cannot
+ *  clobber an unread (incl. undecryptable) blob. */
 export function loadEventDrafts(): Promise<WasmEventDrafts> {
   if (facePromise) return facePromise;
   const id = get(identity);
@@ -92,15 +106,18 @@ export function loadEventDrafts(): Promise<WasmEventDrafts> {
       throw new Error('event drafts: build abandoned by its settle deadline');
     }
     face = built;
-    try {
-      const draft = (await built.restoreDrafts()) as EventDraft | undefined;
-      // Both seams again, after the restore's own await: a switch or an
-      // abandonment landing inside it must not seed `current` either — the
-      // replacement build restores its own.
-      if (draft && stillThisActor() && stillWanted()) current = draft;
-    } catch (e) {
-      logMessage('warn', 'fauna_web::events', `restore event drafts failed: ${e}`);
-    }
+    built.restoreDrafts().then(
+      (restored: unknown) => {
+        const draft = restored as EventDraft | undefined;
+        // Both seams again, after the restore's own wait: a switch or an
+        // abandonment landing inside it must not seed `current` either — the
+        // replacement build restores its own.
+        if (!draft || !stillThisActor() || !stillWanted()) return;
+        current = fillEventDraft(current, draft);
+        for (const listener of restoredListeners) listener();
+      },
+      (e: unknown) => logMessage('warn', 'fauna_web::events', `restore event drafts failed: ${e}`),
+    );
     return built;
   };
   // A failed build must not be MEMOIZED, and a build that never SETTLES must
@@ -146,19 +163,7 @@ export function resumeEventDraft(): EventDraft | null {
   return empty ? null : current;
 }
 
-// Under the Playwright e2e agent, debounce far shorter so a restart round-trip
-// test (`test_event_draft_persistence.py`) needn't wait the production window —
-// mirrors the identical E2E cadence in `feed.ts` / `conversations.ts`.
-const DRAFT_SAVE_DEBOUNCE_E2E_MS = 150;
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-function draftSaveDebounceMs(): number {
-  const hasAgent =
-    __FAUNA_E2E_AUTOMATION__ &&
-    typeof window !== 'undefined' &&
-    (window as unknown as { __faunaTestAgent?: unknown }).__faunaTestAgent != null;
-  return hasAgent ? DRAFT_SAVE_DEBOUNCE_E2E_MS : autosaveDebounceMs();
-}
 
 /** Debounced persist of the event-composer draft after a compose change
  *  (`events.md` § Persistence). Coalesces a burst of keystrokes into one
@@ -187,14 +192,14 @@ export function scheduleEventDraftSave(draft: EventDraft): void {
  *  wording: a browser grants no reliable async work after either event) —
  *  mirrors `conversations.ts`/`feed.ts`'s twin, reading `current` directly since
  *  this rail has no manager to snapshot ([`scheduleEventDraftSave`]'s own doc). */
-export function flushEventDraftNow(): void {
+export function flushEventDraftNow(): Promise<void> {
   if (draftSaveTimer) {
     clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
   }
-  if (!face || !current) return;
+  if (!face || !current) return Promise.resolve();
   const { summary, dtstart, dtend, description, location } = current;
-  void face.saveDrafts(summary, dtstart, dtend, description, location).catch((e) => {
+  return face.saveDrafts(summary, dtstart, dtend, description, location).catch((e) => {
     logMessage('debug', 'fauna_web::events', `leave-flush event draft failed: ${e}`);
   });
 }

@@ -328,6 +328,50 @@
                            Opacity="0.6" TextWrapping="Wrap" />
             </StackPanel>
 
+            <!-- Update channel (fauna.admin.update_channel.{get,set};
+                 nest/update-channel.md § The UI), directly after the web-app
+                 origin. Every sentence, the three radios (label + description) and
+                 can_set are the shared admin_update_channel_view fold; radios are
+                 unmarked and disabled until the read lands and whenever can_set is
+                 false. A radio pick is local; the save commits it and the section
+                 repaints from the fresh read the set answers. -->
+            <StackPanel x:Name="UpdateChannelSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelSection}"
+                        AutomationProperties.Name="admin-nest-update-channel-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/update_channel_label}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/nest_page/update_channel_desc}" />
+
+                <!-- No Content in markup: label + description are the fold's, set
+                     at render. -->
+                <RadioButton x:Name="UpdateChannelStableRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelStableRadio}"
+                             GroupName="AdminUpdateChannel" IsEnabled="False"
+                             Checked="UpdateChannelStableRadio_Checked" />
+                <RadioButton x:Name="UpdateChannelTestRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelTestRadio}"
+                             GroupName="AdminUpdateChannel" IsEnabled="False"
+                             Checked="UpdateChannelTestRadio_Checked" />
+                <RadioButton x:Name="UpdateChannelDevRadio"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelDevRadio}"
+                             GroupName="AdminUpdateChannel" IsEnabled="False"
+                             Checked="UpdateChannelDevRadio_Checked" />
+
+                <!-- No AutomationProperties.Name, so get_text reads the dynamic Text. -->
+                <TextBlock x:Name="UpdateChannelStatusText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelStatus}"
+                           TextWrapping="Wrap" Opacity="0.7" />
+                <!-- A direct child of this panel: the offline gate hosts its inline
+                     reason caption as the next sibling. -->
+                <Button x:Name="UpdateChannelSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestUpdateChannelSaveButton}"
+                        HorizontalAlignment="Left" IsEnabled="False"
+                        Click="UpdateChannelSaveButton_Click"
+                        Content="{loc:Localize Key=admin/nest_page/update_channel_save}" />
+            </StackPanel>
+
             <!-- Deployment-identity rotation (box-recovery.md § Deployment-seed
                  rotation). Arm → roster read → confirm/cancel, no dialog (the
                  roster rows are the decision surface, not decoration — the
@@ -356,7 +400,8 @@
                     <TextBlock TextWrapping="Wrap" Opacity="0.7"
                                Text="{loc:Localize Key=admin/nest_page/rotate_seed_confirm_body}" />
                     <!-- Roster rows built imperatively in code-behind (RenderSeedRotate) —
-                         indexed admin-nest-seed-rotate-roster-item-{n}, one per
+                         each carries the one repeated admin-nest-seed-rotate-roster-item
+                         id (a driver picks row n by index), one per
                          current admin who inherits, painted ONLY from a resolved
                          roster. Never a bare layout root — each row needs
                          AutomationProperties.Name or FlaUI prunes it
@@ -509,6 +554,13 @@
                                             Tag="{Binding ReportId}" Click="ReportOpenTakedown_Click"
                                             Visibility="{Binding CanOpenTakedown, Converter={StaticResource BoolToVis}}"
                                             AutomationProperties.AutomationId="admin-nest-report-open-takedown-button" />
+                                    <!-- Block — an item subject only (the shared can_block);
+                                         arms the confirm below the blocked list, its label
+                                         the shared form view's. -->
+                                    <Button Content="{Binding BlockLabel}"
+                                            Tag="{Binding ReportId}" Click="ReportBlock_Click"
+                                            Visibility="{Binding CanBlock, Converter={StaticResource BoolToVis}}"
+                                            AutomationProperties.AutomationId="admin-nest-report-block-button" />
                                     <Button Content="{loc:Localize Key=admin/nest_page/reports_acted}"
                                             Tag="{Binding ReportId}" Click="ReportActed_Click"
                                             Loaded="ReportActedButton_Loaded"
@@ -530,6 +582,86 @@
                            Opacity="0.7" TextWrapping="Wrap" />
             </StackPanel>
 
+            <!-- Blocked items (takedown-and-block.md § Admin block of a reported item),
+                 below the queue whose Block verb fills it: one admin-nest-blocked-item per
+                 row with its Unblock, which arms the SAME confirm Block does (shown below
+                 the list while armed, its summary folded once at arm time). Rows are flat in
+                 a non-virtualizing ItemsControl so count-all sees every row; the loading
+                 line paints until the list read lands and the empty line only after it.
+                 Every word is shared Rust's. Reference: tui's admin/nest.rs::blocked_elements. -->
+            <StackPanel x:Name="BlockedSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestBlockedSection}"
+                        AutomationProperties.Name="admin-nest-blocked-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/blocked_label}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/blocked_desc}" />
+                <TextBlock x:Name="BlockedLoadingText" Opacity="0.6"
+                           Text="{loc:Localize Key=admin/nest_page/blocked_loading}" />
+                <TextBlock x:Name="BlockedEmptyText" Opacity="0.6" Visibility="Collapsed"
+                           Text="{loc:Localize Key=admin/nest_page/blocked_empty}" />
+                <ItemsControl x:Name="BlockedList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Literal ids below — this DataTemplate has no x:DataType, so
+                                 `{x:Bind ids:Ids.…}` silently drops here (as on ReportsList). -->
+                            <StackPanel Spacing="4" Padding="0,6">
+                                <TextBlock Text="{Binding Line}"
+                                           AutomationProperties.Name="{Binding Line}"
+                                           AutomationProperties.AutomationId="admin-nest-blocked-item"
+                                           TextWrapping="Wrap" />
+                                <Button Content="{Binding UnblockLabel}"
+                                        Tag="{Binding ReportId}" Click="BlockedUnblock_Click"
+                                        IsEnabled="{Binding CanUnblock}"
+                                        AutomationProperties.AutomationId="admin-nest-blocked-unblock-button" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!-- The armed Block / Unblock confirm: present only while armed. The
+                     summary names the verb, the item and the reason before anything
+                     dispatches — a lever on another user's content is never confirmed
+                     blind. -->
+                <StackPanel x:Name="BlockConfirmPanel" Visibility="Collapsed" Spacing="6">
+                    <TextBlock x:Name="BlockConfirmSummaryText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestReportBlockConfirmSummary}"
+                               TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="BlockConfirmButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestReportBlockConfirmButton}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="BlockConfirm_Click" />
+                        <Button x:Name="BlockCancelButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestReportBlockCancelButton}"
+                                Content="{loc:Localize Key=admin/nest_page/block_cancel_button}"
+                                Click="BlockCancel_Click" />
+                    </StackPanel>
+                </StackPanel>
+                <!-- Present only after a dispatch: the shared verdict's words — not
+                     error-message, since a completed block is a success with
+                     consequences. -->
+                <TextBlock x:Name="BlockStatusText" Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Nest rules (nest-rules.md § The shared rule editor (a); admin.md § N.
+                 Nest → Nest rules), directly after the reports queue and its blocked
+                 list, as on tui: the admin's mounting of the shared rule-editor
+                 (Controls/RuleEditorPanel), read on every page entry over
+                 fauna.admin.content_policy.get beside the self-description's domain
+                 and written by rule-editor-save-button through .set. A failed read or
+                 write lands on rule-editor-status, never blanking the page's other
+                 sections. Named, or the container is pruned from UIA. -->
+            <StackPanel x:Name="RulesSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRulesSection}"
+                        AutomationProperties.Name="admin-nest-rules-section"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=rule_editor/nest_section}" />
+                <controls:RuleEditorPanel x:Name="RulesEditor" />
+            </StackPanel>
+
             <!-- Outside-app sign-in keys (authorization-server.md § The issuer →
                  Two rotation arms). Every sentence here is a shared
                  fauna_client_admin fold — this page only paints
@@ -544,7 +676,8 @@
                 <TextBlock TextWrapping="Wrap" Opacity="0.7"
                            Text="{loc:Localize Key=admin/nest_page/oauth_desc}" />
                 <!-- Key rows built imperatively in code-behind (RenderOauth) —
-                     indexed admin-nest-oauth-key-item-{n}, painted ONLY from an
+                     each carries the one repeated admin-nest-oauth-key-item id
+                     (a driver picks row n by index), painted ONLY from an
                      answered read. Never a bare layout root — each row needs
                      AutomationProperties.Name or FlaUI prunes it
                      (reference_winui_flaui_datatemplate_name). -->
@@ -598,6 +731,26 @@
                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestOauthStatus}"
                            Visibility="Collapsed"
                            Opacity="0.7" TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Retire this server (nest-retirement.md § Layout & flow) — directly
+                 above Factory reset, after the reports section, as on every app:
+                 Factory reset wipes a box the admin keeps, this destroys the box,
+                 so the two sit adjacent with sharply different labels. Opens the
+                 nest_retire page over this live session (the admin shell's
+                 content frame). Named, or the container is pruned from UIA. -->
+            <StackPanel x:Name="RetireSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRetireSection}"
+                        AutomationProperties.Name="admin-nest-retire-section"
+                        Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/nest_page/retire_title}" />
+                <TextBlock TextWrapping="Wrap" Opacity="0.7"
+                           Text="{loc:Localize Key=admin/nest_page/retire_desc}" />
+                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestRetireButton}"
+                        Click="RetireButton_Click"
+                        HorizontalAlignment="Left"
+                        Content="{loc:Localize Key=admin/nest_page/retire_button}" />
             </StackPanel>
 
             <!-- Factory reset (Danger zone) — moved off admin-settings (admin.md

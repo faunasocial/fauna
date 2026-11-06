@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The post image lightbox (`image-lightbox`, feed.md § Element IDs) — one overlay for
+  every page that paints the shared post-card (Controls/PostCardTemplates.xaml): the
+  feed page and the profile's Posts tab. Lifted from FeedPage.xaml unchanged. It is
+  the app's ONLY lightbox shape: a page that wires a picture of its own (ui.yaml lists
+  conversations and media; no app wires either yet) hosts this control, never a
+  ContentDialog.
+
+  A Visibility-toggled full-page overlay, NOT ContentDialog: SettingsAccountPage's
+  sign-out-confirm-button / danger-zone confirm already document the same
+  ContentDialog/FlaUI friction (a dynamically-created ContentDialog button carries no
+  reachable AutomationId there; here the DIALOG ITSELF measured count=1/visible=False
+  while genuinely shown, 2026-09-07 — ContentDialog's own Popup layer doesn't reliably
+  read !IsOffscreen to FlaUI). A Button carries the AutomationId — NOT a
+  Grid/Border/ContentControl, all three of which measured a NULL AutomationPeer here
+  even with Visibility=Visible, correct layout size, AND explicit forced creation via
+  FrameworkElementAutomationPeer.CreatePeerForElement (2026-09-07): a
+  Collapsed-at-load, later-shown element in this exact page position never gets a peer
+  from those three. Button is the one element type already proven working for exactly
+  this need (post-image, post-card) — transparent-styled, matching that same
+  established idiom. So THIS control stays visible and only its Button toggles; the
+  host page spans it over every row so the open overlay covers the whole page. The
+  Click handler dismisses only when the ORIGINAL source is the backdrop Button itself
+  (never the image/ScrollViewer) — UIA Invoke is direct, not pointer-routed, so a
+  driven dismiss click satisfies this too.
+-->
+<UserControl
+    x:Class="FaunaApp.Controls.ImageLightboxOverlay"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ids="using:FaunaApp.UiIds">
+
+    <Button x:Name="ImageLightboxDialog"
+            AutomationProperties.AutomationId="{x:Bind ids:Ids.ImageLightbox}"
+            Visibility="Collapsed"
+            Background="#CC000000" BorderThickness="0" Padding="0"
+            HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+            HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+            Click="ImageLightboxDialog_Click">
+        <ScrollViewer ZoomMode="Enabled" MinZoomFactor="0.5" MaxZoomFactor="5"
+                      HorizontalScrollBarVisibility="Auto"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Image x:Name="LightboxImage" Stretch="Uniform" MaxHeight="800" MaxWidth="1200" />
+        </ScrollViewer>
+    </Button>
+</UserControl>

@@ -48,14 +48,17 @@ internal sealed class ManagerFeedDraftStore : IFeedDraftStore
 /// converging windows onto the same shared gate as tui/linux/web/android (priority
 /// #1/#2/#4).
 ///
-/// <para><b>Windows' own wrinkle, unlike the conversations manager: <c>FfiFeedManager</c>
-/// is rebuilt on every Feed-page load</b> (<c>FeedPage.Page_Loaded</c>), not once per
-/// session. A fresh <see cref="FeedDraftsService"/> instance therefore wraps each
-/// freshly-built manager — <see cref="App.FeedDraftsSync"/> (the sync handle) is what
-/// is held once at login and shared across instances, mirroring android's
-/// <c>FeedManagerHost.manager()</c>, which re-runs <c>sync.load()</c> for every fresh
-/// manager it sees rather than assuming a single load suffices for the whole
-/// session.</para>
+/// <para><b>Lifetime: one instance per (manager, sync handle) pair.</b>
+/// <c>FfiFeedManager</c> lives for the session (<c>FeedManagerHost</c>), as the
+/// conversations manager does, so the restore runs once per pair —
+/// <see cref="EnsureAsync"/> — not on every Feed-page load: a re-restore would
+/// write the nest's older (or another device's) draft over the live compose, since
+/// <c>FeedManager::restore_drafts</c> overwrites a live compose unguarded. The pair
+/// is keyed, not just the manager, because the e2e sync handle
+/// (<c>App.FeedDraftsSync</c>) can arrive after the first Feed load; a Load that
+/// failed is retried on the next load. A page load repaints its (uncached) compose
+/// bar from the manager's snapshot itself. Android's
+/// <c>FeedManagerHost.manager()</c> restores per new manager the same way.</para>
 ///
 /// <para>A service (not a WinUI VM), so it uses <c>ConfigureAwait(false)</c> and never
 /// touches bound UI state — the snapshot read + the save run off the UI thread; the
@@ -68,15 +71,19 @@ internal sealed class FeedDraftsService : IDisposable
     private readonly TimeSpan _debounce;
     private readonly object _gate = new();
     private Timer? _timer;
+    private readonly object? _managerKey;
     private bool _disposed;
+    private bool _restored;
 
     public FeedDraftsService(
         IFfiDraftsSync sync,
         IFeedDraftStore store,
-        TimeSpan? debounce = null)
+        TimeSpan? debounce = null,
+        object? managerKey = null)
     {
         _sync = sync;
         _store = store;
+        _managerKey = managerKey;
         // Shared `fauna_client_drafts::autosave_debounce` via
         // `FaunaFfiMethods.AutosaveDebounceMs()` — the one window every app and every
         // rail reads (reserved-folders.md § Drafts Sync), as the conversations and
@@ -87,13 +94,36 @@ internal sealed class FeedDraftsService : IDisposable
     }
 
     /// <summary>
+    /// The service for (<paramref name="managerKey"/>, <paramref name="sync"/>): the
+    /// <paramref name="existing"/> one when it is live, bound to that same pair and
+    /// has restored, else a new one (the old one is retired) that restores now.
+    /// <c>Restored</c> is true when this call ran a restore that reached the nest.
+    /// </summary>
+    public static async Task<(FeedDraftsService Service, bool Restored)> EnsureAsync(
+        FeedDraftsService? existing, IFfiDraftsSync sync, object managerKey,
+        Func<IFeedDraftStore> makeStore)
+    {
+        var sameBinding = existing is { } e
+            && !e._disposed
+            && ReferenceEquals(e._sync, sync)
+            && ReferenceEquals(e._managerKey, managerKey);
+        if (sameBinding && existing!._restored) return (existing, false);
+
+        var service = sameBinding ? existing! : new FeedDraftsService(sync, makeStore(), managerKey: managerKey);
+        if (!sameBinding) existing?.Dispose();
+        var restored = await service.RestoreOnLaunchAsync().ConfigureAwait(false);
+        return (service, restored);
+    }
+
+    /// <summary>
     /// Fetch + unseal the actor's stored feed draft and restore it into the
     /// manager. <c>None</c> (first run, or nothing typed yet on any device) leaves
     /// the empty composer untouched. Best-effort: a transport/seal failure must
     /// never block the feed page from loading, so it is swallowed (the user keeps
     /// composing; once a later load succeeds the gate opens and saves resume).
+    /// Returns whether the Load reached the nest.
     /// </summary>
-    public async Task RestoreOnLaunchAsync()
+    public async Task<bool> RestoreOnLaunchAsync()
     {
         byte[]? bytes;
         try
@@ -103,11 +133,13 @@ internal sealed class FeedDraftsService : IDisposable
         catch (Exception ex)
         {
             FaunaApp.Core.Logs.E2eTrace.Write($"[feed-drafts] RestoreOnLaunchAsync: Load() threw: {ex.GetType().Name}: {ex.Message}");
-            return;
+            return false;
         }
         FaunaApp.Core.Logs.E2eTrace.Write($"[feed-drafts] RestoreOnLaunchAsync: Load() returned {(bytes is null ? "null" : $"{bytes.Length} bytes")}");
         if (bytes is not null)
             _store.Restore(bytes);
+        _restored = true;
+        return true;
     }
 
     /// <summary>
@@ -156,9 +188,8 @@ internal sealed class FeedDraftsService : IDisposable
     /// Fire a still-pending debounced save immediately, or no-op if nothing is
     /// armed. Unlike <see cref="SaveNowAsync"/> (unconditional — used after a
     /// deliberate state change like posting), this is for a control/page tearing
-    /// down: <c>FfiFeedManager</c> is rebuilt on every Feed-page load
-    /// (this type's own doc comment), so a torn-down instance this navigation
-    /// away never actually typed into has nothing pending and an unconditional
+    /// down: the session's one instance outlives each page, so a
+    /// navigation away that never typed has nothing pending and an unconditional
     /// flush would write a spurious empty snapshot — observably indistinguishable
     /// from a real save to anything polling the rail (nest-side <c>drafts.get</c>
     /// included), which raced and masked a genuine bug the day this guard was

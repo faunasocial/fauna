@@ -6,7 +6,6 @@ using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Conversations;
 using FaunaApp.Controls;
@@ -36,9 +35,12 @@ public sealed partial class ConversationsPage : Page
     /// Used by the TestAgent's <c>conversations_accept_recipient</c> route
     /// to fire AcceptRequested on the currently-visible recipient picker
     /// without going through Win32 keyboard input (which is sandboxed on
-    /// Windows 11 for non-foreground processes).
+    /// Windows 11 for non-foreground processes). The agent is its only reader, so
+    /// it compiles out of Release with it (convention 15).
     /// </summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static ConversationsPage? Current { get; private set; }
+#endif
 
     private ConversationsViewModel? _vm;
     // The shared-Rust conversations session built at login (owns the wired
@@ -128,6 +130,16 @@ public sealed partial class ConversationsPage : Page
     // tui, linux and both apple targets do. Don't re-add a page-level forwarder for the
     // agent: the manager already decides which picker is active.
 
+#if DEBUG || FAUNA_E2E_AGENT
+    // Both members below exist for the TestAgent alone, so they compile out of a
+    // Release build with it (convention 15, e2e-automation-surface-gating.md).
+
+    /// <summary>The active composer's applied styling (<see cref="DmComposeBar.ComposeTextRuns"/>)
+    /// — the new-thread compose when it is up, else the open thread's reply. The TestAgent's
+    /// <c>compose_text_runs</c> read, which answers <c>get_attr(dm-text-field, "text-runs")</c>.</summary>
+    internal List<Dictionary<string, object?>> ComposeTextRuns() =>
+        (_vm?.NewThreadCompose is not null ? NewThreadComposeBar : DetailComposeBar).ComposeTextRuns();
+
     /// <summary>
     /// Stage an attachment against whichever composer is currently active
     /// (an existing thread's reply, or the new-thread compose) — the
@@ -137,12 +149,6 @@ public sealed partial class ConversationsPage : Page
     /// <c>WireComposeBar</c>'s <c>AttachmentPicked</c> wiring — conversations.md
     /// § Attachments). Returns true if a composer was active to stage against.
     /// </summary>
-    /// <summary>The active composer's applied styling (<see cref="DmComposeBar.ComposeTextRuns"/>)
-    /// — the new-thread compose when it is up, else the open thread's reply. The TestAgent's
-    /// <c>compose_text_runs</c> read, which answers <c>get_attr(dm-text-field, "text-runs")</c>.</summary>
-    internal List<Dictionary<string, object?>> ComposeTextRuns() =>
-        (_vm?.NewThreadCompose is not null ? NewThreadComposeBar : DetailComposeBar).ComposeTextRuns();
-
     internal bool StageAttachment(byte[] bytes, string mimeType, string filename)
     {
         if (_vm is null) return false;
@@ -160,6 +166,7 @@ public sealed partial class ConversationsPage : Page
         }
         return false;
     }
+#endif
 
     public ConversationsPage()
     {
@@ -190,8 +197,13 @@ public sealed partial class ConversationsPage : Page
             _deepLinkOpenConversations = clients.DeepLinkOpenConversations;
             _deepLinkThreadId = clients.DeepLinkThreadId;
             _deepLinkMessageId = clients.DeepLinkMessageId;
+            _clients = clients;
         }
     }
+
+    /// <summary>The hand-off this page was navigated with — a room-search post hit hands
+    /// the SAME clients on to the feed's deep-link door (<see cref="OpenRoomSearchHit"/>).</summary>
+    private ServiceClients? _clients;
 
     private void Page_Loaded(object sender, RoutedEventArgs e)
     {
@@ -206,12 +218,16 @@ public sealed partial class ConversationsPage : Page
         }
         else
         {
-            var observer = new ConversationsNotifyObserver();
             // Render off the login-built session's wired manager in production;
             // fall back to ConversationsManagerHost.Instance (mock backends) in
             // E2E / when no session exists (conversations.md § Architectural rules
-            // #2 — the session owns all MLS state in shared Rust).
-            var manager = _convSession?.Manager() ?? ConversationsManagerHost.Instance;
+            // #2 — the session owns all MLS state in shared Rust). A retired session
+            // (a load landing after an actor change, before the frame takes this page
+            // away) loads nothing — and must not build the shared pair, which the
+            // NEXT session's Conversations page would then reuse.
+            if (ConversationsManagerHost.ManagerFor(_convSession, "conversations page load") is not { } manager)
+                return;
+            var observer = new ConversationsNotifyObserver();
             _vm = new ConversationsViewModel(manager, observer, _spamWrite);
             ConversationsManagerHost.PageObserverState = (_vm, observer);
         }
@@ -221,14 +237,21 @@ public sealed partial class ConversationsPage : Page
         WireComposeBar(NewThreadComposeBar, isNewThread: true);
         WireRecipientPicker();
         WireThreadHeader();
+#if DEBUG || FAUNA_E2E_AGENT
         Current = this;
+#endif
 
         // Conversation drafts are nest-backed + cross-device now (draft-persistence v2):
         // App.ConvDrafts restored them INTO the manager at login (file-sync.md § Drafts
         // Sync), so opening a thread renders its restored body via the normal re-seed
         // path — no per-page C# seeding/registration (the feed compose rides the same
-        // shape now, App.FeedDrafts, per-page since its manager rebuilds per visit).
+        // shape now, App.FeedDrafts, restored once per session manager).
         Refresh();
+
+        // The Archive rail is re-read on every visit (archive-import.md § What each
+        // category becomes), so an import finished since login lists with no
+        // re-login; the read notifies the manager's observer, which repaints.
+        _ = App.RefreshArchiveThreadsAsync(_convSession);
 
         // Post-succession member-review roster (succession-aftermath.md §
         // Propagation): loaded once on page load/reconnect — mirrors
@@ -265,6 +288,23 @@ public sealed partial class ConversationsPage : Page
             if (threadId is not null && messageId is not null) _vm.OpenThreadAndMessage(threadId, messageId);
             else if (threadId is not null) _vm.OpenThread(threadId);
             else _vm.StartNewConversation();
+            // The deep-link opens a thread without the list click, so read its
+            // received messages' scan verdicts and delivered-to aliases here too
+            // (tui's mail-search-hit path).
+            if (threadId is not null)
+            {
+                _ = _vm.RefreshMessageScanResultsAsync(threadId);
+                _ = _vm.RefreshDeliveredAliasesAsync(threadId);
+                _ = _vm.RefreshWithheldMessagesAsync(threadId);
+            }
+        }
+        // The page shown again with a thread still selected (no list click follows):
+        // re-read the withheld badges' queue rows, since a takedown or a block lands
+        // while no app is looking (takedown-and-block.md § Legal takedown → App render;
+        // linux reads it on the page's map).
+        else if (_vm.SelectedThreadId is { } shownThread)
+        {
+            _ = _vm.RefreshWithheldMessagesAsync(shownThread);
         }
     }
 
@@ -281,7 +321,9 @@ public sealed partial class ConversationsPage : Page
         _ = App.ConvDrafts?.SaveNowAsync();
         if (_vm is not null) _vm.PropertyChanged -= Vm_PropertyChanged;
         if (_rpc is not null) _rpc.StoreChanged -= OnStoreChanged;
+#if DEBUG || FAUNA_E2E_AGENT
         if (ReferenceEquals(Current, this)) Current = null;
+#endif
     }
 
     /// <summary>The store-change re-read of the review roster (the member chips'
@@ -442,7 +484,9 @@ public sealed partial class ConversationsPage : Page
         var ap = _vm.AddParticipant;
         if (ap is not null)
         {
-            AddParticipantPicker.SetChips(ap.picker.chips.Select(a => new ChipItem(ChipDisplay(a))).ToList());
+            AddParticipantPicker.SetChips(ap.picker.chips.Select(ChipDisplay).ToList());
+            AddParticipantPicker.SetSuggestions(
+                ap.picker.suggestions.Select(ChipDisplay).ToList(), ap.picker.suggestionDisplays);
             AddParticipantPicker.SetBridgeLabels(BridgeLabels());
             AddParticipantPicker.UpdateResolveState(ap.picker.resolveState);
             AddParticipantOverlay.Visibility = Visibility.Visible;
@@ -590,6 +634,11 @@ public sealed partial class ConversationsPage : Page
         DetailThreadHeader.SetRoomNotice(
             notice is { } noticeForLabel ? FaunaConversationsMethods.RoomNoticeLabel(noticeForLabel) : null,
             notice is { } noticeForToken ? FaunaConversationsMethods.RoomNoticeAttrToken(noticeForToken) : null);
+        // The room's search door and strip (room-search.md § The surface): the door is
+        // painted AND LIVE iff the shared capability says so — no app branches on the
+        // class — and the strip is the projected room's own `search` view state.
+        DetailThreadHeader.SetCanSearchRoom(detail.capabilities.canSearchRoom);
+        PaintRoomSearch(detail);
         // The editor's per-control gates follow the LIVE capabilities while it is
         // open (the door itself is never greyed — see ThreadHeader.SetRoom), and
         // so does what stands pending on the room: the home nest serves that list
@@ -745,10 +794,14 @@ public sealed partial class ConversationsPage : Page
             // own canDelete (see ToMessageView), not on a thread capability here.
             bubble.SupportsReactions = detail.capabilities.supportsReactions;
             bubble.ShowReplyAll = showReplyAll;
+            // Reply verbs follow the shared canSend (false on a bridged room no bridge
+            // serves) — disabled, still in view (apple replyAllowed).
+            bubble.ReplyAllowed = detail.capabilities.canSend;
             // A fresh view record per tick (its Reactions list is a new instance), so the DP
             // change fires Bind on every tick — which is what re-projects a document change
             // (a D3 reveal, a resolved link preview) onto a reused bubble.
-            bubble.Message = ToMessageView(m, selected: m.messageId == detail.selectedMessageId);
+            bubble.Message = ToMessageView(
+                m, selected: m.messageId == detail.selectedMessageId, detail.capabilities.encryption);
             // D4 link-preview: fire-once resolve for EACH folded Resolving block in this
             // message's body (mirror FeedPage.SyncPosts). The shared
             // ConversationsManager.resolve_link_preview fetches once (cached) + re-emits; the
@@ -875,6 +928,14 @@ public sealed partial class ConversationsPage : Page
             if (_latestSnapshotById.TryGetValue(msg.Id, out var m))
                 _ = OpenReportSheetAsync(m);
         };
+        // dm-message-withheld-badge → the Moderation page, carrying the matched queue
+        // row's content id; its queue read opens that row's own appeal behind the same
+        // RowIsAppealable gate as the row's appeal-button (takedown-and-block.md § Legal
+        // takedown → App render) — never a second appeal form.
+        bubble.WithheldAppealRequested += msg =>
+        {
+            if (msg.Withheld is { } withheld) MainPage.Current?.OpenModerationAppeal(withheld.ContentId);
+        };
         return bubble;
     }
 
@@ -918,7 +979,10 @@ public sealed partial class ConversationsPage : Page
                 == RoomClass.Community);
         if (picker is not null)
         {
-            NewThreadPicker.SetChips(picker.chips.Select(a => new ChipItem(ChipDisplay(a))).ToList());
+            NewThreadPicker.SetChips(picker.chips.Select(ChipDisplay).ToList());
+            NewThreadPicker.SetInputText(picker.rawInput);
+            NewThreadPicker.SetSuggestions(
+                picker.suggestions.Select(ChipDisplay).ToList(), picker.suggestionDisplays);
             NewThreadPicker.SetBridgeLabels(BridgeLabels());
             NewThreadPicker.UpdateResolveState(picker.resolveState);
             // `recipient-picker-class` — the class of the room this composer is
@@ -997,6 +1061,9 @@ public sealed partial class ConversationsPage : Page
             FlushActiveComposeDraft();
             _vm.OpenThread(row.ThreadIdValue);
             _ = _vm.RefreshListSendAsync(row.ThreadIdValue);
+            _ = _vm.RefreshMessageScanResultsAsync(row.ThreadIdValue);
+            _ = _vm.RefreshDeliveredAliasesAsync(row.ThreadIdValue);
+            _ = _vm.RefreshWithheldMessagesAsync(row.ThreadIdValue);
             // No MarkRead here: the shared manager now reads a thread when it is
             // selected (ConversationsManager::notify, conversations.md § State &
             // data shape → When a thread is read) — an app calling it too would be
@@ -1169,6 +1236,22 @@ public sealed partial class ConversationsPage : Page
         // snapshot tick repaints the toggle, `recipient-picker-class` and the send's
         // gate off it.
         NewThreadPicker.HomeNestToggled += (_, include) => _vm?.SetNewThreadHomeNest(include);
+        // A suggestion click is the Enter path (conversations.md § Recipient
+        // suggestions): the manager writes the spelling and commits the chip.
+        NewThreadPicker.SuggestionPicked += async (_, i) =>
+        {
+            if (_vm is null) return;
+            await _vm.AcceptSuggestionAsync((uint)i);
+            await _vm.RefreshListSendAsync(null);
+        };
+        AddParticipantPicker.SuggestionPicked += async (_, i) =>
+        {
+            if (_vm is not null) await _vm.AcceptSuggestionAsync((uint)i);
+        };
+        // A chip's × drops that chip from the active picker (the shared
+        // remove_recipient_chip); the snapshot tick repaints both pickers off it.
+        NewThreadPicker.ChipRemoved += (_, i) => _vm?.RemoveRecipientChip((uint)i);
+        AddParticipantPicker.ChipRemoved += (_, i) => _vm?.RemoveRecipientChip((uint)i);
         NewThreadPicker.AcceptRequested += async (_, text) =>
         {
             if (_vm is null || string.IsNullOrWhiteSpace(text)) return;
@@ -1221,6 +1304,169 @@ public sealed partial class ConversationsPage : Page
         DetailThreadHeader.MemberKeepRequested += async (_, personHex) => await MemberReviewKeepAsync(personHex);
         DetailThreadHeader.MemberRemoveRequested += async (_, addr) => await RemoveMemberAsync(addr);
         DetailThreadHeader.RoomSettingsRequested += (_, _) => OpenRoomSettings();
+        DetailThreadHeader.RoomSearchToggled += (_, _) => ToggleRoomSearch();
+    }
+
+    // ── The community room's search strip (room-search.md § The surface) ─────
+
+    /// <summary>What the result region last painted, so a tick that changes nothing does
+    /// not rebuild the rows (and take focus and scroll with them).</summary>
+    private string? _roomSearchPainted;
+
+    /// <summary><c>room-search-button</c>: open the strip, or close it when it is open
+    /// (<c>manager.close_room_search</c> also drops the query and the rows).</summary>
+    private void ToggleRoomSearch()
+    {
+        if (_vm?.SelectedThreadId is not { } id) return;
+        if (_vm.SelectedDetail?.room?.search is not null)
+            _vm.CloseRoomSearch(id);
+        else
+            _vm.OpenRoomSearch(id);
+    }
+
+    private async void RoomSearchSubmit_Click(object sender, RoutedEventArgs e) =>
+        await SubmitRoomSearchAsync();
+
+    private async void RoomSearchField_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.Enter:
+                e.Handled = true;
+                await SubmitRoomSearchAsync();
+                break;
+            case Windows.System.VirtualKey.Escape:
+                e.Handled = true;
+                if (_vm?.SelectedThreadId is { } id) _vm.CloseRoomSearch(id);
+                break;
+        }
+    }
+
+    /// <summary><c>manager.room_search(thread, query)</c> — submit-driven, no debounce; a
+    /// blank query is the manager's to drop. A refusal lands on the snapshot's page error
+    /// (<c>error-message</c>), so nothing is caught-and-hidden here.</summary>
+    private async System.Threading.Tasks.Task SubmitRoomSearchAsync()
+    {
+        if (_vm?.SelectedThreadId is not { } id) return;
+        try
+        {
+            await _vm.RoomSearchAsync(id, RoomSearchField.Text);
+        }
+        catch (Exception ex)
+        {
+            ReportPageError(Strings.Error(ex));
+        }
+    }
+
+    /// <summary>Paint the strip and its result region off the projected room's
+    /// <c>search</c>. Absent → the message stream is back and the field is empty. Present →
+    /// the strip shows; once a query was submitted the results take the stream's place: one
+    /// row per hit in the order served, or the empty state. In flight and failed paint no
+    /// result region at all (convention 14 — a driver waits on a row, the empty state or
+    /// <c>error-message</c>, never on a "searching" element).</summary>
+    private void PaintRoomSearch(ThreadDetail detail)
+    {
+        var search = detail.room?.search;
+        if (search is null)
+        {
+            RoomSearchStrip.Visibility = Visibility.Collapsed;
+            RoomSearchScroll.Visibility = Visibility.Collapsed;
+            MessagesScroll.Visibility = Visibility.Visible;
+            if (_roomSearchPainted is not null)
+            {
+                RoomSearchResults.Children.Clear();
+                RoomSearchField.Text = string.Empty;
+                _roomSearchPainted = null;
+            }
+            return;
+        }
+
+        RoomSearchStrip.Visibility = Visibility.Visible;
+        var submitted = search.status != RoomSearchStatus.Idle;
+        MessagesScroll.Visibility = submitted ? Visibility.Collapsed : Visibility.Visible;
+        RoomSearchScroll.Visibility = submitted ? Visibility.Visible : Visibility.Collapsed;
+
+        var signature = search.status == RoomSearchStatus.Done
+            ? string.Join(
+                "\u0001",
+                search.results.Select(r => $"{r.kind}|{r.senderDisplay}|{r.sentAtMs}|{r.text}|{r.pending}"))
+              + $"\u0002{search.results.Length}"
+            : $"{search.status}";
+        if (signature == _roomSearchPainted) return;
+        _roomSearchPainted = signature;
+        RoomSearchResults.Children.Clear();
+        if (search.status != RoomSearchStatus.Done) return;
+
+        if (search.results.Length == 0)
+        {
+            var none = new TextBlock
+            {
+                Text = Strings.Get("conversations/unified/room_search_no_results"),
+                Opacity = 0.7,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(none, Ids.RoomSearchNoResults);
+            RoomSearchResults.Children.Add(none);
+            return;
+        }
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var row in search.results)
+        {
+            // Every word on a row is the shared snapshot's: sender, time, first line —
+            // or, on a message this device has not received yet, the time-less shared
+            // "not on this device yet" copy (`text`).
+            var words = new List<string>(3);
+            if (!string.IsNullOrEmpty(row.senderDisplay)) words.Add(row.senderDisplay!);
+            if (row.sentAtMs is { } sentAt)
+                words.Add(ValueFormat.ConversationTimestamp(nowMs, sentAt, DeviceOffset.UtcOffsetSeconds()));
+            if (!string.IsNullOrEmpty(row.text)) words.Add(row.text);
+            var label = string.Join(" · ", words);
+
+            var button = new Button
+            {
+                Content = new TextBlock { Text = label, TextWrapping = TextWrapping.Wrap },
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Tag = row.navigation,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(button, Ids.RoomSearchResultItem);
+            // A Name keeps the row in the UIA content view (a DataTemplate-less Button
+            // with no Name is pruned); the `kind` attribute rides HelpText.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, label);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+                button, FaunaConversationsMethods.RoomSearchResultKindAttrToken(row.kind));
+            button.Click += RoomSearchResult_Click;
+            RoomSearchResults.Children.Add(button);
+        }
+    }
+
+    private void RoomSearchResult_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: RoomSearchNav nav }) OpenRoomSearchHit(nav);
+    }
+
+    /// <summary>Open a hit through its typed navigation (<c>room-search.md</c> § The
+    /// surface → <i>Opening a hit</i>): a Message target selects the message in the stream
+    /// (the strip closes); a Post target goes through the feed's deep-link door —
+    /// <c>resolve_post_from(post_id, home)</c> when the room is homed elsewhere, else
+    /// <c>resolve_post</c> — then post detail. The home is the hit's own, never guessed.</summary>
+    private void OpenRoomSearchHit(RoomSearchNav nav)
+    {
+        switch (nav)
+        {
+            case RoomSearchNav.Message message:
+                _vm?.OpenThreadAndMessage(message.threadId, message.messageId);
+                if (_vm?.SelectedThreadId is { } id) _vm.CloseRoomSearch(id);
+                break;
+            case RoomSearchNav.Post post when _clients is not null:
+                Frame.Navigate(typeof(FeedPage), _clients with
+                {
+                    DeepLinkPostId = post.postId,
+                    DeepLinkPostHomeUrl = post.homeNestUrl,
+                });
+                break;
+        }
     }
 
     // ── The room policy editor (ui.yaml `conversations.sub_pages.room_settings`)
@@ -1986,7 +2232,8 @@ public sealed partial class ConversationsPage : Page
             ? Convert.ToHexString(fauna.@actorId).ToLowerInvariant()
             : null;
 
-    private static FaunaApp.Controls.DmMessageView ToMessageView(MessageSnapshot m, bool selected)
+    private static FaunaApp.Controls.DmMessageView ToMessageView(
+        MessageSnapshot m, bool selected, ThreadEncryption encryption)
     {
         var from = string.IsNullOrEmpty(m.senderDisplay) ? FaunaConversationsMethods.TypedAddressDisplay(m.sender) : m.senderDisplay;
         // Guardian Notify (family-safety.md § Guardian Notify): count any
@@ -2053,6 +2300,17 @@ public sealed partial class ConversationsPage : Page
             // when the region drove it — the placeholder painted ahead of the family arm.
             ContentVerdict: region.Verdict,
             Region: region.Placeholder,
+            // ...and whether that placeholder owes the sealed-item sentence: the shared
+            // rule over the thread's encryption and whether Notify counted this message.
+            RegionSealedNote: region.SealedNoteOwed(
+                encryption,
+                FaunaApp.Core.Services.GuardianNotifyCache.WouldCount(guardianEnforcedCategories)),
+            // ...and the session nest's rules in the same call (nest-rules.md § The
+            // nest source in the engine): its placeholder when a nest rule drove the
+            // verb, and the guardian rule's reason the family arm paints beside its
+            // fixed frame.
+            Nest: region.NestPlaceholder,
+            GuardianReason: region.GuardianReason,
             // The viewer's own report is what hid it: the blocked-notice then reads
             // "You reported this" (`source="reported"`), not the family-policy words.
             Reported: region.Reported,
@@ -2066,13 +2324,36 @@ public sealed partial class ConversationsPage : Page
             // The `SearchNav.Mail` deep-link marker (conversations.md § The
             // selected message) — read-time-resolved by the caller off
             // `ThreadDetail.selectedMessageId`, never re-derived here.
-            Selected: selected);
-    }
-
-    public async void ShowImageLightbox(BitmapImage image)
-    {
-        ImageLightboxDialog.XamlRoot = this.XamlRoot;
-        await Controls.Dialogs.ShowAsync(ImageLightboxDialog, prepare: () => LightboxImage.Source = image);
+            Selected: selected,
+            // The received mail message's own scan verdict (mail-content-scanning.md §
+            // User sees their own message's row): the shared lines, resolved through
+            // the app's string pipeline — never re-derived here.
+            ScanResultLines: m.scanResultLines.Select(FaunaApp.Core.Services.Strings.Resolve).ToList(),
+            // The alias a received mail message arrived on (mail-aliases.md § Label):
+            // already worded by the shared snapshot, never re-derived here.
+            DeliveredTo: m.deliveredTo,
+            // A Sent message the bridge never took (conversations.md § A bridged room no
+            // bridge serves): the shared flag, painted as dm-message-undelivered.
+            Undelivered: m.undelivered,
+            // The admin block (takedown-and-block.md § Admin block of a reported item,
+            // decision 4): worded once here through the shared notice face; in place of
+            // the bubble only when the record was withheld (the document is empty —
+            // Rust MessageSnapshot::admin_block_in_place), else beside the author's body.
+            AdminBlockNotice: m.adminBlockReason is { Length: > 0 } blockReason
+                ? FaunaApp.Core.ViewModels.FeedPostItem.AdminBlockNoticeText(blockReason)
+                : null,
+            AdminBlockInPlace: m.adminBlockReason is { Length: > 0 } && m.document.blocks.Length == 0,
+            // The viewer's own message the nest withholds (takedown-and-block.md § Legal
+            // takedown → App render, the fourth surface): the shared lines resolved once
+            // here, painted as dm-message-withheld-badge.
+            Withheld: FaunaApp.Core.Services.WithheldBadgeView.From(m.withheld),
+            // The user's own sent mail the fresh-IP warm-up holds (mail-deliverability.md
+            // § Enforcement at submission time): worded once here by the shared
+            // warmup_deferred_text in the viewer's clock — null once the release passed.
+            WarmupDeferred: m.warmupHold is { } hold
+                ? uniffi.fauna_conversations.FaunaConversationsMethods.WarmupDeferredText(
+                    hold, DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                : null);
     }
 }
 

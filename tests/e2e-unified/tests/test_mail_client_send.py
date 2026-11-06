@@ -46,6 +46,7 @@ import time
 
 import pytest
 
+from helpers.app_surface import require_surface
 from i18n.strings import S
 
 # Client-driven SMTP send is wired on linux + web + windows (apple/android
@@ -241,7 +242,7 @@ def test_client_send_over_inline_ceiling_refused_with_localized_display_text(
     logged_in_app, mail_bridge_mta
 ):
     """The message_too_large inline-ceiling pre-check (`SmtpBackend::send`,
-    smtp-server.md § Message size limits) refuses locally with exactly a
+    mail-message-size.md § Message size limits) refuses locally with exactly a
     `BackendError::Other(..)`, which flows through `ConversationsManager::
     send_new_thread` -> `SendState::failed(e.to_string())` -> the materialized
     thread's `send_state` -> the app's `error-message` — a real, UI-reachable
@@ -265,25 +266,14 @@ def test_client_send_over_inline_ceiling_refused_with_localized_display_text(
         # function markers, so this ran on windows despite the comment above
         # ("so this doesn't widen to every app") never actually holding.
         # Reproduced twice in isolation (2026-08-13): filling
-        # dm-text-field via ValuePattern.SetValue with a 2,000,000-character
-        # body kills the FlaUI bridge's own HTTP connection (WinError 10054)
-        # before Send is even clicked — a bridge/UIA-layer limit with a huge
-        # SetValue call, not the product behavior this test actually pins
-        # (SmtpBackend's local ceiling refusal). Root cause undiagnosed.
-        from helpers.app_surface import skip_unbuilt
-
-        skip_unbuilt(
-            app.driver,
-            surface="a multi-megabyte compose-body fill via the automation bridge",
-            detail=(
-                "ValuePattern.SetValue with a 2MB string kills the FlaUI "
-                "bridge's HTTP connection (WinError 10054) before Send is "
-                "reached; needs a chunked-set fallback or a diagnosed UIA "
-                "size limit, not a product fix — windows was never actually "
-                "meant to run this regression pin (see comment above)"
-            ),
-            tracked="",
-        )
+        # dm-text-field with a 2,000,000-character body never reaches Send.
+        # Measured 2026-10-28: ValuePattern.SetValue times out in UIA because
+        # the app's UI thread stalls inside the compose RichEditBox's
+        # Document.SetText, which lays the whole document out at once (the
+        # bridge used to swallow that and retype it physically, which is what
+        # reset its connection, WinError 10054). The stall is app-side; the
+        # registry entry's detail holds the measurement and the open ruling.
+        require_surface(app.driver, "compose-body-bulk-fill")
 
     recipient = f"recipient@{EXTERNAL_DOMAIN}"
     subject = "Oversized compose"

@@ -14,17 +14,7 @@ use async_channel::Sender;
 
 use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver};
 
-pub struct GtkObserver {
-    pub tx: Sender<()>,
-}
-
-impl OnboardingObserver for GtkObserver {
-    fn on_changed(&self) {
-        // try_send so the mutator path never blocks; a full channel is a wake
-        // already owed (`async_helper::snapshot_wake_channel`).
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(pub GtkObserver, OnboardingObserver);
 
 /// Build a machine. The wizard is in-memory only; identity persistence
 /// happens at the identity-confirmation view layer via

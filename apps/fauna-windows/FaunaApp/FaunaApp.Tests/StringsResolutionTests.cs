@@ -33,6 +33,24 @@ public class StringsResolutionTests
     }
 
     [Fact]
+    public void Resolve_FillsArgsInOnePass_AnArgHoldingAPlaceholderIsNotExpanded()
+    {
+        // notifications.md § Localized body: every arg is someone else's plain text. `a` is
+        // inserted first so a sequential per-arg Replace would expand `{b}` inside it.
+        Strings.Initialize(new FakeLocalizer(new() { ["t/pair"] = "{a} / {b}" }));
+        var args = new Dictionary<string, string>();
+        args["a"] = "{b}";
+        args["b"] = "second";
+        var msg = new uniffi.fauna_core.LocalizedText("t.pair", args);
+
+        for (var i = 0; i < 64; i++)
+        {
+            Assert.Equal("{b} / second", Strings.Resolve(msg));
+            Assert.Equal("{b} / second", Strings.ResolveNested(msg));
+        }
+    }
+
+    [Fact]
     public void Error_ShowsASharedRefusalAsItsOwnSentence_NotBehindTheHttpErrorWrapper()
     {
         // A shared-Rust refusal's `msg` IS the user-facing sentence. The exception's own

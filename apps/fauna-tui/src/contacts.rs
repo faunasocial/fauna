@@ -46,7 +46,6 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_contacts::ContactsClient;
 use fauna_client_family::family::FamilyContactRequestInfo;
-use fauna_core::identity::ActorKeypair;
 use fauna_i18n::strings::{common, contacts as t};
 use fauna_protocol::contacts::{ContactItem, KnockItem};
 use serde_json::{Value, json};
@@ -55,6 +54,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::address_book::{AddressbookRow, Segment, VCardRow};
 use crate::app::{App, UiMessage};
 use crate::element::{Element, Field, Gesture};
+use fauna_archive_import_machine::link::{ArchiveLinkState, ArchiveLinkView, ArchiveLinks};
 
 /// A gesture on the contacts page. Each maps onto a transport call or a local
 /// state change — never a navigation decision of its own.
@@ -63,9 +63,9 @@ pub enum Action {
     /// `contact-actor-id-lookup` — classify the typed input
     /// (`classify_recipient`): a 64-hex actor id resolves **offline** (the
     /// echo the knock-send e2e pins); a handle resolves same-nest over
-    /// `fauna.actor.by_handle` (async). Malformed input still probes the nest
-    /// as a bare handle, mirroring linux's Invalid-branch local resolve, so a
-    /// genuinely unknown name reports not-found rather than silence.
+    /// `fauna.actor.by_handle` (async) — a bare localpart on the home nest, the
+    /// shared classification's domain-less `Handle`. Input that is neither is
+    /// refused with the find error, as on every app.
     Lookup,
     /// `contacts-add-button` — send the signed knock to the resolved actor
     /// (`build_knock_payload` → `fauna.inbox.send`, same-nest). Async.
@@ -120,6 +120,16 @@ pub enum Action {
     /// not be loaded — or even be in the book the user last opened — so this one
     /// takes a network read where `OpenCard` is purely local.
     OpenCardByUid(String),
+    /// `contact-archive-link-yes[i]` / `contact-archive-link-no[i]` — the
+    /// user's answer to the row's same-person question (`archive-import.md`
+    /// § Linking and merging, ruling 8): `ArchiveLinks::answer_link`.
+    ArchiveLinkAnswer {
+        contact: String,
+        platform: String,
+        yes: bool,
+    },
+    /// `contact-archive-unlink[i]` — `ArchiveLinks::unlink` (outcome 19).
+    ArchiveUnlink { contact: String, platform: String },
 }
 
 /// A resolved Find User hit — what `contact-actor-id-result` renders and
@@ -166,6 +176,13 @@ pub struct ContactsState {
     pub contacts: Vec<ContactItem>,
     /// `fauna.knocks.list` rows.
     pub knocks: Vec<KnockItem>,
+    /// The newest roster read's generation, claimed at dispatch by every op
+    /// that ends in [`Outcome::Loaded`] and checked at commit, so a superseded
+    /// read landing late is dropped instead of overwriting a newer roster.
+    /// The login hydration is spawned while the nav-to-tab read is awaited,
+    /// so both landing orders are reachable. A `Cell` for the same reason as
+    /// `EventsState::events_gen`: [`nav_enter_op`] takes `&ContactsState`.
+    pub roster_gen: std::cell::Cell<u64>,
     /// The `contacts-search-field` local roster filter (a LOCAL substring
     /// filter via the shared predicate — never a nest query).
     pub filter: String,
@@ -206,6 +223,13 @@ pub struct ContactsState {
     pub cards: Vec<VCardRow>,
     /// The open card's hex id — the `card_detail` sub-page.
     pub open_card: Option<String>,
+    // ── Phase two of archive import (`archive-import.md` § Linking and merging) ──
+    /// The account's archive links (the conversations session's sink), lent at
+    /// login; `None` when this login wired none.
+    pub archive_links: Option<Arc<ArchiveLinks>>,
+    /// One view per (contact, platform) pair — the state each row's link
+    /// prompt renders from, derived by the shared `link` module.
+    pub archive_views: Vec<ArchiveLinkView>,
 }
 
 /// Build the page state at the post-auth hook and start the initial roster +
@@ -215,6 +239,7 @@ pub fn init(
     node_url: &str,
     secret: [u8; 32],
     mail: Arc<dyn fauna_client_config::MailStore>,
+    archive_links: Option<Arc<ArchiveLinks>>,
     tx: &UnboundedSender<UiMessage>,
     session_generation: u64,
 ) -> ContactsState {
@@ -223,6 +248,7 @@ pub fn init(
         node_url: node_url.to_string(),
         secret: Some(secret),
         mail: Some(mail),
+        archive_links,
         ..ContactsState::default()
     };
     spawn_refresh(&state, tx, session_generation);
@@ -240,7 +266,11 @@ pub fn nav_enter_op(state: &ContactsState) -> Option<Op> {
     // ONE op per nav edge (the actuation contract): load whichever half the
     // sticky segment is showing, not both.
     match state.segment {
-        Segment::People => Some(Op::Refresh { nest }),
+        Segment::People => Some(Op::Refresh {
+            nest,
+            query_gen: claim_roster_gen(state),
+            links: state.archive_links.clone(),
+        }),
         Segment::AddressBook => Some(Op::LoadAddressbooks {
             nest,
             secret: state.secret?,
@@ -349,6 +379,11 @@ impl Action {
             | Action::SelectAddressbook(_)
             | Action::OpenCard(_)
             | Action::OpenCardByUid(_) => None,
+            // The answer's durable half is a write into the archive folder
+            // (`state/links.cbor`) and its signal rides the pair's MLS channel;
+            // neither is one nest kind, and a failure lands on `error-message`
+            // with the question still standing, so nothing is lost offline.
+            Action::ArchiveLinkAnswer { .. } | Action::ArchiveUnlink { .. } => None,
         }
     }
 }
@@ -383,20 +418,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 // A typed `user@domain` resolves same-nest first with the domain
                 // threaded (the nest disambiguates multi-domain handles); if the
                 // reply proves the domain foreign, the op falls through to the
-                // peer itself (module docs).
+                // peer itself (module docs). A bare localpart classifies with no
+                // domain and takes the home probe alone.
                 fauna_core::resolve::RecipientInput::Handle { user, domain } => Some(Op::Lookup {
                     nest,
                     handle: user,
-                    domain: Some(domain),
+                    domain,
                 }),
-                // Anything else still probes the nest as a bare handle —
-                // linux's Invalid-branch local resolve. An unknown name comes
-                // back not-found; a plain `alice` resolves.
-                fauna_core::resolve::RecipientInput::Invalid => Some(Op::Lookup {
-                    nest,
-                    handle: st.find_input.trim().to_string(),
-                    domain: None,
-                }),
+                // Not an actor id or a handle (whitespace, another rail's
+                // address, an `@…` form): the same refusal every app gives.
+                fauna_core::resolve::RecipientInput::Invalid => {
+                    st.find_error = Some(t::HANDLE_OR_ACTOR_ID.to_string());
+                    None
+                }
             }
         }
         Action::AddContact => {
@@ -447,6 +481,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             st.open_card = None;
             Some(Op::Refresh {
                 nest: st.nest.clone()?,
+                query_gen: claim_roster_gen(st),
+                links: st.archive_links.clone(),
             })
         }
         Action::ShowAddressBook => {
@@ -476,6 +512,22 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             st.open_card = Some(id);
             None
         }
+        Action::ArchiveLinkAnswer {
+            contact,
+            platform,
+            yes,
+        } => Some(Op::ArchiveLink {
+            links: st.archive_links.clone()?,
+            contact,
+            platform,
+            gesture: LinkGesture::Answer(yes),
+        }),
+        Action::ArchiveUnlink { contact, platform } => Some(Op::ArchiveLink {
+            links: st.archive_links.clone()?,
+            contact,
+            platform,
+            gesture: LinkGesture::Unlink,
+        }),
         Action::OpenCardByUid(uid_hash) => {
             // Show the Address Book half straight away — the read below is a
             // round trip, and landing on the People segment first would flash
@@ -501,7 +553,16 @@ fn knock_op(state: &ContactsState, kind: KnockKind, peer_id: String) -> Option<O
         nest: state.nest.clone()?,
         kind,
         peer_id,
+        query_gen: claim_roster_gen(state),
     })
+}
+
+/// Claim the next [`ContactsState::roster_gen`] for a roster read about to be
+/// dispatched.
+fn claim_roster_gen(state: &ContactsState) -> u64 {
+    let query_gen = state.roster_gen.get() + 1;
+    state.roster_gen.set(query_gen);
+    query_gen
 }
 
 /// Which `ContactsClient` mutation a [`Op::KnockAction`] runs.
@@ -517,7 +578,14 @@ pub enum KnockKind {
 /// it can be awaited on the agent's path or spawned on the keyboard's.
 pub enum Op {
     /// Fetch roster + knocks (login, nav-to-tab, and after every mutation).
-    Refresh { nest: Arc<NestClient> },
+    /// `query_gen` is the [`ContactsState::roster_gen`] claimed at dispatch.
+    Refresh {
+        nest: Arc<NestClient>,
+        query_gen: u64,
+        /// The archive links, when wired: the rows' link views load in the
+        /// same read (one op per nav edge).
+        links: Option<Arc<ArchiveLinks>>,
+    },
     /// `fauna.actor.by_handle` (the Find User handle branch) — same-nest first,
     /// then the peer directly when `domain` proves foreign.
     Lookup {
@@ -544,6 +612,8 @@ pub enum Op {
         nest: Arc<NestClient>,
         kind: KnockKind,
         peer_id: String,
+        /// The [`ContactsState::roster_gen`] its refetch reads at.
+        query_gen: u64,
     },
     /// `fauna.bridges.list_addressbooks` + unseal — the Address Book picker.
     LoadAddressbooks {
@@ -575,17 +645,49 @@ pub enum Op {
         mail: Arc<dyn fauna_client_config::MailStore>,
         uid_hash: String,
     },
+    /// The rows' link views alone ([`archive_views_op`]) — after the links
+    /// moved while the page shows.
+    ArchiveViews { links: Arc<ArchiveLinks> },
+    /// A row's link gesture, then the views re-read.
+    ArchiveLink {
+        links: Arc<ArchiveLinks>,
+        contact: String,
+        platform: String,
+        gesture: LinkGesture,
+    },
+}
+
+/// Which link gesture an [`Op::ArchiveLink`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkGesture {
+    Answer(bool),
+    Unlink,
+}
+
+/// The rows' link-view re-read, when links are wired.
+pub fn archive_views_op(state: &ContactsState) -> Option<Op> {
+    Some(Op::ArchiveViews {
+        links: state.archive_links.clone()?,
+    })
 }
 
 /// What an op resolved to — applied to [`App`] by [`apply_outcome`]
 /// (synchronously on the agent's path; via the channel on the keyboard's).
 #[derive(Debug)]
 pub enum Outcome {
-    /// Fresh roster + knocks (Refresh and every KnockAction end here).
+    /// Fresh roster + knocks (Refresh and every KnockAction end here), read
+    /// at the [`ContactsState::roster_gen`] the op claimed.
     Loaded {
         contacts: Vec<ContactItem>,
         knocks: Vec<KnockItem>,
+        query_gen: u64,
+        /// The rows' link views read alongside; `None` keeps the ones painted
+        /// (no links wired, or the read failed — a roster must not blank its
+        /// prompts on a folder read's hiccup).
+        archive_views: Option<Vec<ArchiveLinkView>>,
     },
+    /// The rows' link views re-read ([`Op::ArchiveViews`], [`Op::ArchiveLink`]).
+    ArchiveViews(Vec<ArchiveLinkView>),
     /// A transport failure loading or mutating — lands on `error-message`.
     Failed(String),
     /// The Find User handle branch resolved. `nest_url` is `Some` only when the
@@ -642,54 +744,8 @@ pub enum Outcome {
     },
 }
 
-/// How a knock send ended — the one classification the contacts page and the
-/// profile page (`profile-request-contact-button`) both render from, so the
-/// guardian gate is told apart from every other failure in exactly one place.
-#[derive(Debug)]
-pub enum KnockSend {
-    Sent,
-    /// The nest's typed guardian-approval refusal
-    /// (`RpcError::is_guardian_approval_required`) — the one failure that
-    /// reveals `contact-request-guardian-button`.
-    RefusedByGuardian,
-    Failed(String),
-}
-
-/// `build_knock_payload` → `fauna.inbox.send`. `recipient_nest_url` `None`
-/// delivers on this nest; `Some(peer)` makes the home nest originate
-/// `fauna.federation.inbox.deliver` to that peer (`inbox_handlers.rs`;
-/// `federation.md` § the inbox send).
-pub(crate) async fn send_knock(
-    nest: Arc<NestClient>,
-    node_url: &str,
-    secret: [u8; 32],
-    recipient: String,
-    recipient_nest_url: Option<String>,
-) -> KnockSend {
-    let kp = ActorKeypair::from_secret(secret);
-    let recipient_bytes = match fauna_core::hex32::decode(&recipient) {
-        Ok(b) => b,
-        Err(e) => return KnockSend::Failed(format!("recipient id: {e}")),
-    };
-    let payload =
-        match fauna_client_core::email::build_knock_payload(&kp, &recipient_bytes, node_url) {
-            Ok(p) => p,
-            Err(e) => return KnockSend::Failed(format!("knock payload: {e}")),
-        };
-    match fauna_client_inbox::InboxClient::new(nest)
-        .send(recipient, recipient_nest_url, payload)
-        .await
-    {
-        Ok(_) => KnockSend::Sent,
-        // The guardian gate is separated from every other failure here, on the
-        // shared predicate rather than a per-app string match — the namespace
-        // naming *which* handler refused is the nest's business, not a page's.
-        Err(fauna_client::NestClientError::Rpc(err)) if err.is_guardian_approval_required() => {
-            KnockSend::RefusedByGuardian
-        }
-        Err(e) => KnockSend::Failed(format!("inbox send: {e}")),
-    }
-}
+// The knock send and its classification are shared Rust (`fauna_client_contacts::knock`).
+pub(crate) use fauna_client_contacts::knock::{KnockSend, send_knock};
 
 /// `fauna.family.contact.request` — the supervised ward's ask, offered only
 /// after a knock came back [`KnockSend::RefusedByGuardian`]. On success it
@@ -717,7 +773,38 @@ pub(crate) async fn ask_guardian(
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::Refresh { nest } => refresh(nest).await,
+            Op::Refresh {
+                nest,
+                query_gen,
+                links,
+            } => refresh(nest, query_gen, links).await,
+            Op::ArchiveViews { links } => match links.views().await {
+                Ok(views) => Outcome::ArchiveViews(views),
+                Err(e) => Outcome::Failed(e.to_string()),
+            },
+            Op::ArchiveLink {
+                links,
+                contact,
+                platform,
+                gesture,
+            } => {
+                let Some(platform) =
+                    fauna_archive_import_machine::link::Platform::parse_token(&platform)
+                else {
+                    return Outcome::Failed(format!("unknown archive platform {platform}"));
+                };
+                let done = match gesture {
+                    LinkGesture::Answer(yes) => links.answer_link(&contact, &platform, yes).await,
+                    LinkGesture::Unlink => links.unlink(&contact, &platform).await,
+                };
+                if let Err(e) = done {
+                    return Outcome::Failed(e.to_string());
+                }
+                match links.views().await {
+                    Ok(views) => Outcome::ArchiveViews(views),
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
             Op::Lookup {
                 nest,
                 handle,
@@ -764,6 +851,7 @@ impl Op {
                 nest,
                 kind,
                 peer_id,
+                query_gen,
             } => {
                 let client = ContactsClient::new(Arc::clone(&nest));
                 let result = match kind {
@@ -775,7 +863,7 @@ impl Op {
                 match result {
                     // The mutation reply is an empty ack — refetch so the rows
                     // the driver counts are the nest's own view.
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, query_gen, None).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -836,7 +924,11 @@ impl Op {
     }
 }
 
-async fn refresh(nest: Arc<NestClient>) -> Outcome {
+async fn refresh(
+    nest: Arc<NestClient>,
+    query_gen: u64,
+    links: Option<Arc<ArchiveLinks>>,
+) -> Outcome {
     let client = ContactsClient::new(nest);
     let contacts = match client.contacts_list().await {
         Ok(r) => r.contacts,
@@ -846,7 +938,22 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
         Ok(r) => r.knocks,
         Err(e) => return Outcome::Failed(e.to_string()),
     };
-    Outcome::Loaded { contacts, knocks }
+    let archive_views = match links {
+        Some(links) => match links.views().await {
+            Ok(views) => Some(views),
+            Err(e) => {
+                tracing::warn!("contacts: archive link views: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+    Outcome::Loaded {
+        contacts,
+        knocks,
+        query_gen,
+        archive_views,
+    }
 }
 
 /// Fold an op's result back into the page. One function for both dispatch
@@ -854,13 +961,30 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     let st = &mut app.contacts;
     match outcome {
-        Outcome::Loaded { contacts, knocks } => {
+        Outcome::Loaded {
+            contacts,
+            knocks,
+            query_gen,
+            archive_views,
+        } => {
+            // A newer roster read has been dispatched since this one: its
+            // reply is the one to paint (`ContactsState::roster_gen`).
+            if query_gen != st.roster_gen.get() {
+                return;
+            }
             st.contacts = contacts;
             st.knocks = knocks;
+            if let Some(views) = archive_views {
+                st.archive_views = views;
+            }
             app.errors.remove(&crate::pages::Page::Contacts);
         }
         Outcome::Failed(e) => {
             app.errors.insert(crate::pages::Page::Contacts, e);
+        }
+        Outcome::ArchiveViews(views) => {
+            st.archive_views = views;
+            app.errors.remove(&crate::pages::Page::Contacts);
         }
         Outcome::Resolved { actor_id, nest_url } => {
             st.find_result = Some(FindResult { actor_id, nest_url });
@@ -1207,7 +1331,16 @@ pub fn elements(app: &App) -> Vec<Element> {
         ));
     }
 
-    for (i, c) in matched.into_iter().enumerate() {
+    for (i, c, heading) in roster_paint_order(&matched) {
+        // One section per relationship status, in the shared order (contacts.md
+        // § Where logic lives → Roster status grouping). The heading is chrome:
+        // ui.yaml scopes no id for it, and the per-row indexed ids below keep
+        // counting across sections in paint order.
+        if let Some(status) = heading {
+            out.push(Element::chrome(crate::wizard::localized(
+                &fauna_core::format::contact_status_label(status),
+            )));
+        }
         out.push(Element::label(ids::CONTACT_ROW, " "));
         // The post-succession review badge — the third rendering of the one flag
         // (`identity-succession.md` § Propagation → *MLS groups*: group member
@@ -1286,8 +1419,112 @@ pub fn elements(app: &App) -> Vec<Element> {
                 }),
             ));
         }
+        archive_link_elements(st, c, &name.primary, i, &mut out);
     }
     out
+}
+
+/// The roster's paint order: the (already filtered) contacts grouped by
+/// relationship status in [`fauna_core::format::contact_roster_group_order`]'s
+/// order, each group's rows in roster order. Yields `(index, contact,
+/// heading)` where `index` counts across groups in paint order (the indexed
+/// per-row ids' index) and `heading` is `Some(status)` on a group's first row.
+/// A status the filter emptied has no rows, so it gets no heading.
+fn roster_paint_order<'a>(
+    matched: &[&'a ContactItem],
+) -> Vec<(usize, &'a ContactItem, Option<&'a str>)> {
+    let ordered = fauna_core::format::contact_roster_paint_order(matched, |c| c.status.as_str());
+    let mut prev: Option<&str> = None;
+    ordered
+        .into_iter()
+        .copied()
+        .enumerate()
+        .map(|(i, c)| {
+            let heading = (prev != Some(c.status.as_str())).then_some(c.status.as_str());
+            prev = Some(c.status.as_str());
+            (i, c, heading)
+        })
+        .collect()
+}
+
+/// The row's archive-link affordances (`archive-import.md` § Linking and
+/// merging, ruling 8): while the shared view is `Asked`, the question and
+/// its yes / no; while `Linked`, the linked line and unlink. Every other
+/// state renders nothing. Each is scoped `.within(contact-row, i)` because
+/// it renders on some rows only. The words are the machine crate's
+/// composers — tui only paints them.
+fn archive_link_elements(
+    st: &ContactsState,
+    c: &ContactItem,
+    contact_name: &str,
+    i: usize,
+    out: &mut Vec<Element>,
+) {
+    use fauna_archive_import_machine::text::{link_prompt, linked_label};
+    use fauna_i18n::strings::archive_import as ai;
+    let resolve = |t: fauna_core::localized::ComposedText| t.resolve(fauna_i18n::strings::lookup);
+    for view in st
+        .archive_views
+        .iter()
+        .filter(|v| v.contact.eq_ignore_ascii_case(&c.peer_id))
+    {
+        let answer = |yes: bool| {
+            Gesture::Contacts(Action::ArchiveLinkAnswer {
+                contact: view.contact.clone(),
+                platform: view.platform.clone(),
+                yes,
+            })
+        };
+        match view.state {
+            ArchiveLinkState::Asked => {
+                out.push(
+                    Element::label(
+                        ids::CONTACT_ARCHIVE_LINK_PROMPT,
+                        resolve(link_prompt(view, contact_name)),
+                    )
+                    .within(ids::CONTACT_ROW, i),
+                );
+                out.push(
+                    Element::gesture_button(
+                        ids::CONTACT_ARCHIVE_LINK_YES,
+                        ai::LINK_YES,
+                        true,
+                        answer(true),
+                    )
+                    .within(ids::CONTACT_ROW, i),
+                );
+                out.push(
+                    Element::gesture_button(
+                        ids::CONTACT_ARCHIVE_LINK_NO,
+                        ai::LINK_NO,
+                        true,
+                        answer(false),
+                    )
+                    .within(ids::CONTACT_ROW, i),
+                );
+            }
+            ArchiveLinkState::Linked => {
+                out.push(
+                    Element::label(ids::CONTACT_ARCHIVE_LINKED, resolve(linked_label(view)))
+                        .within(ids::CONTACT_ROW, i),
+                );
+                out.push(
+                    Element::gesture_button(
+                        ids::CONTACT_ARCHIVE_UNLINK,
+                        ai::UNLINK,
+                        true,
+                        Gesture::Contacts(Action::ArchiveUnlink {
+                            contact: view.contact.clone(),
+                            platform: view.platform.clone(),
+                        }),
+                    )
+                    .within(ids::CONTACT_ROW, i),
+                );
+            }
+            ArchiveLinkState::Offered | ArchiveLinkState::Declined | ArchiveLinkState::Unlinked => {
+            }
+        }
+    }
 }
 
 // ── e2e state serializer ──────────────────────────────────────────────────────
@@ -1443,6 +1680,124 @@ mod tests {
         );
     }
 
+    fn a_link_view(contact: &str, state: ArchiveLinkState, unmatched: u64) -> ArchiveLinkView {
+        ArchiveLinkView {
+            contact: contact.to_string(),
+            state,
+            platform: "facebook".into(),
+            archived_name: "Friend Two".into(),
+            claimed: 0,
+            unmatched,
+        }
+    }
+
+    fn paths_of(app: &crate::app::App, id: &str) -> Vec<Vec<(String, usize)>> {
+        elements(app)
+            .into_iter()
+            .filter(|e| e.id == id)
+            .map(|e| e.path.iter().map(|(c, i)| (c.clone(), *i)).collect())
+            .collect()
+    }
+
+    /// Phase two's row affordances (`archive-import.md` § Linking and merging,
+    /// ruling 8): the question and its yes / no only on an `Asked` row, the
+    /// linked line and unlink only on a `Linked` one, nothing for the other
+    /// states — each scoped to its own row, the asked contact deliberately
+    /// SECOND so a flat render would name the wrong person.
+    #[test]
+    fn the_archive_link_prompt_renders_only_on_its_asked_row_and_unlink_only_when_linked() {
+        let mut app = contacts_app();
+        let (a, b, c) = ("aa".repeat(32), "bb".repeat(32), "cc".repeat(32));
+        app.contacts.contacts = vec![
+            a_contact(&a, Some("ada"), "accepted"),
+            a_contact(&b, Some("bo"), "accepted"),
+            a_contact(&c, Some("cy"), "confirmed"),
+        ];
+        app.contacts.archive_views = vec![
+            a_link_view(&a, ArchiveLinkState::Offered, 0),
+            a_link_view(&b, ArchiveLinkState::Asked, 0),
+            a_link_view(&c, ArchiveLinkState::Linked, 2),
+        ];
+        // Paint order groups by status (confirmed first): cy is row 0, ada
+        // row 1, bo row 2.
+        let row = |i| vec![vec![("contact-row".to_string(), i)]];
+        assert_eq!(paths_of(&app, "contact-archive-link-prompt"), row(2));
+        assert_eq!(paths_of(&app, "contact-archive-link-yes"), row(2));
+        assert_eq!(paths_of(&app, "contact-archive-link-no"), row(2));
+        assert_eq!(paths_of(&app, "contact-archive-linked"), row(0));
+        assert_eq!(paths_of(&app, "contact-archive-unlink"), row(0));
+        let text = |id: &str| {
+            elements(&app)
+                .into_iter()
+                .find(|e| e.id == id)
+                .map(|e| e.text)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            text("contact-archive-link-prompt"),
+            "Is bo the “Friend Two” from your Facebook friends?"
+        );
+        assert_eq!(
+            text("contact-archive-linked"),
+            "Linked: Facebook · 2 could not be matched to a post"
+        );
+
+        // Declined and unlinked rows ask nothing and offer nothing.
+        app.contacts.archive_views = vec![
+            a_link_view(&b, ArchiveLinkState::Declined, 0),
+            a_link_view(&c, ArchiveLinkState::Unlinked, 0),
+        ];
+        let painted = ids(&app);
+        assert!(
+            !painted.iter().any(|id| id.starts_with("contact-archive-")),
+            "{painted:?}"
+        );
+    }
+
+    /// The row's yes / no / unlink carry the row's own contact and platform
+    /// into the shared calls, and with no links wired they issue nothing.
+    #[test]
+    fn the_archive_link_answers_dispatch_the_shared_calls_for_their_row() {
+        let mut app = contacts_app();
+        let b = "bb".repeat(32);
+        app.contacts.contacts = vec![a_contact(&b, Some("bo"), "accepted")];
+        app.contacts.archive_views = vec![a_link_view(&b, ArchiveLinkState::Asked, 0)];
+        let gesture = |app: &crate::app::App, id: &str| {
+            elements(app)
+                .into_iter()
+                .find(|e| e.id == id)
+                .and_then(|e| match e.role {
+                    crate::element::Role::Button(g) => Some(g),
+                    _ => None,
+                })
+        };
+        match gesture(&app, "contact-archive-link-no") {
+            Some(Gesture::Contacts(Action::ArchiveLinkAnswer {
+                contact,
+                platform,
+                yes,
+            })) => {
+                assert_eq!(
+                    (contact.as_str(), platform.as_str(), yes),
+                    (b.as_str(), "facebook", false)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // No links on this login: the gesture is a quiet no-op, never a panic.
+        assert!(
+            apply_local(
+                &mut app,
+                Action::ArchiveLinkAnswer {
+                    contact: b.clone(),
+                    platform: "facebook".into(),
+                    yes: true,
+                },
+            )
+            .is_none()
+        );
+    }
+
     /// `contacts-no-matches` must separate THREE states that all render zero
     /// rows, which is the entire reason the element exists (`contacts.md`
     /// § Errors & edge cases case (c); linux shipped the mirror-image bug of
@@ -1485,6 +1840,119 @@ mod tests {
         app.contacts.filter = String::new();
         assert_eq!(count_id(&app, "contact-row"), 1);
         assert!(!shown(&app));
+    }
+
+    /// The roster paints one section per relationship status, in the shared
+    /// order (contacts.md § Where logic lives → Roster status grouping): the
+    /// canonical four first, a status outside them (a newer nest's) after, each
+    /// headed by its localized label, rows within a section in roster order.
+    /// The filter narrows within sections and a section it empties paints no
+    /// heading.
+    #[test]
+    fn the_roster_groups_by_status_in_the_shared_order() {
+        let mut app = contacts_app();
+        app.contacts.contacts = vec![
+            a_contact("01", Some("bea"), "blocked"),
+            a_contact("02", Some("lee"), "later"),
+            a_contact("03", Some("ann"), "accepted"),
+            a_contact("04", Some("cid"), "confirmed"),
+            a_contact("05", Some("abe"), "accepted"),
+        ];
+        let heading =
+            |s: &str| crate::wizard::localized(&fauna_core::format::contact_status_label(s));
+        let headings: Vec<String> = ["confirmed", "accepted", "blocked", "later"]
+            .iter()
+            .map(|s| heading(s))
+            .collect();
+        // The heading and name sequence, in paint order.
+        let painted = |a: &crate::app::App| -> Vec<String> {
+            elements(a)
+                .into_iter()
+                .filter(|e| {
+                    e.id == "contact-name" || (e.id.is_empty() && headings.contains(&e.text))
+                })
+                .map(|e| e.text)
+                .collect()
+        };
+        assert_eq!(
+            painted(&app),
+            vec![
+                heading("confirmed"),
+                "cid".into(),
+                heading("accepted"),
+                "ann".into(),
+                "abe".into(),
+                heading("blocked"),
+                "bea".into(),
+                heading("later"),
+                "lee".into(),
+            ]
+        );
+        // Headings register nothing: the indexed ids still count one per row.
+        assert_eq!(count_id(&app, "contact-row"), 5);
+
+        // A filter narrowing a section away removes its heading too.
+        app.contacts.filter = "a".into(); // ann, abe, bea
+        assert_eq!(
+            painted(&app),
+            vec![
+                heading("accepted"),
+                "ann".into(),
+                "abe".into(),
+                heading("blocked"),
+                "bea".into(),
+            ]
+        );
+    }
+
+    /// After grouping, every indexed per-row element names the contact painted
+    /// at that index: the open-profile button, `contact-status[i]`, and the
+    /// confirm gesture — so a selection never lands on the wrong person.
+    #[test]
+    fn a_grouped_rows_affordances_name_the_contact_painted_there() {
+        let mut app = contacts_app();
+        app.contacts.contacts = vec![
+            a_contact("01", Some("bea"), "blocked"),
+            a_contact("03", Some("ann"), "accepted"),
+            a_contact("04", Some("cid"), "confirmed"),
+        ];
+        let els = elements(&app);
+        let names: Vec<&str> = els
+            .iter()
+            .filter(|e| e.id == "contact-name")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(names, ["cid", "ann", "bea"]);
+        let statuses: Vec<&str> = els
+            .iter()
+            .filter(|e| e.id == "contact-status")
+            .map(|e| e.text.as_str())
+            .collect();
+        let label =
+            |s: &str| crate::wizard::localized(&fauna_core::format::contact_status_label(s));
+        assert_eq!(
+            statuses,
+            [label("confirmed"), label("accepted"), label("blocked")]
+        );
+        // The row button the focus ring selects opens the contact painted there.
+        let rows: Vec<&str> = els
+            .iter()
+            .filter(|e| ["01", "03", "04"].contains(&e.id.as_str()))
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(rows, ["04", "03", "01"]);
+        // The one confirm (index 0) confirms the accepted contact, not the
+        // nest's first row.
+        let confirms: Vec<_> = els
+            .iter()
+            .filter(|e| e.id == "contact-confirm")
+            .filter_map(|e| e.gesture())
+            .collect();
+        assert_eq!(confirms.len(), 1);
+        assert!(matches!(
+            &confirms[0],
+            Gesture::Contacts(Action::ConfirmContact { peer_id }) if peer_id == "03"
+        ));
     }
 
     /// The `contacts-view-segment` toggle is page chrome, not a mode-local
@@ -1692,6 +2160,65 @@ mod tests {
             },
         );
         assert_eq!(app.contacts.cards.len(), 1);
+    }
+
+    /// A roster read superseded by a newer one is dropped when it lands late.
+    ///
+    /// The login hydration (`init`) is spawned, so its reply rides the
+    /// channel, while the agent's nav-to-tab read is awaited inline. When a
+    /// contact edge lands between the two, the login read predates it, and
+    /// applying it after the nav read silently removed the new contact's row
+    /// with nothing left to re-read it (the e2e `open_contact_profile` wait,
+    /// 3 runs in 12 on a loaded box).
+    #[test]
+    fn a_superseded_roster_read_landing_late_is_dropped() {
+        let mut app = contacts_app();
+        app.contacts.nest = Some(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        let Some(Op::Refresh {
+            query_gen: login_gen,
+            ..
+        }) = nav_enter_op(&app.contacts)
+        else {
+            panic!("the People half refreshes the roster");
+        };
+        let Some(Op::Refresh {
+            query_gen: nav_gen, ..
+        }) = nav_enter_op(&app.contacts)
+        else {
+            panic!("the People half refreshes the roster");
+        };
+        let old = "aa".repeat(32);
+        let new = "bb".repeat(32);
+
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                contacts: vec![
+                    a_contact(&old, None, "accepted"),
+                    a_contact(&new, None, "accepted"),
+                ],
+                knocks: Vec::new(),
+                query_gen: nav_gen,
+                archive_views: None,
+            },
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                contacts: vec![a_contact(&old, None, "accepted")],
+                knocks: Vec::new(),
+                query_gen: login_gen,
+                archive_views: None,
+            },
+        );
+        assert_eq!(
+            count_id(&app, &new),
+            1,
+            "the older read must not overwrite the newer roster"
+        );
     }
 
     /// A resolved `SearchNav::Contact` deep link lands the WHOLE Address Book
@@ -1938,6 +2465,35 @@ mod tests {
         // A non-hex input probes the nest (handle branch) instead.
         app.contacts.find_input = "nonexistent_actor_00000000".to_string();
         assert!(apply_local(&mut app, Action::Lookup).is_some());
+    }
+
+    /// A bare localpart is a home-nest handle (`contacts.md` § Layout & flow,
+    /// region 3): the shared classification hands it over with no domain, so
+    /// the lookup op probes the home nest alone. Input that is neither an actor
+    /// id nor a handle is refused with the find error and never hits the nest.
+    #[test]
+    fn a_bare_localpart_probes_home_and_junk_is_refused() {
+        let mut app = contacts_app();
+        app.contacts.nest = Some(fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        app.contacts.find_input = "microsoft-reviewer".to_string();
+        match apply_local(&mut app, Action::Lookup) {
+            Some(Op::Lookup { handle, domain, .. }) => {
+                assert_eq!(handle, "microsoft-reviewer");
+                assert_eq!(domain, None, "a bare localpart names no domain");
+            }
+            _ => panic!("a bare localpart must probe the home nest"),
+        }
+        assert_eq!(app.contacts.find_error, None);
+
+        app.contacts.find_input = "two words".to_string();
+        assert!(apply_local(&mut app, Action::Lookup).is_none());
+        assert_eq!(
+            app.contacts.find_error.as_deref(),
+            Some(t::HANDLE_OR_ACTOR_ID)
+        );
     }
 
     /// **The cross-nest knock join** (`contacts.md` § Implementation status

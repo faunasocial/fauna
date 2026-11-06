@@ -15,19 +15,29 @@ public struct RegionPlaceholderView: View {
     let placeholder: FfiRegionPlaceholder
     let witnessKey: String
     let onReveal: () -> Void
+    /// Adds the sealed-item sentence (`region.sealed_note`) on its own line after
+    /// the frame, INSIDE `region-blocked-notice` — set only by the conversation
+    /// bubble, from `RegionRenderDecision.sealedNote`; never feed cards, post
+    /// details or the nest's page.
+    let sealedNote: Bool
 
-    public init(placeholder: FfiRegionPlaceholder, witnessKey: String, onReveal: @escaping () -> Void) {
+    public init(
+        placeholder: FfiRegionPlaceholder, witnessKey: String, sealedNote: Bool = false,
+        onReveal: @escaping () -> Void
+    ) {
         self.placeholder = placeholder
         self.witnessKey = witnessKey
+        self.sealedNote = sealedNote
         self.onReveal = onReveal
     }
 
     private var isBlock: Bool { placeholder.verb == "block" }
 
     private var noticeText: String {
-        isBlock
+        let frame = isBlock
             ? L.region.blockedNotice(region: placeholder.region, authority: placeholder.authorityName)
             : L.region.collapsedNotice(region: placeholder.region, authority: placeholder.authorityName)
+        return sealedNote ? frame + "\n" + L.region.sealedNote : frame
     }
 
     public var body: some View {
@@ -93,11 +103,32 @@ public struct RegionGatedPostContent<Content: View>: View {
                     }
                     .padding()
                 }
+            } else if let withheldNest = decision.withheldByNest(revealed: revealed) {
+                ScrollView {
+                    NestPlaceholderView(placeholder: withheldNest, witnessKey: witnessKey) {
+                        revealed = true
+                    }
+                    .padding()
+                }
+            } else if decision.verdict == "block" {
+                // The family arm, composed the way the feed card does
+                // (`family-safety.md` § Content policy): a guardian `block`
+                // replaces the whole detail, the guardian's reason beside it.
+                ScrollView {
+                    ContentPolicyBlockedNotice(reported: decision.reported, reason: decision.guardianReason)
+                        .padding()
+                }
+            } else if decision.verdict == "collapse" && !revealed {
+                ScrollView {
+                    ContentPolicyCollapsedPlaceholder(reason: decision.guardianReason) { revealed = true }
+                        .padding()
+                }
             } else {
                 content()
             }
         }
         .regionBlockWitness(witnessKey, blocked: decision.isRegionBlocked)
+        .nestBlockWitness(witnessKey, blocked: decision.isNestBlocked)
     }
 }
 #endif

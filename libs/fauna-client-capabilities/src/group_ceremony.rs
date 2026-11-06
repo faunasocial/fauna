@@ -151,6 +151,25 @@ pub fn begin_group_share(
     })
 }
 
+/// Keep the recipient's compare-code LAN candidates in the initiator's
+/// ceremony record — the initiator's first dial of the recipient on the group
+/// pump, until the recipient's own `fauna.group.endpoints` cell has reached
+/// it (`p2p-shared-set-build.md` § Build design — the group set, decision 8).
+/// The deliver carries the initiator's cell to the recipient; nothing carries
+/// the recipient's back before the initiator's first pull, so the code it
+/// already dialed is the only addressing it has. A no-op for an unknown
+/// ceremony.
+pub fn record_recipient_candidates(
+    cfg: &mut GroupShareConfig,
+    scope_id: &[u8; 32],
+    recipient: &ActorId,
+    lan_endpoints: &[std::net::SocketAddr],
+) {
+    if let Some(r) = initiated_mut(cfg, scope_id, recipient) {
+        r.recipient_lan_addrs = lan_endpoints.iter().map(ToString::to_string).collect();
+    }
+}
+
 /// The outcome of ingesting one peer-channel ceremony frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupIngestOutcome {
@@ -370,6 +389,7 @@ pub fn build_group_deliver(
     scope_id: &[u8; 32],
     recipient: &ActorId,
     now: Timestamp,
+    bootstrap_endpoints: Option<&fauna_core::device_endpoints::DeviceEndpointsEntry>,
 ) -> Result<BuiltGroupShareDeliver, GroupCeremonyError> {
     let record = cfg
         .initiated
@@ -441,7 +461,7 @@ pub fn build_group_deliver(
         // Birth: nothing is revoked yet, so the first mint is past nothing.
         Vec::new(),
         authority_device,
-        device_authorization,
+        device_authorization.clone(),
         now_ms(now),
     )
     .map_err(|e| GroupCeremonyError::Wrap(e.to_string()))?;
@@ -459,28 +479,58 @@ pub fn build_group_deliver(
     )
     .map_err(|e| GroupCeremonyError::Wrap(e.to_string()))?;
 
-    let plane_rows = vec![
+    let mut plane_rows = vec![
         GroupPlaneRow {
             kind: KIND_GROUP_BIRTH.into(),
             key: GROUP_BIRTH_KEY.into(),
+            merge_meta: None,
             value: offer.birth.clone(),
         },
         GroupPlaneRow {
             kind: KIND_GROUP_ROSTER.into(),
             key: roster_cell_key(&own_entry_id, &authority_device_id),
+            merge_meta: None,
             value: own_row,
         },
         GroupPlaneRow {
             kind: KIND_GROUP_ROSTER.into(),
             key: roster_cell_key(&their_entry_id, &authority_device_id),
+            merge_meta: None,
             value: their_row,
         },
         GroupPlaneRow {
             kind: KIND_GROUP_GENERATION_MINT.into(),
             key: fauna_core::hex32::encode(&built.generation_id),
+            merge_meta: None,
             value: canonical_encode(&built.record)?.to_vec(),
         },
     ];
+    // Decision 8's bootstrap: the initiator's own endpoints cell, signed and
+    // stamped by the authority device that writes the initiator's plane
+    // (the cell's carriage, `fauna_core::group_endpoints`), so the recipient
+    // knows where to pull the scope from before any pull has run.
+    if let Some(entry) = bootstrap_endpoints {
+        let record = fauna_core::group_endpoints::GroupEndpointsRecord::sign(
+            fauna_core::group_endpoints::GroupEndpointsCore {
+                scope_id: *scope_id,
+                entry: entry.clone(),
+                stamped_at_ms: now_ms(now),
+            },
+            authority_device,
+            device_authorization,
+        )?;
+        let stamp = fauna_protocol::merge_policy::LwwStamp {
+            at_ms: now_ms(now),
+            writer: authority_device_id,
+        }
+        .encode()?;
+        plane_rows.push(GroupPlaneRow {
+            kind: fauna_protocol::group_state::KIND_GROUP_ENDPOINTS.into(),
+            key: fauna_core::group_endpoints::group_endpoints_cell_key(&authority_device_id),
+            merge_meta: Some(stamp.into()),
+            value: canonical_encode(&record)?.to_vec(),
+        });
+    }
 
     let deliver = GroupShareDeliver {
         scope_id: *scope_id,
@@ -864,6 +914,7 @@ mod tests {
             &scope,
             &bob().actor_id(),
             now,
+            None,
         )
         .expect("deliver");
         mark_group_delivered(&mut alice_cfg, &scope, &bob().actor_id());
@@ -939,6 +990,7 @@ mod tests {
                 &scope,
                 &bob().actor_id(),
                 now,
+                None,
             ),
             Err(GroupCeremonyError::OutOfOrder(_))
         ));
@@ -972,6 +1024,7 @@ mod tests {
             &scope,
             &bob().actor_id(),
             now,
+            None,
         )
         .expect("deliver");
         ingest_group_frame(
@@ -1088,6 +1141,7 @@ mod tests {
             &scope,
             &bob().actor_id(),
             now,
+            None,
         )
         .expect("deliver");
         ingest_group_frame(
@@ -1125,6 +1179,7 @@ mod tests {
         deliver.machinery_snapshot.push(GroupPlaneRow {
             kind: KIND_GROUP_AUTHORITY_REVOCATION.into(),
             key,
+            merge_meta: None,
             value: canonical_encode(&revocation).expect("encode").to_vec(),
         });
         let resigned = sign_group_share_deliver(&alice(), &deliver).expect("re-sign");

@@ -306,6 +306,13 @@ pub struct FamilyState {
     /// A refresh reloads the editor only when either moved, so an unsaved rule
     /// survives a refresh that changed nothing it shows.
     rules_source: Option<(Vec<u8>, Option<ContentPolicy>)>,
+    /// The newest read's generation, claimed at dispatch by every [`Op`] that
+    /// ends in a re-read and checked at commit, so a superseded read landing
+    /// late is dropped instead of overwriting newer state — the post-auth
+    /// status read and a reconnect resync are spawned while the nav-to-tab read
+    /// is awaited, so both landing orders are reachable. The
+    /// `NotificationsState::read_gen` shape.
+    pub read_gen: std::cell::Cell<u64>,
 }
 
 /// The two live states a ward's feed-source ask can be in — the shared
@@ -443,9 +450,10 @@ pub fn spawn_status_check(
     let Some(nest) = state.nest.clone() else {
         return;
     };
+    let read_gen = claim_read_gen(state);
     let tx = tx.clone();
     tokio::spawn(async move {
-        let outcome = Op::Refresh { nest }.run().await;
+        let outcome = Op::Refresh { nest, read_gen }.run().await;
         let _ = tx.send(UiMessage::Data(DataMessage::Page(
             session_generation,
             PageOutcome::Family(outcome),
@@ -461,7 +469,15 @@ pub fn spawn_status_check(
 pub fn nav_enter_op(state: &FamilyState) -> Option<Op> {
     Some(Op::Refresh {
         nest: state.nest.clone()?,
+        read_gen: claim_read_gen(state),
     })
+}
+
+/// Claim the next [`FamilyState::read_gen`] for a read about to be dispatched.
+fn claim_read_gen(state: &FamilyState) -> u64 {
+    let read_gen = state.read_gen.get() + 1;
+    state.read_gen.set(read_gen);
+    read_gen
 }
 
 // ── Field access ─────────────────────────────────────────────────────────────
@@ -749,6 +765,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest,
                 ward,
                 document: Box::new(document),
+                read_gen: claim_read_gen(&app.family),
             })
         }
         Action::RevealGraduate => {
@@ -795,6 +812,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest: app.family.nest.clone()?,
                 editor: Box::new(editor),
                 remove,
+                read_gen: claim_read_gen(&app.family),
             })
         }
         Action::SavePolicy => {
@@ -817,6 +835,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest,
                 ward,
                 policy: Box::new(policy),
+                read_gen: claim_read_gen(&app.family),
             })
         }
         Action::AddContact => {
@@ -837,7 +856,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             };
             app.errors.remove(&Page::Family);
             app.family.contact_input.clear();
-            Some(Op::ContactAdd { nest, ward, peer })
+            Some(Op::ContactAdd {
+                nest,
+                ward,
+                peer,
+                read_gen: claim_read_gen(&app.family),
+            })
         }
         Action::Transfer => {
             let nest = app.family.nest.clone()?;
@@ -853,17 +877,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 return None;
             };
             app.errors.remove(&Page::Family);
-            Some(Op::Transfer { nest, ward, target })
+            Some(Op::Transfer {
+                nest,
+                ward,
+                target,
+                read_gen: claim_read_gen(&app.family),
+            })
         }
         Action::TransferCancel => Some(Op::TransferCancel {
             nest: app.family.nest.clone()?,
             ward: app.family.selected()?.actor_id.to_vec(),
+            read_gen: claim_read_gen(&app.family),
         }),
         Action::ConfirmGraduate => {
             let nest = app.family.nest.clone()?;
             let ward = app.family.selected()?.actor_id.to_vec();
             app.family.graduate_revealed = false;
-            Some(Op::Graduate { nest, ward })
+            Some(Op::Graduate {
+                nest,
+                ward,
+                read_gen: claim_read_gen(&app.family),
+            })
         }
         Action::Decide { index, approve } => {
             let nest = app.family.nest.clone()?;
@@ -872,15 +906,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest,
                 entry: Box::new(entry),
                 approve,
+                read_gen: claim_read_gen(&app.family),
             })
         }
         Action::DecideIncoming { index, accept } => {
             let nest = app.family.nest.clone()?;
             let ward = app.family.incoming.get(index)?.supervised_actor_id.to_vec();
+            let read_gen = claim_read_gen(&app.family);
             Some(if accept {
-                Op::TransferAccept { nest, ward }
+                Op::TransferAccept {
+                    nest,
+                    ward,
+                    read_gen,
+                }
             } else {
-                Op::TransferDecline { nest, ward }
+                Op::TransferDecline {
+                    nest,
+                    ward,
+                    read_gen,
+                }
             })
         }
         Action::AllowBlockedPeer {
@@ -892,6 +936,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             ward,
             bridge_id,
             peer_id,
+            read_gen: claim_read_gen(&app.family),
         }),
         Action::DeviceMark {
             ward,
@@ -902,6 +947,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             ward,
             device_id,
             marked,
+            read_gen: claim_read_gen(&app.family),
         }),
     }
 }
@@ -909,17 +955,23 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 // ── Network half ─────────────────────────────────────────────────────────────
 
 /// The network half of a Family gesture — owns only `Arc`s + owned data, so it
-/// can be awaited on the agent's path or spawned on the keyboard's.
+/// can be awaited on the agent's path or spawned on the keyboard's. Every
+/// variant ending in a re-read carries the `read_gen` it claimed at dispatch
+/// ([`FamilyState::read_gen`]).
 pub enum Op {
     /// `fauna.family.status` + `fauna.family.approvals.list` — the post-auth
     /// gate check, the nav edge, and the tail of every mutation.
-    Refresh { nest: Arc<NestClient> },
+    Refresh {
+        nest: Arc<NestClient>,
+        read_gen: u64,
+    },
     /// Boxed policy: the reach document inlines two optional pillars, and an
     /// unboxed variant would balloon this enum past `large_enum_variant`.
     PolicyUpdate {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
         policy: Box<ReachPolicy>,
+        read_gen: u64,
     },
     /// A subscribed labeler picked in the content rules: its module
     /// (`fauna.labelers.inspect`), for the rule to bundle.
@@ -933,6 +985,7 @@ pub enum Op {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
         document: Box<fauna_core::content_policy::ContentPolicyDocument>,
+        read_gen: u64,
     },
     /// Boxed for the same reason: an approval entry carries eleven owned fields,
     /// and each kind names its item with a different one — so the whole entry
@@ -942,38 +995,46 @@ pub enum Op {
         nest: Arc<NestClient>,
         entry: Box<FamilyApprovalEntry>,
         approve: bool,
+        read_gen: u64,
     },
     ContactAdd {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
         peer: Vec<u8>,
+        read_gen: u64,
     },
     Graduate {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
+        read_gen: u64,
     },
     Transfer {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
         target: Vec<u8>,
+        read_gen: u64,
     },
     TransferCancel {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
+        read_gen: u64,
     },
     TransferAccept {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
+        read_gen: u64,
     },
     TransferDecline {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
+        read_gen: u64,
     },
     DeviceMark {
         nest: Arc<NestClient>,
         ward: Vec<u8>,
         device_id: String,
         marked: bool,
+        read_gen: u64,
     },
     /// The un-deny — the shared `FamilyClient::allow_blocked_dm_peer` for one
     /// `(bridge, peer)` on one ward.
@@ -982,6 +1043,7 @@ pub enum Op {
         ward: Vec<u8>,
         bridge_id: String,
         peer_id: String,
+        read_gen: u64,
     },
     /// A guardian-tier feature limit, saved or removed through the shared seam
     /// (`FeaturesClient::save` / `remove`): re-read the ward's policy, replace
@@ -991,6 +1053,7 @@ pub enum Op {
         nest: Arc<NestClient>,
         editor: Box<fauna_client_features::PolicyEditor>,
         remove: bool,
+        read_gen: u64,
     },
     /// `fauna.family.usage_report` — the ward's own foreground heartbeat
     /// (`family-safety.md` § Screen time). Unlike every op above it is NOT a
@@ -1051,6 +1114,9 @@ pub struct FamilyView {
     /// The guardian's subscribed labelers a content rule may name (hex ids) —
     /// read only when the caller guards someone.
     pub rule_labelers: Vec<String>,
+    /// The [`FamilyState::read_gen`] the read claimed at dispatch (`0`, the
+    /// state's own starting value, in fixtures).
+    pub read_gen: u64,
 }
 
 /// What an op resolved to.
@@ -1105,11 +1171,12 @@ pub enum Outcome {
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::Refresh { nest } => refresh(nest).await,
+            Op::Refresh { nest, read_gen } => refresh(nest, read_gen).await,
             Op::WriteFeatureLimit {
                 nest,
                 editor,
                 remove,
+                read_gen,
             } => {
                 let client = fauna_client_features::FeaturesClient::new(Arc::clone(&nest));
                 let written = if remove {
@@ -1123,7 +1190,7 @@ impl Op {
                         return Outcome::Failed(e.text().resolve(fauna_i18n::strings::lookup));
                     }
                 };
-                match refresh(nest).await {
+                match refresh(nest, read_gen).await {
                     Outcome::Loaded(view) => Outcome::FeatureLimitWritten {
                         view,
                         editor: Box::new(editor.reseeded(&saved.reply)),
@@ -1132,10 +1199,15 @@ impl Op {
                     other => other,
                 }
             }
-            Op::PolicyUpdate { nest, ward, policy } => {
+            Op::PolicyUpdate {
+                nest,
+                ward,
+                policy,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.policy_update(ward, *policy).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1147,18 +1219,19 @@ impl Op {
                 nest,
                 ward,
                 document,
+                read_gen,
             } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.save_content_rules(&ward, *document).await {
                     // Written: the page re-reads, and the editor re-loads from
                     // what the nest now stores.
-                    Ok(Some(_)) => match refresh(nest).await {
+                    Ok(Some(_)) => match refresh(nest, read_gen).await {
                         Outcome::Loaded(view) => Outcome::RulesSaved(view),
                         other => other,
                     },
                     // No longer this caller's ward: nothing was written, and
                     // the refresh closes the editor.
-                    Ok(None) => refresh(nest).await,
+                    Ok(None) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::RulesFailed(e.to_string()),
                 }
             }
@@ -1166,6 +1239,7 @@ impl Op {
                 nest,
                 entry,
                 approve,
+                read_gen,
             } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 // Each kind names its item with a different key, and the entry
@@ -1186,49 +1260,75 @@ impl Op {
                     )
                     .await;
                 match result {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::ContactAdd { nest, ward, peer } => {
+            Op::ContactAdd {
+                nest,
+                ward,
+                peer,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.contact_add(ward, peer).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::Graduate { nest, ward } => {
+            Op::Graduate {
+                nest,
+                ward,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.graduate(ward).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::Transfer { nest, ward, target } => {
+            Op::Transfer {
+                nest,
+                ward,
+                target,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.transfer(ward, target).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::TransferCancel { nest, ward } => {
+            Op::TransferCancel {
+                nest,
+                ward,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.transfer_cancel(ward).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::TransferAccept { nest, ward } => {
+            Op::TransferAccept {
+                nest,
+                ward,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.transfer_accept(ward).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::TransferDecline { nest, ward } => {
+            Op::TransferDecline {
+                nest,
+                ward,
+                read_gen,
+            } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.transfer_decline(ward).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1237,10 +1337,11 @@ impl Op {
                 ward,
                 device_id,
                 marked,
+                read_gen,
             } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 match client.device_mark(ward, device_id, marked).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1249,6 +1350,7 @@ impl Op {
                 ward,
                 bridge_id,
                 peer_id,
+                read_gen,
             } => {
                 let client = FamilyClient::new(Arc::clone(&nest));
                 // The shared un-deny owns the wire shape (the approving
@@ -1256,7 +1358,7 @@ impl Op {
                 // row only hands it its own `(bridge_id, peer_id)` pair.
                 let result = client.allow_blocked_dm_peer(ward, bridge_id, peer_id).await;
                 match result {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -1335,7 +1437,7 @@ impl Op {
 /// `fauna.family.status` (both roles) + the guardian's
 /// `fauna.family.approvals.list`. The queue read is unconditional: a
 /// supervised-only account gets an empty list, which keeps one code path.
-async fn refresh(nest: Arc<NestClient>) -> Outcome {
+async fn refresh(nest: Arc<NestClient>, read_gen: u64) -> Outcome {
     let client = FamilyClient::new(Arc::clone(&nest));
     let status = match client.status().await {
         Ok(s) => s,
@@ -1372,6 +1474,7 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
         crate::rule_editor::read_labelers(&nest).await
     };
     Outcome::Loaded(Box::new(FamilyView {
+        read_gen,
         capabilities,
         rule_labelers,
         supervised_by: status.supervised_by.map(|g| g.handle),
@@ -1468,7 +1571,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 feed_requests,
                 capabilities,
                 rule_labelers,
+                read_gen,
             } = *view;
+            // A newer read has been dispatched since this one: its reply is
+            // the one to paint (`FamilyState::read_gen`).
+            if read_gen != app.family.read_gen.get() {
+                return;
+            }
             app.family.capabilities = capabilities;
             app.family.rules.labelers = rule_labelers;
             // Clause 2: this successful read is the moment to remember. Persist
@@ -2372,7 +2481,6 @@ fn incoming_elements(st: &FamilyState, out: &mut Vec<Element>) {
 mod tests {
     use super::*;
     use crate::app::tests::authed_app;
-    use fauna_core::obligation::ContentFloor;
     use fauna_protocol::ByteBuf;
     use fauna_protocol::family::{
         FamilyBlockedPeerInfo, FamilyGuardianInfo, FamilyPendingTransferInfo, FamilyStatusReply,
@@ -2816,6 +2924,10 @@ mod tests {
     /// test below exercises the real `apply_outcome` path (ward re-selection and
     /// editor load included) rather than poking state by hand.
     fn load(app: &mut App, view: FamilyView) {
+        let view = FamilyView {
+            read_gen: app.family.read_gen.get(),
+            ..view
+        };
         apply_outcome(app, Outcome::Loaded(Box::new(view)));
     }
 
@@ -4151,7 +4263,7 @@ mod tests {
         use fauna_core::content_policy::{
             ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
         };
-        use fauna_core::obligation::{ContentFloor, ContentPolicy};
+        use fauna_core::obligation::ContentPolicy;
         let mut document = ContentPolicyDocument::empty();
         document.rules.push(ContentRule {
             factor: "spam".into(),
@@ -4167,7 +4279,6 @@ mod tests {
         });
         let policy = ReachPolicy {
             content_policy: Some(ContentPolicy {
-                nsfw: ContentFloor::Block,
                 document: Some(document),
                 ..Default::default()
             }),
@@ -4186,7 +4297,7 @@ mod tests {
         assert_eq!(
             summary.lines().filter(|l| l.contains(" — ")).count(),
             1,
-            "the floor's line and the reach lines carry none: {summary}"
+            "the reach lines carry none: {summary}"
         );
     }
 
@@ -4244,10 +4355,6 @@ mod tests {
             ReachPolicy {
                 unknown_sender_mail: "quarantine".into(),
                 feed_sources: "curated".into(),
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Unknown,
-                    ..Default::default()
-                }),
                 ..Default::default()
             },
         )]);
@@ -4257,13 +4364,11 @@ mod tests {
             text_of(&app, "family-policy-unknown-sender-select"),
             "Hold for review"
         );
-        // The unknown floor shows in the rule editor as what binds: a block.
-        assert_eq!(text_of(&app, ids::RULE_EDITOR_ITEM_VERDICT_SELECT), "Block");
     }
 
     /// The guardian's mounting of the shared rule editor stands where the four
     /// floor selects stood (`family-safety.md` § App surface → *Content
-    /// rules*): a floor still set shows as a rule; editing a rule and saving
+    /// rules*): the ward's document shows its rules; editing a rule and saving
     /// writes the ward's document through the rules op, for the SELECTED ward;
     /// a refresh that changed nothing the editor shows keeps an unsaved edit.
     #[test]
@@ -4274,10 +4379,9 @@ mod tests {
                 3,
                 "sibling",
                 ReachPolicy {
-                    content_policy: Some(ContentPolicy {
-                        spam: ContentFloor::Collapse,
-                        ..Default::default()
-                    }),
+                    content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[
+                        ("spam", fauna_core::content_policy::ContentVerdict::Collapse),
+                    ])),
                     ..Default::default()
                 },
             ),
@@ -4296,13 +4400,16 @@ mod tests {
         assert_eq!(
             text_of(&app, ids::RULE_EDITOR_ITEM_CATEGORY_SELECT),
             "Spam",
-            "the set floor shows as a category rule"
+            "the ward's category rule shows"
         );
         assert_eq!(
             text_of(&app, ids::RULE_EDITOR_ITEM_VERDICT_SELECT),
             "Hide behind a warning"
         );
-        // A floor carries no reason: the guardian writes one before saving.
+        // A rule with no reason cannot be saved: the guardian writes one.
+        app.family
+            .rules
+            .set_field(crate::rule_editor::Input::Reason(0), String::new());
         assert!(apply_local(&mut app, Action::SaveRules).is_none());
         app.family.rules.set_field(
             crate::rule_editor::Input::Reason(0),
@@ -4563,10 +4670,10 @@ mod tests {
                 ..Default::default()
             }),
             policy: Some(ReachPolicy {
-                content_policy: Some(ContentPolicy {
-                    nsfw: ContentFloor::Block,
-                    ..Default::default()
-                }),
+                content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Block,
+                )])),
                 content_notify: Some(true),
                 screen_time: Some(fauna_core::screen_time::ScreenTimePolicy {
                     window_start: Some(1260),
@@ -4703,6 +4810,49 @@ mod tests {
         );
     }
 
+    /// A read superseded by a newer one is dropped when it lands late — the
+    /// spawned post-auth status read (or a reconnect resync) landing after the
+    /// agent's awaited nav-to-tab read must not repaint the older view.
+    #[test]
+    fn a_superseded_read_landing_late_is_dropped() {
+        let mut app = family_app();
+        let Some(Op::Refresh {
+            read_gen: login_gen,
+            ..
+        }) = nav_enter_op(&app.family)
+        else {
+            panic!("the tab refetches");
+        };
+        let Some(Op::Refresh {
+            read_gen: nav_gen, ..
+        }) = nav_enter_op(&app.family)
+        else {
+            panic!("the tab refetches");
+        };
+
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded(Box::new(FamilyView {
+                wards: vec![ward(2, "ward.example", ReachPolicy::default())],
+                read_gen: nav_gen,
+                ..Default::default()
+            })),
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded(Box::new(FamilyView {
+                read_gen: login_gen,
+                ..Default::default()
+            })),
+        );
+        assert_eq!(
+            app.family.wards.len(),
+            1,
+            "the older read must not overwrite the newer view"
+        );
+        assert!(app.has_family, "nor close the gate the newer read opened");
+    }
+
     /// The write half, driven through the real fold: a successful read persists
     /// the snapshot as a side effect of `apply_outcome`, with no separate call
     /// for a per-app leg to forget.
@@ -4732,7 +4882,7 @@ mod tests {
             .expect("a successful read persists");
         let snap = SupervisionSnapshot::from_json(&raw).expect("and it round-trips");
         assert!(snap.is_supervised());
-        assert_eq!(snap.content_policy.unwrap().nsfw, ContentFloor::Block);
+        assert!(snap.content_policy.unwrap().document.is_some());
         assert_eq!(snap.screen_time.unwrap().daily_minutes, Some(90));
         assert!(snap.content_notify);
     }

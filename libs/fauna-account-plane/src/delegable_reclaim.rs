@@ -763,13 +763,13 @@ mod tests {
     use fauna_account_store::sqlite::SqliteBackend;
     use fauna_core::account_entry_crypto::{EntryCoordinates, EntryPlaintext, seal_entry};
     use fauna_core::crypto::{BackupKey, DelegableSchedule};
-    use fauna_core::data::ModerationConfig;
+    use fauna_core::data::SyncPrefsConfig;
     use fauna_protocol::account_state::{
         ACCOUNT_STATE_SCOPE, AccountStatePutReply, AccountStatePutRequest, AccountStateRetireReply,
         AccountStateRetireRequest, KIND_STATE_PUT, KIND_STATE_RETIRE,
     };
     use fauna_protocol::error::RpcError;
-    use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp, PREFERENCE_KEY, kind_keys};
+    use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, LwwStamp, PREFERENCE_KEY, kind_keys};
     use std::sync::{Arc, Mutex};
 
     /// A nest that answers every retire `retired` and every put stored, and
@@ -838,13 +838,13 @@ mod tests {
 
     const PREDECESSOR: [u8; 32] = [0x5A; 32];
 
-    fn moderation(words: &[&str], at_ms: i64, writer: [u8; 32]) -> StateEntry {
+    /// A delegable singleton row (`fauna.state.sync-prefs`) naming `words`.
+    fn prefs(words: &[&str], at_ms: i64, writer: [u8; 32]) -> StateEntry {
         let mut entry = machinery_row(
-            KIND_MODERATION,
+            KIND_SYNC_PREFS,
             PREFERENCE_KEY.into(),
-            &ModerationConfig {
-                muted_keywords: words.iter().map(|w| (*w).into()).collect(),
-                ..Default::default()
+            &SyncPrefsConfig {
+                default_conflict_policy: Some(words.join(" ")),
             },
         );
         entry.merge_meta = Some(LwwStamp { at_ms, writer }.encode().unwrap());
@@ -894,7 +894,7 @@ mod tests {
             writer_seq: 3,
             item_key: [0xE1; 32],
             feed_seq,
-            kind: KIND_MODERATION.into(),
+            kind: KIND_SYNC_PREFS.into(),
             key: PREFERENCE_KEY.into(),
         }
     }
@@ -937,12 +937,12 @@ mod tests {
             if enrolled {
                 f.put(enrollment_row(THEM)).await;
             }
-            let merged = moderation(&["witness"], 9_000, device_id_of(PREDECESSOR));
+            let merged = prefs(&["witness"], 9_000, device_id_of(PREDECESSOR));
             f.put(merged.clone()).await;
             let sibling_row = if same_value {
                 merged.clone()
             } else {
-                moderation(&["other"], 9_001, device_id_of(THEM))
+                prefs(&["other"], 9_001, device_id_of(THEM))
             };
             let cover = relayed(&f, THEM, 4, &sibling_row).await;
             let nest = RetireNest::default();
@@ -1009,7 +1009,7 @@ mod tests {
     async fn the_gate_withholds_and_no_schedule_or_listing_judges_nothing() {
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
-        let merged = moderation(&["witness"], 9_000, device_id_of(PREDECESSOR));
+        let merged = prefs(&["witness"], 9_000, device_id_of(PREDECESSOR));
         f.put(merged.clone()).await;
         let own = relayed(&f, US, 4, &merged).await;
         let own_key: [u8; 32] = own.item_key.as_slice().try_into().unwrap();
@@ -1075,7 +1075,7 @@ mod tests {
             let f = fixture().await;
             f.put(enrollment_row(US)).await;
             f.put(enrollment_row(THEM)).await;
-            let merged = moderation(&["witness"], 9_000, device_id_of(THEM));
+            let merged = prefs(&["witness"], 9_000, device_id_of(THEM));
             f.put(merged.clone()).await;
             let cover = relayed(&f, THEM, 4, &merged).await;
             let own = relayed(&f, US, 2, &merged).await;
@@ -1171,7 +1171,7 @@ mod tests {
             let f = fixture().await;
             f.put(enrollment_row(US)).await;
             f.put(enrollment_row(THEM)).await;
-            let merged = moderation(&["witness"], 9_000, device_id_of(THEM));
+            let merged = prefs(&["witness"], 9_000, device_id_of(THEM));
             // Merged here and published: no unsent own row holds the item.
             let (_, seq) = f.store.put_state(merged.clone()).await.unwrap();
             f.store
@@ -1278,11 +1278,11 @@ mod tests {
     #[test]
     fn a_row_is_never_called_below_a_row_it_is_above() {
         let records = [
-            entry_to_plaintext(&moderation(&["a"], 1, [1; 32])),
-            entry_to_plaintext(&moderation(&["b"], 2, [1; 32])),
+            entry_to_plaintext(&prefs(&["a"], 1, [1; 32])),
+            entry_to_plaintext(&prefs(&["b"], 2, [1; 32])),
             // A tied stamp with another value: neither covers the other.
-            entry_to_plaintext(&moderation(&["c"], 2, [1; 32])),
-            entry_to_plaintext(&moderation(&["d"], 2, [2; 32])),
+            entry_to_plaintext(&prefs(&["c"], 2, [1; 32])),
+            entry_to_plaintext(&prefs(&["d"], 2, [2; 32])),
         ];
         let markers = [marker(1), marker(2), marker(9)];
         let seens = [seen(&[(1, 1)]), seen(&[(1, 1), (2, 2)]), seen(&[(3, 3)])];

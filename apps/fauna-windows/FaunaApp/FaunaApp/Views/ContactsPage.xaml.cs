@@ -57,21 +57,34 @@ public sealed partial class ContactsPage : Page
             // load after a relaunch, a sibling device's edit, this device's Save).
             ContactOverlayNames.Moved += OnOverlayMoved;
             // The ward's durable asks moved (a status read landed): repaint the find
-            // result's ask pair. App-lifetime static → unsubscribed in OnNavigatedFrom.
+            // result's ask pair and the knock cards' knock-guardian-pending.
+            // App-lifetime static → unsubscribed in OnNavigatedFrom.
             WardAsksCache.Changed += OnWardAsksChanged;
+            // Phase two's archive-link views moved (a question arrived through the
+            // sink, an answer or unlink landed): repaint the rows' contact-archive-*
+            // affordances. App-lifetime host → unsubscribed in OnNavigatedFrom.
+            ArchiveLinksHost.Instance.Changed += OnArchiveLinksChanged;
         }
     }
 
     private void OnOverlayMoved() =>
         DispatcherQueue.TryEnqueue(() => _viewModel?.RefreshNamesIfMoved());
 
-    private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(PaintFindAsk);
+    private void OnArchiveLinksChanged() =>
+        DispatcherQueue.TryEnqueue(() => _viewModel?.RepaintArchiveLinksIfMoved());
+
+    private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(() =>
+    {
+        PaintFindAsk();
+        _viewModel?.RefreshKnockMarks();
+    });
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
         ContactOverlayNames.Moved -= OnOverlayMoved;
         WardAsksCache.Changed -= OnWardAsksChanged;
+        ArchiveLinksHost.Instance.Changed -= OnArchiveLinksChanged;
         // Unsubscribe the knock-roster handler + the VM's reconnect re-hydrate
         // handler (the INestRpcClient seam is app-lifetime, so leaving them attached
         // would leak this page).
@@ -117,11 +130,9 @@ public sealed partial class ContactsPage : Page
         await _viewModel.LoadCommand.ExecuteAsync(null);
 
         KnocksList.ItemsSource = _viewModel.KnockRows;
-        ContactsList.ItemsSource = _viewModel.Rows;
-        AppDataSnapshot.SetContacts(_viewModel.Contacts.Select(c =>
-            new AppDataSnapshot.ContactSnapshot(c.ActorId, c.Handle, c.Status.ToString())));
-        AppDataSnapshot.SetKnocks(_viewModel.Knocks.Select(k =>
-            new AppDataSnapshot.KnockSnapshot(k.ActorId, k.Summary, k.Timestamp)));
+        ShowRoster(_viewModel.Sections);
+        AppDataSnapshot.SetContacts(_viewModel.Contacts);
+        AppDataSnapshot.SetKnocks(_viewModel.Knocks);
 
         NoKnocksText.Visibility = _viewModel.Knocks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         NoMatchesText.Visibility = Visibility.Collapsed;
@@ -280,17 +291,28 @@ public sealed partial class ContactsPage : Page
         var query = (sender.Text ?? string.Empty).Trim();
         if (query.Length == 0)
         {
-            ContactsList.ItemsSource = _viewModel.Rows;
+            ShowRoster(_viewModel.Sections);
             NoMatchesText.Visibility = Visibility.Collapsed;
             return;
         }
-        var filtered = _viewModel.FilterRows(query);
-        ContactsList.ItemsSource = filtered;
+        // The filter narrows within the status sections; a section it empties drops
+        // out with its heading (ContactsViewModel.FilterSections).
+        var filtered = _viewModel.FilterSections(query);
+        ShowRoster(filtered);
         // case (c) search-no-results (contacts.md § Errors & edge cases): only when a
         // NON-EMPTY roster narrowed to zero — never the true-empty-roster state.
         NoMatchesText.Visibility = _viewModel.Rows.Count > 0 && filtered.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    /// <summary>Paint <paramref name="sections"/> as the grouped roster: the live
+    /// <see cref="ContactsViewModel.Sections"/> (rebuilt on every load and name
+    /// refresh), or a filtered snapshot while a query is typed.</summary>
+    private void ShowRoster(object sections)
+    {
+        RosterSource.Source = sections;
+        ContactsList.ItemsSource = RosterSource.View;
     }
 
     private async void LookUpContact_Click(object sender, RoutedEventArgs e)
@@ -367,6 +389,11 @@ public sealed partial class ContactsPage : Page
     public static Visibility PresentToVisibility(string? line) =>
         string.IsNullOrEmpty(line) ? Visibility.Collapsed : Visibility.Visible;
 
+    /// <summary>A knock card's <c>knock-guardian-pending</c>: Visible iff the row awaits
+    /// the guardian (<see cref="KnockRow.AwaitsGuardian"/>).</summary>
+    public static Visibility BoolToVisibility(bool value) =>
+        value ? Visibility.Visible : Visibility.Collapsed;
+
     private async void ContactConfirm_Click(object sender, RoutedEventArgs e)
     {
         if (_viewModel is null) return;
@@ -374,6 +401,28 @@ public sealed partial class ContactsPage : Page
         {
             await _viewModel.ConfirmContactCommand.ExecuteAsync(actorId);
         }
+    }
+
+    // ── Phase two's archive-link affordances (archive-import.md § Linking and
+    // merging, ruling 8). Each button's Tag is its row's paint, carrying the view's
+    // own contact and platform into the shared answer / unlink calls.
+
+    private async void ArchiveLinkYes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null && sender is Button { Tag: ArchiveLinkRowPaint paint })
+            await _viewModel.AnswerArchiveLinkAsync(paint, yes: true);
+    }
+
+    private async void ArchiveLinkNo_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null && sender is Button { Tag: ArchiveLinkRowPaint paint })
+            await _viewModel.AnswerArchiveLinkAsync(paint, yes: false);
+    }
+
+    private async void ArchiveUnlink_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null && sender is Button { Tag: ArchiveLinkRowPaint paint })
+            await _viewModel.UnlinkArchiveLinkAsync(paint);
     }
 
     /// <summary>Tap a contact row to open that peer's profile (OTHER profile — the
@@ -393,6 +442,7 @@ public sealed partial class ContactsPage : Page
         if (ContactsList.SelectedItem is ContactRow contact && !string.IsNullOrEmpty(contact.ActorId))
         {
             App.PendingProfileTarget = contact.ActorId;
+            App.PendingProfileHome = contact.HomeNestUrl;
             // Clear before navigating; the re-entrant SelectionChanged (now null)
             // no-ops on the type guard above.
             ContactsList.SelectedItem = null;
@@ -434,6 +484,17 @@ public sealed partial class ContactsPage : Page
                     System.Convert.ToHexString(r.person).Equals(c.ActorId, System.StringComparison.OrdinalIgnoreCase));
             mark.Visibility = reviewed ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
         }
+    }
+
+    /// <summary><c>contact-actor-id-open-profile-button</c> — open the found actor's
+    /// profile with the lookup's <c>nest_url</c> carried as the actor-home hint (the
+    /// Find User door; contacts.md § Layout &amp; flow region 3).</summary>
+    private void OpenFoundProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: ContactInfo found } || string.IsNullOrEmpty(found.ActorId)) return;
+        App.PendingProfileTarget = found.ActorId;
+        App.PendingProfileHome = found.NestUrl;
+        Views.MainPage.Current?.NavigateToView("profile");
     }
 
     private async void AddFoundContact_Click(object sender, RoutedEventArgs e)

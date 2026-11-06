@@ -8,9 +8,9 @@ guide: docs/guides/who-can-see-what.md § Folders you make public
 
 ## What a user gets
 
-Follow a folder someone made public by its address and browse it in Media as
-a read-only scope, even when it lives on another nest. If they take it private
-again, your copy stops updating.
+Follow a folder someone made public by their handle and the folder's name, and
+browse it in Media as a read-only folder, even when it lives on another nest. If
+they take it private again, your copy stops updating.
 
 ## Coverage contract
 
@@ -38,32 +38,34 @@ Stamped 2026-09-22 at 963ffb408a.
    - `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_followed_row_says_whose_folder_it_is`
 10. [app] A file in a folder you follow can be downloaded from the browse, with no account on the owner's nest — `docs/goal/ui/media.md` § Followed public folders
    - `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there`
+   - `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+e5506940 standalone |
-| ios | ⚠ partial | 0.1.2-dev+e5506940 standalone |
+| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+3b591c2e standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+e3bf6a64.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+2b0759a1 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_follow_a_public_folder_and_browse_it_in_media` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_public_folder_follow_cross_nest.py::test_a_follower_on_another_nest_reads_the_relay_and_fetches_the_bytes` | nest (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_public_folder_follow_cross_nest.py::test_a_follower_on_another_nest_reads_the_relay_and_fetches_the_bytes` | nest (linux): passed, nest (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_unfollowing_removes_the_row_with_nothing_to_undo_anywhere` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_follow_says_when_its_owner_stops_publishing_and_resumes_by_itself` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_the_owners_nest_keeps_no_record_of_who_follows` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_wrong_private_or_gone_address_fails_with_one_plain_message` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed, nest (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_the_owners_nest_keeps_no_record_of_who_follows` | nest (linux): passed, nest (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_wrong_private_or_gone_address_fails_with_one_plain_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_network_problem_never_reads_as_the_folder_having_been_taken_away` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_followed_row_says_whose_folder_it_is` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there` | tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there` | tui (linux): passed, tui (windows): passed |
+| 10 | app | `tests/e2e-unified/tests/test_folder_follow_media_browse.py::test_a_followed_folders_file_on_another_nest_downloads_with_no_account_there` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

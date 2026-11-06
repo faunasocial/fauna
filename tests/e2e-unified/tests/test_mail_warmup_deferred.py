@@ -32,7 +32,6 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register
-from helpers.app_surface import skip_unbuilt
 from helpers.budgets import RECEIVE_CYCLE_S
 from helpers.mail_dedicated_nest import (
     alias_admin_to_address,
@@ -49,6 +48,9 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.linux,
     pytest.mark.android,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
     pytest.mark.real_conversations,
 ]
 
@@ -112,6 +114,15 @@ def _expected_line(hold: dict) -> str:
     return f"{until} {queue}"
 
 
+def _bubble_tree_lines(driver) -> list[str]:
+    """The `dm-message*` lines of the driver's accessibility-tree dump — what the
+    open thread really exposes when the warm-up line is missing (empty on a
+    driver without a tree)."""
+    tree = getattr(driver, "tree", None)
+    text = tree() if callable(tree) else ""
+    return [ln.strip()[:200] for ln in text.splitlines() if "dm-message" in ln][:30]
+
+
 @pytest.mark.feature("email-in-conversations")
 def test_a_sent_mail_the_warm_up_holds_says_when_it_will_be_delivered(
     app, dedicated_mail_nest, request
@@ -119,21 +130,6 @@ def test_a_sent_mail_the_warm_up_holds_says_when_it_will_be_delivered(
     """Send a mail past the day's ramp through the app, open its conversation,
     and read on its bubble when it will be delivered and how many are ahead —
     the very release time and position the nest's own Sent read reports."""
-    if not (
-        app.driver.is_tui()
-        or app.driver.is_web()
-        or app.driver.is_linux()
-        or app.driver.is_android()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="dm-message-warmup-deferred",
-            detail="tui, web, linux and android paint it; windows, macOS and iOS "
-            "follow in their own trickle-down rows",
-            tracked="docs/goal/behavior/mail-deliverability.md § Enforcement at "
-            "submission time",
-        )
-
     handle = dedicated_mail_nest
     handle.assert_mta_running()
     nest = handle.nest
@@ -195,7 +191,8 @@ def test_a_sent_mail_the_warm_up_holds_says_when_it_will_be_delivered(
         RECEIVE_CYCLE_S,
         diagnose=lambda: (
             f"bubble texts: {app.driver.get_texts('dm-message-text')!r}, "
-            f"nest hold: {hold!r}, error: {app.error_text()!r}"
+            f"nest hold: {hold!r}, error: {app.error_text()!r}, "
+            f"bubble ids in the tree: {_bubble_tree_lines(app.driver)!r}"
         ),
     )
     assert app.driver.get_texts("dm-message-warmup-deferred") == [_expected_line(hold)], (

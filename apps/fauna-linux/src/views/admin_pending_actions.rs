@@ -65,8 +65,7 @@ pub fn render(
     actions: &[AdminPendingActionSummary],
     client: &Rc<FaunaClient>,
 ) {
-    let rows: Vec<&AdminPendingActionSummary> =
-        actions.iter().filter(|a| a.status == "pending").collect();
+    let rows: Vec<&AdminPendingActionSummary> = actions.iter().filter(|a| a.is_pending()).collect();
     section.heading.set_label(&if rows.is_empty() {
         admin::users_page::PENDING_NONE.to_string()
     } else {

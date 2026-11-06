@@ -12,7 +12,7 @@ import java.io.ByteArrayOutputStream
 import com.fauna.app.core.ContentPolicyInputs
 import com.fauna.app.ui.util.LocalConnectionState
 import com.fauna.ffi.FfiConnectionState
-import com.fauna.ffi.FfiContentPolicy
+import com.fauna.app.testing.GuardianRulesFixture
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -406,15 +406,15 @@ class ConversationDetailContentTest {
     // arms are the locally-runnable proof the block mechanism actually gates.
 
     @Test
-    fun guardianBlockFloorCollapsesBubbleToNoticeAndHidesBody() {
-        // A guardian `block` floor over an nsfw-labeled message (700‰ > the 500‰
+    fun guardianBlockRuleCollapsesBubbleToNoticeAndHidesBody() {
+        // A guardian `block` rule over an nsfw-labeled message (700‰ > the 500‰
         // guardian trigger) collapses the bubble to `content-policy-blocked-notice`
         // in place of the body — no `dm-message-text` reaches the tree.
         val labeled = msg("m1", body = "flagged", labels = listOf(ContentLabelEntry("nsfw", 700u)))
         render(
             detail(messages = listOf(labeled)),
             contentPolicyInputs = ContentPolicyInputs(
-                contentPolicy = FfiContentPolicy("block", "inherit", "inherit", "inherit"),
+                contentPolicy = GuardianRulesFixture.blocking("nsfw"),
             ),
         )
         composeTestRule.onNodeWithTag("content-policy-blocked-notice")
@@ -425,15 +425,15 @@ class ConversationDetailContentTest {
     }
 
     @Test
-    fun guardianCollapseFloorFoldsBubbleBehindARevealableNotice() {
-        // A guardian `collapse` floor over a commercial-labeled message folds the
+    fun guardianCollapseRuleFoldsBubbleBehindARevealableNotice() {
+        // A guardian `collapse` rule over a commercial-labeled message folds the
         // bubble behind `content-policy-blocked-notice` in state `collapsed`, and
         // `content-policy-collapsed-reveal-button` shows the body in place.
         val labeled = msg("m1", body = "folded", labels = listOf(ContentLabelEntry("commercial", 900u)))
         render(
             detail(messages = listOf(labeled)),
             contentPolicyInputs = ContentPolicyInputs(
-                contentPolicy = FfiContentPolicy("inherit", "inherit", "inherit", "collapse"),
+                contentPolicy = GuardianRulesFixture.collapsing("commercial"),
             ),
         )
         composeTestRule.onNodeWithTag("content-policy-blocked-notice")
@@ -446,15 +446,15 @@ class ConversationDetailContentTest {
     }
 
     @Test
-    fun cleanMessageUnderABlockFloorStillRendersItsBody() {
+    fun cleanMessageUnderABlockRuleStillRendersItsBody() {
         // The gate is label-specific (not always-on): an UNLABELED message under
-        // the same block floor renders its body normally, no false-positive
+        // the same block rule renders its body normally, no false-positive
         // collapse and no notice.
         val clean = msg("m1", body = "hello there")
         render(
             detail(messages = listOf(clean)),
             contentPolicyInputs = ContentPolicyInputs(
-                contentPolicy = FfiContentPolicy("block", "inherit", "inherit", "inherit"),
+                contentPolicy = GuardianRulesFixture.blocking("nsfw"),
             ),
         )
         composeTestRule.onNodeWithTag("dm-message-text").assertExists()

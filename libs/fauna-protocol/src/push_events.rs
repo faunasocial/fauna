@@ -730,8 +730,8 @@ pub enum PushEvent {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StaleSurfaces {
     /// The post feed. **No push feeds it** — so it is stale only after a
-    /// reconnect, never from a push (see [`Self::on_reconnect`]). [`Self::family`]
-    /// and [`Self::own_thresholds`] are the other such surfaces.
+    /// reconnect, never from a push (see [`Self::on_reconnect`]). [`Self::family`],
+    /// [`Self::own_thresholds`] and [`Self::admin_gate`] are the other such surfaces.
     pub feed: bool,
     /// The unified notification list.
     pub notifications: bool,
@@ -790,6 +790,16 @@ pub struct StaleSurfaces {
     /// the rest of the session. Safe to re-fire for the same reason too: every
     /// app's producer keeps the last-loaded thresholds on a failed read.
     pub own_thresholds: bool,
+    /// The nest-admin gate — `fauna.account.am_i_admin`, which shows the
+    /// `admin-tab` entry (`admin.md` § Navigation model, point 1).
+    /// Reconnect-only like [`Self::family`]: no push feeds it, it is read at
+    /// login, and a login read that found no nest fails closed to "not an
+    /// admin" — which, with no second read, hid the admin entry from a real
+    /// admin for the whole session. Safe to re-fire only because the re-read
+    /// moves the gate on a successful reply alone: a failed reconnect read
+    /// keeps the last-known answer, so a transient error never hides the entry
+    /// from an admin who already has it.
+    pub admin_gate: bool,
     /// The nest's self-description — `fauna.nest.info`, which carries the
     /// nest admin's signed published rules (`nest-rules.md` § Acceptance at
     /// joining, and a change of rules). Fed by `fauna.nest.info_changed`, which
@@ -853,6 +863,7 @@ impl StaleSurfaces {
         media: false,
         family: false,
         own_thresholds: false,
+        admin_gate: false,
         nest_info: false,
         mail_spam: false,
         mail_export: false,
@@ -863,7 +874,7 @@ impl StaleSurfaces {
     /// **Everything.** A reconnect resets the push `seq` to 0
     /// (`transport.md` § Push events), so the gap may have swallowed any push at
     /// all — including the feed's, which nothing else recovers, and the two
-    /// surfaces no push feeds at all (feed, family, own thresholds), which only this sweep ever
+    /// surfaces no push feeds at all (feed, family, own thresholds, admin gate), which only this sweep ever
     /// refreshes. The invariant worth keeping: this covers every kind's own
     /// set, pinned by `a_reconnect_covers_every_kind`; that the family read
     /// rides it, and nothing else, is pinned by
@@ -881,6 +892,7 @@ impl StaleSurfaces {
             media: true,
             family: true,
             own_thresholds: true,
+            admin_gate: true,
             nest_info: true,
             mail_spam: true,
             mail_export: true,
@@ -967,6 +979,7 @@ impl StaleSurfaces {
                 feed: false,
                 family: false,
                 own_thresholds: false,
+                admin_gate: false,
                 ..Self::on_reconnect()
             },
             _ => Self::NONE,
@@ -987,6 +1000,7 @@ impl StaleSurfaces {
             && (self.media || !other.media)
             && (self.family || !other.family)
             && (self.own_thresholds || !other.own_thresholds)
+            && (self.admin_gate || !other.admin_gate)
             && (self.nest_info || !other.nest_info)
             && (self.mail_spam || !other.mail_spam)
             && (self.mail_export || !other.mail_export)
@@ -1009,6 +1023,7 @@ impl StaleSurfaces {
             media: self.media || other.media,
             family: self.family || other.family,
             own_thresholds: self.own_thresholds || other.own_thresholds,
+            admin_gate: self.admin_gate || other.admin_gate,
             nest_info: self.nest_info || other.nest_info,
             mail_spam: self.mail_spam || other.mail_spam,
             mail_export: self.mail_export || other.mail_export,
@@ -1034,6 +1049,7 @@ impl StaleSurfaces {
             && !self.media
             && !self.family
             && !self.own_thresholds
+            && !self.admin_gate
             && !self.nest_info
             && !self.mail_spam
             && !self.mail_export
@@ -1103,14 +1119,15 @@ impl PushEvent {
             // The nest's outbound channel for this subscriber overflowed and it
             // dropped pushes (§ Backpressure and `ResyncRequired`). Everything a
             // *dropped* push could have staled is therefore stale — which is
-            // every surface but the three no push feeds (the feed, the family
-            // read, the own-threshold read): a dropped push cannot have staled
+            // every surface but the four no push feeds (the feed, the family
+            // read, the own-threshold read, the admin gate): a dropped push cannot have staled
             // what no push touches. The self-description IS push-fed
             // (`fauna.nest.info_changed`), so a dropped push may have staled it.
             PushEvent::ResyncRequired(_) => StaleSurfaces {
                 feed: false,
                 family: false,
                 own_thresholds: false,
+                admin_gate: false,
                 ..StaleSurfaces::on_reconnect()
             },
             // The admin's published rules changed (`nest-rules.md` § A change
@@ -2646,9 +2663,9 @@ mod tests {
         }
     }
 
-    /// The feed, the family read and the own-threshold read are the surfaces no
+    /// The feed, the family read, the own-threshold read and the admin gate are the surfaces no
     /// push feeds, so only a full reconnect recovers them — `ResyncRequired`
-    /// deliberately leaves all three alone and stales everything else.
+    /// deliberately leaves all four alone and stales everything else.
     #[test]
     fn only_a_reconnect_stales_the_feed() {
         assert!(StaleSurfaces::on_reconnect().feed);
@@ -2658,6 +2675,7 @@ mod tests {
                 feed: false,
                 family: false,
                 own_thresholds: false,
+                admin_gate: false,
                 ..StaleSurfaces::on_reconnect()
             },
             resync_required().invalidates(),
@@ -2846,6 +2864,44 @@ mod tests {
             assert!(
                 !StaleSurfaces::for_kind(event.kind()).own_thresholds,
                 "for_kind({:?}) stales the own-threshold read, but no push feeds it",
+                event.kind()
+            );
+        }
+    }
+
+    /// The admin gate (`fauna.account.am_i_admin`, which shows `admin-tab`) is
+    /// the third login read no push feeds. Before this flag existed a session
+    /// whose first mint found no nest — a re-created acceptance nest whose name
+    /// did not resolve on this machine yet — failed the read closed to "not an
+    /// admin", and the reconnect that followed never asked again: the admin of
+    /// a freshly claimed nest had no `admin-tab` for the whole session.
+    #[test]
+    fn a_reconnect_stales_the_admin_gate_and_no_push_does() {
+        assert!(StaleSurfaces::on_reconnect().admin_gate);
+        const { assert!(!StaleSurfaces::NONE.admin_gate) };
+        for event in [
+            knock(),
+            notification(),
+            account_updated(),
+            calendar_changed(),
+            address_book_changed(),
+            sync_changed(),
+            consent_requested(),
+            resync_required(),
+            mail_received(),
+            mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
+            nest_info_changed(),
+        ] {
+            assert!(
+                !event.invalidates().admin_gate,
+                "{:?} stales the admin gate, but no push feeds it",
+                event.kind()
+            );
+            assert!(
+                !StaleSurfaces::for_kind(event.kind()).admin_gate,
+                "for_kind({:?}) stales the admin gate, but no push feeds it",
                 event.kind()
             );
         }

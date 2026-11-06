@@ -114,11 +114,10 @@ protocols behind Fastmail and iCloud calendar sharing — read-write, with the
 in Settings → **Mail & Calendar** and listed under Settings → **Connected apps**, where each can be revealed, copied or disconnected on its own):
 
 - **Automatic setup** (Apple Calendar/Contacts, DAVx⁵): enter
-  the username shown on the credential's row under Settings → **Connected apps** (`you@example.com`, or `you+laptop@example.com` for the credential named "laptop") + the credential password; the apps discover the
-  server via your domain's DNS records (they're part of the standard record
-  set on the admin DNS page).
-- **Manual setup**: server address `mail.example.com`, port 443. (Use
-  this on Apple apps if discovery doesn't kick in — they're picky about it.)
+  the username shown on the credential's row under Settings → **Connected apps** (`you@example.com`, or `you+laptop@example.com` for the credential named "laptop") + the credential password; on a nest in the cloud with a domain, the apps discover the server via your domain's DNS records (they're part of the standard record set on the admin DNS page).
+- **Manual setup**: on a nest in the cloud with a domain, server address `mail.example.com`, port 443. (Use this on Apple apps if discovery doesn't kick in — they're picky about it.) On a nest at home, set apps up by hand — see [On a home nest](#on-a-home-nest).
+
+If your nest serves calendars and contacts with mail turned off, you still get a credential: Fauna creates one when you first sign in (unless your admin has switched that off), and you can add one at any time with **Add credential** under Settings → **Mail & Calendar**.
 
 Apple Calendar and Contacts (Mac + iPhone), Thunderbird, Evolution, and
 DAVx⁵ (Android) all work with your nest. Outlook and Google Calendar can't mount
@@ -184,12 +183,8 @@ which a sender can write however they like.
 ## Whose eyes: the privacy model
 
 Events and contact cards are **stored encrypted on every nest**, locked to
-your keys before they're stored — no nest can read your calendar or address book
-on its disk unless you give it permission to, as below. The Fauna
-apps open everything on your own device. When a standard calendar or
-contacts app connects over CalDAV/CardDAV, your nest opens your items with
-that app's password, and only for that signed-in session — so while it is
-connected, your box does handle readable copies of what it serves. Invitations
+your keys before they're stored — no nest can read your calendar on its disk unless you give it permission to, as below, and no permission you give it lets it read your address book — only a connected app's signed-in session does, as below. The Fauna
+apps open everything on your own device. When a standard calendar or contacts app connects over CalDAV/CardDAV, your nest opens your items with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — so while one is connected, your box does handle readable copies of what it serves. Invitations
 and replies that travel by email are readable to your nest as they pass to
 and from email, like any mail; one that arrives is stored encrypted. Beyond those, your nest reads your calendar
 itself only if you give it permission to — by saying yes to **Trust this box?** when you
@@ -199,23 +194,22 @@ what any server that delivers your messages must: who you're connected to —
 your contacts, whom you follow, the groups you're in — and when and how much
 you send.
 
-One practical consequence: your DAV credential password is a real key to
-this data — treat the generated one with the respect it deserves, and prefer
-generated over invented passwords.
+One practical consequence: your DAV credential password is a real key to this data — and not only to this data: the same password also reads and sends your mail whenever mail is on, and opens every folder you serve over WebDAV. Treat the generated one with the respect it deserves, prefer generated over invented passwords, and give each app or device its own, so you can disconnect one under Settings → **Connected apps** without touching the others.
 
 And a deployment note worth knowing: **calendar + contacts without mail is a
 genuinely quieter server** — it's just an HTTPS surface, with no
 mail-receiving port open to the world. A home box can serve your family's
 calendars with mail off entirely.
 
-## On a home nest (no domain)
+## On a home nest
 
 A home nest ([Set up a nest at home](nest-home-setup.md)) serves CalDAV and
-CardDAV too, on its own port (8443 by default, changeable in the admin app).
-There's no DNS on a bare IP address, so apps need manual setup
-(`https://<the-box's-IP>:8443`), and Fauna's own apps handle the
-self-signed-certificate story for you — third-party calendar apps may need
-you to accept the certificate once.
+CardDAV too, at its own address on its own port (8443 by default, changeable
+in the admin app) — with a domain or without one. Apps may not find it on
+their own, so set them up by hand with the **CalDAV host** and **CalDAV port**
+shown under Settings → **Mail & Calendar** (like `https://192.0.2.10:8443`).
+Fauna's own apps handle the certificate for you; third-party calendar apps may
+need you to accept it once.
 
 ## Where this stands today
 
@@ -228,10 +222,10 @@ you to accept the certificate once.
 | Fauna-to-Fauna invitations without mail (end-to-end encrypted, across nests) | **Available** |
 | CalDAV read-write for Apple Calendar, Thunderbird, Evolution, DAVx⁵ | **Available** |
 | CardDAV read-write for Apple Contacts, Thunderbird, DAVx⁵ | **Available** |
-| DNS-based autodiscovery (enter address + password, done) | **Available** (Apple apps sometimes need manual `mail.<domain>`) |
+| DNS-based autodiscovery on a nest in the cloud with a domain (enter address + password, done) | **Available** (Apple apps sometimes need manual `mail.<domain>`) |
 | Contacts page: requests, accept/block, contact list | **Available** |
 | Address Book view in the Fauna app (read-only) | **Available** |
 | Editing address-book cards inside the Fauna app | **Planned** — edit via the synced native apps meanwhile |
-| Calendar/contacts on a bare-IP home nest (port 8443, changeable) | **Available** |
+| Calendar/contacts on a home nest, with a domain or without (port 8443, changeable) | **Available** |
 | Refused changes to your events, checked and reported | **Available** |
 | Events and contact cards stored encrypted on every nest | **Available** |

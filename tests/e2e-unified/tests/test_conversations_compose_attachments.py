@@ -51,6 +51,28 @@ import pytest
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"
 
 
+@pytest.fixture
+def attachments_app(request, app, nest_instance):
+    """``app`` signed in as a DEDICATED fresh actor, never the session ``test_user``.
+
+    Staging a file saves the new-thread draft with the file's handle in the
+    actor's ``__drafts`` plane (``test_conversations_draft_attachment_restore.py``
+    step 2), and these tests leave a staged file in the composer. On the shared
+    ``test_user`` that draft outlived the module: after the next module's cold
+    relaunch, the first new conversation opened restored it with a file this
+    device holds no bytes for, its send refused, and
+    ``test_conversations_forged_delete.py`` read "alice's sent bubble never
+    rendered" (reproduced with this module alone ahead of it). A fresh actor
+    keeps whatever these tests stage on an account no later test opens —
+    the ``drafts_actor`` trade in ``test_conversations_draft_persistence.py``.
+    """
+    from conftest import _login_app_as, _make_user
+
+    user = _make_user(nest_instance)
+    _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
+    return app
+
+
 def _stage_one_attachment(app):
     """Open the new-thread composer and stage ``FIXTURE_IMAGE`` onto it.
 
@@ -79,14 +101,14 @@ def _stage_one_attachment(app):
 @pytest.mark.windows
 @pytest.mark.tui
 @pytest.mark.feature("conversation-attachments")
-def test_staged_attachment_shows_a_chip_and_can_be_removed(logged_in_app):
+def test_staged_attachment_shows_a_chip_and_can_be_removed(attachments_app):
     """Stage → the chip names the file → remove → the chip is gone.
 
     The remove assertion is the load-bearing half: ``remove_attachment`` /
     ``remove_new_thread_attachment`` shipped built-and-unused on every app,
     so this is the first test anywhere that drives either of them.
     """
-    app = logged_in_app
+    app = attachments_app
     driver = app.driver
     filename = _stage_one_attachment(app)
 
@@ -122,7 +144,7 @@ def test_staged_attachment_shows_a_chip_and_can_be_removed(logged_in_app):
 @pytest.mark.windows
 @pytest.mark.tui
 @pytest.mark.feature("conversation-attachments")
-def test_staged_attachment_chip_shows_its_size(logged_in_app):
+def test_staged_attachment_chip_shows_its_size(attachments_app):
     """The chip carries the file's size, not just its name.
 
     Size comes from the shared ``fauna_core::format::byte_size``
@@ -131,7 +153,7 @@ def test_staged_attachment_chip_shows_its_size(logged_in_app):
     routed through the shared formatter. The fixture is a small PNG, so it
     lands in the ``B``/``KB`` range.
     """
-    app = logged_in_app
+    app = attachments_app
     driver = app.driver
     _stage_one_attachment(app)
 

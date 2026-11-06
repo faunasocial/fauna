@@ -15,10 +15,11 @@ absences:
 
 On the desktop the app can start when you sign in, and closing its window is
 never a silent stop: the app keeps running in the tray where there is one, sync
-carries on where the desktop keeps its agent alive past the window, and where
-nothing can stay behind, closing quits and the setting says so. Close to tray
-is on by default wherever there is a tray, and start at login is on by default
-on Linux, Windows and macOS (you can turn either off, and the app keeps your choice).
+carries on where its background sync helper keeps running after the window
+closes, and where nothing can stay behind, closing quits and the setting says
+so. Close to tray is on by default wherever there is a tray, and start at login
+is on by default on every desktop (you can turn either off, and the app keeps
+your choice).
 
 ## Coverage contract
 
@@ -48,9 +49,9 @@ Stamped 2026-09-22 at e9f79fdf25.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ✅ full | |
-| macos | ⚠ partial | |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ✅ full | 0.1.5-dev+a73ed62e.dirty standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
 | ios | — absent | |
 | android | — absent | |
 | tui | — absent | |
@@ -66,8 +67,8 @@ Stamped 2026-09-22 at e9f79fdf25.
 | 1 | app | `tests/e2e-unified/tests/test_windows_close_to_tray.py::test_close_to_tray_defaults_on_for_a_fresh_install` | windows (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_windows_close_to_tray.py::test_closing_hides_to_tray_and_keeps_the_app_alive` | windows (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_windows_close_to_tray.py::test_close_to_tray_choice_survives_a_relaunch` | windows (windows): passed |
-| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_j_autostart_stays_hidden_only_when_it_lands_in_the_main_app` | windows (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_j_autostart_stays_hidden_only_when_it_lands_in_the_main_app` | linux (linux): passed, windows (windows): passed, macos (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_tray_close_to_tray.py::test_close_to_tray_defaults_on_for_a_fresh_install` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_windows_close_to_tray.py::test_close_to_tray_defaults_on_for_a_fresh_install` | windows (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_autostart_choice.py::test_start_at_login_is_a_choice_that_survives_a_relaunch` | linux (linux): passed, windows (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_autostart_choice.py::test_start_at_login_is_a_choice_that_survives_a_relaunch` | linux (linux): passed, windows (windows): passed, macos (macos): passed |
 <!-- features-render:end -->

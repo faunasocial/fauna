@@ -24,7 +24,7 @@ public enum SingleInstanceDecision
 /// is unit-testable in FaunaApp.Tests (no WinUI types).
 ///
 /// <para>The Windows twin of linux's NON_UNIQUE-in-e2e gate
-/// (<c>apps/fauna-linux/src/main.rs</c>): production enforces a single instance
+/// (<c>apps/fauna-linux/src/lib.rs</c>): production enforces a single instance
 /// (a second launch activates the primary and bows out), but under the E2E
 /// bridge the guard is disabled so the harness can run concurrent app processes
 /// against different nests.</para>

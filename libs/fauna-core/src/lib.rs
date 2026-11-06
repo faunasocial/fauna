@@ -81,7 +81,10 @@ pub mod generation;
 pub mod grant_event;
 pub mod group_ceremony;
 pub mod group_content;
+pub mod group_endpoints;
+pub mod group_file;
 pub mod group_generation;
+pub mod group_name;
 pub mod group_scope;
 pub mod hex32;
 pub mod human_code;
@@ -102,6 +105,10 @@ pub mod log_redact;
 /// The source scanner the crates' [`log_redact`] regression pins share.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod log_redact_scan;
+/// `LoopWake` — the e2e seam that ends a slow background loop's wait early
+/// (empty in a production build).
+#[cfg(feature = "network")]
+pub mod loop_wake;
 pub mod mail_aliases;
 pub mod mail_auth;
 pub mod mail_availability;
@@ -112,6 +119,7 @@ pub mod mailbox;
 pub mod manifest_crypto;
 pub mod markdown;
 pub mod mime_wrap;
+pub mod moderation_rows;
 pub mod money;
 pub mod nat_mode;
 pub mod nest_reseal;
@@ -157,6 +165,7 @@ pub mod version;
 pub mod web;
 #[cfg(all(target_arch = "wasm32", feature = "js"))]
 pub mod web_lock;
+pub mod windows_names;
 
 #[cfg(feature = "format_text")]
 pub mod format_text;

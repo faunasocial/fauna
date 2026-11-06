@@ -84,7 +84,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -101,8 +103,10 @@ from drivers.machine_test_setter import set_handle_check_snapshot
 from helpers.app_launch import app_launch_config
 from helpers.apple_admin_gate import admin_gate_log
 from common.scope_store import attach_scope_store
+from helpers import enrollment
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.instance_guard import (
+    await_first_seat_follows_the_account,
     expect_launch_refused,
     is_app_alive,
     wait_alive_until,
@@ -204,15 +208,28 @@ ACCOUNT_PAGE_NAV = {
 SETTINGS_PAGE_NAV = {"nav": {"stack": [{"view": "settings"}]}}
 
 
-def _seed_two_accounts(nest_instance, active="user"):
+def _seed_two_accounts(nest_instance, active="user", second="admin"):
     """A claimed-admin account + a freshly-registered regular-user account, seeded
     into the registry active on the regular user (or the admin, ``active="admin"``).
     Returns (seed_map, user_actor, admin_actor). The admin is ``nest_instance``'s
     own claimed identity (so ``am-i-admin`` is true for it); the user is registered
-    via the admin key."""
+    via the admin key.
+
+    ``second="user"`` seeds a second fresh regular user in the admin's row
+    instead (the returned third value is then that user), for a journey that
+    needs two identities but not an admin — one that removes the second identity
+    or keeps its store past teardown. The admin is shared by the whole run, and a
+    machine signed into it that the harness cannot retire at teardown leaves its
+    grant live and pins the admin's fleet scope (`e2e-launch-isolation.md`,
+    *A discarded driver retires its machine*)."""
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    if second == "user":
+        other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+        admin_actor = other["actor_id_hex"]
+        admin_secret = bytes(other["signing_key"]).hex()
+    else:
+        admin_actor = bytes(admin_sk.verify_key).hex()
+        admin_secret = bytes(admin_sk).hex()
 
     user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
     user_actor = user["actor_id_hex"]
@@ -1229,6 +1246,126 @@ def test_apple_admin_auto_default_flags_admin_and_explicit_off_sticks(
         driver.teardown()
 
 
+def _lock_file_openers(lock_path) -> set[int]:
+    """The pids ``lsof`` reports holding ``lock_path`` open. macOS has no
+    ``/proc/locks``, so this stands in for linux's waiter count: the shared
+    ``FileMutationLock`` opens the lock file only inside ``acquire`` and drops it
+    with the guard (``libs/fauna-client-accounts/src/mutation_lock.rs``), so an
+    app pid listed here while the test holds the exclusive ``flock`` is a
+    mutator parked in ``flock(2)`` — it cannot have taken the lock."""
+    out = subprocess.run(
+        ["lsof", "-t", "--", str(lock_path)], capture_output=True, text=True
+    ).stdout
+    return {int(tok) for tok in out.split() if tok.isdigit()}
+
+
+@pytest.mark.parametrize("app_name", ["macos"], indirect=True)
+@pytest.mark.feature("multiple-accounts")
+def test_apple_a_registry_write_queues_behind_a_sibling_instances_mutation_lock(
+    nest_instance, app_name, request, tmp_path
+):
+    """``multiple-accounts`` outcome 14 on macOS: a second window changing the
+    identities at the same time never loses the change — one waits for the
+    other (``account-scoping.md`` § Concurrent instances; ``long-term-store.md``
+    § Multi-account evolution → *Cross-process mutation lock*). macOS only: iOS
+    admits one instance per app (``account-scoping.md`` § Concurrent instances).
+
+    The test stands in for the sibling instance mid-mutation: it takes the
+    install-scoped ``flock`` on ``<Application Support>/Fauna/account-registry.lock``
+    and holds it, then presses ``account-require-confirm-toggle`` — a real
+    gesture whose write is one index read-modify-write. Polarised (convention
+    14): the positive observable is ``lsof`` listing the APP's pid on the lock
+    file (it opens it only to lock it, and cannot hold it while we do), with the
+    flag still off in the same reading; after release the write lands and the
+    app closes the file. A registry built without the lock writes straight
+    through, which the poll reports as the first failure it sees. Linux twin:
+    ``test_linux_a_registry_write_queues_behind_a_sibling_instances_mutation_lock``."""
+    import fcntl
+
+    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    driver = create_driver(app_name)
+    driver.launch({
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+        # Relocate Application Support (CFFIXED_USER_HOME) so the lock file is
+        # this launch's own, never the real profile's.
+        "home": str(tmp_path / "home"),
+        **app_launch_config(app_name, request),
+    })
+    held = None
+    try:
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
+        )
+        _wait_switcher_count(driver, 2, timeout=30)
+        app_support = driver.app_support_dir()
+        assert app_support, "the launch must relocate Application Support"
+        lock_path = Path(app_support) / "Fauna" / "account-registry.lock"
+        wait_until(
+            lambda: lock_path.is_file() or None, 20.0,
+            diagnose=lambda: f"the app never stamped {lock_path}",
+        )
+        app_pid = driver._app_proc.pid
+        # Non-vacuity: at rest the app does NOT keep the lock file open, so its
+        # pid in the list below can only mean a mutator inside `acquire`.
+        wait_until(
+            lambda: app_pid not in _lock_file_openers(lock_path) or None, 20.0,
+            diagnose=lambda: f"the idle app (pid {app_pid}) holds {lock_path} open",
+        )
+
+        # (1) The sibling holds the registry lock.
+        held = open(lock_path, "a+")
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        # (2) The app flips the admin row's flag — it must QUEUE behind the hold.
+        _wait_flag(driver, admin_actor, False, timeout=10)
+        # The mutator may block the app's main thread inside the `flock`, so the
+        # click helper's follow-up driver calls may not answer until the sibling
+        # lets go: press from a thread, and watch only `lsof` and the index file
+        # (neither goes through the app) meanwhile.
+        pressed = threading.Thread(
+            target=lambda: driver.click(REQUIRE_CONFIRM_TOGGLE, scope=f"{SWITCHER_ITEM}[1]"),
+            daemon=True,
+        )
+        pressed.start()
+        deadline = time.monotonic() + 30.0
+        while app_pid not in _lock_file_openers(lock_path):
+            flags = {
+                a["actor_id"]: a.get("require_confirm_to_activate", False)
+                for a in (_read_registry_index(driver) or {}).get("accounts", [])
+            }
+            assert flags.get(admin_actor) is not True, (
+                "the registry write LANDED while a sibling held "
+                f"{lock_path} — the mutator never asked for the lock. flags={flags!r}"
+            )
+            assert time.monotonic() < deadline, (
+                f"the toggle write never showed as blocked on {lock_path}"
+            )
+            time.sleep(0.3)
+        flags = {
+            a["actor_id"]: a.get("require_confirm_to_activate", False)
+            for a in (_read_registry_index(driver) or {}).get("accounts", [])
+        }
+        assert flags.get(admin_actor) is not True, (
+            f"the app has {lock_path} open but the write already landed — it "
+            f"wrote before locking. flags={flags!r}"
+        )
+
+        # (3) The sibling lets go → the write lands, the app closes the file.
+        fcntl.flock(held, fcntl.LOCK_UN)
+        pressed.join(timeout=60)
+        _wait_flag(driver, admin_actor, True, timeout=30)
+        wait_until(
+            lambda: app_pid not in _lock_file_openers(lock_path) or None, 20.0,
+            diagnose=lambda: "the app still holds the registry lock file open",
+        )
+    finally:
+        if held is not None:
+            held.close()
+        driver.teardown()
+
+
 @pytest.mark.parametrize("app_name", APPS, indirect=True)
 @pytest.mark.feature("multiple-accounts")
 def test_apple_remove_account_shrinks_switcher_live(nest_instance, app_name, request):
@@ -1300,15 +1437,35 @@ def test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others(
 ):
     """Removing an identity deletes THAT identity's data on this device and
     leaves every other identity's data untouched (`account-scoping.md` § The
-    scoping taxonomy; apple's erase door is `AccountStateDir.erase`, run by
-    `AccountSwitcherVM.remove` after the registry drops the row).
+    scoping taxonomy; apple's door is the shared `removeAccountGesture`, run by
+    `AccountSwitcherVM.remove`).
 
     The apple twin of `test_linux_removing_an_identity_deletes_its_data_and_leaves_the_others`.
-    Both identities first run a real session each (the admin's through a
+    Both identities first run a real session each (the second's through a
     switch), so each owns a populated scope; the removal must then leave no
-    admin scope under ANY base the erase sweeps (`AppleScopeStore`) while the
-    user's `mls.db` and secret are still there. Every wait is on state."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    scope of the removed identity under ANY base the erase sweeps
+    (`AppleScopeStore`) while the user's `mls.db` and secret are still there.
+    Every wait is on state.
+
+    The removal also retires this machine from the removed identity, as a
+    sign-out does (`account-scoping.md` § Erasure follows scope → *Removing an
+    account retires this machine from it, as a sign-out does*): the removed
+    identity's named row stays on its nest with its grant cleared. The roster
+    read sits behind causal barriers (convention 14): the removed identity's
+    own enrollment latch before the removal, the cleared roster within a named
+    budget after it.
+
+    Both identities are dedicated, never the run's shared admin: the roster
+    must be exact (``helpers.enrollment``), and a removal whose nest half were
+    deferred would leave a grant no teardown could find to retire
+    (`e2e-launch-isolation.md`, *A discarded driver retires its machine*)."""
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
+    # The removed identity as the roster helpers address it: its id and its
+    # signing key, read back out of the seed that carries its secret.
+    other = {
+        "actor_id_hex": other_actor,
+        "signing_key": SigningKey(bytes.fromhex(seed[f"fauna/{other_actor}/secret"])),
+    }
     driver = _launch_seeded(app_name, request, nest_instance, seed)
     try:
         await_session_actor(driver, user_actor, budget_s=APP_RELAUNCH_S,
@@ -1318,17 +1475,25 @@ def test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others(
         wait_until(user_db.exists, APP_RELAUNCH_S,
                    diagnose=lambda: f"the user's own MLS state {user_db} never appeared")
 
-        # Give the admin a real session of its own, so it has data to lose.
+        # Give the other identity a real session of its own, so it has data to lose.
         _wait_switcher_count(driver, 2, timeout=30)
         driver.click(SWITCHER_ITEM, scope=f"{SWITCHER_ITEM}[1]")
-        await_session_actor(driver, admin_actor, budget_s=APP_RELAUNCH_S,
-                            what="the switch to the admin")
-        admin_dirs = store.scope_dirs(admin_actor)
-        admin_db = admin_dirs[0] / "mls.db"
-        wait_until(admin_db.exists, APP_RELAUNCH_S,
-                   diagnose=lambda: f"the admin's own MLS state {admin_db} never appeared")
+        await_session_actor(driver, other_actor, budget_s=APP_RELAUNCH_S,
+                            what="the switch to the other identity")
+        other_dirs = store.scope_dirs(other_actor)
+        other_db = other_dirs[0] / "mls.db"
+        wait_until(other_db.exists, APP_RELAUNCH_S,
+                   diagnose=lambda: f"the other identity's own MLS state {other_db} never appeared")
+        # This machine is enrolled on it now: its named row carries a grant.
+        url = nest_instance["url"]
+        _writer, other_row, _ = enrollment.await_enrollment(
+            SimpleNamespace(driver=driver), url, other
+        )
+        assert enrollment.principals(url, other).get(other_row), (
+            f"the precondition: the latched row {other_row} carries this machine's grant"
+        )
 
-        # Back to the user: the admin row is now the non-active one, the only
+        # Back to the user: the other row is now the non-active one, the only
         # row the switcher offers a remove button on.
         _wait_switcher_count(driver, 2, timeout=30)
         driver.click(SWITCHER_ITEM, scope=f"{SWITCHER_ITEM}[0]")
@@ -1339,27 +1504,32 @@ def test_apple_removing_an_identity_deletes_its_data_and_leaves_the_others(
         driver.click(REMOVE_BUTTON)
         index = _wait_registry_index(driver, 1, timeout=30)
         assert [a["actor_id"] for a in index["accounts"]] == [user_actor], (
-            f"only the removed admin may leave the registry; got {index!r}"
+            f"only the removed identity may leave the registry; got {index!r}"
         )
 
         wait_until(
-            lambda: not any(d.exists() for d in admin_dirs),
+            lambda: not any(d.exists() for d in other_dirs),
             RPC_ROUNDTRIP_S,
             diagnose=lambda: (
                 "the removed identity's scope survived under: "
-                f"{[str(d) for d in admin_dirs if d.exists()]}; "
+                f"{[str(d) for d in other_dirs if d.exists()]}; "
                 f"error-message: {_error_line(driver)!r}"
             ),
         )
         assert user_db.exists(), (
-            "removing the admin must leave the remaining identity's data "
+            "removing the other identity must leave the remaining identity's data "
             f"untouched; {user_db} is gone"
         )
-        assert _read_store_slot(driver, f"fauna/{admin_actor}/secret") is None, (
+        assert _read_store_slot(driver, f"fauna/{other_actor}/secret") is None, (
             "the removed identity's secret must be gone from this device"
         )
         assert _read_store_slot(driver, f"fauna/{user_actor}/secret"), (
             "the remaining identity's secret must survive the removal"
+        )
+        # The nest half: the named row stays, its grant cleared — as after a
+        # sign-out (the barrier's diagnosis names every other reading).
+        enrollment.await_grant_cleared(
+            url, other, other_row, "after removing the identity through the switcher"
         )
     finally:
         driver.teardown()
@@ -1595,6 +1765,55 @@ def test_apple_switching_identity_keeps_device_settings_and_moves_drafts(
         assert device_setting() == chosen, (
             "the device setting must still hold after switching back; "
             f"{toggle} reads {driver.get_attr(toggle, 'checked')!r}, chose {chosen!r}"
+        )
+    finally:
+        driver.teardown()
+
+
+@pytest.mark.parametrize("app_name", APPS, indirect=True)
+@pytest.mark.feature("drafts-survive")
+def test_apple_a_new_message_draft_never_shows_under_another_identity(
+    nest_instance, app_name, request
+):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs (tui's twin of the same name)."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admin_actor = bytes(admin_sk.verify_key).hex()
+    user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    user_actor = user["actor_id_hex"]
+    seed = build_registry_seed(
+        [
+            {"actor_id": user_actor, "secret_hex": bytes(user["signing_key"]).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-user", "handle": "user"},
+            {"actor_id": admin_actor, "secret_hex": bytes(admin_sk).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-admin", "handle": "admin"},
+        ],
+        active=user_actor,
+    )
+    driver = create_driver(app_name)
+    driver.launch({
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+        **app_launch_config(app_name, request),
+    })
+    try:
+        # The first activation of the admin flags it require-confirm (the admin
+        # auto-default), so the arc's second switch to the admin raises the
+        # re-auth prompt. On apple that is the OS sheet behind the seam file,
+        # not the in-app prompt the arc confirms: the user approves it here.
+        _write_reauth_verdict(driver, "approve")
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes(user["signing_key"])),
+            admin=(admin_actor, bytes(admin_sk)),
+            show_switcher=lambda: _wait_switcher_count(driver, 2, timeout=30),
+            await_session=lambda actor, what: await_session_actor(
+                driver, actor, budget_s=APP_RELAUNCH_S, what=what
+            ),
         )
     finally:
         driver.teardown()
@@ -2242,8 +2461,9 @@ def test_apple_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
     the process binding before the launch machine resolves the session, so
     the bound-or-refuse gate meets the successor on both sides.
 
-    The first (plain) seat still serves the retired id throughout; what it
-    does about being superseded is the own-device-fleet leg, not this case's.
+    The first (plain) seat follows the account to the successor too, as in the
+    tui twin — asserted after the third seat, so the two adoptions are read
+    independently.
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
@@ -2321,10 +2541,14 @@ def test_apple_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
             finally:
                 third.teardown()
 
-            fstate = first.get_state()
-            assert fstate.get("session", {}).get("actor_id") == user_actor and bool(
-                fstate.get("session", {}).get("authenticated")
-            ), "the first (plain) seat must be untouched by either launch"
+            # The first seat followed the account, as in the tui twin.
+            await_first_seat_follows_the_account(
+                first,
+                old_actor,
+                new_actor,
+                SUCCESSION_AND_RELAUNCH_S,
+                diagnose=lambda: f"First seat's log:{_succession_log_lines(first)}",
+            )
         finally:
             second.teardown()
     finally:
@@ -2342,18 +2566,18 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
     """The switcher's "open in new window" affordance (ui.yaml
     `account-open-new-instance-button`; `account-scoping.md` § Concurrent
     instances, the running instance's surface): clicking it on the non-active
-    (admin) row spawns a SECOND app instance bound to that account, while
+    (second-identity) row spawns a SECOND app instance bound to that account, while
     this window stays on its own.
 
     The spawned child is observed directly: under e2e the spawner allocates
     the child its own automation port and reports it in the parent's
     `spawned_instances` state, so the test polls the child's own agent for
-    "authenticated as the admin". The child shares the parent's install
+    "authenticated as the other identity". The child shares the parent's install
     world by inheritance (credential dir, relocated HOME) — which is exactly
     the production premise (one OS login)."""
     import urllib.request
 
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
     world = _shared_instance_world()
     launch_config = app_launch_config(app_name, request)
 
@@ -2371,7 +2595,7 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
             and bool(s.get("session", {}).get("authenticated")),
             timeout=45,
         )
-        # Row 0 = user (active), row 1 = admin. Since W5.6 (2026-08-16) the
+        # Row 0 = user (active), row 1 = other. Since W5.6 (2026-08-16) the
         # button renders on EVERY row (macOS retired its same-account
         # refusal), so a bare click is now ambiguous — scope to row 1, the
         # same idiom `SWITCHER_ITEM` clicks elsewhere in this file use.
@@ -2382,7 +2606,7 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
         # parent's state.
         state = driver.wait_for_state(
             lambda s: any(
-                r.get("actor_id") == admin_actor and r.get("agent_port")
+                r.get("actor_id") == other_actor and r.get("agent_port")
                 for r in s.get("spawned_instances", [])
             ),
             timeout=15,
@@ -2390,10 +2614,10 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
         child_port = next(
             r["agent_port"]
             for r in state["spawned_instances"]
-            if r.get("actor_id") == admin_actor
+            if r.get("actor_id") == other_actor
         )
 
-        # The child comes up bound: authenticated as the ADMIN while the
+        # The child comes up bound: authenticated as the OTHER identity while the
         # parent stays on the user. (The child dies with the parent's
         # process group at teardown — no orphan.)
         deadline = time.monotonic() + 60
@@ -2409,7 +2633,7 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
                     # nests the payload under "state".
                     child_session = body.get("state", body).get("session", {})
                 if (
-                    child_session.get("actor_id") == admin_actor
+                    child_session.get("actor_id") == other_actor
                     and child_session.get("authenticated")
                 ):
                     break
@@ -2417,7 +2641,7 @@ def test_apple_open_as_new_instance_spawns_a_bound_sibling(
                 last_error = e
             time.sleep(0.5)
         assert (
-            child_session.get("actor_id") == admin_actor
+            child_session.get("actor_id") == other_actor
             and child_session.get("authenticated")
         ), (
             "the spawned instance must authenticate as the account it was "
@@ -2450,8 +2674,8 @@ def test_apple_logout_promotes_the_next_account_and_survives_relaunch(
     """Logout on a two-account install removes the active account and lands on
     the promoted one — in-session, in the persisted registry, and across a
     relaunch."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
-    admin_secret = seed[f"fauna/{admin_actor}/secret"]
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
+    other_secret = seed[f"fauna/{other_actor}/secret"]
     world = _shared_instance_world()
     launch_config = app_launch_config(app_name, request)
 
@@ -2470,19 +2694,19 @@ def test_apple_logout_promotes_the_next_account_and_survives_relaunch(
             timeout=45,
         )
         driver.logout()
-        # The removal promoted the admin and the logout relaunched into it.
+        # The removal promoted the other identity and the logout relaunched into it.
         driver.wait_for_state(
-            lambda s: s.get("session", {}).get("actor_id") == admin_actor
+            lambda s: s.get("session", {}).get("actor_id") == other_actor
             and bool(s.get("session", {}).get("authenticated")),
             timeout=45,
         )
         store = _read_seeded_store(driver)
         index = json.loads(store["fauna/index"])
-        assert [a["actor_id"] for a in index["accounts"]] == [admin_actor], (
+        assert [a["actor_id"] for a in index["accounts"]] == [other_actor], (
             "logout must remove the logged-out account from the registry"
         )
-        assert index["active"] == admin_actor
-        assert store.get(f"fauna/{admin_actor}/secret") == admin_secret, (
+        assert index["active"] == other_actor
+        assert store.get(f"fauna/{other_actor}/secret") == other_secret, (
             "the promoted account's per-actor secret must survive the logout"
         )
         assert f"fauna/{user_actor}/secret" not in store, (
@@ -2505,7 +2729,7 @@ def test_apple_logout_promotes_the_next_account_and_survives_relaunch(
         state = relaunched.wait_for_state(
             lambda s: bool(s.get("session", {}).get("authenticated")), timeout=45
         )
-        assert state["session"]["actor_id"] == admin_actor, (
+        assert state["session"]["actor_id"] == other_actor, (
             "the relaunch must come up as the promoted account, not the "
             "logged-out one"
         )
@@ -2578,10 +2802,10 @@ def test_apple_instances_on_different_accounts_run_concurrently(
     nest_instance, app_name, request
 ):
     """The guard's key is the account, not the install: a primary on the user
-    and a bound secondary on the admin share one world and BOTH serve — the
+    and a bound secondary on a second identity share one world and BOTH serve — the
     concurrent-instances goal state, and the proof the same-account refusals
     above come from the per-account lock, not some install-wide guard."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
     world = _shared_instance_world()
     launch_config = app_launch_config(app_name, request)
 
@@ -2604,12 +2828,12 @@ def test_apple_instances_on_different_accounts_run_concurrently(
         second = create_driver(app_name)
         second.launch({
             "url": nest_instance["url"],
-            "environment": {**_seeded_environment(request, nest_instance), "FAUNA_BOUND_ACCOUNT": admin_actor},
+            "environment": {**_seeded_environment(request, nest_instance), "FAUNA_BOUND_ACCOUNT": other_actor},
             **world,
             **launch_config,
         })
         second.wait_for_state(
-            lambda s: s.get("session", {}).get("actor_id") == admin_actor
+            lambda s: s.get("session", {}).get("actor_id") == other_actor
             and bool(s.get("session", {}).get("authenticated")),
             timeout=45,
         )

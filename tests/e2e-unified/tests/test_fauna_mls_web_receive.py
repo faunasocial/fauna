@@ -19,9 +19,11 @@ Flow:
      layer-1 ``InboxEnvelope``) — exactly as a real same-nest sender would, except
      bob is offline-equivalent (no push subscription on web at all).
   4. bob's web receive loop ticks ``drainInbox``, which fetches the Welcome,
-     dispatches it to ``apply_welcome`` → joins + binds the MLS group, and a new
-     FaunaMls thread appears in bob's conversations view — bound to the same
-     channel id the sender created.
+     dispatches it to ``apply_welcome`` → joins + binds the MLS group, and acks
+     the inbox row (the join witness). A Welcome-only 1:1 is listed on no rail
+     (``archive-import.md`` § Linking and merging, ruling 1), so alice then posts
+     one message, and a new FaunaMls thread appears in bob's conversations view —
+     bound to the same channel id the sender created.
 
 This proves **layer 4** (the web drains its durable inbox + joins a real Welcome it
 never got a push for). Layer 5 — a two-driven-GUI-client harness (sender + receiver
@@ -79,8 +81,8 @@ def test_fauna_mls_web_receive(real_faunamls_app, nest_instance, test_user):
     #    key package, so only bob's GUI engine can join it.
     bob_kp = conv_api.keypackage_fetch(port, alice, bob_actor_id)
     assert bob_kp is not None, "bob should have a fetchable key package"
-    channel_id_hex, welcome_bytes, _group_id_hex = conv_api.mint_group_welcome(
-        bytes(alice["signing_key"]), bob_kp
+    channel_id_hex, welcome_bytes, envelope = conv_api.mint_group_welcome_with_message(
+        bytes(alice["signing_key"]), bob_kp, "web receive proof"
     )
 
     # 3) Deliver the Welcome to bob's durable inbox (canonical layer-1 envelope).
@@ -89,11 +91,14 @@ def test_fauna_mls_web_receive(real_faunamls_app, nest_instance, test_user):
     # contact so her DM Welcome flows under the default mode — per-pair,
     # so the session-scoped recipient's own mode stays untouched.
     conv_api.accept_contact(port, test_user, alice["actor_id_hex"])
-    conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
+    inbox_id = conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
 
     # 4) bob's web receive loop (`startReceivePoll` → `drainInbox`) must, within a
-    #    few poll ticks, fetch + dispatch the Welcome, join the group, and surface a
-    #    FaunaMls thread bound to the sender's channel id.
+    #    few poll ticks, fetch + dispatch the Welcome and join the group — the
+    #    acked inbox row is the join — and, once alice's first message lands,
+    #    surface a FaunaMls thread bound to the sender's channel id.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S, who="bob's web GUI")
+    conv_api.channel_send(port, alice, channel_id_hex, envelope)
     def _received_thread():
         threads = app.conversations.list_threads()
         for t in threads:

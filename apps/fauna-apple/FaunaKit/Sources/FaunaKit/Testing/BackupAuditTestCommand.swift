@@ -31,9 +31,7 @@ public enum BackupAuditTestCommand {
     /// no-op (testing.md convention 11: honour the command or refuse audibly).
     @MainActor
     public static func apply(_ command: [String: Any]) async -> String? {
-        let offset = (command["now_offset_secs"] as? NSNumber)?.int64Value
-            ?? (command["now_offset_secs"] as? Int).map(Int64.init)
-            ?? 0
+        let offset = TestCommandArgs.nowOffsetSecs(command)
         setBackupAuditClockOffsetSecs(offsetSecs: offset)
 
         guard let vm = BackupDestinationsVM.liveInstanceForTest else {

@@ -52,13 +52,16 @@ enum Kind {
 impl Kind {
     /// The `(root, generation)` the engine's upload seals under for this kind
     /// — the same rule `upload_seal_root` applies.
-    fn seal_root(self) -> Option<([u8; 32], Option<u64>)> {
+    fn seal_root(self) -> Option<([u8; 32], Option<fauna_core::blob_seal::SealStamp>)> {
         match self {
             Kind::OwnerSealed | Kind::MetadataOnly => Some((
                 BackupKey::from_bytes(OWNER_KEY).convergent_chunk_root(),
                 None,
             )),
-            Kind::ContentKeyed => Some((CONTENT_KEY, Some(1))),
+            Kind::ContentKeyed => Some((
+                CONTENT_KEY,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            )),
             Kind::Public => None,
         }
     }

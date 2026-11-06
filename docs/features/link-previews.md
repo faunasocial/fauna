@@ -36,23 +36,23 @@ Stamped 2026-09-19 at 23b3189e2b.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.2-dev+f5c0a21a.dirty standalone |
-| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
-| ios | ✅ full | 0.1.5-dev+61b844ca standalone |
-| android | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.6-dev+8438e5ce standalone |
+| android |  no run recorded | |
+| tui | ✅ full | 0.1.6-dev+8438e5ce standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_link_preview_card_paints_for_a_resolved_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_two_bare_urls_paint_a_card_each` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_conversations_link_preview.py::test_conversations_link_preview_card_paints_and_reveals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_resolves_served_og_page_with_image` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_private_ip_url_fails` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_cache_hit_returns_first_result` | nest (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_link_preview_card_paints_for_a_resolved_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_conversations_link_preview.py::test_conversations_link_preview_card_paints_and_reveals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_feed_link_preview_failed.py::test_a_link_the_nest_cannot_preview_stays_a_plain_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_link_preview_card_paints_for_a_resolved_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_two_bare_urls_paint_a_card_each` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_conversations_link_preview.py::test_conversations_link_preview_card_paints_and_reveals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_resolves_served_og_page_with_image` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_private_ip_url_fails` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_link_preview.py::test_cache_hit_returns_first_result` | nest (linux): passed, nest (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_feed_link_preview.py::test_link_preview_card_paints_for_a_resolved_preview` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_conversations_link_preview.py::test_conversations_link_preview_card_paints_and_reveals` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_feed_link_preview_failed.py::test_a_link_the_nest_cannot_preview_stays_a_plain_link` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -55,21 +55,31 @@ export CAMBRIA_DISABLE_AOT := "1"
 # locations, and a path dependency outside the workspace members (the vendored
 # forks) with the checkout's absolute path — so a verifier rebuilding a tagged
 # commit in any other checkout or `CARGO_HOME` got different `.wasm` bytes.
-# Remapping both roots to fixed placeholders makes the output a function of the
-# source alone; the Dockerfile's `rust-wasm` stage sets the SAME placeholders
-# for its own roots, so the image's chunks and a `just web` build agree. The
-# cargo target dir is the third root: build-script `OUT_DIR` output lives under
-# it, and although none of those paths survives into the final `.wasm`, it
-# feeds the LLVM module hash that names promoted symbols (`….llvm.<hash>`) —
-# measured 2026-09-27, one commit built into two different target dirs gave a
-# `fauna_wasm_bg.wasm` differing only in one such suffix. Scoped to the wasm32
-# target through cargo's per-target variable: native and host units (build
-# scripts, proc-macros) are untouched, and every wasm32 cargo run under `just`
-# shares one fingerprint. Order matters — rustc applies the LAST matching
-# prefix, so a target dir inside the checkout still maps to `/fauna/target`.
-# Not `trim-paths`: its `cargo-features` line would make the workspace manifest
-# unloadable by stable cargo (build-target-layout-linux.md, Track C-2).
-export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS := "--remap-path-prefix=" + justfile_directory() + "=/fauna --remap-path-prefix=" + env("CARGO_HOME", home_directory() / ".cargo") + "=/cargo --remap-path-prefix=" + env("CARGO_TARGET_DIR", justfile_directory() / "target") + "=/fauna/target"
+# Cargo's `trim-paths = "all"` (stable since cargo 1.101) has cargo itself remap
+# every root to a fixed placeholder: the workspace root to `.`, each
+# non-workspace package's root to `<name>-<version>`, the cargo build dir to
+# `/cargo/build-dir` and the sysroot to `/rustc/<commit>`. The build dir counts
+# too: build-script `OUT_DIR` output lives under it, and although none of those
+# paths survives into the final `.wasm`, it feeds the LLVM module hash that names
+# promoted symbols (`….llvm.<hash>`) — measured 2026-09-27, one commit built into
+# two target dirs gave a `fauna_wasm_bg.wasm` differing only in one such suffix.
+# Cargo fingerprints the SETTING, not the computed flags, so every checkout
+# spells it the same and a target seeded from a sibling reads its wasm32 units
+# Fresh — the hand-written remap-path-prefix triple this replaced carried
+# the checkout's own path and target dir, and no seeded wasm32 unit was ever
+# Fresh (build-target-layout-linux.md, the linker verdict's 2026-10-29 paragraph).
+# Every wasm-pack line prefixes it: wasm-pack builds `--release`, and a profile
+# setting cannot be scoped to one target, so it lives in the wasm recipes' own
+# environment and native `release` builds keep their real paths. The
+# Dockerfile's `rust-wasm` stage sets the same in its `ENV`, so the image's
+# chunks and a `just web` build agree.
+wasm_trim := "CARGO_PROFILE_RELEASE_TRIM_PATHS=all"
+# The retired remap export must not reach a recipe from the caller's environment:
+# a process started by an older justfile's `just` (a retired next-loop run from
+# the main checkout before this change) carries that checkout's remap triple, and cargo
+# would append it to the trim, so the chunks would again depend on whose
+# environment built them.
+unexport CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS
 # The wasm32 C compiler: the chunks' one C dependency (zstd-sys) is compiled by
 # it and every chunk's `producers` section names it, so every builder SELECTS one
 # pinned upstream LLVM release (`supply-chain/wasm32-cc.toml`) — never the clang
@@ -84,6 +94,16 @@ export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS := "--remap-path-prefix=" +
 # build-machine path is wiring, not a choice.
 export CC_wasm32_unknown_unknown := home_directory() / ".local/share/fauna/wasm32-cc/bin/clang"
 export AR_wasm32_unknown_unknown := home_directory() / ".local/share/fauna/wasm32-cc/bin/llvm-ar"
+
+# The Gradle SDK/JDK defaults for EVERY recipe that runs `gradlew` (android-debug,
+# android-store-driver, the release/store/kids/foss builds, the bundles). The
+# verify queue and the merge-gate check run under `systemd-run --user` with no
+# login profile, so the `ANDROID_HOME`/`JAVA_HOME` that a login shell exports
+# are absent there and Gradle dies with "SDK location not found" in 10 s. An
+# exported value wins; non-Linux machines keep their own (empty here).
+# tests: scripts/test_justfile_gradlew_env.py pins this pair.
+export ANDROID_HOME := env("ANDROID_HOME", if os() == "linux" { home_directory() / "android-sdk" } else { "" })
+export JAVA_HOME := env("JAVA_HOME", if os() == "linux" { "/usr/lib/jvm/java-21-openjdk-arm64" } else { "" })
 
 # ── The interpreter: ALWAYS uv, never bare `python3` (user ruling 2026-08-23) ──
 # Bare `python3` resolves to a DIFFERENT interpreter per machine — 3.14 on the
@@ -228,8 +248,20 @@ slot_build :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "
 # no recipe symbolicates from it. EVERY debug SwiftPM line passes the same flag so
 # the build graph never flips between formats (a flip rebuilds the lot).
 # build-target-layout-macos.md § The per-checkout physical budget.
-swiftpm_debug := "-debug-info-format none"
+#
+# The linker flags shrink each linked product (2026-10-31): `-S` drops the stabs,
+# and exporting only `_main` drops the 132 M exports trie and lets `-dead_strip`
+# reach Rust code no export was keeping. Symbol names stay, so backtraces still
+# read. `_main` must stay exported: with `-no_exported_symbols`, `swift test` ran
+# none of the 1,227 swift-testing tests and still exited 0.
+# mac-disk-budget.md § Where the disk goes and what frees it (mac), what
+# `swift test` writes.
+swiftpm_debug := "-debug-info-format none -Xlinker -S -Xlinker -exported_symbol -Xlinker _main"
 slot_build_wide := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --cores 4-8 --" } else { "" }
+slot_build_ffi := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 16 --" } else { "" }
+slot_build_swift := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 10 --" } else { "" }
+slot_build_swift_test := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 8 --" } else { "" }
+slot_build_crate := if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool build --disk-gb 5 --" } else { "" }
 slot_tier_1 :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { py + " scripts/build-slot.py --pool tier_1 --" } else { "" }
 slot_focus :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { if os() == "linux" { "" } else { py + " scripts/build-slot.py --pool focus --" } } else { "" }
 slot_build_body :=if path_exists(justfile_directory() / "scripts/build-slot.py") == "true" { '[ -n "${FAUNA_SLOT_HELD_BUILD:-}" ] || exec ' + py + ' scripts/build-slot.py --pool build -- bash "$0"' } else { ":" }
@@ -260,6 +292,18 @@ gpu_watch := if path_exists(justfile_directory() / "scripts/mac-gpu-deadlock.py"
 # box's last-known-good path internally), so the branch windows itself takes
 # never fails either.
 msbuild_exe := if os() == "windows" { trim(`scripts/vs-install-path.cmd`) + "/MSBuild/Current/Bin/MSBuild.exe" } else { "" }
+
+# The cargo a recipe line that builds on every OS runs (`tui-release`, and the
+# Windows release recipes): on windows `scripts\cargo-win.cmd`, which sets up the
+# MSVC + LLVM environment for the host and the line's `--target` — under Git Bash a
+# bare cargo meets Git's own link.exe, and the arm64 C builds' clang finds the SDK
+# headers only through the INCLUDE the wrapper sets — and cargo itself everywhere
+# else. The path's one backslash sits in the shell's single quotes: a linewise
+# recipe reaches sh through the MSYS runtime's own parse of its Windows command
+# line, which takes a doubled backslash to one before the shell reads the line
+# (measured 2026-10-28 — `scripts\\cargo-win.cmd` reached cmd as
+# `scriptscargo-win.cmd`), and the quotes hold in a `#!` body too.
+cargo := if os() == "windows" { "cmd //c 'scripts\\cargo-win.cmd'" } else { "cargo" }
 
 # ── Per-out-dir wasm mutex ────────────────────────────────────────────────────
 # The 'build' pool above bounds LOAD, not OUTPUT DIRS: it is 2 slots wide, so two
@@ -304,12 +348,12 @@ wasm_mutex := if path_exists(justfile_directory() / "scripts/build-slot.py") == 
 #
 # ── Linux only ────────────────────────────────────────────────────────────────
 # Web is built only on Linux (owner-ruled 2026-10-05, build-system.md § The Deno
-# build sandbox): the `[macos]`/`[windows]` variant refuses. `linux` runs the 9
+# build sandbox): the `[macos]`/`[windows]` variant refuses. `linux` runs the 10
 # chunks CONCURRENTLY under a SINGLE build slot (the `[linux]` recipe below)
 # rather than as a sequential prerequisite list (measured 2026-07-23,
 # dev-resources plan):
 #   * a wasm build's cost is ~15% cargo compile + ~85% the wasm-bindgen/
-#     wasm-opt tail. The compiles can't overlap (all 9 chunks share one
+#     wasm-opt tail. The compiles can't overlap (all 10 chunks share one
 #     CARGO_TARGET_DIR, so cargo's build-directory lock serialises them — proven),
 #     but the tails run OUTSIDE that lock and `wasm-opt` used only ~5-10 of the
 #     then-16-core wasm mask solo, so 2-3 tails overlapped for
@@ -321,7 +365,7 @@ wasm_mutex := if path_exists(justfile_directory() / "scripts/build-slot.py") == 
 wasm:
     @echo "web is built only on Linux — build-system.md § The Deno build sandbox" >&2 && exit 1
 
-# Linux: fan the 9 chunks out concurrently, but inside ONE build slot and with
+# Linux: fan the 10 chunks out concurrently, but inside ONE build slot and with
 # the out-dir mutexes hoisted ABOVE that slot, so this is a good machine citizen:
 #   * ONE build slot, not two — parallel builds keep a free slot (plain
 #     `[parallel]` on the chunks would instead grab BOTH slots for the whole run).
@@ -331,7 +375,7 @@ wasm:
 #     slot" — the same mutex-outside-slot order every per-chunk `_wasm-*-impl`
 #     line already follows (asserted by test_build_slot.py). A process blocked on a
 #     mutex therefore holds no slot, so no hold-and-wait cycle can form. Acquiring
-#     all 9 mutexes up front is safe because parallel sessions work in separate
+#     all 10 mutexes up front is safe because parallel sessions work in separate
 #     checkouts with DISJOINT (path-keyed) mutexes, and within one checkout the
 #     9 are always requested in this one fixed order.
 # Once the wrapper holds the 8 mutexes + 1 slot, each `_wasm-*-impl` the fan-out
@@ -344,7 +388,7 @@ wasm:
 #
 # A fully warm tree must still take NEITHER the mutexes NOR the slot (same-class
 # residue as the mail-bridge/prev-build `--stamp` fixes — build-system.md §
-# Build/e2e slot locks): so BEFORE any of that acquisition, probe all 9 chunks'
+# Build/e2e slot locks): so BEFORE any of that acquisition, probe all 10 chunks'
 # own freshness gates via `build-if-stale --check` (no cmd, no mutex, no slot).
 # Only on a real miss does the mutex+slot chain below run, unchanged.
 [linux]
@@ -381,10 +425,10 @@ wasm:
         --target libs/fauna-wasm-launch/pkg/fauna_wasm_launch_bg.wasm.d.ts || fresh=0
     # mirrors: wasm-folders (openmls-dependent — see wasm-folders' comment)
     "${common[@]}" ${VENDOR_SOURCE:-} --label wasm-folders \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm \
-        --target apps/fauna-web/static/fauna_wasm_folders.js \
-        --target apps/fauna-web/static/fauna_wasm_folders.d.ts \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm.d.ts || fresh=0
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders.js \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders.d.ts \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm.d.ts || fresh=0
     # mirrors: wasm-backups (openmls-dependent — see wasm-backups' comment)
     "${common[@]}" ${VENDOR_SOURCE:-} --label wasm-backups \
         --target apps/fauna-web/static/fauna_wasm_backups_bg.wasm \
@@ -425,11 +469,12 @@ wasm:
         --target libs/fauna-wasm-atproto-settings/pkg/fauna_wasm_atproto_settings_bg.wasm.d.ts || fresh=0
     if [ "$fresh" = "1" ]; then
         # `fauna_wasm`/`fauna_wasm_onboarding`/`fauna_wasm_launch`/
-        # `fauna_wasm_atproto_settings` are two-producer chunks (prod vs test
-        # flavor share one `static/` slot — see `wasm-core-test`'s comment).
+        # `fauna_wasm_folders`/`fauna_wasm_atproto_settings` are two-producer
+        # chunks (prod vs test flavor share one `static/` slot — see
+        # `wasm-core-test`'s comment).
         # The --check above only proves `pkg/` itself is fresh; it says nothing
         # about which flavor `static/` currently holds (e.g. a prior
-        # `just web-test` left the TEST flavor there). Re-run all four
+        # `just web-test` left the TEST flavor there). Re-run all five
         # two-producer mirrors unconditionally — cheap (byte-compare, no
         # wasm-pack) — same reasoning, and now the same full set, as
         # `[linux] web-test:`'s own fast path below.
@@ -439,6 +484,8 @@ wasm:
             --from libs/fauna-wasm-onboarding/pkg --to apps/fauna-web/static
         {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_launch \
             --from libs/fauna-wasm-launch/pkg --to apps/fauna-web/static
+        {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_folders \
+            --from libs/fauna-wasm-folders/pkg --to apps/fauna-web/static
         {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_atproto_settings \
             --from libs/fauna-wasm-atproto-settings/pkg --to apps/fauna-web/static
         echo "[wasm] all 10 chunks up-to-date — no build slot taken"
@@ -523,6 +570,7 @@ wasm-chunk-check: _wasm32-cc-check
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-account-store
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-account-store --features test-helpers --tests
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-wasm-folders
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-wasm-folders --features test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-wasm-backups
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-wasm-media
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked --target wasm32-unknown-unknown -p fauna-wasm-labeler-catalog
@@ -562,7 +610,7 @@ wasm-chunk-check: _wasm32-cc-check
 # NOT on the synchronous cheap merge tier: it needs real wasm builds,
 # which is compile-scale (build-system.md § CI enforcement — a compile-scale check
 # goes in the merge-gate check, never back onto the merge path).
-wasm-seam-check: wasm-core wasm-core-test wasm-atproto-settings wasm-atproto-settings-test wasm-onboarding wasm-onboarding-test wasm-launch wasm-launch-test
+wasm-seam-check: wasm-core wasm-core-test wasm-atproto-settings wasm-atproto-settings-test wasm-onboarding wasm-onboarding-test wasm-launch wasm-launch-test wasm-folders wasm-folders-test
     {{py}} scripts/check-wasm-seam-exclusion.py
     {{py}} scripts/check-wasm-seam-exclusion.py \
         --prod-pkg libs/fauna-wasm-atproto-settings/pkg \
@@ -576,6 +624,10 @@ wasm-seam-check: wasm-core wasm-core-test wasm-atproto-settings wasm-atproto-set
         --prod-pkg libs/fauna-wasm-launch/pkg \
         --test-pkg libs/fauna-wasm-launch/pkg-test \
         --stem fauna_wasm_launch
+    {{py}} scripts/check-wasm-seam-exclusion.py \
+        --prod-pkg libs/fauna-wasm-folders/pkg \
+        --test-pkg libs/fauna-wasm-folders/pkg-test \
+        --stem fauna_wasm_folders
 
 # Core WASM chunk (libs/fauna-wasm) — PRODUCTION flavor.
 #
@@ -620,7 +672,7 @@ wasm-core:
         --from libs/fauna-wasm/pkg --to apps/fauna-web/static
 
 _wasm-core-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web
 
 # Test-flavoured core wasm: adds `libs/fauna-wasm`'s `test-helpers` feature, which
 # is what compiles the e2e injection seams (`installMockBackendsForTest`,
@@ -655,7 +707,7 @@ wasm-core-test:
         --from libs/fauna-wasm/pkg-test --to apps/fauna-web/static
 
 _wasm-core-test-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web --out-dir pkg-test -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm --target web --out-dir pkg-test -- --features test-helpers
 
 # Onboarding WASM chunk (libs/fauna-wasm-onboarding).
 #
@@ -690,7 +742,7 @@ wasm-onboarding:
         --from libs/fauna-wasm-onboarding/pkg --to apps/fauna-web/static
 
 _wasm-onboarding-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web
 
 # Launch WASM chunk (libs/fauna-wasm-launch) — the shared `LaunchMachine`'s JS
 # bindings, which drive the § App-launch routing rows off the SPA's
@@ -725,7 +777,7 @@ wasm-launch:
         --from libs/fauna-wasm-launch/pkg --to apps/fauna-web/static
 
 _wasm-launch-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-launch/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web
 
 wasm-launch-test:
     @{{py}} scripts/build-if-stale.py --label wasm-launch-test \
@@ -739,7 +791,7 @@ wasm-launch-test:
         --from libs/fauna-wasm-launch/pkg-test --to apps/fauna-web/static
 
 _wasm-launch-test-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-test -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-launch/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-test -- --features test-helpers
 
 # Test-flavoured onboarding wasm: includes the test-helpers feature so
 # the e2e bridge can call setHandleCheckSnapshotForTest /
@@ -785,29 +837,53 @@ wasm-onboarding-test:
         --from libs/fauna-wasm-onboarding/pkg-test --to apps/fauna-web/static
 
 _wasm-onboarding-test-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web --out-dir pkg-test -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-onboarding --target web --out-dir pkg-test -- --features test-helpers
 
 # Folder wizard + page-level Devices WASM chunk (libs/fauna-wasm-folders:
 # `FolderWizardMachine` + `DevicesMachine`). Wired into the `wasm:` aggregate
-# (and `web-test`) so `just web` builds it; the web Devices page renders off the
-# shared `DevicesMachine` via `#lib/wasm-folders` (web-renderer track).
+# (and, as `wasm-folders-test`, `web-test`) so `just web` builds it; the web
+# Devices page renders off the shared `DevicesMachine` via `#lib/wasm-folders`
+# (web-renderer track).
+#
+# TWO producers since 2026-10-31, same shape as wasm-onboarding/
+# wasm-onboarding-test — this recipe and `wasm-folders-test` below, which builds
+# the SAME crate with `--features test-helpers` (the trust facet's render clock
+# in THIS chunk's runtime: `custodyFacetLoad` folds receipt freshness here, so
+# the core chunk's offset never reaches it). Separate out-dirs (`pkg` vs
+# `pkg-test`), each gate keyed on its own out-dir, and the `static/` mirror runs
+# unconditionally so `just web` and `just web-test` are correct in either order
+# (see wasm-onboarding's comment for the false-green story this shape avoids).
 wasm-folders:
     #!/usr/bin/env bash
     set -euo pipefail
     {{py}} scripts/build-if-stale.py --label wasm-folders \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm \
-        --target apps/fauna-web/static/fauna_wasm_folders.js \
-        --target apps/fauna-web/static/fauna_wasm_folders.d.ts \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm.d.ts \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders.js \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders.d.ts \
+        --target libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm.d.ts \
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
         -- just _wasm-folders-impl
+    {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_folders \
+        --from libs/fauna-wasm-folders/pkg --to apps/fauna-web/static
 
 _wasm-folders-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-folders/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web
-    cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm apps/fauna-web/static/
-    cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders.js apps/fauna-web/static/
-    cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders.d.ts apps/fauna-web/static/
-    cp libs/fauna-wasm-folders/pkg/fauna_wasm_folders_bg.wasm.d.ts apps/fauna-web/static/
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-folders/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web
+
+wasm-folders-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{py}} scripts/build-if-stale.py --label wasm-folders-test \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders_bg.wasm \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders.js \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders.d.ts \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders_bg.wasm.d.ts \
+        --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude '*/pkg-panic-witness/*' \
+        -- just _wasm-folders-test-impl
+    {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_folders \
+        --from libs/fauna-wasm-folders/pkg-test --to apps/fauna-web/static
+
+_wasm-folders-test-impl: _wasm32-cc-check
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-folders/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web --out-dir pkg-test -- --features test-helpers
 
 # Page-level Backups WASM chunk (libs/fauna-wasm-backups: the snapshot half's
 # `BackupsMachine`). Its own chunk (not folded into fauna-wasm-folders) because
@@ -827,7 +903,7 @@ wasm-backups:
         -- just _wasm-backups-impl
 
 _wasm-backups-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-backups/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-backups --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-backups/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-backups --target web
     cp libs/fauna-wasm-backups/pkg/fauna_wasm_backups_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-backups/pkg/fauna_wasm_backups.js apps/fauna-web/static/
     cp libs/fauna-wasm-backups/pkg/fauna_wasm_backups.d.ts apps/fauna-web/static/
@@ -850,7 +926,7 @@ wasm-media:
         -- just _wasm-media-impl
 
 _wasm-media-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-media/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-media --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-media/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-media --target web
     cp libs/fauna-wasm-media/pkg/fauna_wasm_media_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-media/pkg/fauna_wasm_media.js apps/fauna-web/static/
     cp libs/fauna-wasm-media/pkg/fauna_wasm_media.d.ts apps/fauna-web/static/
@@ -873,7 +949,7 @@ wasm-labeler-catalog:
         -- just _wasm-labeler-catalog-impl
 
 _wasm-labeler-catalog-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-labeler-catalog --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-labeler-catalog --target web
     cp libs/fauna-wasm-labeler-catalog/pkg/fauna_wasm_labeler_catalog_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-labeler-catalog/pkg/fauna_wasm_labeler_catalog.js apps/fauna-web/static/
     cp libs/fauna-wasm-labeler-catalog/pkg/fauna_wasm_labeler_catalog.d.ts apps/fauna-web/static/
@@ -896,7 +972,7 @@ wasm-share:
         -- just _wasm-share-impl
 
 _wasm-share-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-share/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-share --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-share/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-share --target web
     cp libs/fauna-wasm-share/pkg/fauna_wasm_share_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-share/pkg/fauna_wasm_share.js apps/fauna-web/static/
     cp libs/fauna-wasm-share/pkg/fauna_wasm_share.d.ts apps/fauna-web/static/
@@ -921,7 +997,7 @@ wasm-connected-apps:
         -- just _wasm-connected-apps-impl
 
 _wasm-connected-apps-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-connected-apps/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-connected-apps --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-connected-apps/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-connected-apps --target web
     cp libs/fauna-wasm-connected-apps/pkg/fauna_wasm_connected_apps_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-connected-apps/pkg/fauna_wasm_connected_apps.js apps/fauna-web/static/
     cp libs/fauna-wasm-connected-apps/pkg/fauna_wasm_connected_apps.d.ts apps/fauna-web/static/
@@ -957,7 +1033,7 @@ wasm-atproto-settings:
         --from libs/fauna-wasm-atproto-settings/pkg --to apps/fauna-web/static
 
 _wasm-atproto-settings-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web
 
 wasm-atproto-settings-test:
     @{{py}} scripts/build-if-stale.py --label wasm-atproto-settings-test \
@@ -971,7 +1047,7 @@ wasm-atproto-settings-test:
         --from libs/fauna-wasm-atproto-settings/pkg-test --to apps/fauna-web/static
 
 _wasm-atproto-settings-test-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web --out-dir pkg-test -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg-test -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web --out-dir pkg-test -- --features test-helpers
 
 # Content-index WASM chunk (libs/fauna-wasm-content-index). ON HOLD — not in
 # the `wasm` aggregate. Compiles to wasm32 but tantivy panics at runtime
@@ -987,7 +1063,7 @@ wasm-content-index:
         -- just _wasm-content-index-impl
 
 _wasm-content-index-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-content-index/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-content-index --target web
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-content-index/pkg -- {{slot_build}} wasm-pack build libs/fauna-wasm-content-index --target web
     cp libs/fauna-wasm-content-index/pkg/fauna_wasm_content_index_bg.wasm apps/fauna-web/static/
     cp libs/fauna-wasm-content-index/pkg/fauna_wasm_content_index.js apps/fauna-web/static/
     cp libs/fauna-wasm-content-index/pkg/fauna_wasm_content_index.d.ts apps/fauna-web/static/
@@ -1025,28 +1101,28 @@ wasm-panic-witness:
         -- just _wasm-panic-witness-impl
 
 _wasm-panic-witness-impl: _wasm32-cc-check
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-launch/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-panic-witness --out-name fauna_wasm_launch_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-launch/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-launch --target web --out-dir pkg-panic-witness --out-name fauna_wasm_launch_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-launch/pkg-panic-witness/fauna_wasm_launch_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-launch/pkg-panic-witness/fauna_wasm_launch_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-media/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-media --target web --out-dir pkg-panic-witness --out-name fauna_wasm_media_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-media/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-media --target web --out-dir pkg-panic-witness --out-name fauna_wasm_media_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-media/pkg-panic-witness/fauna_wasm_media_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-media/pkg-panic-witness/fauna_wasm_media_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-folders/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web --out-dir pkg-panic-witness --out-name fauna_wasm_folders_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-folders/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-folders --target web --out-dir pkg-panic-witness --out-name fauna_wasm_folders_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-folders/pkg-panic-witness/fauna_wasm_folders_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-folders/pkg-panic-witness/fauna_wasm_folders_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-labeler-catalog --target web --out-dir pkg-panic-witness --out-name fauna_wasm_labeler_catalog_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-labeler-catalog --target web --out-dir pkg-panic-witness --out-name fauna_wasm_labeler_catalog_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-labeler-catalog/pkg-panic-witness/fauna_wasm_labeler_catalog_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-labeler-catalog/pkg-panic-witness/fauna_wasm_labeler_catalog_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-share/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-share --target web --out-dir pkg-panic-witness --out-name fauna_wasm_share_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-share/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-share --target web --out-dir pkg-panic-witness --out-name fauna_wasm_share_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-share/pkg-panic-witness/fauna_wasm_share_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-share/pkg-panic-witness/fauna_wasm_share_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-connected-apps/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-connected-apps --target web --out-dir pkg-panic-witness --out-name fauna_wasm_connected_apps_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-connected-apps/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-connected-apps --target web --out-dir pkg-panic-witness --out-name fauna_wasm_connected_apps_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-connected-apps/pkg-panic-witness/fauna_wasm_connected_apps_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-connected-apps/pkg-panic-witness/fauna_wasm_connected_apps_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web --out-dir pkg-panic-witness --out-name fauna_wasm_atproto_settings_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-atproto-settings/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-atproto-settings --target web --out-dir pkg-panic-witness --out-name fauna_wasm_atproto_settings_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-atproto-settings/pkg-panic-witness/fauna_wasm_atproto_settings_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-atproto-settings/pkg-panic-witness/fauna_wasm_atproto_settings_panic_witness_bg.wasm apps/fauna-web/static/
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_mutex}}libs/fauna-wasm-backups/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-backups --target web --out-dir pkg-panic-witness --out-name fauna_wasm_backups_panic_witness -- --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{wasm_trim}} {{wasm_mutex}}libs/fauna-wasm-backups/pkg-panic-witness -- {{slot_build}} wasm-pack build libs/fauna-wasm-backups --target web --out-dir pkg-panic-witness --out-name fauna_wasm_backups_panic_witness -- --features test-helpers
     cp libs/fauna-wasm-backups/pkg-panic-witness/fauna_wasm_backups_panic_witness.js apps/fauna-web/static/
     cp libs/fauna-wasm-backups/pkg-panic-witness/fauna_wasm_backups_panic_witness_bg.wasm apps/fauna-web/static/
 
@@ -1100,9 +1176,8 @@ web-manifest: wasm i18n-generate providers-generate
 # clone of this repository, never this working tree — and compare every file
 # (piece 2's verifier half). Exits non-zero naming each changed, missing or
 # extra file. The commit must be in this clone (`git fetch` first if the
-# manifest is newer than it). The wasm path remap (the
-# CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS export above) is what lets a
-# rebuild in a temporary directory match a build made anywhere else; a toolchain
+# manifest is newer than it). The wasm path trim (`wasm_trim` above, cargo's
+# `trim-paths`) is what lets a rebuild in a temporary directory match a build made anywhere else; a toolchain
 # difference (wasm-pack's binaryen, deno) prints as a note beside any mismatch.
 # The rebuild is cold by design — its own cargo target inside the throwaway
 # directory (several GB under $TMPDIR), removed on exit. BASH_ENV is cleared
@@ -1205,7 +1280,7 @@ web-unit-test:
 # (`wasm-content-index` stays out of both lists on purpose: it is ON HOLD, and
 # its only importer is a skipped test, so it never enters the SPA's rollup graph.)
 #
-# Linux only, like `wasm:` above (see its comment): `[linux]` fans the 9 chunks
+# Linux only, like `wasm:` above (see its comment): `[linux]` fans the 10 chunks
 # out concurrently under one build slot (`_wasm-fanout-test` below); the
 # `[macos]`/`[windows]` variant refuses. Paid more often
 # than `web-check`'s own `wasm:` dependency: every `--client web` e2e run
@@ -1228,7 +1303,7 @@ web-test:
 # output, never races their out-dirs.
 #
 # Same warm-tree precheck as `[linux] wasm:` above (build-system.md § Build/e2e
-# slot locks): probe all 9 chunks via `build-if-stale --check` BEFORE the
+# slot locks): probe all 10 chunks via `build-if-stale --check` BEFORE the
 # mutex+slot chain. Unlike `wasm:`, this can't early-`exit` on all-fresh — the
 # SPA build-if-stale step below must still run unconditionally either way.
 [linux]
@@ -1262,12 +1337,12 @@ web-test: i18n-generate providers-generate
         --target libs/fauna-wasm-launch/pkg-test/fauna_wasm_launch.js \
         --target libs/fauna-wasm-launch/pkg-test/fauna_wasm_launch.d.ts \
         --target libs/fauna-wasm-launch/pkg-test/fauna_wasm_launch_bg.wasm.d.ts || fresh=0
-    # mirrors: wasm-folders (openmls-dependent — see wasm-folders' comment)
-    "${common[@]}" ${VENDOR_SOURCE:-} --label wasm-folders \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm \
-        --target apps/fauna-web/static/fauna_wasm_folders.js \
-        --target apps/fauna-web/static/fauna_wasm_folders.d.ts \
-        --target apps/fauna-web/static/fauna_wasm_folders_bg.wasm.d.ts || fresh=0
+    # mirrors: wasm-folders-test (openmls-dependent — see wasm-folders' comment)
+    "${common[@]}" ${VENDOR_SOURCE:-} --label wasm-folders-test \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders_bg.wasm \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders.js \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders.d.ts \
+        --target libs/fauna-wasm-folders/pkg-test/fauna_wasm_folders_bg.wasm.d.ts || fresh=0
     # mirrors: wasm-backups (openmls-dependent — see wasm-backups' comment)
     "${common[@]}" ${VENDOR_SOURCE:-} --label wasm-backups \
         --target apps/fauna-web/static/fauna_wasm_backups_bg.wasm \
@@ -1306,12 +1381,13 @@ web-test: i18n-generate providers-generate
         --target libs/fauna-wasm-atproto-settings/pkg-test/fauna_wasm_atproto_settings_bg.wasm.d.ts || fresh=0
     if [ "$fresh" = "1" ]; then
         # `fauna_wasm`/`fauna_wasm_onboarding`/`fauna_wasm_launch`/
-        # `fauna_wasm_atproto_settings` are two-producer chunks (prod vs test
-        # flavor share one `static/` slot — see `wasm-core-test`'s comment). The
+        # `fauna_wasm_folders`/`fauna_wasm_atproto_settings` are two-producer
+        # chunks (prod vs test flavor share one `static/` slot — see
+        # `wasm-core-test`'s comment). The
         # --check above only proves `pkg-test/` itself is fresh; it says nothing
         # about which flavor `static/` currently holds (e.g. a `just web`/
         # `wasm-seam-check` run in between last asserted the PROD flavor
-        # there). Re-run all four two-producer mirrors unconditionally — cheap (byte-compare, no
+        # there). Re-run all five two-producer mirrors unconditionally — cheap (byte-compare, no
         # wasm-pack) — so this fast path can't leave `static/` on the wrong
         # flavor the way the "all fresh, skip everything" shortcut used to.
         {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm \
@@ -1320,6 +1396,8 @@ web-test: i18n-generate providers-generate
             --from libs/fauna-wasm-onboarding/pkg-test --to apps/fauna-web/static
         {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_launch \
             --from libs/fauna-wasm-launch/pkg-test --to apps/fauna-web/static
+        {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_folders \
+            --from libs/fauna-wasm-folders/pkg-test --to apps/fauna-web/static
         {{py}} scripts/sync-wasm-static.py -q --stem fauna_wasm_atproto_settings \
             --from libs/fauna-wasm-atproto-settings/pkg-test --to apps/fauna-web/static
         echo "[web-test] all 10 wasm chunks up-to-date — no build slot taken"
@@ -1327,7 +1405,7 @@ web-test: i18n-generate providers-generate
         {{wasm_mutex}}libs/fauna-wasm/pkg-test -- \
         {{wasm_mutex}}libs/fauna-wasm-onboarding/pkg-test -- \
         {{wasm_mutex}}libs/fauna-wasm-launch/pkg-test -- \
-        {{wasm_mutex}}libs/fauna-wasm-folders/pkg -- \
+        {{wasm_mutex}}libs/fauna-wasm-folders/pkg-test -- \
     {{wasm_mutex}}libs/fauna-wasm-backups/pkg -- \
         {{wasm_mutex}}libs/fauna-wasm-media/pkg -- \
         {{wasm_mutex}}libs/fauna-wasm-labeler-catalog/pkg -- \
@@ -1359,7 +1437,7 @@ web-test: i18n-generate providers-generate
 # swaps). NEVER call this directly.
 [linux]
 [parallel]
-_wasm-fanout-test: wasm-core-test wasm-onboarding-test wasm-launch-test wasm-folders wasm-backups wasm-media wasm-labeler-catalog wasm-share wasm-connected-apps wasm-atproto-settings-test
+_wasm-fanout-test: wasm-core-test wasm-onboarding-test wasm-launch-test wasm-folders-test wasm-backups wasm-media wasm-labeler-catalog wasm-share wasm-connected-apps wasm-atproto-settings-test
 
 # Notes WYSIWYG editor browser harness (web). Bundles the SHIPPING
 # `notesEditorExtensions()` + the real wasm into a standalone esbuild page, mounts
@@ -1388,7 +1466,7 @@ web-dev: web
     @echo "Starting fauna-nest and static file server..."
     @echo "Node API: http://127.0.0.1:3000"
     @echo "Web UI:   http://127.0.0.1:8080"
-    {{slot_build}} cargo build -p fauna-nest
+    {{slot_build_crate}} cargo build -p fauna-nest
     "$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')/debug/fauna-nest{{exe_suffix}}" --bind 0.0.0.0:3000 --cors-origin http://127.0.0.1:8080 --cors-origin http://localhost:8080 &
     {{py}} -m http.server 8080 --directory apps/fauna-web/build
 
@@ -1417,11 +1495,15 @@ site:
         --source docs/sites/fauna-social \
         --source docs/features \
         --source installer/official-apps.json \
+        --source installer/downloads.json \
+        --source scripts/check-site-urls.py \
         -- just _site-impl
 
 _site-impl:
     deno install --config sites/fauna-social/deno.json
     {{slot_build}} bash -c 'cd sites/fauna-social && deno task build'
+    @# No slashed or relative page URL in what was built (front-door.md § Public-vhost topology).
+    {{py}} scripts/check-site-urls.py sites/fauna-social/dist
 
 # Use this to review the site, NOT `deno task dev` — dev serves an unbundled
 # build with an injected HMR client, i.e. not what visitors get.
@@ -1451,7 +1533,8 @@ servers-release target="": i18n-generate providers-generate
         cargo build --locked -p "$crate" --release {{ if target == "" { "" } else { "--target " + target } }}
     done
 
-# Build nest Docker image
+# Build nest Docker image — a tier_4 artifact build, earned only by a diff
+# touching the image's plumbing (testing.md § The tier a verification earns).
 docker-build: i18n-generate providers-generate
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1623,8 +1706,32 @@ deploy-verify-cloud-firewall host *ARGS:
 
 # Run E2E tests (Python + Playwright)
 e2e: web i18n-generate providers-generate
-    {{slot_build}} cargo build -p fauna-nest
+    {{slot_build_crate}} cargo build -p fauna-nest
     pytest tests/e2e-unified/tests/web/ -v
+
+# The front of an e2e run, alone: conftest's prewarm-only run of the given pytest
+# args — every prebuild job the selection reaches, under each recipe's own gate and
+# slot, the lane named and never taken — after a plan header (`[e2e-plan]` lines:
+# the lane and what admits it, each job warm or stale from its freshness gate, kache,
+# the disk floor). `--plan` prints the header and exits 0, nothing built, no slot
+# taken. Run it, graded, before a long verification whose front may be cold
+# (build-slot-pool.md § Cross-pool acquisition order → *The preflight*). No outer
+# slot: each prebuild recipe takes its own, as the warm pass does.
+#
+#   just e2e-preflight --plan tests/e2e-unified/tests/test_x.py --app linux
+#   just e2e-preflight tests/e2e-unified/tests/test_x.py --app linux
+[positional-arguments]
+e2e-preflight *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=()
+    plan=
+    for a in "$@"; do
+        if [ "$a" = "--plan" ]; then plan=1; else args+=("$a"); fi
+    done
+    export FAUNA_E2E_PREWARM_ONLY=1
+    if [ -n "$plan" ]; then export FAUNA_E2E_PLAN_ONLY=1; fi
+    exec pytest "${args[@]}"
 
 # Tier-filtered E2E runs (by mocking depth; see tests/e2e-unified/README.md).
 #   tier_1 = in-process Python, no driver, no nest
@@ -1647,22 +1754,30 @@ e2e: web i18n-generate providers-generate
 # so a cold win checkout — the merge-gate check's pinned tree is one on most
 # passes — otherwise fails `test_fauna_ffi.py`'s builder tests, not skips them.
 #
+# On linux/mac the first line builds the harness-flavor fauna-ffi cdylib the same
+# way (`just e2e-ffi release`, build-if-stale-gated and self-slotted in `build`):
+# the cdylib `fauna_ffi.py` would otherwise compile inside the `tier_1` hold, where
+# the mac core pause cannot throttle a compiler (mac-core-hold.md § Per-core
+# tokens, mechanism (4); measured 2026-10-30: all four holds after the conftest-only warm carried
+# an `e2e-ffi` cargo row of 197-385 s). `_prewarm_tier_1_run` warms the same build
+# for a BARE pytest run, which is the only run that takes its slot after it.
+#
 # The pytest line self-slots in the `tier_1` lane (slot_tier_1 above): the three
 # merge-gate check scripts call this recipe bare, exactly like every recipe
 # that owns its own slot, and a hand reproduction gets the same policy. The
-# win-only FFI prerequisite stays OUTSIDE the lane — it is a build and takes
+# FFI prerequisite stays OUTSIDE the lane — it is a build and takes
 # its own `build` slot. The recipe still NAMES NO FILES (directory + marker);
 # test_e2e_tier_1_test_recipe_names_no_files pins that, and
 # test_e2e_tier1_gate_is_a_bare_just_call_whose_recipe_self_slots pins the lane.
 e2e-tier-1-test *ARGS:
-    {{ if os() == "windows" { "just windows-ffi-test dev" } else { "true" } }}
+    {{ if os() == "windows" { "just windows-ffi-test dev" } else { "just e2e-ffi release" } }}
     {{slot_tier_1}} pytest tests/e2e-unified/tests/ --tier 1 -v {{ARGS}}
 
 e2e-tier-2-test *ARGS:
-    pytest tests/e2e-unified/tests/ --tier 2 -v {{ARGS}}
+    pytest --long-run 'e2e-tier-2-test' tests/e2e-unified/tests/ --tier 2 -v {{ARGS}}
 
 e2e-tier-3-test *ARGS:
-    pytest tests/e2e-unified/tests/ --tier 3 -v {{ARGS}}
+    pytest --long-run 'e2e-tier-3-test' tests/e2e-unified/tests/ --tier 3 -v {{ARGS}}
 
 # CHECK-tier gate — the nightly cross-app parity run, one APP per invocation: the whole
 # tier_2/3 selection on `tui` every night, `linux`/`web` on alternating nights.
@@ -1675,10 +1790,22 @@ e2e-tier-3-test *ARGS:
 # and a run the gate abandons at its bound ends itself instead of holding the
 # lane on as an orphan.
 e2e-tier-23-check APP:
-    pytest tests/e2e-unified/tests/ --tier 2,3 --app {{APP}} -v --durations=50 --max-run-secs 28800
+    pytest --long-run 'e2e-tier-23-check' tests/e2e-unified/tests/ --tier 2,3 --app {{APP}} -v --durations=50 --max-run-secs 28800
 
 e2e-tier-4-test *ARGS:
-    pytest tests/e2e-unified/tests/ --tier 4 -v {{ARGS}}
+    pytest --long-run 'e2e-tier-4-test' tests/e2e-unified/tests/ --tier 4 -v {{ARGS}}
+
+# The verify queue's `nest-image` action (delayed-testing.md § The verify queue):
+# this tree's docker-mode test image, keyed on its sources and reused when the key
+# is present. `docker_build` holds the build's lock and its own `build` slot, and an
+# image only for tests is built locally, never dispatched (image-pipeline.md § Image
+# tags & channels). The interpreter is pytest's: the helper imports the harness.
+nest-test-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd tests/e2e-unified
+    interpreter=$(head -n 1 "$(command -v pytest)")
+    FAUNA_ALLOW_NEST_IMAGE_BUILD=1 "${interpreter#\#!}" -c "import sys; from pathlib import Path; sys.path[:0] = ['.', '..', '../..']; from tests.platform.docker.helpers import docker_build; print(docker_build(Path('../..').resolve()))"
 
 # The nest-mode axis: run the ORDINARY journey suite against the real deployment
 # artifact instead of a locally-built binary (testing.md § Default app and nest
@@ -1701,7 +1828,7 @@ e2e-tier-4-test *ARGS:
 #        just e2e-docker-mode-test ghcr.io/faunasocial/nest:sha-abc123
 #        just e2e-docker-mode-test ghcr.io/faunasocial/nest:latest --app tui
 e2e-docker-mode-test IMAGE="ghcr.io/faunasocial/nest:latest" *ARGS:
-    pytest tests/e2e-unified/tests/ --nest docker:{{IMAGE}} -v {{ARGS}}
+    pytest --long-run 'e2e-docker-mode-test' tests/e2e-unified/tests/ --nest docker:{{IMAGE}} -v {{ARGS}}
 
 # The nest-mode axis's LIVE sweep: run the suite against an already-deployed real
 # box (testing.md § Default app and nest mode). The only mode with real DNS, a
@@ -1727,7 +1854,7 @@ e2e-docker-mode-test IMAGE="ghcr.io/faunasocial/nest:latest" *ARGS:
 #        just e2e-live-mode-test https://staging.example -k filesync
 #        just e2e-live-mode-test https://dev.fauna.build --app tui
 e2e-live-mode-test URL="https://dev.fauna.build" *ARGS:
-    pytest tests/e2e-unified/tests/ --nest live:{{URL}} -v {{ARGS}}
+    pytest --long-run 'e2e-live-mode-test' tests/e2e-unified/tests/ --nest live:{{URL}} -v {{ARGS}}
 
 # The CD gate: the curated `cd_suite` journey subset against a deployed box, as
 # the promote-after-verify pipeline's verify job runs it. Every part of this
@@ -1766,7 +1893,7 @@ e2e-live-mode-test URL="https://dev.fauna.build" *ARGS:
 # Usage: just e2e-cd-gate https://dev.fauna.build
 #        just e2e-cd-gate https://dev.fauna.build -k port25
 e2e-cd-gate URL *ARGS:
-    pytest tests/e2e-unified/tests -m cd_suite --nest live:{{URL}} --live-box disposable --fail-on-skip -v {{ARGS}}
+    pytest --long-run 'e2e-cd-gate' tests/e2e-unified/tests -m cd_suite --nest live:{{URL}} --live-box disposable --fail-on-skip -v {{ARGS}}
 
 # Real-fediverse interop harness (tests/platform/fediverse/): a pinned official
 # third-party server federated against a locally-built fauna-nest across a real
@@ -1817,7 +1944,7 @@ e2e-gotosocial-test *ARGS:
 # sweep set the pre-2026-08-01 default gave it rather than inheriting `[tui]`.
 # A trailing `--app <x>` in ARGS still wins (last occurrence).
 e2e-crash-recovery-test *ARGS:
-    pytest tests/e2e-unified/tests/ -m crash_recovery -v --app sweep {{ARGS}}
+    pytest --long-run 'e2e-crash-recovery-test' tests/e2e-unified/tests/ -m crash_recovery -v --app sweep {{ARGS}}
 
 # Warm the previous-build cache: rebuild the PINNED previous release's nest + the
 # client binary THIS machine can build (pinned-previous-build.toml;
@@ -1845,8 +1972,36 @@ e2e-prev-build *ARGS:
     # slot just to let `--build` conclude there is nothing to do.
     if {{py}} tests/e2e-unified/helpers/prev_build.py --path {{ARGS}} >/dev/null 2>&1; then
         echo "[e2e-prev-build] pinned build already cached — no build slot taken"
+    elif [[ " {{ARGS}} " == *" --client web "* ]]; then
+        # The pinned `just web-test` takes its wasm out-dir mutexes and then its own build
+        # slot, and the machine-wide order puts every such mutex before 'build' — so it
+        # must not run inside an outer `--pool build` wrap (build-slot.py refuses it, the
+        # AB-BA deadlock of 2026-09-26). prev_build.py slots its own cargo steps instead.
+        {{py}} tests/e2e-unified/helpers/prev_build.py --build {{ARGS}}
     else
         {{slot_build}} {{py}} tests/e2e-unified/helpers/prev_build.py --build {{ARGS}}
+    fi
+
+# The release's own app: build CLIENT (tui | linux | reports-pass) at COMMIT (a
+# full private sha) into the previous-build cache, client alone — what the
+# organisation drives against a kept box launch instead of the tip's app
+# (docs/goal/architecture/org-nests.md § fauna.build → Disposable, rule (1)).
+# The commit is resolved from the box's image by helpers/release_app.py (its
+# `resolve` verb); the e2e conftest and scripts/uat-reports.py call this with
+# it. A warm cache takes no build slot (the e2e-prev-build probe); a client
+# absent at COMMIT is refused (exit 3) before anything is built.
+# Usage: just e2e-release-app-build <sha> tui
+e2e-release-app-build COMMIT CLIENT:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    {{py}} tests/e2e-unified/helpers/release_app.py path --commit {{COMMIT}} --client {{CLIENT}} >/dev/null || rc=$?
+    if [ "$rc" = 0 ]; then
+        echo "[e2e-release-app-build] {{CLIENT}} at {{COMMIT}} already cached — no build slot taken"
+    elif [ "$rc" = 1 ]; then
+        {{slot_build}} {{py}} tests/e2e-unified/helpers/release_app.py build --commit {{COMMIT}} --client {{CLIENT}}
+    else
+        exit "$rc"
     fi
 
 # Real-binary version skew (version-compatibility.md § Dim 6, the real-binary
@@ -1856,14 +2011,14 @@ e2e-prev-build *ARGS:
 # can build (§ Dim 6: each leg runs on its own machine). Needs the previous-build
 # cache (`just e2e-prev-build`) — the suites warm it themselves if cold.
 # `--app sweep` (this machine's full set) is the recipe default because the skew
-# grid is parametrized over the GUI apps and only its mixed-nests cell runs on
-# tui: under the 2026-08-01 rust-first default (`[tui]`) a bare run collects that
-# one cell and nothing of the grid. A trailing `--app <x>` in ARGS still wins
+# grid is parametrized over the apps: under the 2026-08-01 rust-first default
+# (`[tui]`) a bare run collects the tui leg and none of the machine's native
+# one. A trailing `--app <x>` in ARGS still wins
 # (last occurrence). `--include-independent` keeps the nest-only
 # upgrade-in-place cell (`test_nest_data_upgrade.py`: the pinned nest's data dir
 # reopened by the HEAD nest), which launches no app and so is client-independent.
 e2e-version-skew-test *ARGS:
-    pytest tests/e2e-unified/tests/ -m version_skew -v --app sweep --include-independent {{ARGS}}
+    pytest --long-run 'e2e-version-skew-test' tests/e2e-unified/tests/ -m version_skew -v --app sweep --include-independent {{ARGS}}
 
 # The macOS CLIENT-ARTIFACT suite: drive the SHIPPED artifacts instead of the
 # locally-built binaries — the real `Fauna.app` bundle, a DMG-installed copy of
@@ -1892,7 +2047,7 @@ e2e-version-skew-test *ARGS:
 # Usage: just e2e-walk-sweep
 #        just e2e-walk-sweep --app linux
 e2e-walk-sweep *ARGS:
-    pytest tests/e2e-unified/tests/walk/ --walk-sweep -v {{ARGS}}
+    pytest --long-run 'e2e-walk-sweep' tests/e2e-unified/tests/walk/ --walk-sweep -v {{ARGS}}
 
 # Produce the store-listing screenshots: the real app on injected fixture content,
 # its own window sized and captured to PNG, each checked against the store's
@@ -1999,15 +2154,59 @@ e2e-linux-artifact-test *ARGS:
 e2e-tui-artifact-test *ARGS:
     pytest tests/e2e-unified/tests/artifact --client-artifact --app tui -v {{ARGS}}
 
+# The android half: the app as Google Play delivered it. The store driver
+# (`android-store-driver`, a self-instrumenting UiAutomator APK) opens the app's
+# Play listing on the run's device, presses Install, and drives the installed
+# app through UiAutomation alone (feature-catalog.md § Implementation status
+# today, how the Android store install is driven). Needs a device with the Play
+# Store signed in to an internal tester; skips as environment otherwise.
+# The sign-in leg needs no input: it signs in as the google-reviewer account on
+# test.fauna.build from the staging box's kept identity file
+# (tests/e2e-unified/helpers/store_install_account.py).
+# The device is the fauna-e2e-play AVD on host.
+# Usage: just e2e-android-store-test --device-serial emulator-5556
+[linux]
+e2e-android-store-test *ARGS:
+    pytest tests/e2e-unified/tests/artifact/test_android_store_install.py --client-artifact --app android -v {{ARGS}}
+
+# The iOS half: the app as TestFlight delivered it. The store driver
+# (`ios-store-driver`, an XCUITest runner bundle) opens TestFlight on the
+# physical device paired with this machine, presses Install, and drives the
+# installed app through the accessibility tree alone (feature-catalog.md
+# § Implementation status today, how the iOS store install is driven). Needs a
+# paired iPhone in Developer Mode with TestFlight signed in to a tester; skips
+# as environment otherwise. A simulator never counts: TestFlight installs only
+# on a device. Run `just ios-store-driver` first (the witness reads the
+# runner, never builds it). The sign-in leg needs no input: it signs in as the
+# apple-reviewer account on test.fauna.build from the staging box's kept
+# identity file (tests/e2e-unified/helpers/store_install_account.py), and
+# skips as environment where that file is absent.
+# Usage: just e2e-ios-store-test
+[macos]
+e2e-ios-store-test *ARGS:
+    pytest tests/e2e-unified/tests/artifact/test_ios_store_install.py --client-artifact --app ios -v {{ARGS}}
+
+# The windows half: the app as the Microsoft Store delivered it, activated from its
+# Start-menu entry and driven by UI Automation alone (feature-catalog.md
+# § Implementation status today, how the Windows Store install is driven). Without
+# a Store-signed install the witness skips as environment; the development-mode
+# nodes register the store-no-payments layout `windows-store-package` staged under
+# the reserved identity, and refuse it as the witness.
+# Usage: just e2e-windows-store-test
+[windows]
+e2e-windows-store-test *ARGS:
+    pytest tests/e2e-unified/tests/artifact/test_windows_store_install.py --client-artifact --app windows -v {{ARGS}}
+
 # The full-flavor RELEASE build of the terminal app — what the archive channel
 # ships (installers/tui.md § What any channel must satisfy: a direct download
 # carries the full default-feature build; `tui-store-safe` is the store flavor).
 # The archive's three binaries: tui's spawner expects fauna-sync-agent beside it,
-# and fauna-cli is the cli app's device shell. `release.yml` (Linux) and
-# `release-macos.yml` (darwin) build the archive with this recipe, one `target`
-# per runner (empty = the host); then `assemble-archive.sh`.
+# and fauna-cli is the cli app's device shell. `release.yml` (Linux, and the
+# Windows `windows-terminal` part, which ships the agent from `windows-services-
+# release` instead) and `release-macos.yml` (darwin) build the archive with this
+# recipe, one `target` per runner (empty = the host); then `assemble-archive.sh`.
 tui-release target="": i18n-generate providers-generate
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} cargo build --locked -p fauna-tui -p fauna-sync-agent -p fauna-cli-device --release {{ if target == "" { "" } else { "--target " + target } }}
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected {{slot_build}} {{cargo}} build --locked -p fauna-tui -p fauna-sync-agent -p fauna-cli-device --release {{ if target == "" { "" } else { "--target " + target } }}
 
 # Live, OPT-IN Hetzner provisioning e2e: provisions a REAL, PAID VPS through the
 # client onboarding path (real api.hetzner.cloud — server and DNS, a token each),
@@ -2079,18 +2278,49 @@ e2e-live-ap-serving APP="linux" *ARGS:
     pytest tests/e2e-unified/tests/test_activitypub_live.py --app {{APP}} --nest live:${FAUNA_LIVE_NEST_URL} -v -s {{ARGS}}
 
 # Live, OPT-IN, NON-DESTRUCTIVE bootstrap of a claim-fresh deployed nest
-# (the live nest) through the linux app UI: claim (or sign in) -> wait for the claimed
+# (the live nest) through an app's UI (default tui): claim (or sign in) -> wait for the claimed
 # domain's ACME cert under strict TLS -> enable mail + approve the co-located
 # bridges -> wait for mail.<domain> :993/:465/:587 under strict TLS. Idempotent:
 # on an already-bootstrapped box it signs in and mutates nothing. Never resets.
 # Base env: FAUNA_LIVE_NEST_URL (the admin seed is resolved per box: FAUNA_LIVE_SECRET_HEX > ~/.config/fauna/staging-box/<host>.json > ~/.fauna-id). An UNCLAIMED box also
-# needs FAUNA_LIVE_HANDLE (the handle to claim under — its @suffix becomes the
-# domain) and FAUNA_LIVE_CLAIM_CODE (the nest's startup banner, container log);
-# mail still off needs FAUNA_LIVE_MAIL_PASSWORD. `--nest live:` is the live_box
-# opt-in, as for e2e-live-ap-serving. APP is the first positional arg.
+# needs FAUNA_LIVE_CLAIM_CODE (the box's /data/claim-code) and the handle to claim
+# under — its @suffix becomes the domain — resolved per box like the mailbox
+# (FAUNA_LIVE_MAIL_ADDRESS > the staging-box file's handle);
+# mail still off takes the box's mail password (FAUNA_LIVE_MAIL_PASSWORD > the
+# staging-box file). `--nest live:` is the live_box opt-in, as for e2e-live-ap-serving. APP is the first positional arg.
 # Usage: FAUNA_LIVE_NEST_URL=… just e2e-live-bootstrap
-e2e-live-bootstrap APP="linux" *ARGS:
+e2e-live-bootstrap APP="tui" *ARGS:
     pytest tests/e2e-unified/tests/test_live_box_bootstrap.py --app {{APP}} --nest live:${FAUNA_LIVE_NEST_URL} -v -s {{ARGS}}
+
+# Live, OPT-IN, non-destructive: a store reviewer's likely session (sign in on a
+# fresh install, the seeded first run, message, post, report a message and a
+# post, block and unblock, the terms, Sessions and account deletion — read,
+# never pressed) as each of the three reviewer accounts, on a STAGING box
+# (dev.fauna.build or test.fauna.build; the acceptance nest is refused). Needs
+# the org accounts admitted and seeded on that box, their identity files under
+# ~/.config/fauna/staging-box/<box>/accounts/. `-k google` picks one reviewer.
+# The app is the release's: built from the commit the box serves (its health
+# `commit`), never the tip (org-nests.md § fauna.build → Disposable, rule (1)).
+# Usage: just e2e-store-reviewer test.fauna.build [tui] [pytest args]
+e2e-store-reviewer BOX APP="tui" *ARGS:
+    pytest tests/e2e-unified/tests/test_store_reviewer_journey.py --app {{APP}} --nest live:https://{{BOX}} -v -s {{ARGS}}
+
+# A store-install witness machine's own tester on a staging box (org-nests.md
+# § fauna.build → Accounts, the witness-host tester): mint this machine's
+# `<platform>-tester` identity for the box — kept 0600 under
+# ~/.config/fauna/staging-box/<box>/accounts/, never copied anywhere — and
+# register its PUBLIC key and handle in the tracked
+# tests/e2e-unified/org-testers.toml, which the staging-box provisioning drive
+# admits on every run of the box. Then land the registry. Run once
+# per witness machine; a rerun is a no-op. Needs pynacl for the public key, so
+# it runs on the e2e venv's interpreter, resolved from the pytest shim as
+# `notes-browser-harness` does. `just org-tester-list` prints the registry.
+# Usage: just org-tester-mint [test.fauna.build]
+org-tester-mint BOX="test.fauna.build":
+    "$(sed -n '1s/^#!//p' "$(command -v pytest)")" scripts/org-tester.py mint {{BOX}}
+
+org-tester-list:
+    "$(sed -n '1s/^#!//p' "$(command -v pytest)")" scripts/org-tester.py list
 
 # Live, OPT-IN ActivityPub federation e2e: the private -> public -> fediverse chain
 # across TWO real Hetzner VPSes + one local Docker private nest, ending at a real
@@ -2316,6 +2546,7 @@ feature-test-compile-check:
     {{slot_build_body}}
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-account-plane --tests --features account-driver,preference-store
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-account-store --tests --features test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-archive-import-machine --tests --features conversations-sink,rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-atproto-settings-machine --tests --features account-port
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-calendar --tests --features nest-segments
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-cli --tests --features device
@@ -2333,14 +2564,14 @@ feature-test-compile-check:
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-core --tests --features format_text,local-clock,qr_render,sqlite-schema-meta
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-credential-store --tests --features live-keychain
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-devices-machine --tests --features rpc-glue,account-port
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-ffi --tests --features file-provider-host,test-helpers
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-ffi-core --tests --features file-provider-host,test-helpers
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-folders-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-index --tests --features uniffi
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-iroh --tests --features quic
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-labeler-catalog-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-launch-machine --tests --features test-helpers,test-observer
     {{ if os() == "linux" { "CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-linux --tests --features live-secret-service" } else { "true" } }}
-    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,dmarc-report,dmarc-report-view,domain-rename,imap-client,imap-client-native,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures,tlsrpt-report
+    CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-mail --tests --features caldav-schedule,dmarc-report,dmarc-report-view,domain-rename,imap-client,imap-client-native,imap-client-tunnel,mail-export,multidomain,nest-segments,outbound-net,role-overrides,segments-codec,segments-receive,staged-envelope,tls-test-fixtures,tlsrpt-report
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-media-machine --tests --features rpc-glue
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-nest-http --tests --features launch-machine
     CARGO_RESOLVER_FEATURE_UNIFICATION=selected cargo check --locked -p fauna-onboarding-machine --tests --features test-observer
@@ -2369,7 +2600,7 @@ fauna-linux-test-check:
     #!/usr/bin/env bash
     set -euo pipefail
     {{slot_build_body}}
-    xvfb-run -a cargo test --locked -p fauna-linux --bins -- --test-threads=1
+    xvfb-run -a cargo test --locked -p fauna-linux --lib -- --test-threads=1
     cargo build --locked -p fauna-linux --bin fauna-desktop
     "${CARGO_TARGET_DIR:-target}/debug/fauna-desktop" --version
     if command -v desktop-file-validate >/dev/null 2>&1; then desktop-file-validate apps/fauna-linux/packaging/social.fauna.fauna.desktop; else echo "SKIPPED: desktop-file-validate not installed on this machine -- the public linux-desktop job still runs it"; fi
@@ -2474,6 +2705,7 @@ peer-channel-hardening-check:
 workspace-clippy-check:
     {{slot_build}} cargo clippy --locked --workspace --all-targets \
         --exclude fauna-ffi \
+        --exclude fauna-ffi-core \
         --exclude fauna-ipc \
         --exclude fauna-bridge-service \
         --exclude fauna-nest-service \
@@ -2511,8 +2743,9 @@ workspace-clippy-check:
 # and nine members with tests are bin-only — including apps/fauna-tui, the LEAD app
 # (the app new UI features land on first), whose 1407 tests live in its bin target. A --lib-only arm
 # would have silently missed 1,499 tests, the largest dark suite in the tree after
-# fauna-nest's, while looking like full workspace coverage. This is the same reason
-# fauna-linux-test-check is `--bins`.
+# fauna-nest's, while looking like full workspace coverage. (Since 2026-10-27 tui and
+# the linux app are each a library plus a thin bin, their tests run under --lib, and
+# fauna-linux-test-check is `--lib`; --bins stays for the members still bin-only.)
 #
 # SCOPE-gated, not cadence-gated — the opposite call from nest-lib-test-check, and
 # the measurement is why. That gate must carry a 24h stamp because fauna-nest's
@@ -2635,7 +2868,9 @@ workspace-clippy-check:
 #                                [target.'cfg(target_arch = "wasm32")'] dep edge
 #                                (fauna-launch-machine), which never unifies on a
 #                                native run. +2.
-#   fauna-ffi/test-helpers     — genuinely opt-in; nothing enables it. +2.
+#   fauna-ffi-core/test-helpers — genuinely opt-in; nothing enables it. +2. The
+#                                core of the fauna-ffi split, where the tests
+#                                live (the thin `fauna-ffi` only forwards it).
 #   fauna-mail/mail-export     — genuinely opt-in (client-only export twin of
 #                                imap-client, docs/goal/behavior/mail-export.md
 #                                § Export pipeline); nothing enables it.
@@ -2659,7 +2894,7 @@ workspace-clippy-check:
 # recomputes this whole split, so a NEW dark feature cannot land silently.
 workspace-test-check:
     {{slot_build}} cargo test --locked --workspace --lib --bins \
-        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report \
+        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi-core/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report,fauna-mail/imap-client-tunnel \
         --exclude fauna-nest \
         --exclude fauna-linux \
         --exclude fauna-bridge-service \
@@ -2685,7 +2920,7 @@ workspace-test-check:
 # under the five-minute line that decides a doctest gate is worth a pass slot.
 workspace-doctest-check:
     {{slot_build}} cargo test --locked --workspace --doc \
-        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report \
+        --features fauna-iroh/quic,fauna-client-core/auth-ceremony,fauna-ffi-core/test-helpers,fauna-mail/mail-export,fauna-mail/dmarc-report \
         --exclude fauna-nest \
         --exclude fauna-linux \
         --exclude fauna-bridge-service \
@@ -3211,34 +3446,21 @@ nest-lib-test-check:
     cargo test --locked -p fauna-nest --lib
     cargo test --locked -p fauna-nest --lib --features nostr,bluesky,activitypub,test-hooks,test-helpers
 
-# CHECK-tier gate — the tier_3 API contract suites (merge-gate-check.md
-# § Merge-gate check -> Accepted gaps, item (6)). ARMED 2026-08-21 as the 24th
-# gate, `run_api_contract_gate` in scripts/merge-gate-check.sh (cadence-stamped
-# nightly, NOT scope-gated, modelled on `run_nest_lib_test_gate`: 24m05s
-# measured, which sits inside nest-lib-test-check's own 27-39 min band and must
-# not ride the per-push cadence). Was deliberately left unarmed while red on
-# origin/main with 10 deterministic failures (measured 2026-08-20) —
-# arming a gate red on arrival would have published a fleet-wide red section for ten defects nobody had triaged. A follow-up dispositioned all ten as stale tests (no production defect); the suite
-# now runs 277 passed / 0 failed.
-#
-# Deliberately not `--tier 3`: the directory is the unit the gate protects (71
-# tier_3 + 1 tier_2, no tier_4), and a tier filter would silently change scope
-# as markers move.
-#
-# COST NOTE: this holds an *e2e* slot for its whole duration while ALSO
-# queueing for a *build* slot for the nest prebuild, so it draws from both
-# pools -- measured live. That is why the caller runs it bare (conftest
-# takes its e2e lane) and never under `build` (build-slot.py's own § Cross-pool
-# order: e2e-holds-while-build-queues is the only non-deadlocking direction),
-# and why it rides the nightly stamp rather than the per-push cadence.
+# The tier_3 API contract suites, whole, by hand. No gate runs this: the
+# 24th gate was RETIRED 2026-10-31 and `tests/api/` is the background tester's
+# shards (merge-gate-catalog.md, the gate's entry). The whole directory takes
+# the one-seat long lane, so this is a long-lane run: announced, and rare
+# (e2e-fleet-load.md, Q4). Run bare, never under `build`: conftest takes the e2e
+# lane and the nest prebuild queues for `build` from inside that hold (the
+# only non-deadlocking direction, build-slot.py's § Cross-pool order).
 api-contract-check:
-    pytest tests/e2e-unified/tests/api/ -v --durations=0
+    pytest --long-run 'api-contract-check' tests/e2e-unified/tests/api/ -v --durations=0
 
 # CHECK-tier gate — the share/peer-transfer plane's only end-to-end witness
 # (merge-gates.md § two-tier posture). BUILT
 # 2026-08-24 as the 25th gate, `run_share_pump_gate` in
 # scripts/merge-gate-check.sh (cadence-stamped nightly, NOT scope-gated,
-# modelled on `run_api_contract_gate`: same cadence-not-scope shape, same
+# modelled on `run_nest_lib_test_gate`: same cadence-not-scope shape, same
 # reason — `test_share_pump_two_actor.py` carries `@pytest.mark.timeout(1800)`
 # and a fresh measurement put `--app linux` at ~12 min, `--app tui` at up to
 # ~36 min under load, so running BOTH every push would fall behind a merge
@@ -3252,7 +3474,7 @@ api-contract-check:
 # (an escrow-deposit RPC disconnect stranding the folder dial row); see
 # merge-gate-check.md § 25th gate for the disposition pointer.
 #
-# COST NOTE: same e2e/build cross-pool shape as api-contract-check — the
+# COST NOTE: the e2e/build cross-pool shape of a bare pytest gate — the
 # caller runs this bare, never under `build` (build-slot.py § Cross-pool
 # order), and it rides the nightly stamp rather than the per-push cadence.
 share-pump-check:
@@ -3272,7 +3494,7 @@ share-pump-check:
 # this recipe — cadence-stamped nightly, NOT scope-gated, modelled on
 # `run_share_pump_gate`.
 #
-# COST NOTE: same e2e/build cross-pool shape as api-contract-check — the
+# COST NOTE: the e2e/build cross-pool shape of a bare pytest gate — the
 # caller runs this bare, never under `build` (build-slot.py § Cross-pool
 # order), and it rides the nightly stamp rather than the per-push cadence.
 # `--durations=0` so the check log carries every test's own wall-clock — the
@@ -3297,7 +3519,7 @@ platform-sync-check:
 # machine" contract after the 2026-08-01 rust-first default flip to `[tui]`.
 # A trailing `--app <x>` in ARGS still wins (last occurrence).
 e2e-reclaim-cycle-test *ARGS:
-    pytest tests/e2e-unified/tests/ -m reclaim_cycle --reclaim-cycle --tier 3 -v --app sweep {{ARGS}}
+    pytest --long-run 'e2e-reclaim-cycle-test' tests/e2e-unified/tests/ -m reclaim_cycle --reclaim-cycle --tier 3 -v --app sweep {{ARGS}}
 
 # Real-wire acceptance for the client-driven DNS-01 cert order core (Phase 3, S4b). Drives `obtain_certificate_dns01` end to end against a local
 # pebble ACME server + an in-process authoritative DNS responder — the only test
@@ -3353,6 +3575,74 @@ android-debug: android-ffi-test i18n-generate providers-generate
         --exclude '*/build/*' --exclude '*/.gradle/*' \
         -- {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android assembleDebug assembleDebugAndroidTest
 
+# The out-of-process store driver: a self-instrumenting UiAutomator test APK
+# that drives a Play-delivered install of the app through UiAutomation alone
+# (feature-catalog.md § Implementation status today, how the Android store
+# install is driven). No FFI and no app build: only the driver module and the
+# find/actuate source set it shares with the harness bridge. Fails until the
+# bump round that admits the module's dependencies includes it in
+# `settings.gradle.kts` (the head of `store-driver/build.gradle.kts`).
+android-store-driver:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{py}} scripts/build-if-stale.py --label android-store-driver \
+        --target apps/fauna-android/store-driver/build/outputs/apk/debug/store-driver-debug.apk \
+        --source apps/fauna-android/store-driver --source apps/fauna-android/automation-shared \
+        --source apps/fauna-android/settings.gradle.kts --source apps/fauna-android/build.gradle.kts \
+        --exclude '*/build/*' --exclude '*/.gradle/*' \
+        -- {{slot_build}} apps/fauna-android/gradlew -p apps/fauna-android :store-driver:assembleDebug
+
+# The iOS app's export-compliance (encryption) declarations, read from App
+# Store Connect through the App Store Connect API key and printed as JSON —
+# each declaration's platform, state, questionnaire answers, dates and
+# `codeValue`, the code `Fauna-iOS/Resources/Info.plist` pins as
+# `ITSEncryptionExportComplianceCode` (installers/ios.md § Upload mechanics →
+# *Export compliance*). Read-only; no third-party code (the token is signed
+# with CryptoKit). The key: the FAUNA_NOTARY_KEY_FILE / _KEY_ID / _ISSUER
+# triple when set, else the local store `~/.config/fauna/asc/` (one
+# `AuthKey_<id>.p8` plus a one-line `issuer`). Exit 3 = no key on this box,
+# 2 = App Store Connect refused (its reply verbatim on stderr).
+# `test_ios_export_compliance_live.py` holds the pin to the newest code.
+# Usage: just ios-export-compliance
+#        just ios-export-compliance --bundle-id social.fauna.faunakids
+[macos]
+ios-export-compliance *ARGS:
+    xcrun swift scripts/asc-export-compliance.swift {{ARGS}}
+
+# The iOS store driver: an XCUITest runner bundle of its own
+# (`apps/fauna-apple/StoreDriver/`, bundle id `social.fauna.storedriver`) that
+# obtains the app from TestFlight on a physical device and drives the install
+# through the accessibility tree alone (feature-catalog.md § Implementation
+# status today, how the iOS store install is driven). No FFI and no app build:
+# the runner compiles only its test file and FaunaKit's generated `Ids` table.
+# `signed` (the default) signs the runner with the Apple Development identity
+# and the development profile its target names, which must list the device;
+# `unsigned` is the compile check any macOS box can run. Output:
+# `build/ios-store-driver/<mode>/Build/Products/*.xctestrun`, which
+# `helpers/ios_store_driver.py` hands to `xcodebuild test-without-building`.
+# Usage: just ios-store-driver
+#        just ios-store-driver unsigned
+[macos]
+ios-store-driver mode="signed":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{mode}}" in
+        signed) sign=() ;;
+        unsigned) sign=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO) ;;
+        *) echo "ERROR: mode is signed or unsigned, not '{{mode}}'" >&2; exit 2 ;;
+    esac
+    out="build/ios-store-driver/{{mode}}"
+    {{py}} scripts/build-if-stale.py --label ios-store-driver-{{mode}} \
+        --stamp "$out/.built" \
+        --source apps/fauna-apple/StoreDriver \
+        --source apps/fauna-apple/FaunaKit/Sources/FaunaKit/Generated/UiIds.swift \
+        -- {{slot_build}} xcodebuild build-for-testing \
+            -project apps/fauna-apple/StoreDriver/StoreDriver.xcodeproj \
+            -scheme StoreDriver \
+            -destination generic/platform=iOS \
+            -derivedDataPath "$out" \
+            "${sign[@]}"
+
 # Print the SSH tunnel command for the android e2e run venue (testing.md
 # § Default app and nest mode → Android's run venue): the one command the
 # emulator's machine runs to dial this one, with every forward generated from
@@ -3371,8 +3661,8 @@ android-tunnel-spec login="" address="":
 android-venue-agents login="" address="":
     @{{py}} tests/e2e-unified/helpers/android_venue.py --agents "{{login}}" "{{address}}"
 
-# Is the android e2e venue up? One line — `venue UP: … serves emulator-5554` or
-# `venue DOWN: <which leg>` — asked of the tunnelled adb server through the
+# Is the android emulator up? One line — `emulator up: … serves emulator-5554` or
+# `emulator down: <which leg>` — asked of the tunnelled adb server through the
 # harness's own adb prefix (`-L tcp:127.0.0.1:18509`, which never starts a local
 # server). Exit 0 when up, 1 otherwise. Cheap: one `adb devices`, 5 s at most.
 android-venue-probe:
@@ -4315,7 +4605,17 @@ apple-ffi-store-safe profile="release": i18n-generate providers-generate
 apple-ffi-kids profile="release": i18n-generate providers-generate
     @just _apple-ffi-flavor "kids-safe,kids-floor" "" "{{profile}}"
 
-# Shared implementation of the two full-slice flavors above.
+# store-no-payments full FFI — the second store flavor's apple xcframework
+# (`dynamic-features.md` § The App-Store escape hatch → *The store flavors*):
+# `--no-default-features --features store-safe,p2p-share`, the complement plus
+# the one member it keeps. No apple artifact ships this flavor today (the App
+# Store takes `store-safe`); it exists so the family can build it the day a
+# ruling asks, and `just apple-store-safe-check`'s store-no-payments column, on
+# the host twin `apple-ffi-host-store-no-payments`, keeps it compiling.
+apple-ffi-store-no-payments profile="release": i18n-generate providers-generate
+    @just _apple-ffi-flavor "store-safe,p2p-share" "" "{{profile}}"
+
+# Shared implementation of the full-slice flavors above.
 #
 # Convention: testing.md § Cross-app e2e conventions point 15 — the automation
 # surface is compiled out of release artifacts. Rule (b) there keys any UniFFI
@@ -4389,7 +4689,8 @@ _apple-ffi-flavor features slices="" profile="release":
     # see `_apple-ffi-build-impl`.
     #
     # CACHE_EPOCH guards the cached *artifact layout* only (what we stage/restore
-    # below); build-flag changes are caught by the `just --show` hash, not this.
+    # below); build-flag changes are caught by the `just --show` hash, and an
+    # Xcode move by the `xcode=` line in the key, not this.
     CACHE_EPOCH=1
     CACHE_ROOT="${FAUNA_APPLE_FFI_CACHE:-$HOME/.cache/fauna-apple-ffi}"
     CACHE_KEY=""
@@ -4415,9 +4716,15 @@ _apple-ffi-flavor features slices="" profile="release":
         # `_apple-ffi-flavor`: the slot-lease split moved every build-flag-bearing
         # line into the impl, so hashing THIS recipe's now build-irrelevant
         # cache-lookup text would stop catching a build-flag change entirely.
+        # `xcode=` (2026-10-26): the selected developer dir and its build version.
+        # Nothing else in the key moves when Xcode does — the SDKs, the linker
+        # and the C builds of every slice come from it — so without this line a
+        # move to a new Xcode, or the rollback to the old one, is served the
+        # other Xcode's artifact as a HIT.
         CACHE_KEY="$(
             printf '%s\n' \
                 "epoch=$CACHE_EPOCH" \
+                "xcode=$(xcode-select -p 2>/dev/null) $(xcodebuild -version 2>/dev/null | tr '\n' ' ')" \
                 "features=$FEATURES" \
                 "shape=$SHAPE" \
                 "profile=$PROFILE" \
@@ -4543,7 +4850,7 @@ _apple-ffi-flavor features slices="" profile="release":
     # parametrized delegate call defeats the tier_1 tests' generic one-line-
     # delegation detection (`_recipe_body`), which requires the call to be bare.
     export FEATURES SLICES CACHE_KEY CACHE_ROOT FLAVOR PROFILE
-    {{slot_build}} just _apple-ffi-build-impl
+    {{slot_build_ffi}} just _apple-ffi-build-impl
 
 # The slotted build phase split out of `_apple-ffi-flavor` (2026-08-25):
 # the cache lookup above stays unslotted (a warm tree must never queue) while
@@ -4582,6 +4889,15 @@ _apple-ffi-build-impl:
     # below would build `kids-safe,kids-floor` WITH defaults — nothing excised.
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_ARGS=(--no-default-features --features "store-safe,file-provider-host")
+    # `store-safe,<member>` is the complement PLUS the registry members a store
+    # flavor keeps — `store-safe,p2p-share` is `store-no-payments`
+    # (dynamic-features.md § The App-Store escape hatch → *The store flavors*) —
+    # never a second spelling of the complement. Mirrors android's
+    # `_android-ffi-flavor` and windows' `_windows-ffi-flavor`. It must sit above
+    # the generic `elif` below, which would build it WITH defaults — nothing
+    # excised.
+    elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then
+        FEATURE_ARGS=(--no-default-features --features "$FEATURES,file-provider-host")
     elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
         FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")
     elif [ -n "$FEATURES" ]; then
@@ -4855,7 +5171,13 @@ apple-ffi-host-store-safe config="debug" profile="": i18n-generate providers-gen
 apple-ffi-host-kids config="debug" profile="": i18n-generate providers-generate
     @just _apple-ffi-host-flavor "{{config}}" "kids-safe,kids-floor" "{{profile}}"
 
-# Shared implementation of the two host-only flavors above. Same feature
+# store-no-payments host-only FFI — the 1-slice twin of
+# `apple-ffi-store-no-payments`, and what `just apple-store-safe-check`'s
+# store-no-payments column links.
+apple-ffi-host-store-no-payments config="debug" profile="": i18n-generate providers-generate
+    @just _apple-ffi-host-flavor "{{config}}" "store-safe,p2p-share" "{{profile}}"
+
+# Shared implementation of the host-only flavors above. Same feature
 # semantics as `_apple-ffi-flavor` (testing.md § convention 15).
 #
 # `profile` decouples the CARGO profile from `config` (Xcode's build
@@ -4888,6 +5210,11 @@ _apple-ffi-host-flavor config features profile="":
     FEATURES="{{features}}"
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_ARGS=(--no-default-features --features "store-safe,file-provider-host")
+    elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then
+        # `store-safe,<member>` (store-no-payments is `store-safe,p2p-share`) —
+        # see `_apple-ffi-build-impl`'s branch; above the generic arm for the
+        # same reason.
+        FEATURE_ARGS=(--no-default-features --features "$FEATURES,file-provider-host")
     elif [ "$FEATURES" = "kids-safe,kids-floor" ]; then
         # The kids flavor — see `_apple-ffi-build-impl`'s kids branch.
         FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")
@@ -4979,6 +5306,10 @@ _apple-ffi-host-flavor config features profile="":
     STASH="$ARTIFACTS/staged"
     BINDGEN_STAMP="$ARTIFACTS/apple-ffi-host-bindgen.stamp"
     [ "$(cat apps/fauna-apple/.ffi-flavor 2>/dev/null)" = "$FLAVOR:$FEATURES" ] || {
+        # The full flavor's fast-path stamp goes WITH the framework it vouches
+        # for, here and not only at the end: a step below that fails (a refused
+        # slot, exit 75) would otherwise leave it vouching for a host-only one.
+        rm -f apps/fauna-apple/.ffi-cache.stamp
         rm -rf apps/fauna-apple/FaunaFFI.xcframework
         if [ -f "$STASH/.stashed" ] && [ -f "$BINDGEN_STAMP" ] && \
            [ ! "$BINDGEN_STAMP" -nt "$STASH/.stashed" ] && (
@@ -5015,7 +5346,7 @@ _apple-ffi-host-flavor config features profile="":
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
         --source .cargo/config.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" \
+        -- {{slot_build_crate}} cargo build --locked -p fauna-ffi --profile "$PROFILE" "${FEATURE_ARGS[@]}" \
            -Z unstable-options --artifact-dir "$ARTIFACTS"
     # Same .a-staleness gate as `apple-ffi`: the darwin .a is the precise signal —
     # regen bindings + xcframework iff it changed, else skip bindgen. Same
@@ -5218,10 +5549,10 @@ _apple-ffi-bindgen features cargo_args bindgen_lib +slices:
 # {{slot_build}} lines stay: under this one they are reentrant no-ops
 # (build-slot.py § FIFO ticket queue).
 swift-test: (apple-ffi-host-test "debug")
-    {{slot_build}} just _swift-test-impl
+    {{slot_build_swift_test}} just _swift-test-impl
 
 _swift-test-impl:
-    {{slot_build}} swift test {{swiftpm_debug}} --package-path apps/fauna-apple
+    FAUNA_SWIFTPM_SKIP_LIBRARY_PRODUCTS=1 {{slot_build}} swift test {{swiftpm_debug}} --package-path apps/fauna-apple
     {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --target FaunaiOS
 
 # Build Fauna macOS desktop app (debug). Test FFI flavor for the same reason
@@ -5325,7 +5656,7 @@ mac-debug: (apple-ffi-host-test "debug")
 # callers must NOT wrap it again.
 [macos]
 apple-swift-build-check: mac-debug
-    {{slot_build}} just _apple-swift-build-check-impl
+    {{slot_build_swift}} just _apple-swift-build-check-impl
 
 _apple-swift-build-check-impl:
     {{slot_build}} swift build {{swiftpm_debug}} --package-path apps/fauna-apple --target FaunaiOS
@@ -5503,8 +5834,9 @@ _mac-app-impl:
     done
 
     # Bundle the per-user sync agent beside the app executable — the .dmg
-    # channel's agent source: the app's LaunchdSyncAgentSpawner resolves
-    # Contents/MacOS/fauna-sync-agent and self-installs its LaunchAgent
+    # channel's agent source: the app's launchd spawner (the shared Rust
+    # FfiLaunchdAgentSpawner) resolves Contents/MacOS/fauna-sync-agent first and
+    # self-installs its LaunchAgent
     # (sync-agent.md § Packaging + lifecycle; a .pkg install also ships it at
     # /usr/local/bin, the spawner's fallback path).
     RELEASE_FLAG=""
@@ -5607,7 +5939,9 @@ mac-dmg-package:
     # dragged out of the .dmg then passes Gatekeeper offline too.
     xcrun stapler staple "$APP_PATH"
 
-    shasum -a 256 "$DMG_PATH" > "${DMG_PATH}.sha256"
+    # The .sha256 names the bare file, as release.yml's SHA256SUMS does: it is
+    # published beside the .dmg, so `shasum -c` runs where both were downloaded.
+    (cd build && shasum -a 256 "$(basename "$DMG_PATH")") > "${DMG_PATH}.sha256"
     echo "==> Done! DMG: $DMG_PATH"
 
 # Sign, notarize and tar ONE of the terminal app's macOS archives
@@ -5671,21 +6005,24 @@ mac-tui-archive suffix dir:
     TAR="build/$NAME.tar.gz"
     rm -f "$TAR"
     tar -C build -czf "$TAR" "$NAME"
-    shasum -a 256 "$TAR" > "${TAR}.sha256"
+    # Bare file name, as the .dmg's: verified beside the downloaded archive.
+    (cd build && shasum -a 256 "$NAME.tar.gz") > "${TAR}.sha256"
     echo "==> Done! Archive: $TAR"
 
-# Build fauna-ffi for Windows ARM64 and generate C# bindings.
+# Build fauna-ffi for Windows and generate C# bindings.
 # Uses the in-tree uniffi-bindgen-cs (libs/uniffi-bindgen-cs/, vendored from
 # NordSecurity PR #168 + patched for uniffi 0.31). Mirrors apple-ffi/android-ffi.
 # Bare cargo fails on Git Bash (its link.exe shadows the MSVC linker) — use
 # scripts/cargo-win.cmd.
 #
-# x86_64 (amd64): pass `target="x86_64-pc-windows-msvc"` for the x64 cross-compile
-# leg (needs `rustup target add x86_64-pc-windows-msvc`, user-approved). Empty
-# (default) keeps the original arm64 implicit-host build unchanged.
-# `cargo-win.cmd` selects the matching cl/link/lib environment via CARGO_WIN_ARCH
-# (the `Hostarm64\x64` cross tools + `lib\x64`/SDK `Lib\...\{um,ucrt}\x64` ship in
-# the same BuildTools/SDK install already used natively for arm64).
+# `target`: empty (default) is the host's implicit-target build — arm64 on the dev
+# box; `aarch64-pc-windows-msvc` or `x86_64-pc-windows-msvc` builds that arch from
+# either host (the target's rustup component is the caller's: the dev box's x64
+# one is user-approved, a hosted runner's is its toolchain step's). `release.yml`'s
+# `windows-ffi` part builds the MSI's FFI with this recipe, both arches from the
+# x64 hosted runner. `cargo-win.cmd` selects the matching cl/link/lib environment
+# from the `--target` it is handed (the cross tools + `lib\<arch>`/SDK
+# `Lib\...\{um,ucrt}\<arch>` ship in the same BuildTools/SDK install).
 windows-ffi profile="release" target="": i18n-generate providers-generate
     @just _windows-ffi-flavor "{{profile}}" "" "{{target}}"
 
@@ -5720,7 +6057,18 @@ windows-ffi-test profile="dev" target="": i18n-generate providers-generate
 windows-ffi-store-safe profile="release" target="": i18n-generate providers-generate
     @just _windows-ffi-flavor "{{profile}}" "store-safe" "{{target}}"
 
-# Shared implementation of the two flavors above.
+# Store-no-payments Windows FFI — the second store flavor (dynamic-features.md
+# § The App-Store escape hatch → *The store flavors*): the complement plus
+# `p2p-share`, so the generated C# face carries no payments or zap export and
+# keeps the ceremony face. The shell half is `just windows-store-no-payments`
+# (`/p:FaunaExcisePayments=true` alone). It shares the one staging slot with
+# every other flavor; the `.ffi-flavor` marker and the flavor-private slot both
+# key on the feature string, so this dll is never served to a store-safe build,
+# nor the reverse.
+windows-ffi-store-no-payments profile="release" target="": i18n-generate providers-generate
+    @just _windows-ffi-flavor "{{profile}}" "store-safe,p2p-share" "{{target}}"
+
+# Shared implementation of the flavors above.
 #
 # Unlike android — which has Gradle buildType source sets and stages each flavor
 # into its own (`_android-ffi-flavor`) — the WinUI project consumes ONE fixed
@@ -5752,20 +6100,26 @@ _windows-ffi-flavor profile features target:
         dev) PROFILE_DIR=debug ;;
         *)   PROFILE_DIR="$PROFILE" ;;
     esac
-    # {{target}} is empty (implicit-host arm64, the original behavior) or a cargo
-    # target triple. Only x86_64-pc-windows-msvc is wired up today (the x64 cross
-    # leg, 2026-08-24) — RID is the .NET runtime-identifier folder name the C#
-    # csproj already branches on (FaunaApp.csproj's two `runtimes\win-*\native\`
-    # ItemGroups), CARGO_WIN_ARCH selects cargo-win.cmd's matching cl/link/lib env,
-    # TARGET_ARG is threaded into the cargo invocation, and CARGO_OUT_DIR mirrors
-    # cargo's own target-dir shape (a bare `--target` adds a `<triple>/` path
-    # segment that the implicit-host build below deliberately avoids).
+    # {{target}} is empty (the host: what an implicit-target cargo builds, arm64 on
+    # the dev box) or one of the two windows MSVC triples, each from either host —
+    # the arm64 dev box and the x64 hosted release runner (release-integrity.md
+    # § What a release ships → *Every release build runs the `just` recipe*). RID is
+    # the .NET runtime-identifier folder name the C# csproj already branches on
+    # (FaunaApp.csproj's two `runtimes\win-*\native\` ItemGroups), TARGET_ARG is
+    # threaded into the cargo invocation (cargo-win.cmd sets up the arch it names,
+    # the host's when there is none — so a CARGO_WIN_ARCH leaked from a caller is
+    # dropped), and CARGO_OUT_DIR mirrors cargo's own target-dir shape (a
+    # `--target` adds a `<triple>/` path segment that the implicit-host build below
+    # deliberately avoids).
     TARGET="{{target}}"
-    case "$TARGET" in
-        "")                         RID=win-arm64; CARGO_WIN_ARCH=arm64; TARGET_ARG="" ;;
-        x86_64-pc-windows-msvc)     RID=win-x64;   CARGO_WIN_ARCH=x64;   TARGET_ARG="--target x86_64-pc-windows-msvc" ;;
-        *) echo "_windows-ffi-flavor: unsupported target '$TARGET' (only x86_64-pc-windows-msvc is wired up besides the default arm64 host)" >&2; exit 1 ;;
+    TRIPLE="${TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
+    case "$TRIPLE" in
+        aarch64-pc-windows-msvc) RID=win-arm64 ;;
+        x86_64-pc-windows-msvc)  RID=win-x64 ;;
+        *) echo "_windows-ffi-flavor: unsupported target '$TRIPLE' (aarch64-pc-windows-msvc or x86_64-pc-windows-msvc)" >&2; exit 1 ;;
     esac
+    TARGET_ARG="${TARGET:+--target $TARGET}"
+    unset CARGO_WIN_ARCH
     CARGO_OUT_DIR="target${TARGET:+/$TARGET}/$PROFILE_DIR"
     # Flavor guard — mirrors apple-ffi-host's `.ffi-flavor` (§ Host-only debug
     # FFI (mac dev loop)). The app consumes ONE fixed pair of paths regardless
@@ -5846,16 +6200,21 @@ _windows-ffi-flavor profile features target:
     # RID:PROFILE_DIR:FEATURES keying with no separate discriminator needed —
     # same reasoning as `apple-ffi-host`'s bindgen stamp under $ARTIFACTS.
     BINDGEN_STAMP="$FFI_DIR/windows-ffi-bindgen-${FEATURES:-production}.stamp"
-    # Flavor guard (see the long comment above). ALSO drops this flavor's own
-    # cargo stamp: because the .dll path is shared across production/test-helpers
-    # at the same profile, a stamp keyed only on source mtimes would read "fresh"
-    # the moment we switch BACK to this flavor, even though the .dll on disk right
-    # now holds the OTHER flavor's build. The marker mismatch is itself the proof
-    # a rebuild is owed, independent of what any stamp says. Marker records
-    # RID:PROFILE:FEATURES — RID joins the axis for the same reason FEATURES did.
+    # What this flavor's bindgen last staged, kept beside its dll so a warm switch
+    # back to it is a restage (`scripts/win-ffi-stash.sh`; the restore sits between
+    # the two gates below).
+    STASH="$FFI_DIR/staged"
+    # Flavor guard (see the long comment above). A mismatch drops the STAGED .dll,
+    # which is what sends the staging gate below back to work, and nothing else:
+    # this flavor's cargo stamp vouches for the flavor-private dll beside it, which
+    # only this flavor's gated command ever writes, so a switch owes no cargo run.
+    # (The guard dropped the stamp too until 2026-10-31, a rule from before the
+    # private slot, when the .dll path was shared across flavors. It made every
+    # switch a real `build` acquire, which an e2e run's in-hold re-check refuses.)
+    # Marker records RID:PROFILE:FEATURES — RID joins the axis for the same reason
+    # FEATURES did.
     [ "$(cat "$FLAVOR_MARKER" 2>/dev/null)" = "$RID:$PROFILE:$FEATURES" ] || {
         rm -f "apps/fauna-windows/FaunaApp/FaunaApp/runtimes/$RID/native/fauna_ffi.dll"
-        rm -f "$CARGO_STAMP"
     }
     # `test-helpers` (TEST FLAVOR ONLY) exposes the OnboardingMachine snapshot
     # setters (`set_handle_check_snapshot_for_test`, `call_machine_method`), the
@@ -5881,9 +6240,12 @@ _windows-ffi-flavor profile features target:
     # downstream would read that as a clean excision.
     if [ "$FEATURES" = "store-safe" ]; then
         FEATURE_ARGS="--no-default-features --features store-safe"
-    # `store-safe,<extra>` is the complement PLUS a named interim carry (see
-    # `_STORE_SAFE_INTERIM_CARRY` in `test_payments_excision_spine.py`, which
-    # pins every shell to none today), never a second spelling of the complement.
+    # `store-safe,<member>` is the complement PLUS the registry members a store
+    # flavor keeps — `store-safe,p2p-share` is `store-no-payments`
+    # (dynamic-features.md § The App-Store escape hatch → *The store flavors*) —
+    # never a second spelling of the complement. The `store-safe` recipe pins
+    # its own carry to none (`_STORE_SAFE_INTERIM_CARRY` in
+    # `test_payments_excision_spine.py`).
     elif [ "${FEATURES#store-safe,}" != "$FEATURES" ]; then
         FEATURE_ARGS="--no-default-features --features $FEATURES"
     elif [ -n "$FEATURES" ]; then
@@ -5898,7 +6260,7 @@ _windows-ffi-flavor profile features target:
     # above — an empty variable expands to no argument at all. The store-safe
     # branch composes with it unchanged: it sets two words rather than one, and an
     # unquoted expansion passes both.
-    export PROFILE PROFILE_DIR FEATURE_ARGS FFI_DLL TARGET_ARG CARGO_WIN_ARCH CARGO_OUT_DIR
+    export PROFILE PROFILE_DIR FEATURE_ARGS FFI_DLL TARGET_ARG CARGO_OUT_DIR
     #
     # cargo's incremental build is the staleness gate for the .dll: it tracks
     # fauna-ffi's full transitive source graph, so this no-ops cheaply when
@@ -5909,9 +6271,9 @@ _windows-ffi-flavor profile features target:
     # boundary, so cmd.exe receives the right switch.
     #
     # CARGO_INCREMENTAL=1 (`release` only, never `dev` or `dist`): release
-    # profiles default incremental OFF, and the FFI-touching rebuild is
-    # dominated by rustc re-compiling the fauna-ffi crate itself (~6.5 min
-    # measured; the cdylib link is ~8 s). Turning it on for local crates cuts
+    # profiles default incremental OFF, and the FFI-touching release rebuild
+    # is dominated by rustc re-compiling the fauna-ffi crate itself (~6.5 min
+    # measured on the pre-split monolith). Turning it on for local crates cuts
     # the touch-rebuild ~4× (387 s → 93 s measured) for +3.2 G of caches. The
     # `dev` profile gets NO override: since 2026-08-23 the workspace profile
     # sets `incremental = false` fleet-wide (disk ruling — the cache measured
@@ -5920,17 +6282,24 @@ _windows-ffi-flavor profile features target:
     # else, and the env's fingerprint-flip footgun stays confined to this one
     # release leg. `dist` (shipped artifacts) stays non-incremental by
     # construction.
-    # Numbers + rationale: docs/goal/architecture/build-system.md § UniFFI
-    # cdylib rebuild cost (win).
+    # Numbers + rationale: docs/goal/architecture/build-target-layout-windows.md
+    # § UniFFI cdylib rebuild cost (win).
     if [ "$PROFILE" = "release" ]; then export CARGO_INCREMENTAL=1; fi
+    # The dll links with the toolchain's `rust-lld`, every profile, through
+    # .cargo/config.toml's `[target.*-pc-windows-msvc] linker` — no flag of its own
+    # here (build-target-layout-windows.md § UniFFI cdylib rebuild cost (win) →
+    # *Linker verdict*: under the dev profile MSVC link.exe's /OPT:REF spent 459-491 s
+    # on this dll, rust-lld 9.5-16.5 s).
     # `--lib --crate-type cdylib` restricts the emitted artifact to the .dll this
     # recipe actually consumes (`_windows-ffi-bindgen` below reads only
     # fauna_ffi.dll) — a plain `cargo build` would also link the unused `lib`
     # (rlib) and `staticlib` crate-types declared in Cargo.toml (the staticlib
     # alone is ~474 MB) and build the dead `uniffi-bindgen` bin target. Inverts
     # the watchOS staticlib-only shape (justfile:1014, § apple-ffi watchOS
-    # slice) — same technique, opposite crate-type. Nothing in the workspace
-    # depends on fauna-ffi as a path/rlib dependency, so dropping `lib` is safe.
+    # slice) — same technique, opposite crate-type. Since the rlib + thin-cdylib
+    # split the thin `fauna-ffi` package declares no `lib` (rlib) crate-type and the core
+    # `fauna-ffi-core` rlib is built as its dependency (build-target-layout-windows.md
+    # § The rlib + thin-cdylib split); the flag still drops the staticlib and the bin.
     # Freshness-gated OUTSIDE the build slot (a warm tree must not queue —
     # build-machine-resources.md § Build/e2e slot locks), the same shape as
     # mail-bridge-ffi-lib / _apple-ffi-host-flavor / windows-debug's own MSBuild
@@ -5986,16 +6355,32 @@ _windows-ffi-flavor profile features target:
     # fixing it. BINDGEN_STAMP lives under FFI_DIR, which already keys on
     # RID:PROFILE_DIR:FEATURES (the same axes the cargo gate's CARGO_STAMP
     # above uses) — no separate discriminator needed.
+    BINDGEN_SOURCES=(
+        --source "$FFI_DLL"
+        --source libs/uniffi-bindgen-cs/templates
+        --source libs/uniffi-bindgen-cs/src
+        --source scripts/generate-windows-fake-bases.py
+    )
+    # A warm flavor switch is a restage, never a build (2026-10-31): the guard above
+    # dropped the staged .dll, and `_windows-ffi-bindgen` takes a slot before it
+    # looks at anything. So ask this flavor's stamp alone, its targets aside,
+    # whether its generation is still the current one; when it is, the stash puts
+    # that generation back and the gate below reads up to date. Anything else, a
+    # stale stamp or no usable stash, leaves the .dll missing and the gate regenerates.
+    if [ ! -e "apps/fauna-windows/FaunaApp/FaunaApp/runtimes/$RID/native/fauna_ffi.dll" ] && \
+       {{py}} scripts/build-if-stale.py --check -q --stamp "$BINDGEN_STAMP" "${BINDGEN_SOURCES[@]}" && \
+       bash scripts/win-ffi-stash.sh restore "$STASH" "$BINDGEN_STAMP" "$FFI_DLL" "$RID"; then
+        echo "windows-ffi: restored the stashed ${FEATURES:-production} generation (cargo + bindgen stamps fresh) — no rebuild"
+    fi
     {{py}} scripts/build-if-stale.py --label "windows-ffi-bindgen-$RID" \
         --stamp "$BINDGEN_STAMP" \
         --target apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi \
         --target "apps/fauna-windows/FaunaApp/FaunaApp/runtimes/$RID/native/fauna_ffi.dll" \
         --target apps/fauna-windows/FaunaApp/FaunaApp.Tests/Generated/FakeBases.g.cs \
-        --source "$FFI_DLL" \
-        --source libs/uniffi-bindgen-cs/templates \
-        --source libs/uniffi-bindgen-cs/src \
-        --source scripts/generate-windows-fake-bases.py \
+        "${BINDGEN_SOURCES[@]}" \
         -- just _windows-ffi-bindgen "$PROFILE_DIR" "$FEATURES" "$RID"
+    bash scripts/win-ffi-stash.sh save "$STASH" "$BINDGEN_STAMP" "$FFI_DLL" "$RID" || \
+        echo "windows-ffi: stash failed (non-fatal) — the next flavor switch regenerates"
     # Written only after a successful build+stage, so a crashed or interrupted run
     # leaves the marker on the PREVIOUS flavor and the next invocation still forces
     # a restage rather than trusting a half-built tree (android's rule, same reason).
@@ -6028,16 +6413,17 @@ _windows-ffi-bindgen profile_dir="release" features="" rid="win-arm64":
     FFI_DLL="target/{{profile_dir}}/windows-ffi/$RID/${FEATURES:-production}/fauna_ffi.dll"
     # Generate C# bindings from the flavor's build (the metadata carried in any
     # slice is platform-independent — bindgen is target-agnostic). The bindgen
-    # TOOL itself always builds+runs host-native (arm64) regardless of which
-    # flavor's .dll it is reading — it is a build-time executable, never a
-    # shipped cross-arch artifact, so CARGO_WIN_ARCH is forced back to arm64
-    # here even if the caller's environment carries an x64 flavor's setting.
+    # TOOL itself always builds+runs on the host's own arch (arm64 on the dev
+    # box, x64 on the hosted release runner) regardless of which flavor's .dll it
+    # is reading — it is a build-time executable, never a shipped cross-arch
+    # artifact, so CARGO_WIN_ARCH is cleared here (cargo-win.cmd then sets up the
+    # host) even if the caller's environment carries the other arch's setting.
     # Under a build slot: the `cargo run` compiles
     # the bindgen tool first, a release compile of its own on a cold tree, and
     # the dll gate's slot above was released before this recipe ran. Through
     # `bash -c` like the cdylib build above, so the `//c` is rewritten by the
     # bash that launches cmd itself.
-    {{slot_build}} bash -c "cmd //c \"set CARGO_WIN_ARCH=arm64&& scripts\\cargo-win.cmd run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- --library $FFI_DLL --out-dir apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/\""
+    {{slot_build}} bash -c "cmd //c \"set CARGO_WIN_ARCH=&& scripts\\cargo-win.cmd run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- --library $FFI_DLL --out-dir apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/\""
     # Copy the flavor's .dll into the app's runtimes/<RID>/native/ for
     # CopyToOutputDirectory (FaunaApp.csproj branches on RID/Platform per arch).
     mkdir -p "apps/fauna-windows/FaunaApp/FaunaApp/runtimes/$RID/native/"
@@ -6220,6 +6606,10 @@ mail-bridge-ffi profile="release":
         --source libs ${VENDOR_SOURCE:-} --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
         -- {{slot_build}} bash -c 'cargo build --locked -p fauna-ffi --profile {{profile}} --no-default-features --features labeler && cp "$CARGO_LIB" "$LIB.$$.tmp" && mv -f "$LIB.$$.tmp" "$LIB"'
+    # The cdylib's install name is `@rpath/…` (libs/fauna-ffi-cdylib/build.rs),
+    # so every cgo binary linked against it loads its own checkout's copy; a
+    # path into another checkout here is a cached link from before that rule.
+    {{py}} scripts/check_linked_paths.py --root "$TARGET_DIR" "$LIB"
     # The bindgen stages OUTSIDE libs/ (generator/mtime contract —
     # build-system.md § How the gate works): uniffi-bindgen-go rewrites its
     # out-dir unconditionally, and libs/ is `--source` for all nine wasm chunk
@@ -6445,6 +6835,10 @@ _go-cgo-build cmd out_name profile go_tags:
         --exclude 'bins/fauna-bridges/fauna-atproto-bridge*' \
         --exclude 'bins/fauna-bridges/seal-helper-testonly*' \
         -- {{slot_build}} bash -c 'rm -f "$STAMP_STEM"-*.stamp && go -C bins/fauna-bridges build -trimpath $GOTAGS -ldflags="$GOLDFLAGS" -o "{{out_name}}" {{cmd}}'
+    # Outside the gate, so a binary built before the check existed is held too:
+    # the bridge must load THIS checkout's dylib, never a path baked in by a
+    # sibling's link (scripts/check_linked_paths.py; a no-op off macOS).
+    {{py}} scripts/check_linked_paths.py --root "$TARGET_DIR" --root "$(pwd)" "bins/fauna-bridges/{{out_name}}"
 
 # Test the Go mail-bridge binary (depends on FFI bindings). The legs live in
 # `_mail-bridge-go-test-legs` below, which the Linux merge-gate check's
@@ -6715,12 +7109,34 @@ _ffi-store-safe-check-impl:
     # the cargo-target dataset was reclaimed under us (build-machine-resources.md
     # § Build/e2e slot locks → the slot is the recipe's dataset lease).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
+    # Everything greppable in the artifact: its strings, plus a Mach-O's export
+    # names (see `built`). Both assertion helpers scan through here.
+    scan() { strings -a "$LIB"; printf '%s\n' "$SYMS"; }
 
     # `zaps` is a SUBSET member of `payments`, so it excises with the money
     # plane in the store-safe column and on its own in the Damus column.
@@ -6750,7 +7166,7 @@ _ffi-store-safe-check-impl:
     # the spine pin holds this array to the payments catalog.
     PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-asking-price' \
         'compose-sell-price' 'compose-sell-subscribers-free' 'gated-post-price' \
-        'gated-post-payment-link' 'gated-post-buy-button')
+        'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
     # The `p2p-share` member, its own axis (2026-09-28): the ceremony half
     # (`offline-share`) left `store-safe` for `p2p-share`, the plane half
     # (`share_plane`) was never in it. All FOUR catalog prefixes are live here —
@@ -6771,7 +7187,7 @@ _ffi-store-safe-check-impl:
     absent() {  # absent <flavor-label> <pattern>...
         local flavor="$1"; shift
         for pat in "$@"; do
-            n="$(strings -a "$LIB" | grep -c "$pat" || true)"
+            n="$(scan | grep -c "$pat" || true)"
             if [ "$n" != "0" ]; then
                 echo "ERROR: the $flavor fauna-ffi flavor still carries $n '$pat' occurrence(s)." >&2
                 echo "  That plane must be COMPLETELY compiled away (dynamic-features.md" >&2
@@ -6791,7 +7207,7 @@ _ffi-store-safe-check-impl:
                 echo "        #[cfg_attr(feature = \"payments\", doc = \" …post-tip-total…\")]" >&2
                 echo "      which keeps the id greppable in source and out of the artifact." >&2
                 echo "      Confirm which you have — the string itself says so:" >&2
-                echo "      strings -a \$LIB | grep '$pat'" >&2
+                echo "      strings -a \$LIB | grep '$pat'   (a .dylib: also nm -gU \$LIB)" >&2
                 exit 1
             fi
         done
@@ -6800,7 +7216,7 @@ _ffi-store-safe-check-impl:
     present() {  # present <flavor-label> <pattern>...
         local flavor="$1"; shift
         for pat in "$@"; do
-            n="$(strings -a "$LIB" | grep -c "$pat" || true)"
+            n="$(scan | grep -c "$pat" || true)"
             if [ "$n" = "0" ]; then
                 echo "ERROR: the $flavor fauna-ffi flavor carries no '$pat' — the absence" >&2
                 echo "  assertions in the other columns are therefore vacuous. Either the plane" >&2
@@ -6888,11 +7304,30 @@ _nest-store-safe-check-impl:
     # the cargo-target dataset was reclaimed under us (build-machine-resources.md
     # § Build/e2e slot locks → the slot is the recipe's dataset lease).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # --- column 1: the store-safe nest must not be able to reach money --------
@@ -6960,11 +7395,30 @@ _nest-automation-surface-check-impl:
     TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
     BIN="$TARGET_DIR/debug/fauna-nest"
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # --- column A: the DEFAULT nest must ship with NO automation surface ------
@@ -7059,11 +7513,30 @@ _tui-store-safe-check-impl:
     # the cargo-target dataset was reclaimed under us (build-machine-resources.md
     # § Build/e2e slot locks → the slot is the recipe's dataset lease).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # --- column 1: the store-safe tui carries neither the UI nor the wire -----
@@ -7076,7 +7549,7 @@ _tui-store-safe-check-impl:
     # `compose-sell-`) also cover ids outside the plane. Hand-listed here until
     # the catalog entry lands with the last family's gates (that section says why
     # the entry comes last).
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe fauna-tui flavor still carries $n '$pat' occurrence(s)." >&2
@@ -7114,7 +7587,7 @@ _tui-store-safe-check-impl:
     # → *The store flavors*): the complement plus `p2p-share`. Both directions,
     # because an absence-only column would pass on a build that had fallen back
     # to store-safe — the flavor this one exists to differ from.
-    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
     NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.')
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui --no-default-features --features store-safe,p2p-share
     built "$BIN"
@@ -7143,7 +7616,7 @@ _tui-store-safe-check-impl:
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-tui --bin fauna-tui
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'fauna\.peer\.share\.' 'nostr-zap-signer-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT fauna-tui flavor carries no '$pat' — the store-safe" >&2
@@ -7206,11 +7679,30 @@ _linux-store-safe-check-impl:
     # the cargo-target dataset was reclaimed under us (build-machine-resources.md
     # § Build/e2e slot locks → the slot is the recipe's dataset lease).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # --- column 1: the store-safe shell carries neither the UI nor the wire ---
@@ -7226,7 +7718,7 @@ _linux-store-safe-check-impl:
     # `compose-sell-`) also cover ids outside the plane. Hand-listed here until
     # the catalog entry lands with the last family's gates (that section says why
     # the entry comes last).
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe fauna-desktop flavor still carries $n '$pat' occurrence(s)." >&2
@@ -7246,7 +7738,7 @@ _linux-store-safe-check-impl:
     # tui's column 2, for this shell (dynamic-features.md § The App-Store escape
     # hatch → *The store flavors*). `nostr-zap-signer-` is not watched here, as
     # in this recipe's other columns: linux paints no zap-signer control.
-    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'fauna\.tips\.' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
     NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-')
     {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop --no-default-features --features store-safe,p2p-share
     built "$BIN"
@@ -7275,7 +7767,7 @@ _linux-store-safe-check-impl:
     # match nothing — a renamed id would read as a successful excision.
     {{slot_build}} cargo build --locked -p fauna-linux --bin fauna-desktop
     built "$BIN"
-    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'post-tip-' 'fauna\.payments\.' 'offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT fauna-desktop flavor carries no '$pat' — the store-safe" >&2
@@ -7315,18 +7807,105 @@ windows-store-safe: windows-ffi-store-safe i18n-generate providers-generate
         "-restore" "//p:Platform=ARM64" "//p:Configuration=Release" \
         "//p:FaunaStoreSafe=true" "//verbosity:minimal"
 
+# Build the store-no-payments WinUI app — the second store flavor
+# (dynamic-features.md § The App-Store escape hatch → *The store flavors*), the
+# one the Microsoft Store ships (installers/windows.md § Store distribution, the
+# flavour paragraph). The payments member's property ALONE — never
+# `FaunaExciseP2pShare` or `FaunaStoreSafe`, which would excise the sharing plane
+# this flavor keeps — over the `store-safe,p2p-share` FFI. Release and never
+# build-if-stale gated, on `windows-store-safe`'s grounds right above.
+windows-store-no-payments: windows-ffi-store-no-payments i18n-generate providers-generate
+    {{slot_build}} "{{msbuild_exe}}" \
+        apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj \
+        "-restore" "//p:Platform=ARM64" "//p:Configuration=Release" \
+        "//p:FaunaExcisePayments=true" "//verbosity:minimal"
+
+# Compile the store-no-payments SHELL over the bindings the tree rests on — the C#
+# half of `windows-store-no-payments` above, and gate 11 of the win merge-gate
+# check (merge-gate-check-win.md § Merge-gate check (win)). The same MSBuild line,
+# `/p:FaunaExcisePayments=true` alone at Release as the Store flavor builds, but
+# over the `dev:test-helpers` FFI every dev loop and gate stages, so it pays no
+# fauna-ffi flavor flip. What it sees: a C# caller outside `#if PAYMENTS` of a
+# member inside it — `FeedPage` calling `ResolveAuthorFaceAsync`, CS1061,
+# 2026-10-28. What it cannot see: a C# call to an FFI method the excised
+# fauna-ffi does not export (`ResolvePostTips`, 2026-09-06) — these bindings still
+# carry the payments face; `windows-excised-ffi-check` below compiles over the
+# excised ones (dynamic-features.md § The feature-matrix test story).
+#
+# It writes bin/ + obj/ARM64/Release, which `windows-release` owns behind a
+# build-if-stale stamp, so the stamp goes FIRST: the next `windows-release` re-runs
+# MSBuild, which sees the changed define and item set and rebuilds the full flavor,
+# where a fresh stamp would hand back this excised app as the shipped one. Never
+# build-if-stale gated itself, on `windows-store-safe`'s grounds above.
+windows-excise-payments-check: (windows-ffi-test "dev") i18n-generate providers-generate
+    rm -f target/windows-release.stamp
+    {{slot_build}} "{{msbuild_exe}}" \
+        apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj \
+        "-restore" "//p:Platform=ARM64" "//p:Configuration=Release" \
+        "//p:FaunaExcisePayments=true" "//verbosity:minimal"
+
+# Compile BOTH store flavors' shells over their OWN excised fauna-ffi faces — the
+# compile half of `windows-store-safe-check`, and gate 12 of the win merge-gate
+# check, run once a day (merge-gate-check-win.md § Merge-gate check (win)). It sees
+# what `windows-excise-payments-check` above cannot: C# outside `#if PAYMENTS` (or
+# `#if P2P_SHARE`) calling an FFI method the excised fauna-ffi does not export —
+# `FfiFeedManager.ResolvePostTips` from `FeedViewModel`, CS1061, 2026-09-06.
+#
+# The FFI at the `dev` cargo profile, never the shipped `release`: the generated C#
+# face is a function of the FEATURES alone (no UniFFI export is keyed on the
+# profile — e2e-automation-surface-gating.md point 15, rule (b)), so the compile
+# verdict is the release one, without release optimization of each excised feature
+# set's crates (63 and 115 min on a two-core grant, measured 2026-10-28). What it
+# leaves to `windows-store-safe-check`: the scans of the artifact a submission
+# carries.
+#
+# Two columns: store-safe (both members excised, so it also sees a call outside
+# `#if P2P_SHARE` to a share-plane method), then store-no-payments (the flavor the
+# Store ships: PAYMENTS off with P2P_SHARE on, a combination no other build
+# compiles). No bin/ + obj/ wipe: each column's generated face differs from the one
+# before it, so Core and the app recompile — `windows-store-safe-check` wipes for its
+# scans, which this does not run, and the Debug tree is left alone. Release, as
+# the Store flavors build; the `windows-release` stamp goes first, on
+# `windows-excise-payments-check`'s grounds. It leaves the staging slot on the
+# store-no-payments flavor: `just windows-ffi-test dev` restages the resting one
+# (the gate does). ONE slot for the whole recipe; never build-if-stale gated (a
+# flavor flip touches no source).
+windows-excised-ffi-check: i18n-generate providers-generate
+    {{slot_build}} just _windows-excised-ffi-check-impl
+
+_windows-excised-ffi-check-impl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    APP=apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj
+    rm -f target/windows-release.stamp
+    # `-p:`, never `/p:`: MSYS rewrites a leading-slash argument into a path.
+    just windows-ffi-store-safe dev
+    "{{msbuild_exe}}" "$APP" -restore -p:Platform=ARM64 -p:Configuration=Release \
+        -p:FaunaStoreSafe=true -verbosity:minimal
+    just windows-ffi-store-no-payments dev
+    "{{msbuild_exe}}" "$APP" -restore -p:Platform=ARM64 -p:Configuration=Release \
+        -p:FaunaExcisePayments=true -verbosity:minimal
+    echo "windows-excised-ffi-check: OK — store-safe and store-no-payments shells compile over their own excised fauna-ffi faces"
+
 # Build the Microsoft Store package — the full MSIX a Partner Center upload
 # carries (installers/windows.md § Store distribution): the shipped-flavour
-# payload, built and staged here, then packed by scripts/build-store-package.py.
-# An upload is built from a clean public clone at the recorded commit
-# (release-integrity.md § Release signing → *A store upload is built from a
-# recorded public commit*), with the reserved identity:
+# payload, built and staged here, then packed by scripts/build-store-package.py
+# into build/installer/Fauna-Store-<arch>.msix. An upload is built from the
+# recorded public commit (release-integrity.md § Release signing → *A store upload
+# is built from a recorded public commit*) by the public Store workflow, which
+# runs this recipe for each arch from an x64 hosted runner, with the reserved
+# identity:
 #
-#   just windows-store-package arm64 full FaunaSocial.FaunaSocial "CN=E8868D60-047A-46A3-B608-0D4CA88AB791"
+#   just windows-store-package arm64 store-no-payments FaunaSocial.FaunaSocial "CN=E8868D60-047A-46A3-B608-0D4CA88AB791"
 #
 # Empty identity/publisher → the packer's dev placeholders (a local check, never
-# an upload). `flavor` is `full` or `store-safe` (the escape hatch:
-# dynamic-features.md § The App-Store escape hatch).
+# an upload). `flavor` is `full`, `store-safe` or `store-no-payments` (the escape
+# hatch and its two store flavors: dynamic-features.md § The App-Store escape
+# hatch → *The store flavors*); the Store ships a store flavor
+# (installers/windows.md § Store distribution, the flavour paragraph), the
+# workflow's `flavour` input, and the table below is the one place a flavour's
+# three settings live.
 #
 # Why a recipe of its own and not the MSI helper's stage: the only other local
 # payload builder, test_installer.py::_build_msi, compiles the e2e automation
@@ -7353,51 +7932,51 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
     FLAVOR="{{flavor}}"
     # Installer artifacts build at the size-optimised `dist` profile; `release` is
     # the dev/test inner loop (installers/windows.md § Size & build profile).
+    # Each arch names its triple, never the implicit host: the public Store
+    # workflow builds both from an x64 hosted runner, where the host is x64.
+    # cargo-win.cmd selects the matching cl/link/lib environment from `--target`.
     case "$ARCH" in
-        arm64) TARGET="";                     RID=win-arm64; CARGO_WIN_ARCH=arm64; CARGO_OUT=target/dist ;;
-        x64)   TARGET=x86_64-pc-windows-msvc; RID=win-x64;   CARGO_WIN_ARCH=x64;   CARGO_OUT=target/x86_64-pc-windows-msvc/dist ;;
+        arm64) TARGET=aarch64-pc-windows-msvc; RID=win-arm64 ;;
+        x64)   TARGET=x86_64-pc-windows-msvc;  RID=win-x64 ;;
         *) echo "windows-store-package: arch must be arm64 or x64, got '$ARCH'" >&2; exit 2 ;;
     esac
     case "$FLAVOR" in
-        full|store-safe) ;;
-        *) echo "windows-store-package: flavor must be full or store-safe, got '$FLAVOR'" >&2; exit 2 ;;
+        full|store-safe|store-no-payments) ;;
+        *) echo "windows-store-package: flavor must be full, store-safe or store-no-payments, got '$FLAVOR'" >&2; exit 2 ;;
     esac
-    # cargo-win.cmd selects the matching cl/link/lib environment from this.
-    export CARGO_WIN_ARCH
-    TARGET_ARG="${TARGET:+--target $TARGET}"
+    TARGET_ARG="--target $TARGET"
+    CARGO_OUT="target/$TARGET/dist"
     APP=apps/fauna-windows/FaunaApp/FaunaApp
-    CORE=apps/fauna-windows/FaunaApp/FaunaApp.Core
 
     # 1. The PRODUCTION FFI: stages runtimes/<rid>/native/fauna_ffi.dll and the
     #    generated C# bindings the publish compiles against. Never the -test flavour.
-    if [ "$FLAVOR" = store-safe ]; then
-        just windows-ffi-store-safe dist "$TARGET"
-        AGENT_FEATURES="--no-default-features"   # drops p2p-share, the agent's only default
-        PUBLISH_FLAVOR="-p:FaunaStoreSafe=true"
-    else
-        just windows-ffi dist "$TARGET"
-        AGENT_FEATURES=""
-        PUBLISH_FLAVOR=""
-    fi
+    #    One arm per flavour sets all three of its settings together. The sync
+    #    agent's only default feature is `p2p-share`, the share plane's ingest
+    #    half: store-safe drops it, store-no-payments keeps it, spelled out.
+    case "$FLAVOR" in
+        store-safe)
+            just windows-ffi-store-safe dist "$TARGET"
+            AGENT_FEATURES="--no-default-features"
+            PUBLISH_FLAVOR="-p:FaunaStoreSafe=true" ;;
+        store-no-payments)
+            just windows-ffi-store-no-payments dist "$TARGET"
+            AGENT_FEATURES="--no-default-features --features p2p-share"
+            PUBLISH_FLAVOR="-p:FaunaExcisePayments=true" ;;
+        full)
+            just windows-ffi dist "$TARGET"
+            AGENT_FEATURES=""
+            PUBLISH_FLAVOR="" ;;
+    esac
 
     # 2. The two Rust binaries the package carries, each in its OWN invocation:
     #    one naming several packages unifies their features (release.yml's rule).
     cmd //c "scripts\\cargo-win.cmd build --profile dist --locked -p fauna-sync-agent $AGENT_FEATURES $TARGET_ARG"
     cmd //c "scripts\\cargo-win.cmd build --profile dist --locked -p fauna-shell-ext $TARGET_ARG"
 
-    # 3. The app, self-contained Release. bin/ + obj/ are wiped first: a flavour
-    #    flip touches no source, and _build_msi publishes its e2e-agent build into
-    #    this very same bin/Release/<tfm>/<rid>/publish directory, so an
-    #    incremental publish could hand that assembly back (the trap
-    #    `windows-store-safe-check` measured).
-    rm -rf "$APP/bin" "$APP/obj" "$CORE/bin" "$CORE/obj"
-    "{{msbuild_exe}}" "$APP/FaunaApp.csproj" -restore -t:Publish \
-        -p:Configuration=Release -p:RuntimeIdentifier=$RID \
-        -p:SelfContained=true -p:WindowsAppSDKSelfContained=true \
-        $PUBLISH_FLAVOR -verbosity:minimal
+    # 3. The app, self-contained Release, in the flavour's MSBuild property — the
+    #    one publish recipe the MSI's app is built with too.
+    just windows-app-publish "$ARCH" "$PUBLISH_FLAVOR"
     PUBLISH_DIR="$APP/bin/Release/net10.0-windows10.0.26100/$RID/publish"
-    [ -f "$PUBLISH_DIR/FaunaApp.exe" ] || {
-        echo "windows-store-package: no FaunaApp.exe under $PUBLISH_DIR after the publish" >&2; exit 1; }
 
     # 4. Stage exactly the payload the manifest references.
     STAGE="build/installer/store-payload/$ARCH"
@@ -7414,6 +7993,46 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
     [ -n "{{publisher}}" ] && PACK+=(--publisher "{{publisher}}")
     {{py}} scripts/build-store-package.py "${PACK[@]}"
 
+# Publish the WinUI app self-contained at Release for one arch — the app the MSI
+# carries (`release.yml`'s `build-windows` job) and the Store package carries
+# (`windows-store-package` above): self-contained, so it runs on a box with no .NET
+# or Windows App SDK runtime installed (the works-out-of-the-box invariant).
+# MSBuild.exe, never `dotnet publish`: only under MSBuild does the XAML compiler run
+# in-process; `dotnet publish` shells out to the net472 XamlCompiler.exe, which
+# exited 1 with no diagnostic on both arches of the Store workflow's 0.1.5 dry run.
+# `property` is a store flavour's MSBuild switch (`-p:FaunaStoreSafe=true`,
+# `-p:FaunaExcisePayments=true`; empty = the full app), which only
+# `windows-store-package`'s flavour table sets. The FFI the app compiles against
+# (its C# bindings and runtimes/<rid>/native/fauna_ffi.dll) is staged first —
+# by `windows-ffi`, or by the release workflow from its FFI part — never here.
+#
+# bin/ + obj/ are wiped first: a flavour flip touches no source, and the MSI test
+# helper (test_installer.py::_build_msi) publishes its e2e-agent build into this
+# very same bin/Release/<tfm>/<rid>/publish directory, so an incremental publish
+# could hand that assembly back (the trap `windows-store-safe-check` measured).
+# The binary log is kept beside the installer outputs: the XAML compiler can fail
+# with nothing on the console, and the log carries its diagnostics.
+windows-app-publish arch="arm64" property="": i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    case "{{arch}}" in
+        arm64) RID=win-arm64 ;;
+        x64)   RID=win-x64 ;;
+        *) echo "windows-app-publish: arch must be arm64 or x64, got '{{arch}}'" >&2; exit 2 ;;
+    esac
+    APP=apps/fauna-windows/FaunaApp/FaunaApp
+    CORE=apps/fauna-windows/FaunaApp/FaunaApp.Core
+    rm -rf "$APP/bin" "$APP/obj" "$CORE/bin" "$CORE/obj"
+    mkdir -p build/installer
+    "{{msbuild_exe}}" "$APP/FaunaApp.csproj" -restore -t:Publish \
+        -p:Configuration=Release -p:RuntimeIdentifier=$RID \
+        -p:SelfContained=true -p:WindowsAppSDKSelfContained=true \
+        {{property}} -verbosity:minimal "-bl:build/installer/app-publish-{{arch}}.binlog"
+    PUBLISH_DIR="$APP/bin/Release/net10.0-windows10.0.26100/$RID/publish"
+    [ -f "$PUBLISH_DIR/FaunaApp.exe" ] || {
+        echo "windows-app-publish: no FaunaApp.exe under $PUBLISH_DIR after the publish" >&2; exit 1; }
+
 # The windows APP-SHELL column of the store-safe family — the SIXTH, closing the
 # app-shell half (`dynamic-features.md` § The feature-matrix test story). See
 # `tui-store-safe-check` for why an app-shell column is not redundant with the
@@ -7426,8 +8045,9 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
 # the `#US` heap, BOTH as UTF-16LE. GNU strings could read them with `-e l`; the
 # `strings` on this machine is `llvm-strings`, which has no encoding flag at all.
 # So the columns below scan through `scripts/strings-utf16.py`. A verbatim copy of
-# tui's recipe would report 0 in BOTH columns — column 2 turns that red rather than
-# letting it read as a clean excision, which is exactly what column 2 is for.
+# tui's recipe would report 0 in EVERY column — the default column turns that red
+# rather than letting it read as a clean excision, which is exactly what the
+# default column is for.
 #
 # (2) THE TWO CRITERIA LAND ON DIFFERENT ARTIFACTS, as they do on android
 # (dex vs archive). Criterion 1 (element ids) is a claim about the SHELL's own
@@ -7454,11 +8074,11 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
 # exactly the 30 ids in the gated const table; the scan had never seen a render
 # at all. The mutant in point (5) is what found it.
 #
-# (4) BOTH COLUMNS WIPE bin/ + obj/ FIRST. Both flavors write the same output
-# directory, and a flavor flip touches no source file — so an incremental second
-# column can hand back the first column's assembly. Wiping obj/ forces a full
-# recompile and makes the flavor a fact about the run rather than a hope about
-# MSBuild's up-to-date checks.
+# (4) EVERY COLUMN WIPES bin/ + obj/ FIRST. All three flavors (store-safe,
+# store-no-payments, default) write the same output directory, and a flavor flip
+# touches no source file — so an incremental later column can hand back an earlier
+# column's assembly. Wiping obj/ forces a full recompile and makes the flavor a
+# fact about the run rather than a hope about MSBuild's up-to-date checks.
 #
 # (5) THE MUTANT THAT GRADES THIS COLUMN is an ungated `AutomationId` carrying a
 # payments id, in a page outside Views\Payments\ — tui's `Element::label(
@@ -7474,12 +8094,17 @@ windows-store-package arch="arm64" flavor="full" identity_name="" publisher="": 
 # though windows paints no tip surface: it is non-vacuous through the generated
 # const table alone, which is the carrier this shell most needed gating.
 # The `p2p-share` member rides its own three lists (P2P_ID_PATS, P2P_FACE_PATS,
-# P2P_NATIVE_PATS) because it is its own define (`P2P_SHARE`) and its own render
-# directory (Views\P2pShare\). Its ceremony prefixes are carried by the render
-# and the table; `share-transfer-` / `share-serve-` (the plane, which windows
-# does not paint) by the generated table alone. ⚠ Adding a registry member
-# later is the same shape: one id list, one face list, one native list, one
+# P2P_NATIVE_PATS) because it is its own define (`P2P_SHARE`), its own MSBuild
+# property (`FaunaExciseP2pShare`) and its own render directory
+# (Views\P2pShare\). Its ceremony prefixes are carried by the render and the
+# table; `share-transfer-` / `share-serve-` (the plane, which windows does not
+# paint) by the generated table alone. ⚠ Adding a registry member later is the
+# same shape: one property, one id list, one face list, one native list, one
 # render directory.
+#
+# Three columns: store-safe (both members excised), store-no-payments (the
+# payments member alone — `dynamic-features.md` § The App-Store escape hatch →
+# *The store flavors*; the flavor the Microsoft Store ships) and the default.
 #
 # ONE slot for the whole recipe (build-machine-resources.md § Build/e2e slot locks
 # → The slot is the recipe's dataset lease): every column builds an artifact and
@@ -7502,27 +8127,18 @@ _windows-store-safe-check-impl:
     # `payments` and rides the SAME store-safe axis (dynamic-features.md §
     # Which element IDs belong to a gated feature) — mirrors the swift row's
     # `_APPLE_ID_PREFIXES`.
+    # The last ten are the price-and-route class (dynamic-features.md § Platform-
+    # family surface excision → The price-and-route class), hand-listed as FULL ids
+    # since each natural prefix also covers ids outside the plane. They read 0 in
+    # store-safe because the catalog moved their `const string`s into
+    # Generated/UiIds.cs's `#if PAYMENTS` half and every render is hosted under it.
     PAY_ID_PATS=('subscription-provider-' 'subscription-claim-' 'post-tip-' 'nostr-zap-signer-' \
-        'subscription-tier-form-asking-price' 'compose-sell-asking-price')
-    # The price-and-route class (dynamic-features.md § Platform-family surface
-    # excision → The price-and-route class): the ten ids the catalog does not list
-    # yet, hand-listed as FULL ids, since each natural prefix also covers ids
-    # outside the plane. They are not in PAY_ID_PATS because they cannot read 0
-    # here yet: until the catalog row moves them into Generated/UiIds.cs's
-    # `#if PAYMENTS` half, each one's `const string` sits in the store-safe
-    # assembly's metadata whether or not anything reads it (the C# row of § Which
-    # element IDs belong to a gated feature) — one occurrence, the table's. A
-    # render adds a second: an x:Bind or C# reference compiles to an `ldstr` in
-    # the IL, a literal AutomationId lands in a .xbf. So store-safe must read
-    # EXACTLY 1 (the table and nothing else) and default AT LEAST 2 (the table
-    # and a render). A 0 check scoped to the .xbf set would be vacuous: the
-    # class's renders use x:Bind, which compiles into IL, not the .xbf (measured
-    # 2026-10-08). When the catalog lands the store-safe reading drops to 0 and
-    # table_only goes red on purpose: move these into PAY_ID_PATS then.
-    PAY_CLASS_IDS=('subscription-tier-form-price-hint' 'subscription-tier-form-payment-url' \
+        'subscription-tier-form-asking-price' 'compose-sell-asking-price' \
+        'subscription-tier-form-price-hint' 'subscription-tier-form-payment-url' \
         'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' \
         'compose-sell-price' 'compose-sell-subscribers-free' \
-        'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button')
+        'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' \
+        'gated-post-purchase-pending')
     # The UniFFI faces the shell would call — the C# twin of web's wasm exports.
     PAY_FACE_PATS=('FfiPaymentsClient' 'PaymentsKnownKinds' 'PaymentsWebhookUrl' 'FfiNostrZapSignerClient' 'FfiZapSignerEntry')
     # Criterion 2 — kind strings, which live in the native cdylib, never in the C#.
@@ -7546,29 +8162,48 @@ _windows-store-safe-check-impl:
     # gate rather than a loud failure. So each column asserts its artifacts the
     # moment its build returns (tui's `built` guard, same reasoning).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # SCAN_FILES is set by the caller immediately before each assertion — an array
     # rather than a string so a path with a space cannot split.
     scan() { {{py}} scripts/strings-utf16.py "${SCAN_FILES[@]}"; }
 
-    absent() {
-        local label="$1"; shift
+    absent() {  # absent <flavor> <artifact label> <pattern>...
+        local flavor="$1" label="$2"; shift 2
         local dump; dump="$(scan)"
         local pat n
         for pat in "$@"; do
             n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
-            # Print every count, pass or fail: the two columns' numbers are what
+            # Print every count, pass or fail: the columns' numbers are what
             # dynamic-features.md records per shell, and a witness that only speaks
             # when it fails makes the next session re-measure by hand.
-            echo "  store-safe $label: $pat = $n"
+            echo "  $flavor $label: $pat = $n"
             if [ "$n" != "0" ]; then
-                echo "ERROR: the store-safe windows $label still carries $n '$pat' occurrence(s)." >&2
+                echo "ERROR: the $flavor windows $label still carries $n '$pat' occurrence(s)." >&2
                 echo "  An excised app artifact must contain NO UI surface (element ids), NO" >&2
                 echo "  UniFFI faces and NO wire senders (kind strings) for the plane —" >&2
                 echo "  dynamic-features.md § What \"completely compiled away\" means, items 1-2." >&2
@@ -7582,71 +8217,34 @@ _windows-store-safe-check-impl:
                 echo "      '#if P2P_SHARE' half" >&2
                 echo "      (a C# 'const string' is in assembly metadata even unreferenced —" >&2
                 echo "      scripts/ui-ids-generate.py § GATED_EMISSION);" >&2
-                echo "    · the store-safe fauna_ffi.dll was not the one staged — check" >&2
-                echo "      apps/fauna-windows/.ffi-flavor reads 'release:store-safe'." >&2
+                echo "    · the $flavor fauna_ffi.dll was not the one staged — check" >&2
+                echo "      apps/fauna-windows/.ffi-flavor reads 'win-arm64:release:<its features>'." >&2
                 exit 1
             fi
         done
     }
 
-    present() {
-        local label="$1"; shift
+    present() {  # present <flavor> <artifact label> <pattern>...
+        local flavor="$1" label="$2"; shift 2
         local dump; dump="$(scan)"
         local pat n
         for pat in "$@"; do
             n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
-            echo "  default    $label: $pat = $n"
+            echo "  $flavor $label: $pat = $n"
             if [ "$n" = "0" ]; then
-                echo "ERROR: the DEFAULT windows $label carries no '$pat' — the store-safe" >&2
-                echo "  assertion above is therefore vacuous. Either the surface was removed" >&2
-                echo "  from the default build (a product regression) or it was renamed and" >&2
-                echo "  this witness needs its patterns updated. A pattern that matches" >&2
-                echo "  nothing in BOTH columns is not a stricter check, it is a tripwire." >&2
-                exit 1
-            fi
-        done
-    }
-
-    # The price-and-route class's store-safe reading: the generated table's one
-    # line per id and nothing else (PAY_CLASS_IDS says why it is not 0 yet).
-    table_only() {
-        local label="$1"; shift
-        local dump; dump="$(scan)"
-        local pat n
-        for pat in "$@"; do
-            n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
-            echo "  store-safe $label: $pat = $n (the generated table's line only)"
-            [ "$n" = "1" ] && continue
-            if [ "$n" = "0" ]; then
-                echo "ERROR: the store-safe windows $label carries no '$pat' at all, not even" >&2
-                echo "  the generated table's line. The catalog row has most likely landed and" >&2
-                echo "  moved it behind '#if PAYMENTS': move it from PAY_CLASS_IDS into" >&2
-                echo "  PAY_ID_PATS, which asserts 0 here." >&2
-            else
-                echo "ERROR: the store-safe windows $label carries $n '$pat' occurrences. One" >&2
-                echo "  is the generated table's const; every other one is a RENDER (an x:Bind" >&2
-                echo "  or C# reference compiles to an ldstr, a literal sits in a .xbf). Every" >&2
-                echo "  render of the price-and-route class lives in Views\\Payments\\ and is" >&2
-                echo "  hosted under '#if PAYMENTS' (dynamic-features.md § Platform-family" >&2
-                echo "  surface excision → The price-and-route class)." >&2
-            fi
-            exit 1
-        done
-    }
-
-    # …and its default reading: the table's line plus at least one render.
-    rendered() {
-        local label="$1"; shift
-        local dump; dump="$(scan)"
-        local pat n
-        for pat in "$@"; do
-            n="$(printf '%s\n' "$dump" | grep -c "$pat" || true)"
-            echo "  default    $label: $pat = $n (the generated table's line + renders)"
-            if [ "$n" -lt 2 ]; then
-                echo "ERROR: the DEFAULT windows $label carries $n '$pat', so no render" >&2
-                echo "  paints it and the store-safe reading of 1 above says nothing about the" >&2
-                echo "  render gate. Either the render left the default build or the id was" >&2
-                echo "  renamed and PAY_CLASS_IDS needs updating." >&2
+                if [ "$flavor" = default ]; then
+                    echo "ERROR: the DEFAULT windows $label carries no '$pat' — the absence" >&2
+                    echo "  assertions in the other columns are therefore vacuous. Either the" >&2
+                    echo "  surface was removed from the default build (a product regression) or" >&2
+                    echo "  it was renamed and this witness needs its patterns updated. A pattern" >&2
+                    echo "  that matches nothing in EVERY column is not a stricter check, it is a" >&2
+                    echo "  tripwire." >&2
+                else
+                    echo "ERROR: the $flavor windows $label carries no '$pat'." >&2
+                    echo "  This flavor KEEPS peer-to-peer sharing; a sharing surface gated on" >&2
+                    echo "  the payments member (its define, its property or Views\\Payments\\)," >&2
+                    echo "  or a renamed id, has removed it." >&2
+                fi
                 exit 1
             fi
         done
@@ -7683,15 +8281,15 @@ _windows-store-safe-check-impl:
         fi
     }
 
-    # Both flavors write $OUT and a flavor flip touches no source, so each column
-    # starts from a wiped tree — see the header, point (3).
+    # Every flavor writes $OUT and a flavor flip touches no source, so each column
+    # starts from a wiped tree — see the header, point (4).
     #
     # ⚠ ALL THREE projects, not just the WinUI one. The payments define reaches
     # FaunaApp.Core too (MSBuild does not propagate DefineConstants across a
     # ProjectReference, so each csproj states it and a global /p: reaches all
     # three), and Core is where the UniFFI faces this recipe greps actually live.
     # Wiping only $APP would leave Core's obj/ holding the previous flavor's
-    # compile state and make the second column's verdict depend on whether
+    # compile state and make a later column's verdict depend on whether
     # MSBuild's up-to-date check happens to hash $(DefineConstants) — which is
     # exactly the hope point (3) says not to build a gate on.
     wipe() { rm -rf apps/fauna-windows/FaunaApp/*/bin apps/fauna-windows/FaunaApp/*/obj; }
@@ -7703,10 +8301,9 @@ _windows-store-safe-check-impl:
     built "$OUT/FaunaApp.Core.dll"
     built "$OUT/fauna_ffi.dll"
     collect_id_artifacts
-    SCAN_FILES=("${ID_FILES[@]}");            absent "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
-    SCAN_FILES=("${ID_FILES[@]}");            table_only "assembly + compiled XAML" "${PAY_CLASS_IDS[@]}"
-    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    absent "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
-    SCAN_FILES=("$OUT/fauna_ffi.dll");        absent "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
+    SCAN_FILES=("${ID_FILES[@]}");            absent "store-safe" "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
+    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    absent "store-safe" "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
+    SCAN_FILES=("$OUT/fauna_ffi.dll");        absent "store-safe" "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
     # The renders' own .xbf files must be GONE, not merely id-free: they are the
     # unit the csproj removes, so their presence would mean the item-removal silently
     # stopped matching while some other reason kept the ids out of the scan.
@@ -7718,7 +8315,40 @@ _windows-store-safe-check-impl:
         exit 1
     done
 
-    # --- column 2: the DEFAULT shell must still ship all of it -----------------
+    # --- column 2: store-no-payments drops money and zaps, keeps sharing ------
+    # The second store flavor (dynamic-features.md § The App-Store escape hatch
+    # → *The store flavors*): the payments member's property alone, over the
+    # `store-safe,p2p-share` FFI. BOTH directions on all three artifacts —
+    # `ffi-store-safe-check`'s column 3 and `linux-store-safe-check`'s column 2,
+    # for this shell — because an absence-only column would pass on a build that
+    # had fallen back to store-safe, the flavor this one exists to differ from.
+    wipe
+    just windows-store-no-payments
+    built "$OUT/FaunaApp.dll"
+    built "$OUT/FaunaApp.Core.dll"
+    built "$OUT/fauna_ffi.dll"
+    collect_id_artifacts
+    SCAN_FILES=("${ID_FILES[@]}");            absent "store-no-payments" "assembly + compiled XAML" "${PAY_ID_PATS[@]}"
+    SCAN_FILES=("${ID_FILES[@]}");            present "store-no-payments" "assembly + compiled XAML" "${P2P_ID_PATS[@]}"
+    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    absent "store-no-payments" "core assembly" "${PAY_FACE_PATS[@]}"
+    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    present "store-no-payments" "core assembly" "${P2P_FACE_PATS[@]}"
+    SCAN_FILES=("$OUT/fauna_ffi.dll");        absent "store-no-payments" "native cdylib" "${PAY_KIND_PATS[@]}"
+    SCAN_FILES=("$OUT/fauna_ffi.dll");        present "store-no-payments" "native cdylib" "${P2P_NATIVE_PATS[@]}"
+    for gone in "$OUT"/Views/Payments/*.xbf; do
+        echo "ERROR: the store-no-payments build still emitted $gone." >&2
+        echo "  FaunaApp.csproj's <Page Remove> for Views\\Payments\\** no longer" >&2
+        echo "  matches under FaunaExcisePayments, so the money plane's markup was" >&2
+        echo "  compiled into the artifact." >&2
+        exit 1
+    done
+    if [ ! -s "$OUT/Views/P2pShare/OfflineShareSection.xbf" ]; then
+        echo "ERROR: the store-no-payments build emitted no OfflineShareSection.xbf." >&2
+        echo "  This flavor keeps the ceremony render; Views\\P2pShare\\** is being" >&2
+        echo "  removed on the payments member's property (or on nothing)." >&2
+        exit 1
+    fi
+
+    # --- column 3: the DEFAULT shell must still ship all of it -----------------
     # Without this every assertion above is indistinguishable from a grep that
     # matches nothing — and on THIS shell that is the likeliest failure of all,
     # because an encoding-blind scan reports 0 for every pattern (header, point 1).
@@ -7728,15 +8358,14 @@ _windows-store-safe-check-impl:
     built "$OUT/FaunaApp.Core.dll"
     built "$OUT/fauna_ffi.dll"
     collect_id_artifacts
-    SCAN_FILES=("${ID_FILES[@]}");            present "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
-    SCAN_FILES=("${ID_FILES[@]}");            rendered "assembly + compiled XAML" "${PAY_CLASS_IDS[@]}"
-    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    present "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
-    SCAN_FILES=("$OUT/fauna_ffi.dll");        present "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
+    SCAN_FILES=("${ID_FILES[@]}");            present "default" "assembly + compiled XAML" "${PAY_ID_PATS[@]}" "${P2P_ID_PATS[@]}"
+    SCAN_FILES=("$OUT/FaunaApp.Core.dll");    present "default" "core assembly" "${PAY_FACE_PATS[@]}" "${P2P_FACE_PATS[@]}"
+    SCAN_FILES=("$OUT/fauna_ffi.dll");        present "default" "native cdylib" "${PAY_KIND_PATS[@]}" "${P2P_NATIVE_PATS[@]}"
     # …and the renders' .xbf files must EXIST here, or column 1's absence of them
     # proves nothing about the item-removal.
     for pat in PaymentsAuthorSections ClaimRedeemPanel PostTipDisplay PostTipListDialog NostrZapSignersSection \
-        SubscriptionTierMoneyFields SubscriptionTierPriceText SubscriptionOfferPriceText \
-        SubscriptionOfferPaymentLink SellComposeFields SoldPostTeaser; do
+        TierMoneyFields TierPrice SubscriptionOfferPriceText \
+        OfferPaymentLink SellControls SoldPostTeaser; do
         if [ ! -s "$OUT/Views/Payments/$pat.xbf" ]; then
             echo "ERROR: the DEFAULT build emitted no $pat.xbf, so column 1's check that" >&2
             echo "  the store-safe build lacks it is vacuous. Either the render moved or" >&2
@@ -7751,7 +8380,7 @@ _windows-store-safe-check-impl:
         exit 1
     fi
 
-    echo "windows-store-safe-check: OK — payments + p2p-share element ids, UniFFI faces and native strings present in default, absent in store-safe; the price-and-route class rendered in default, table-only in store-safe"
+    echo "windows-store-safe-check: OK — payments + p2p-share element ids, UniFFI faces and native strings present in default, absent in store-safe, p2p-share only in store-no-payments"
 
 # The android APP-SHELL column of the store-safe family — the FOURTH app-shell
 # witness (after tui, linux and apple) and the second over a non-Rust shell.
@@ -7893,10 +8522,10 @@ android-store-safe-check: i18n-generate providers-generate
 #    unit, never a suffix — installers/android.md § Store identity).
 #
 # The content floor (`kids-floor`) has no string to grep: it is a compiled
-# constant policy (`fauna_core::obligation::KIDS_CONTENT_FLOOR`). Its presence is
+# constant floor (`fauna_core::obligation::KIDS_CONTENT_FLOOR`). Its presence is
 # pinned where it can be — `android-ffi-kids` passing `kids-floor`
-# (test_kids_excision_spine.py) and the floor's own tests in `fauna-ffi`
-# (`cargo test -p fauna-ffi --lib --no-default-features --features kids-safe,kids-floor`).
+# (test_kids_excision_spine.py) and the floor's own tests in the FFI core
+# (`cargo test -p fauna-ffi-core --lib --no-default-features --features kids-safe,kids-floor`).
 #
 # Deliberately NOT in the merge-gate check, on `android-store-safe-check`'s
 # measured cost grounds (two release `fauna-ffi` builds plus two R8 passes).
@@ -8001,11 +8630,11 @@ android-kids-check: i18n-generate providers-generate
         echo "  identity (installers/android.md § Store identity)." >&2
         exit 1
     fi
-    # Permissions of surfaces item (4) does not keep (photo backup, the battery
-    # prompt, the foreground sync service); `app/src/kids/AndroidManifest.xml`
+    # Permissions of surfaces item (4) does not keep (photo backup, the
+    # foreground sync service); `app/src/kids/AndroidManifest.xml`
     # removes them. Matched at end of line (`$`), so `FOREGROUND_SERVICE`
     # does not match a longer name by accident of prefix.
-    REMOVED_PERMS=(READ_MEDIA_IMAGES READ_MEDIA_VIDEO READ_EXTERNAL_STORAGE REQUEST_IGNORE_BATTERY_OPTIMIZATIONS FOREGROUND_SERVICE FOREGROUND_SERVICE_DATA_SYNC FOREGROUND_SERVICE_SPECIAL_USE)
+    REMOVED_PERMS=(READ_MEDIA_IMAGES READ_MEDIA_VIDEO READ_EXTERNAL_STORAGE FOREGROUND_SERVICE FOREGROUND_SERVICE_DATA_SYNC)
     for perm in "${REMOVED_PERMS[@]}"; do
         if grep -q -- "android\.permission\.$perm\$" "$WORK/kids-manifest.txt"; then
             echo "ERROR: the kids APK's manifest still names android.permission.$perm," >&2
@@ -8062,7 +8691,7 @@ android-kids-check: i18n-generate providers-generate
             exit 1
         fi
     done
-    echo "android-kids-check: OK — kids-excised element ids, exported UniFFI faces and feed/search/web kind text present in release, absent in kids; kids identity on the kids APK only; photo-backup/battery/foreground-service permissions in release, absent from the kids manifest"
+    echo "android-kids-check: OK — kids-excised element ids, exported UniFFI faces and feed/search/web kind text present in release, absent in kids; kids identity on the kids APK only; photo-backup/foreground-service permissions in release, absent from the kids manifest"
 
 # Build the excised macOS app — the apple family's escape-hatch artifact
 # (`dynamic-features.md` § Platform-family surface excision). Twin of
@@ -8094,8 +8723,8 @@ mac-store-safe: (apple-ffi-host-store-safe "release")
 # only a Swift artifact can prove `subscription-provider-*` /
 # `subscription-claim-*` leave the app. Apple has no tip surface today
 # (`post-tip-*` is unimplemented here, so it is deliberately NOT a pattern below
-# — a pattern that matches nothing in BOTH columns is the vacuity this witness's
-# second column exists to prevent). The day a tip render lands, its prefix is
+# — a pattern that matches nothing in EVERY column is the vacuity this witness's
+# default column exists to prevent). The day a tip render lands, its prefix is
 # added here in the same commit.
 #
 # ⚠ THE iOS ARM IS A TYPECHECK, NOT AN ARTIFACT. There is no iOS archive recipe
@@ -8106,7 +8735,7 @@ mac-store-safe: (apple-ffi-host-store-safe "release")
 # owed when that recipe lands (`dynamic-features.md` § The App-Store escape
 # hatch).
 #
-# ⚠ BOTH COLUMNS ARE RELEASE BUILDS, and that is a correctness requirement, not
+# ⚠ EVERY COLUMN IS A RELEASE BUILD, and that is a correctness requirement, not
 # a preference (measured 2026-08-15, the first store-safe Swift build): a DEBUG
 # Swift build compiles FaunaKit's `#if DEBUG` automation surface, whose calls to
 # the `*ForTest` UniFFI seams only resolve against the **test-helpers** FFI
@@ -8127,7 +8756,7 @@ mac-store-safe: (apple-ffi-host-store-safe "release")
 # they are reentrant no-ops (build-slot.py § FIFO ticket queue).
 [macos]
 apple-store-safe-check: i18n-generate providers-generate
-    {{slot_build}} just _apple-store-safe-check-impl
+    {{slot_build_swift}} just _apple-store-safe-check-impl
 
 _apple-store-safe-check-impl:
     #!/usr/bin/env bash
@@ -8138,16 +8767,13 @@ _apple-store-safe-check-impl:
     just apple-ffi-host-store-safe release
     {{slot_build}} swift build --package-path apps/fauna-apple --product FaunaMacOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS -Xswiftc -DFAUNA_EXCISE_P2P_SHARE
     {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS -Xswiftc -DFAUNA_EXCISE_P2P_SHARE
-    # The price-and-route class (dynamic-features.md § Platform-family surface
-    # excision → *The price-and-route class*) is NOT in this list yet, on purpose:
-    # on apple the generated `Ids` table is itself a carrier (the Swift row of
-    # § Which element IDs belong to a gated feature) and gates an id only once the
-    # catalog lists it — measured 2026-10-08 on this store-safe artifact with every
-    # render already gated: each of the class's ten uncatalogued ids read exactly 1
-    # (the table's line), its two catalogued twins 0. The twelve full ids join both
-    # columns here and in the iOS archive witness below with the catalog row's
-    # apple re-run.
-    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
+    # The last twelve patterns are the price-and-route class's full ids
+    # (dynamic-features.md § Platform-family surface excision → *The
+    # price-and-route class*). On apple the generated `Ids` table is itself a
+    # carrier (the Swift row of § Which element IDs belong to a gated feature):
+    # it gates an id only once the catalog lists it, so these read 0 only because
+    # the catalog carries all twelve.
+    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe FaunaMacOS flavor still carries $n '$pat' occurrence(s)." >&2
@@ -8164,13 +8790,49 @@ _apple-store-safe-check-impl:
     just _apple-assert-no-fp-test-cli "$BIN" "store-safe FaunaMacOS"
     just _apple-assert-no-e2e-env "$BIN" "store-safe FaunaMacOS"
 
-    # --- column 2: the DEFAULT app must still ship all of it ------------------
+    # --- column 2: store-no-payments drops money and zaps, keeps sharing ------
+    # The second store flavor (dynamic-features.md § The App-Store escape hatch
+    # → *The store flavors*): the FFI is the complement plus `p2p-share`, and
+    # the shell passes the payments condition ONLY — one condition per registry
+    # member, so leaving `FAUNA_EXCISE_P2P_SHARE` off is what keeps the share
+    # plane and the ceremony painted. Both directions, because an absence-only
+    # column would pass on a build that had fallen back to store-safe — the
+    # flavor this one exists to differ from. No apple artifact ships it today;
+    # this column is what keeps the pairing compiling until one does.
+    NO_PAYMENTS_ABSENT=('subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending')
+    NO_PAYMENTS_PRESENT=('offline-share-' 'offline-receive-' 'share-transfer-' 'share-serve-')
+    just apple-ffi-host-store-no-payments release
+    {{slot_build}} swift build --package-path apps/fauna-apple --product FaunaMacOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS
+    {{slot_build}} swift build --package-path apps/fauna-apple --target FaunaiOS -c release -Xswiftc -DFAUNA_EXCISE_PAYMENTS
+    for pat in "${NO_PAYMENTS_ABSENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the store-no-payments FaunaMacOS flavor still carries $n '$pat' occurrence(s)." >&2
+            echo "  The money plane must be compiled away in this flavor exactly as in" >&2
+            echo "  store-safe; a payments render gated on FAUNA_EXCISE_P2P_SHARE (or on" >&2
+            echo "  nothing) is the usual cause — gate it on #if !FAUNA_EXCISE_PAYMENTS." >&2
+            exit 1
+        fi
+    done
+    for pat in "${NO_PAYMENTS_PRESENT[@]}"; do
+        n="$(strings -a "$BIN" | grep -c "$pat" || true)"
+        if [ "$n" = "0" ]; then
+            echo "ERROR: the store-no-payments FaunaMacOS flavor carries no '$pat'." >&2
+            echo "  This flavor KEEPS peer-to-peer sharing; a sharing surface gated on" >&2
+            echo "  FAUNA_EXCISE_PAYMENTS (or a renamed id) has removed it." >&2
+            exit 1
+        fi
+    done
+    just _apple-assert-no-fp-test-cli "$BIN" "store-no-payments FaunaMacOS"
+    just _apple-assert-no-e2e-env "$BIN" "store-no-payments FaunaMacOS"
+
+    # --- column 3: the DEFAULT app must still ship all of it ------------------
     # Without this the assertions above are indistinguishable from greps that
     # match nothing — a renamed id would read as a successful excision. Same
     # release config as column 1, and the same pairing `mac-release` ships.
     just apple-ffi-host release
     {{slot_build}} swift build --package-path apps/fauna-apple --product FaunaMacOS -c release
-    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(strings -a "$BIN" | grep -c "$pat" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT FaunaMacOS flavor carries no '$pat' — the store-safe" >&2
@@ -8182,7 +8844,7 @@ _apple-store-safe-check-impl:
     done
     just _apple-assert-no-fp-test-cli "$BIN" "default FaunaMacOS"
     just _apple-assert-no-e2e-env "$BIN" "default FaunaMacOS"
-    echo "apple-store-safe-check: OK — payments + p2p-share UI and payments kinds present in default, absent in store-safe; File Provider test CLI and e2e env surface absent from both"
+    echo "apple-store-safe-check: OK — payments + p2p-share UI and payments kinds present in default, absent in store-safe, p2p-share only in store-no-payments; File Provider test CLI and e2e env surface absent from all three"
 
 # Convention 15's ARTIFACT witness for apple's File Provider test CLI
 # (`FaunaKit/FileProvider/FileProviderTestCLI.swift`, `#if DEBUG` only —
@@ -8319,14 +8981,12 @@ apple-ios-store-safe-check: i18n-generate providers-generate
     # and the archive then dies on "no library for this platform".
     just apple-ffi-store-safe
     archive store-safe OTHER_SWIFT_FLAGS='$(inherited) -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE'
-    # The price-and-route class (dynamic-features.md § Platform-family surface
-    # excision → *The price-and-route class*) — the class this witness's first
-    # run surfaced — is NOT in this list yet: the generated `Ids` table carries
-    # every uncatalogued id into the apple artifacts (the macOS witness above says
-    # how that was measured), so the twelve full ids join both columns with the
-    # catalog row's apple re-run —
-    # the run that proves the archive clean of the class.
-    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
+    # The last twelve patterns are the price-and-route class's full ids
+    # (dynamic-features.md § Platform-family surface excision → *The
+    # price-and-route class*); the generated `Ids` table carries any id the
+    # catalog does not list (the macOS witness above says how), so the archive
+    # reads them 0 only because the catalog lists all twelve.
+    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(grep -c "$pat" "$SCRATCH/store-safe.strings" || true)"
         if [ "$n" != "0" ]; then
             echo "ERROR: the store-safe iOS archive still carries $n '$pat' occurrence(s)." >&2
@@ -8345,7 +9005,7 @@ apple-ios-store-safe-check: i18n-generate providers-generate
     # the change that would silently hollow out column 1.
     just apple-ffi
     archive default
-    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-'; do
+    for pat in 'subscription-provider-' 'subscription-claim-' 'fauna\.payments\.' 'fauna\.tips\.' 'post-tip-' 'share-transfer-' 'share-serve-' 'offline-share-' 'offline-receive-' 'subscription-tier-form-price-hint' 'subscription-tier-form-asking-price' 'subscription-tier-form-payment-url' 'compose-sell-price' 'compose-sell-asking-price' 'compose-sell-subscribers-free' 'subscription-tier-price' 'subscription-offer-price' 'subscription-offer-payment-link' 'gated-post-price' 'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending'; do
         n="$(grep -c "$pat" "$SCRATCH/default.strings" || true)"
         if [ "$n" = "0" ]; then
             echo "ERROR: the DEFAULT iOS archive carries no '$pat' — the store-safe" >&2
@@ -8387,6 +9047,20 @@ apple-ios-store-safe-check: i18n-generate providers-generate
 #    literals run together in a `strings` line.
 #  * **The store identity.** `social.fauna.faunakids` is the kids archive's
 #    bundle identifier and never the default one's.
+#  * **Photo backup (the packaged Info.plist + the app binary).** Not in item
+#    (4)'s *Kept* set: the kids archive's packaged Info.plist carries no
+#    `NSPhotoLibraryUsageDescription` and permits no `social.fauna.sync.upload`
+#    task, and its binary names neither that task id nor a `photo-backup-*`
+#    element id (Swift-only kids ids, `SWIFT_KIDS_ONLY_ID_PREFIXES`; android
+#    hand-gates its section and measures the manifest instead). The custodian
+#    pull's `processing` mode stays — the backups page is *Kept* — so the column
+#    keys on the photo key and the photo task id, never on a background mode.
+#  * **No in-app browser (one column only).** The kids binary links neither
+#    WebKit nor SafariServices and names neither `WKWebView` nor
+#    `SFSafariViewController`: no web view of an arbitrary page is reachable
+#    (item (4) excises outbound link opening). No Apple target has an in-app
+#    browser today, so the default column has nothing to measure here — this is
+#    a fence against one arriving in shared Swift, not an excision.
 #
 # The content floor (`kids-floor`) has no string to grep, exactly as on
 # android: `apple-ffi-kids` passing it and `fauna-ffi`'s own floor tests pin it.
@@ -8424,6 +9098,8 @@ apple-kids-check: i18n-generate providers-generate
         local app="$SCRATCH/$name.xcarchive/Products/Applications/$scheme.app"
         strings -a "$app/$scheme" > "$SCRATCH/$name.strings"
         plutil -extract CFBundleIdentifier raw "$app/Info.plist" > "$SCRATCH/$name.bundle-id"
+        cp "$app/Info.plist" "$SCRATCH/$name.Info.plist"
+        otool -L "$app/$scheme" > "$SCRATCH/$name.links"
         just _apple-assert-no-fp-test-cli "$app/$scheme" "$name iOS archive"
         just _apple-assert-no-e2e-env "$app/$scheme" "$name iOS archive"
     }
@@ -8454,6 +9130,20 @@ apple-kids-check: i18n-generate providers-generate
     # Wire kinds of the excised planes (criterion 2), unanchored.
     KIND_PATS=('fauna\.feed\.' 'fauna\.search\.' 'fauna\.web\.')
     KIDS_ID='social.fauna.faunakids'
+    # Photo backup (not *Kept*): Swift-only kids ids, its task id, its plist key.
+    PHOTO_ID_PATS=('^photo-backup-')
+    PHOTO_TASK='social.fauna.sync.upload'
+    PHOTO_KEY='NSPhotoLibraryUsageDescription'
+    has_photo_key() { plutil -extract "$PHOTO_KEY" raw "$1" >/dev/null 2>&1; }
+    permits_photo_task() {
+        plutil -extract BGTaskSchedulerPermittedIdentifiers json -o - "$1" 2>/dev/null \
+            | grep -q -- "\"$PHOTO_TASK\""
+    }
+    PHOTO_TASK_LINE='^social\.fauna\.sync\.upload$'  # the id, as a whole `strings` line
+    task_lines() { count "$PHOTO_TASK_LINE" "$1"; }
+    # No in-app browser: the frameworks and the class names.
+    WEB_LINK_PATS=('/WebKit\.framework/' '/SafariServices\.framework/')
+    WEB_CLASS_PATS=('WKWebView' 'SFSafariViewController')
 
     # --- column 1: the kids archive carries none of it -----------------------
     # ⚠ The device xcframework must be the LAST FFI build before the archive (a
@@ -8482,6 +9172,41 @@ apple-kids-check: i18n-generate providers-generate
         if [ "$n" != "0" ]; then
             echo "ERROR: the kids iOS archive still carries $n line(s) of '$pat' kind text:" >&2
             grep -o -- "${pat}[A-Za-z0-9_.]*" "$SCRATCH/kids.strings" | sort -u | head -5 | sed 's/^/    /' >&2
+            fail=1
+        fi
+    done
+    for pat in "${PHOTO_ID_PATS[@]}"; do
+        n="$(count "$(id_line "$pat")" "$SCRATCH/kids.strings")"
+        if [ "$n" != "0" ]; then
+            echo "ERROR: the kids iOS archive still carries $n '$pat' (photo backup) element id(s)." >&2
+            fail=1
+        fi
+    done
+    if has_photo_key "$SCRATCH/kids.Info.plist"; then
+        echo "ERROR: the kids iOS archive's packaged Info.plist carries $PHOTO_KEY —" >&2
+        echo "  photo backup is not in the kids app's Kept set; the kids target must read" >&2
+        echo "  Fauna-iOS/Resources/Info-Kids.plist." >&2
+        fail=1
+    fi
+    if permits_photo_task "$SCRATCH/kids.Info.plist"; then
+        echo "ERROR: the kids iOS archive's packaged Info.plist permits the $PHOTO_TASK task." >&2
+        fail=1
+    fi
+    if [ "$(task_lines "$SCRATCH/kids.strings")" != "0" ]; then
+        echo "ERROR: the kids iOS archive's binary names the $PHOTO_TASK task id — a" >&2
+        echo "  registration the kids plist does not permit fails at launch." >&2
+        fail=1
+    fi
+    for pat in "${WEB_LINK_PATS[@]}"; do
+        if grep -q -- "$pat" "$SCRATCH/kids.links"; then
+            echo "ERROR: the kids iOS archive links $(grep -- "$pat" "$SCRATCH/kids.links" | awk '{print $1}')" >&2
+            echo "  — no web view of an arbitrary page may be reachable in the kids app." >&2
+            fail=1
+        fi
+    done
+    for pat in "${WEB_CLASS_PATS[@]}"; do
+        if [ "$(count "$pat" "$SCRATCH/kids.strings")" != "0" ]; then
+            echo "ERROR: the kids iOS archive names $pat — an in-app browser in the kids app." >&2
             fail=1
         fi
     done
@@ -8534,7 +9259,20 @@ apple-kids-check: i18n-generate providers-generate
         echo "ERROR: the DEFAULT iOS archive carries the Fauna Kids identity." >&2
         exit 1
     fi
-    echo "apple-kids-check: OK — kids-excised element ids, exported UniFFI faces and feed/search/web kind text present in the default iOS archive, absent in the kids one; kids identity on the kids archive only"
+    for pat in "${PHOTO_ID_PATS[@]}"; do
+        if [ "$(count "$(id_line "$pat")" "$SCRATCH/default.strings")" = "0" ]; then
+            echo "ERROR: the DEFAULT iOS archive carries no '$pat' element id — the kids" >&2
+            echo "  photo-backup assertion above is vacuous (or the ids were renamed)." >&2
+            exit 1
+        fi
+    done
+    if ! has_photo_key "$SCRATCH/default.Info.plist" || ! permits_photo_task "$SCRATCH/default.Info.plist" \
+        || [ "$(task_lines "$SCRATCH/default.strings")" = "0" ]; then
+        echo "ERROR: the DEFAULT iOS archive lacks $PHOTO_KEY, the $PHOTO_TASK permission or" >&2
+        echo "  the task id in its binary — the kids photo-backup assertions are vacuous." >&2
+        exit 1
+    fi
+    echo "apple-kids-check: OK — kids-excised element ids, exported UniFFI faces, feed/search/web kind text and photo backup (ids, task id, Info.plist key and permission) present in the default iOS archive, absent in the kids one; kids identity on the kids archive only; no WebKit/SafariServices in the kids archive"
 
 # The WASM/web column of the same witness (`dynamic-features.md` § The
 # feature-matrix test story). Third and last of the store-safe family:
@@ -8603,11 +9341,30 @@ _wasm-store-safe-check-impl: _wasm32-cc-check
     # the cargo-target dataset was reclaimed under us (build-machine-resources.md
     # § Build/e2e slot locks → the slot is the recipe's dataset lease).
     built() {
-        [ -s "$1" ] && return 0
-        echo "ERROR: $1 is missing right after the build that writes it —" >&2
-        echo "  refusing to scan nothing, which every absence assertion here" >&2
-        echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
-        exit 1
+        if [ ! -s "$1" ]; then
+            echo "ERROR: $1 is missing right after the build that writes it —" >&2
+            echo "  refusing to scan nothing, which every absence assertion here" >&2
+            echo "  would read as a clean excision. Re-run; the build state rebuilds." >&2
+            exit 1
+        fi
+        # A UniFFI scaffolding symbol (`uniffi_fauna_ffi_fn_func_…`) is a Mach-O
+        # EXPORT-table name, and Apple's `strings` reads only string data, not the
+        # export table (measured 2026-10-23: `strings` 0 vs `nm -gU` 16 on the
+        # default dylib) — so on a `.dylib` the symbol faces would read as absent
+        # in every column, a vacuous green on the absence columns and a false red
+        # on the present ones. An ELF keeps its symbol names in a string table
+        # `strings` does read; only a Mach-O needs `nm`. A failing `nm` is fatal
+        # here (`set -e` on the assignment), never an empty symbol list.
+        SYMS=""
+        case "$1" in
+            *.dylib)
+                SYMS="$(nm -gU "$1")"
+                if [ -z "$SYMS" ]; then
+                    echo "ERROR: nm -gU read no exports from $1 — refusing an empty symbol scan." >&2
+                    exit 1
+                fi
+                ;;
+        esac
     }
 
     # Both witness axes, per plane. The kind strings are what a nest would ever
@@ -8651,7 +9408,7 @@ _wasm-store-safe-check-impl: _wasm32-cc-check
     # on Linux (the ruling pass's machine could not compile wasm32).
     PAY_ID_PATS=('subscription-claim-' 'post-tip-' 'compose-sell-price' \
         'compose-sell-subscribers-free' 'gated-post-price' 'gated-post-payment-link' \
-        'gated-post-buy-button')
+        'gated-post-buy-button' 'gated-post-purchase-pending')
 
     absent() {  # absent <flavor-label> <pattern>...
         local flavor="$1"; shift
@@ -8857,7 +9614,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
                'compose-sell-price' 'compose-sell-subscribers-free' \
                'subscription-tier-price' 'subscription-offer-price' \
                'subscription-offer-payment-link' 'gated-post-price' \
-               'gated-post-payment-link' 'gated-post-buy-button' \
+               'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
                'paymentsWebhookUrl' 'paymentsReturnUrl'; do
         # ⚠ `|| true` inside the braces, not after the pipe: grep exits 1 when it
@@ -8896,7 +9653,7 @@ web-store-safe-check: wasm i18n-generate providers-generate
                'compose-sell-price' 'compose-sell-subscribers-free' \
                'subscription-tier-price' 'subscription-offer-price' \
                'subscription-offer-payment-link' 'gated-post-price' \
-               'gated-post-payment-link' 'gated-post-buy-button' \
+               'gated-post-payment-link' 'gated-post-buy-button' 'gated-post-purchase-pending' \
                'paymentsProvidersSet' 'paymentsClaimsMint' 'paymentsKnownKinds' \
                'paymentsWebhookUrl' 'paymentsReturnUrl'; do
         n="$({ grep -ro "$pat" "$WORK/default" || true; } | wc -l)"
@@ -9302,13 +10059,33 @@ _windows-go-cgo-build cmd out_name rust_target go_arch profile go_tags:
     # empty `-tags=` argument.
     GOTAGS=""
     if [ -n "{{go_tags}}" ]; then GOTAGS="-tags={{go_tags}}"; fi
-    {{slot_build}} go -C bins/fauna-bridges build $GOTAGS -ldflags="$GOLDFLAGS" -o "$OUT" {{cmd}}
+    # The go build is freshness-gated OUTSIDE the build slot, like the cargo step
+    # in `_windows-go-cgo-env` and the Unix `_go-cgo-build`: an ungated
+    # `{{slot_build}}` takes a slot on a warm tree too, and the e2e in-hold
+    # re-check (refuse mode, build-slot-pool.md § Cross-pool acquisition order ->
+    # the warm pass) refused it on every cycle. --stamp, not the exe, carries
+    # freshness (a no-op `go build` need not rewrite its output). Every target and
+    # profile writes the same target/{{out_name}} (a release attempt builds arm64
+    # then amd64 into it), so the build drops EVERY other stamp for this out_name
+    # (`.exe` ends the prefix, so the prod and e2e atproto stamps never match each
+    # other's glob) — a stale arm64 stamp would otherwise read fresh over an amd64
+    # exe. The output is in target/, not in the module, so nothing needs excluding.
+    STAMP_PREFIX="$(pwd)/target/windows-go-cgo-{{out_name}}"
+    export OUT GOTAGS GOLDFLAGS STAMP_PREFIX
+    {{py}} scripts/build-if-stale.py --label "windows-go-cgo-{{out_name}}-{{rust_target}}-{{profile}}" \
+        --stamp "$STAMP_PREFIX-{{rust_target}}-{{profile}}.stamp" \
+        --target "$OUT" \
+        --source bins/fauna-bridges --source libs/fauna-mail-go --source "$REL/fauna_ffi.dll" \
+        -- {{slot_build}} bash -c 'rm -f "$STAMP_PREFIX"-*.stamp && go -C bins/fauna-bridges build $GOTAGS -ldflags="$GOLDFLAGS" -o "$OUT" {{cmd}}'
     # Stage runtime DLLs beside the exe: our fauna_ffi.dll + libunwind.dll (the one
     # llvm-mingw runtime dep of the gnullvm dll; everything else is OS UCRT api-sets).
     # Windows has no rpath/LD_LIBRARY_PATH equivalent an exe can carry (only the
     # process-wide PATH, which `mail-bridge-test-win-cgo` uses and a shipped exe
     # must not depend on), which is why the output lives in target/ next to its
     # DLLs rather than in bins/fauna-bridges/ like the Unix flavors.
+    # The copies stay UNCONDITIONAL and outside the gate: fauna_ffi.dll and
+    # libunwind.dll are shared by all four exes and both architectures, so another
+    # recipe's build can replace them while this exe's stamp still reads fresh.
     # libunwind.dll is the TARGET's runtime: llvm-mingw keeps one per target triple
     # under <root>/<triple>/bin/ on every host, while <root>/bin/ holds the host
     # arch's copy only on a Windows host (none on a Linux one — Linux's
@@ -9651,6 +10428,26 @@ windows-service-build crate features="":
         --exclude '*/target/*' --exclude '*/bin/*' --exclude '*/obj/*' \
         -- {{slot_build}} bash -c "cmd //c \"scripts\\cargo-win.cmd build -p {{crate}} $FEATURE_ARGS\""
 
+# The four Rust crates the MSI ships for a Windows target, at the release profile:
+# the sync agent, the two machine-service exes (FaunaNest, FaunaBridge — one per
+# virtual account) and the shell-extension cdylib. Each crate is its OWN cargo
+# invocation: one naming several packages unifies their features, and the shipped
+# agent must carry only the feature set it asks for. `target` as for `nest` (empty
+# = the host); `release.yml`'s `windows-services` part builds them with this
+# recipe, both arches from the x64 hosted runner. fauna-nest-service path-depends
+# on bins/fauna-nest, so there is no separate nest build to stage; the shell-ext
+# crate names its lib `fauna_shell`, so the cdylib is fauna_shell.dll directly (the
+# name the .wxs and the CLSID's InprocServer32 expect). The dev loop's per-crate
+# build is `windows-service-build` above.
+windows-services-release target="": i18n-generate providers-generate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{slot_build_body}}
+    export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
+    for crate in fauna-sync-agent fauna-nest-service fauna-bridge-service fauna-shell-ext; do
+        {{cargo}} build --locked --release -p "$crate" {{ if target == "" { "" } else { "--target " + target } }}
+    done
+
 # Build fauna-windows release — the SHIPPED flavor: the production FFI
 # (`windows-ffi`, i.e. release profile with NO `test-helpers`) plus
 # Configuration=Release, which leaves both DEBUG and FaunaE2eAgent undefined. That
@@ -9782,7 +10579,7 @@ linux-debug: i18n-generate providers-generate
         --source libs ${VENDOR_SOURCE:-} --source apps/fauna-linux --source bins/fauna-sync-agent \
         --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} cargo build -p fauna-linux -p fauna-sync-agent
+        -- {{slot_build_crate}} cargo build -p fauna-linux -p fauna-sync-agent
 
 # Build fauna-tui (the TUI client) debug binary
 # fauna-sync-agent builds alongside (like linux-debug): tui's spawner expects the
@@ -9803,7 +10600,7 @@ tui-debug: i18n-generate providers-generate
         --source libs ${VENDOR_SOURCE:-} --source apps/fauna-tui --source bins/fauna-sync-agent \
         --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} cargo build -p fauna-tui -p fauna-sync-agent
+        -- {{slot_build_crate}} cargo build -p fauna-tui -p fauna-sync-agent
 
 # Build the cli app's device shell (`fauna-cli`, apps/cli.md § The device shell)
 # with its e2e seams — what the e2e driver launches as an LLM host would.
@@ -9817,7 +10614,7 @@ cli-debug: i18n-generate providers-generate
         --source libs ${VENDOR_SOURCE:-} --source apps/fauna-cli \
         --source Cargo.lock --source rust-toolchain.toml \
         --exclude '*/pkg/*' --exclude '*/pkg-test/*' --exclude 'libs/fauna-mail-go/*' \
-        -- {{slot_build}} cargo build -p fauna-cli-device --features e2e-agent
+        -- {{slot_build_crate}} cargo build -p fauna-cli-device --features e2e-agent
 
 # Build fauna-linux release binary (+ the sync agent it spawns — see linux-debug).
 # `release.yml` builds the released desktop binary with this recipe; `target` as
@@ -10045,6 +10842,15 @@ ui-registry-lint *ARGS:
 cli-catalog:
     {{slot_build}} cargo run -q -p fauna-cli --example catalog_snapshot > tests/e2e-unified/catalog-actual-cli.yaml
 
+# The nest's module graph and the crate-cut plan it is scored against: `map` lists
+# every top-level module of bins/fauna-nest/src with its production lines and
+# references and finds the cycles; `plan` scores the ratified crate membership
+# (the script's PLAN table) for back-edges; `mono <dump>` aggregates a
+# -Zdump-mono-stats dump per module. Owner: docs/goal/architecture/nest-crate-layout.md.
+# Stdlib-only; reads the tree, builds nothing.
+nest-crate-map *ARGS:
+    {{py}} scripts/nest-crate-map.py {{ARGS}}
+
 # Wire-schema evolution gate: diff libs/fauna-protocol/schemas/*.cddl against
 # the merge base and block non-additive drift (removed/renamed/retyped keys,
 # optional→required). Pure git + regex, stdlib-only, <1s. This is the only
@@ -10096,6 +10902,55 @@ brand-mark-check:
     {{py}} -c "import sys; sys.path.insert(0, 'scripts'); import _svg_flat_render as r; \
         s, e = r.load_shapes('sites/fauna-social/public/favicon.svg'); \
         print(f'brand mark: {len(s)} shapes, viewBox {e}x{e} — readable')"
+
+# Install the kache launcher (docs/goal/architecture/build-compile-cache.md § The
+# launcher): a release build of `tools/kache-launcher`, copied beside the
+# machine's kache, outside every checkout — `D:\tools\kache\bin\kache-launcher.exe`
+# on Windows, `~/.local/fauna-tools/kache/bin/kache-launcher` on macOS and Linux
+# (beside `real/`, the never-direct binary's, never in it), on macOS with
+# `scripts/kache-mac.sb` beside it (the profile its tail runs kache under) — then its
+# `--version` and `--contract`. The kache fronts wrap only through a launcher there
+# answering their contract: no launcher, or an older one, no wrap. Built with
+# FAUNA_KACHE=0, so the program every wrapped compile passes through is never
+# itself served from kache's store. Re-run it after a change to the crate.
+kache-launcher-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{os()}}" = "windows" ]; then
+        FAUNA_KACHE=0 {{slot_focus}} cmd //c "scripts\\cargo-win.cmd build --locked --release -p kache-launcher --bin kache-launcher"
+        DEST_DIR="/d/tools/kache/bin"
+    else
+        FAUNA_KACHE=0 {{slot_focus}} cargo build --locked --release -p kache-launcher --bin kache-launcher
+        DEST_DIR="$HOME/.local/fauna-tools/kache/bin"
+    fi
+    TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | {{py}} -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])')}"
+    BIN="kache-launcher{{exe_suffix}}"
+    mkdir -p "$DEST_DIR"
+    if [ "{{os()}}" = "macos" ]; then
+        # the launcher's mac tail reads the profile beside itself (Stage 2's design,
+        # decision 3): in place before the binary that needs it. Its immutable snapshot
+        # `profiles/kache-mac-<sha256>.sb` goes first: a compile applies the snapshot and
+        # the tail inside it re-applies the same file, so a reinstall while a build runs
+        # never makes the nested profile differ (macOS refuses that: sandbox_apply EPERM)
+        SUM="$(/usr/bin/shasum -a 256 scripts/kache-mac.sb | cut -d' ' -f1)"
+        mkdir -p "$DEST_DIR/profiles"
+        cp scripts/kache-mac.sb "$DEST_DIR/profiles/kache-mac-$SUM.sb.new"
+        mv -f "$DEST_DIR/profiles/kache-mac-$SUM.sb.new" "$DEST_DIR/profiles/kache-mac-$SUM.sb"
+        cp scripts/kache-mac.sb "$DEST_DIR/kache-mac.sb.new"
+        mv -f "$DEST_DIR/kache-mac.sb.new" "$DEST_DIR/kache-mac.sb"
+        # a snapshot no compile can still run under: superseded and a week old
+        find "$DEST_DIR/profiles" -name 'kache-mac-*.sb' ! -name "kache-mac-$SUM.sb" -mtime +7 -delete
+    fi
+    cp "$TARGET_DIR/release/$BIN" "$DEST_DIR/$BIN.new"
+    if [ "{{os()}}" = "windows" ] && [ -e "$DEST_DIR/$BIN" ]; then
+        # a running image cannot be replaced on Windows, only renamed: the old copy moves
+        # aside for the compiles still running it, and a later install removes it
+        mv -f "$DEST_DIR/$BIN" "$DEST_DIR/$BIN.old-$$"
+    fi
+    mv -f "$DEST_DIR/$BIN.new" "$DEST_DIR/$BIN"
+    rm -f "$DEST_DIR/$BIN".old-* 2>/dev/null || true
+    "$DEST_DIR/$BIN" --version
+    echo "contract $("$DEST_DIR/$BIN" --contract)"
 
 # Self-test the nest image's deployment shell (docker/nest-toml-overlay.sh): the
 # artifact's writes into /data/nest.toml — static_dir (the bundled SPA path,
@@ -10168,16 +11023,18 @@ shipped-suite-test:
         exit 0
     fi
     pytest i18n/generator/tests -q
-    pytest scripts/test_build_if_stale.py scripts/test_lint_cross_client.py \
+    pytest scripts/test_build_if_stale.py scripts/test_cargo_boundary.py scripts/test_lint_cross_client.py \
         scripts/test_lint_winui_datatemplate_names.py \
         scripts/test_lint_winui_xbind_nested_calls.py \
         scripts/test_lint_winui_xbind_datatemplate_scope.py -q
     pytest tests/e2e-unified/fakes -q
     pytest tests/scripts/test_actuation_sweep_report.py \
+        tests/scripts/test_check_downloads.py \
         tests/scripts/test_check_wasm_seam_exclusion.py \
         tests/scripts/test_cross_client.py tests/scripts/test_door_deploy_receive.py \
         tests/scripts/test_duplication_report.py \
         tests/scripts/test_features_catalog.py tests/scripts/test_features_lint.py \
+        tests/scripts/test_site_link_spacing.py tests/scripts/test_check_site_urls.py \
         tests/scripts/test_textual_clones.py tests/scripts/test_ui_show.py -q
     pytest tests/docker/test_entrypoint_overlay.py -q
 
@@ -10326,7 +11183,7 @@ features-render *ARGS:
 features-parity *ARGS:
     {{py}} scripts/features-render.py --parity {{ARGS}}
 
-# The catalog gate — the six rules of feature-catalog.md § The catalog lint: the
+# The catalog gate — the seven rules of feature-catalog.md § The catalog lint: the
 # front-matter and every citation resolve; each contract-mapped test exists AND
 # carries its `@pytest.mark.feature` (feature -> test); each marker-tagged test
 # appears in some contract (test -> feature); the declared [app]/[nest] surface
@@ -10387,3 +11244,4 @@ cross-client-check *ARGS:
 # (Retired 2026-05-18: the cargo-target shared-cache GC was removed when each
 # checkout got its own build-cache directory. Lifecycle is now handled by a
 # session-startup script wired to a user-level hook.)
+

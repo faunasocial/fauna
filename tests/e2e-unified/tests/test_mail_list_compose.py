@@ -29,7 +29,7 @@ import urllib.request
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID
+from helpers.e2e_session import e2e_login_device_id
 from helpers.mail_aliases import add_exact_alias
 from helpers.mail_wire import header_value
 from helpers.waiting import wait_until
@@ -38,7 +38,7 @@ from helpers.waiting import wait_until
 # (and with it the SMTP rail whose sink reads the account's lists) only under
 # this launch-time gate; the other apps run it for every login regardless.
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
-    pytest.mark.windows, pytest.mark.macos, pytest.mark.ios, pytest.mark.real_conversations]
+    pytest.mark.windows, pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.real_conversations]
 
 # Routed to the stub external MX by the fixture's `mta_mx_override`.
 MEMBER_DOMAIN = "external.test"
@@ -66,7 +66,7 @@ def _sign_in_with_mail(app, handle):
             "secret_hex": admin_sk.encode().hex(),
             "handle": HANDLE_LOCAL,
             "actor_id": admin_actor_id.hex(),
-            "device_id": E2E_LOGIN_DEVICE_ID,
+            "device_id": e2e_login_device_id(app),
         },
         "nav": {"stack": [{"view": "conversations"}]},
     })

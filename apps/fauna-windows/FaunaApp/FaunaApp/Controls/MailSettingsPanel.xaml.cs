@@ -67,6 +67,12 @@ public sealed partial class MailSettingsPanel : UserControl
     private MailForwardingViewModel? _forwarding;
     private bool _forwardingLoading;
 
+    // The account controls' view-model (switches, automatic reply, quota readouts).
+    private MailAccountViewModel? _account;
+    private bool _accountLoading;
+    // Guards the programmatic IsOn sets in PaintAccount from re-firing Toggled.
+    private bool _suppressAccount;
+
     public MailSettingsPanel()
     {
         this.InitializeComponent();
@@ -75,6 +81,11 @@ public sealed partial class MailSettingsPanel : UserControl
         // are the Enter handlers on these inputs.
         ForwardAllToInput.FaunaGate("fauna.bridges.set_forward_all_to");
         ForwardPerHourInput.FaunaGate("fauna.bridges.set_forward_per_hour");
+        // set_mail_switches is OnlineOnly too. The automatic reply's controls declare
+        // nothing: its write is the OfflineQueued fauna.email.filters.create, which the
+        // gate could never desensitize.
+        ReceiveToggle.FaunaGate("fauna.bridges.set_mail_switches");
+        SendToggle.FaunaGate("fauna.bridges.set_mail_switches");
     }
 
     /// <summary>Supplied by the host page (SettingsMailPage.OnNavigatedTo) before Loaded
@@ -172,8 +183,14 @@ public sealed partial class MailSettingsPanel : UserControl
         _suppressToggle = true;
         EnabledToggle.IsOn = snap.enabled;
         _suppressToggle = false;
+        // A box that cannot run mail: the toggle is disabled with state "unavailable"
+        // and the notice says why; where mail is already on the toggle stays live so it
+        // can still be turned off (mirrors apple's MailSettingsView).
+        var mailUnavailable = !snap.enabled && snap.mailUnavailableHere;
+        EnabledToggle.IsEnabled = !mailUnavailable;
+        UnavailableNotice.Visibility = mailUnavailable ? Visibility.Visible : Visibility.Collapsed;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
-            EnabledToggle, snap.enabled ? "on" : "off");
+            EnabledToggle, snap.enabled ? "on" : mailUnavailable ? "unavailable" : "off");
 
         // Status-indicator text single-sourced in shared Rust
         // (fauna_client_mail_settings::settings_status_label; mail-settings.md § the
@@ -265,6 +282,101 @@ public sealed partial class MailSettingsPanel : UserControl
         // values (the load is a plain RPC read, not part of the machine snapshot).
         ForwardingGroup.Visibility = snap.enabled ? Visibility.Visible : Visibility.Collapsed;
         if (snap.enabled && _forwarding is null) _ = LoadForwardingAsync();
+
+        // Account controls: shown while mail is enabled, read on first show (plain RPC
+        // reads, not part of the machine snapshot).
+        AccountGroup.Visibility = snap.enabled ? Visibility.Visible : Visibility.Collapsed;
+        if (snap.enabled && _account is null) _ = LoadAccountAsync();
+    }
+
+    // ── Account controls (receive / send, automatic reply, quota readouts) ──
+
+    private async Task LoadAccountAsync()
+    {
+        if (_clients?.Rpc is not { } rpc || _accountLoading) return;
+        _accountLoading = true;
+        try
+        {
+            var vm = new MailAccountViewModel(rpc);
+            await vm.LoadAsync();
+            _account = vm;
+            PaintAccount(repaintMessage: true);
+            if (vm.Error is not null) ErrorChanged?.Invoke(vm.Error);
+        }
+        finally { _accountLoading = false; }
+    }
+
+    /// <summary>Paint what the nest last answered, under the guard so the programmatic
+    /// IsOn sets do not read as gestures. The message repaints only when the nest just
+    /// confirmed it, so a refused draft stays in the field beside its reason.</summary>
+    private void PaintAccount(bool repaintMessage)
+    {
+        if (_account is not { } vm) return;
+        _suppressAccount = true;
+        if (vm.ReceiveEnabled is { } receive && vm.SendEnabled is { } send)
+        {
+            SwitchesGroup.Visibility = Visibility.Visible;
+            PaintSwitch(ReceiveToggle, receive);
+            PaintSwitch(SendToggle, send);
+        }
+        if (vm.AutorespondEnabled is { } autorespond)
+        {
+            AutorespondToggleGroup.Visibility = Visibility.Visible;
+            PaintSwitch(AutorespondToggle, autorespond);
+        }
+        _suppressAccount = false;
+        if (repaintMessage) AutorespondMessageInput.Text = vm.AutorespondMessage;
+        PaintReadout(MailboxQuotaButton, MailboxQuotaText, vm.MailboxQuotaText);
+        PaintReadout(SubmissionQuotaButton, SubmissionQuotaText, vm.SubmissionQuotaText);
+        PaintReadout(OverQuotaNoticeButton, OverQuotaNoticeText, vm.OverQuotaNotice);
+    }
+
+    private static void PaintSwitch(ToggleSwitch toggle, bool on)
+    {
+        toggle.IsOn = on;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(toggle, on ? "on" : "off");
+    }
+
+    private static void PaintReadout(Button host, TextBlock text, string? value)
+    {
+        text.Text = value ?? string.Empty;
+        host.Visibility = value is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void ReceiveToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAccount || _account is not { } vm) return;
+        await vm.SetReceiveAsync(ReceiveToggle.IsOn);
+        PaintAccount(repaintMessage: false);
+        ErrorChanged?.Invoke(vm.Error);
+    }
+
+    private async void SendToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAccount || _account is not { } vm) return;
+        await vm.SetSendAsync(SendToggle.IsOn);
+        PaintAccount(repaintMessage: false);
+        ErrorChanged?.Invoke(vm.Error);
+    }
+
+    /// <summary>On sends the message draft (a refused draft snaps the toggle back off
+    /// beside its reason); off deletes the reply and leaves the words in the field, so
+    /// turning it back on sends them again.</summary>
+    private async void AutorespondToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAccount || _account is not { } vm) return;
+        var on = AutorespondToggle.IsOn;
+        await vm.SetAutorespondAsync(on, AutorespondMessageInput.Text);
+        PaintAccount(repaintMessage: on && vm.Error is null);
+        ErrorChanged?.Invoke(vm.Error);
+    }
+
+    private async void AutorespondMessageInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter || _account is not { } vm) return;
+        await vm.CommitAutorespondMessageAsync(AutorespondMessageInput.Text);
+        PaintAccount(repaintMessage: vm.Error is null);
+        ErrorChanged?.Invoke(vm.Error);
     }
 
     // ── Forwarding (forward-all address + hourly limit) ──

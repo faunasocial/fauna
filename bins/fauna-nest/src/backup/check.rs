@@ -443,7 +443,10 @@ mod tests {
 
         let sealed = fauna_core::blob_seal::seal_blob(
             &vec![7u8; 9 * 1024 * 1024],
-            Some(([0x5Au8; 32], Some(1))),
+            Some((
+                [0x5Au8; 32],
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            )),
         )
         .unwrap();
         assert!(sealed.chunks.len() >= 2, "a multi-chunk fixture");

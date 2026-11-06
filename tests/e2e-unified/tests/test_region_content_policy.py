@@ -40,11 +40,17 @@ import urllib.request
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name
 from helpers.authenticated_shell import wait_for_authenticated_shell
 from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
+
+SEALED_NOTE_APPS = ("tui", "linux", "web", "android", "macos", "ios", "windows")
+"""The apps that paint the sealed-item sentence (``region.sealed_note``) on a
+sealed bubble's region placeholder (``region-blocking.md`` § Implementation
+status today). tui leads; each of the others joins with its trickle-down lift and
+an entry here."""
 
 REGION = "XZ"
 AUTHORITY = "Synthetic Test Authority"
@@ -87,12 +93,6 @@ def _seed_region_policy(nest_url: str, sequence: int, version: int | None = None
     reply = _region_hook(nest_url, "content-policy", body)
     assert reply["authority_name"] == AUTHORITY
     return reply["registry"]
-
-
-# The apps whose region plane is built AND whose run of this journey is green;
-# the rest skip as unbuilt until their leg of the trickle-down lands, joining
-# the set with their first green run.
-BUILT = {"tui", "linux", "web", "macos", "ios", "windows"}
 
 
 def _relaunch_in_region(app, registry_hex: str) -> None:
@@ -188,13 +188,6 @@ def _assert_block_render_witness(app, where: str) -> None:
 
 def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app, nest_instance):
     app = logged_in_app
-    if app_name(app.driver) not in BUILT:
-        skip_unbuilt(
-            app.driver,
-            surface="region-blocked-notice",
-            detail="the region content plane's six-app trickle-down has not reached this app yet",
-            tracked="",
-        )
     if not app.driver.preserve_state_across_relaunch():
         pytest.skip("driver cannot preserve the device store across a relaunch")
 
@@ -251,6 +244,15 @@ def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app
         )
         assert app.driver.get_text("region-blocked-reason", index=0) == DM_REASON
         assert app.driver.count("dm-message-text") == 1, "only the clean body renders"
+        if app_name(app.driver) in SEALED_NOTE_APPS:
+            # An end-to-end thread's bubble is sealed: the frame, then the realism ruling's
+            # sentence, inside the same notice (the feed card above carries
+            # the frame alone — `_assert_feed_block`'s exact match).
+            notice = app.driver.get_text("region-blocked-notice", index=0)
+            frame = S.region.blocked_notice(region=REGION, authority=AUTHORITY)
+            assert notice.startswith(frame) and notice.rstrip().endswith(
+                S.region.sealed_note
+            ), f"the sealed bubble's notice lacks the sealed-item sentence: {notice!r}"
         _assert_block_render_witness(app, "DM block")
 
         # 4. The relay forgets; a cold relaunch still blocks from the device store.

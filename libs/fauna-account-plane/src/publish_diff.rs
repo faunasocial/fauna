@@ -871,7 +871,7 @@ mod tests {
     async fn a_predecessor_sealed_relay_row_is_never_vouched_on_a_plane_that_holds_its_schedule() {
         use fauna_core::crypto::DelegableSchedule;
         use fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
-        use fauna_protocol::merge_policy::{KIND_MODERATION, MODERATION_KEY};
+        use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, PREFERENCE_KEY};
 
         let f = fixture().await;
         f.put(enrollment_row(US)).await;
@@ -890,19 +890,19 @@ mod tests {
         .unwrap()
         .with_predecessor_schedules(&predecessors);
 
-        // THEM (a verified member) wrote a moderation row sealed under the
+        // THEM (a verified member) wrote a sync-prefs row sealed under the
         // predecessor's delegable schedule.
         let writer_key = device_key(THEM);
         let sealed = seal_entry(
-            &predecessors[0].for_kind(KIND_MODERATION).into_keys(),
+            &predecessors[0].for_kind(KIND_SYNC_PREFS).into_keys(),
             &EntryCoordinates {
                 writer_id: writer_key.verifying_key().to_bytes(),
                 writer_seq: 1,
                 scope: ACCOUNT_STATE_SCOPE,
             },
             &EntryPlaintext {
-                kind: KIND_MODERATION.into(),
-                key: MODERATION_KEY.into(),
+                kind: KIND_SYNC_PREFS.into(),
+                key: PREFERENCE_KEY.into(),
                 merge_meta: None,
                 value: vec![0xA5].into(),
                 tombstone: false,
@@ -1166,6 +1166,14 @@ mod tests {
         use fauna_protocol::merge_policy::{
             KIND_DELEGATION, KIND_MODERATION, KIND_PERSONALIZATION, KIND_SYNC_PREFS, PREFERENCE_KEY,
         };
+        // The moderation kind's rows are one per muted term: one term's row.
+        let row_key_of = |kind: &str| {
+            if kind == KIND_MODERATION {
+                fauna_core::data::MutedKeyword::plane_key_of("w")
+            } else {
+                PREFERENCE_KEY.to_string()
+            }
+        };
         let f = fixture().await;
         let nest = PutNest::default();
         let p = AccountStatePlane::new(
@@ -1180,11 +1188,12 @@ mod tests {
         let me = WriterId(device_id_of(US));
         let put = |kind: &'static str, at_ms: i64| {
             let p = &p;
+            let row_key_of = &row_key_of;
             async move {
                 p.put(
                     &ItemId {
                         kind: kind.into(),
-                        key: PREFERENCE_KEY.into(),
+                        key: row_key_of(kind),
                     },
                     vec![at_ms as u8],
                     Some(
@@ -1300,6 +1309,14 @@ mod tests {
         use crate::account_state_plane::is_scope_full;
         use fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
         use fauna_protocol::merge_policy::{KIND_DELEGATION, KIND_MODERATION, PREFERENCE_KEY};
+        // The moderation kind's rows are one per muted term: one term's row.
+        let row_key_of = |kind: &str| {
+            if kind == KIND_MODERATION {
+                fauna_core::data::MutedKeyword::plane_key_of("w")
+            } else {
+                PREFERENCE_KEY.to_string()
+            }
+        };
         let f = fixture().await;
         let nest = PutNest::default();
         *nest.room_for.lock().unwrap() = Some(Vec::new());
@@ -1344,7 +1361,7 @@ mod tests {
                 .put_local(
                     &ItemId {
                         kind: kind.into(),
-                        key: PREFERENCE_KEY.into(),
+                        key: row_key_of(kind),
                     },
                     vec![1],
                     stamp(at_ms),

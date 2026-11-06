@@ -29,6 +29,8 @@ projection (route-3 hand-offs).
 
 import pytest
 
+from helpers import budgets
+from helpers.waiting import wait_until
 from i18n.strings import S
 
 # NOT marked `ios`: this test's `ensure_mail_enabled` rides the same iOS gap. ⚠ N+38:
@@ -65,6 +67,29 @@ def _admin_row_index(admin_app, admin_hex: str) -> int:
     return admin_app.admin.admin_row_index(admin_hex)
 
 
+def _wait_serving_status(app, admin_hex: str, want: str, why: str) -> None:
+    """Wait for the admin's own row to read `want` (convention 14).
+
+    The users list is re-fetched when the admin shell is entered and the rows from
+    the last fetch stay on screen until the reply lands, so one read right after
+    navigating can see the previous state. A row lookup that raises while the list
+    re-renders is an observation, asked again."""
+    seen: list[str] = []
+
+    def status():
+        try:
+            got = app.admin.user_mail_serving_status(_admin_row_index(app, admin_hex))
+        except (AssertionError, RuntimeError, TimeoutError) as e:
+            seen.append(f"raised {type(e).__name__}: {str(e)[:120]}")
+            return False
+        seen.append(repr(got))
+        return got == want
+
+    wait_until(status, budgets.RPC_ROUNDTRIP_S, diagnose=lambda: (
+        f"{why}: the admin's row never read {want!r}; last reads {seen[-4:]}; "
+        f"rows {app.admin.user_count()}; error: {app.error_text()!r}"))
+
+
 @pytest.mark.feature("admin-users")
 def test_admin_sees_user_serving_status_read_only(admin_app, nest_instance):
     app = admin_app
@@ -72,12 +97,10 @@ def test_admin_sees_user_serving_status_read_only(admin_app, nest_instance):
 
     # Default on: the admin's own row reads "Serving here" (no flag set).
     app.admin.navigate_users()
-    assert app.admin.user_count() >= 1
-    idx = _admin_row_index(app, admin_hex)
-    assert app.admin.user_mail_serving_status(idx) == S.admin.users_page.serving_here, (
-        "serving indicator should default to 'Serving here'; "
-        f"got {app.admin.user_mail_serving_status(idx)!r}; error: {app.error_text()!r}"
-    )
+    wait_until(lambda: app.admin.user_count() >= 1, budgets.RPC_ROUNDTRIP_S,
+               diagnose=lambda: f"the users page lists no row; error: {app.error_text()!r}")
+    _wait_serving_status(app, admin_hex, S.admin.users_page.serving_here,
+                         "serving indicator should default to 'Serving here'")
 
     # Drive the *user* half: the admin disables their own serving from their own
     # mail-settings serve-here toggle (the only client-driven write path — there
@@ -88,21 +111,20 @@ def test_admin_sees_user_serving_status_read_only(admin_app, nest_instance):
         "serve-here toggle should be visible once mail is enabled; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
-    app.mail_settings.set_serve_here(False)
-    assert app.mail_settings.wait_for_serve_here_state("off"), (
-        f"serve-here should read off after the gesture; error: {app.error_text()!r}"
-    )
+    try:
+        app.mail_settings.set_serve_here(False)
+        assert app.mail_settings.wait_for_serve_here_state("off"), (
+            f"serve-here should read off after the gesture; error: {app.error_text()!r}"
+        )
 
-    # The admin hub now reflects the user's choice read-only: "Not serving".
-    app.admin.navigate_users()
-    idx = _admin_row_index(app, admin_hex)
-    assert app.admin.user_mail_serving_status(idx) == S.admin.users_page.serving_disabled, (
-        "serving indicator should reflect the disabled flag as 'Not serving' "
-        "(proves the row renders the projected field, not a constant); "
-        f"got {app.admin.user_mail_serving_status(idx)!r}; error: {app.error_text()!r}"
-    )
-
-    # Restore (leave the session-scoped actor as found: default on).
-    app.mail_settings.navigate()
-    app.mail_settings.set_serve_here(True)
-    assert app.mail_settings.wait_for_serve_here_state("on")
+        # The admin hub now reflects the user's choice read-only: "Not serving"
+        # (proves the row renders the projected field, not a constant).
+        app.admin.navigate_users()
+        _wait_serving_status(app, admin_hex, S.admin.users_page.serving_disabled,
+                             "serving indicator should reflect the disabled flag")
+    finally:
+        # Restore even on a red: the actor is session-scoped, and a run left at
+        # "Not serving" would fail every later run's default read on this nest.
+        app.mail_settings.navigate()
+        app.mail_settings.set_serve_here(True)
+        assert app.mail_settings.wait_for_serve_here_state("on")

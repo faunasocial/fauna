@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from helpers import budgets
+from helpers.settings_subpage_nav import navigate_settings_subpage
 from helpers.waiting import wait_until
 
 if TYPE_CHECKING:
@@ -56,7 +57,8 @@ DESTINATION_COUNT_WAIT_S = 40       # destination row count settles after add/re
 DESTINATION_DIALOG_WAIT_S = 15      # the add/edit/remove destination dialog opens
 IMMEDIATE_DELETE_MODAL_WAIT_S = 15  # the immediate-delete confirm modal opens
 WIZARD_STEP_WAIT_S = 20             # a wizard step's next element becomes visible
-FOLDER_CREATE_WAIT_S = 30           # a new folder row appears after wizard create
+FOLDER_ROW_READ_BUDGET_S = 20       # one whole read of the row list, restarted when a rebuild drops a counted row
+FOLDER_CREATE_WAIT_S = 30          # a new folder row appears after wizard create
 PENDING_SHARES_WAIT_S = 45          # cross-user pending-share count settles
 
 
@@ -575,12 +577,21 @@ class BackupsActions:
         safe by construction: `begin_op` refuses a second concurrent op, so an
         extra click during the window is a no-op rather than a double prune.
 
+        Each click first waits for the button to be ENABLED — a pick's own load
+        holds the single-flight slot too, and a bridge driver refuses a click
+        on a disabled control outright (409) rather than dropping it (the
+        `create_snapshot` wait, for the same reason).
+
         This is a deadline poll over a retryable gesture (the `select_folder`
         idiom), not a settle-sleep — a green run pays only as long as the round
         trip actually takes.
         """
         deadline = time.monotonic() + timeout
         while True:
+            self.driver.wait_until_enabled(
+                "snapshot-prune-button",
+                timeout=max(1.0, deadline - time.monotonic()),
+            )
             self.driver.click("snapshot-prune-button")
             if self._visible_within("snapshot-prune-preview", 2):
                 return True
@@ -826,6 +837,69 @@ class BackupsActions:
             f"downloaded file {filename!r} did not appear in {download_dir} "
             f"within {timeout}s; dir contains: {present}. "
             f"error-message: {err!r}"
+        )
+
+    def download_signatures(self) -> dict[str, tuple[int, int]]:
+        """Every file now in the e2e download dir, by name, as (mtime_ns, size).
+
+        Taken BEFORE a click that saves under a name an earlier save in the same
+        app may already hold, for :meth:`wait_for_fresh_download`."""
+        import os
+
+        download_dir = self.driver.download_dir()
+        if not download_dir or not os.path.isdir(download_dir):
+            return {}
+        signatures = {}
+        for name in os.listdir(download_dir):
+            stat = os.stat(os.path.join(download_dir, name))
+            signatures[name] = (stat.st_mtime_ns, stat.st_size)
+        return signatures
+
+    def wait_for_fresh_download(
+        self,
+        name_pattern: str,
+        before: dict[str, tuple[int, int]],
+        timeout: float = SNAPSHOT_DOWNLOAD_WAIT_S,
+    ) -> bytes:
+        """The bytes of the file saved SINCE ``before`` was taken, whose name
+        fully matches ``name_pattern``.
+
+        A repeat save never reads as the first one: the app keeps the earlier
+        file, so its bare name still holds the previous archive while the new one
+        lands beside it (tui's ``fauna-export (2).zip``) or over it (linux). Either
+        way the bare-name wait of :meth:`wait_for_downloaded_file` hands back the
+        stale bytes. So a candidate is a matching name that ``before`` lacks or
+        records differently, and it counts once two polls agree on its size."""
+        import os
+
+        download_dir = self.driver.download_dir()
+        assert download_dir, (
+            f"driver {type(self.driver).__name__} does not expose an e2e "
+            "download dir — wire download_dir() before using this action"
+        )
+        pattern = re.compile(name_pattern)
+        last_sizes: dict[str, int] = {}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = self.download_signatures()
+            for name, signature in current.items():
+                if not pattern.fullmatch(name) or before.get(name) == signature:
+                    continue
+                size = signature[1]
+                if size > 0 and last_sizes.get(name) == size:
+                    with open(os.path.join(download_dir, name), "rb") as f:
+                        return f.read()
+                last_sizes[name] = size
+            time.sleep(0.5)
+        err = (
+            self.driver.get_text("error-message")
+            if self.driver.is_visible("error-message")
+            else ""
+        )
+        raise AssertionError(
+            f"no fresh download matching {name_pattern!r} in {download_dir} within "
+            f"{timeout}s; held before the click: {sorted(before)}; now: "
+            f"{sorted(self.download_signatures())}. error-message: {err!r}"
         )
 
     def last_backed_up(self) -> str:
@@ -1355,25 +1429,6 @@ class BackupsActions:
         )
         self.driver.click("backup-destination-reseed-confirm-button")
 
-    def require_pull_back_supported(self) -> None:
-        """Skip unless this app hosts the nest-held pull-back — the re-seed
-        gesture on a surviving nest destination's row (`ui/backups.md`
-        § Restore after losing the nest; owner-approved placement 2026-10-16)
-        — e2e convention 7. tui leads (2026-10-17, over the shared
-        `fauna_sync_engine::reseed_pull::pull_back_from_destination`); linux
-        calls the same host and android its ffi face, and web its wasm twin
-        over the shared leg (2026-10-18); the others follow in their batched
-        trickle-down lifts, each admitted here as it lands."""
-        from helpers.app_surface import app_name, skip_unbuilt
-
-        if app_name(self.driver) not in ("tui", "linux", "android", "web"):
-            skip_unbuilt(
-                self.driver,
-                surface="backup-destination-reseed-button (nest-kind row)",
-                detail="tui leads the nest-held pull-back; this app has not lifted it",
-                tracked="ui/backups.md § Restore after losing the nest",
-            )
-
     def reseed_from_nest_row(self, index: int = 0) -> None:
         """Restore the signed-in nest from a surviving nest destination's copy:
         press `backup-destination-reseed-button` inside that destination's
@@ -1386,28 +1441,6 @@ class BackupsActions:
         if self.driver.is_absent("backup-destination-reseed-result"):
             return ""
         return self.driver.get_text("backup-destination-reseed-result")
-
-    def require_recover_supported(self) -> None:
-        """Skip unless this app paints the recovery gesture on the fifth
-        audit-alert reason (`ui/backups.md` § Audit-alert surface) — e2e
-        convention 7. Built on tui, the lead app (2026-10-08), and on web
-        (2026-10-10, a nest destination's banner only — web is never a
-        custodian) and linux (2026-10-11, a nest destination's banner, and
-        this device's own custodian row through the sync agent's store leg),
-        and on macos and ios (2026-10-21, a nest destination's banner and this
-        device's own custodian row — the agent's store leg on macos, in
-        process on ios); the rest follow in their batched trickle-down lifts. (windows built the
-        nest-destination gesture 2026-10-13 but is not admitted until the
-        journey is green there.)"""
-        from helpers.app_surface import app_name, skip_unbuilt
-
-        if app_name(self.driver) not in ("tui", "web", "linux", "macos", "ios"):
-            skip_unbuilt(
-                self.driver,
-                surface="backup-audit-recover-button",
-                detail="tui leads the recovery gesture; this app has not lifted it",
-                tracked="ui/backups.md § Audit-alert surface",
-            )
 
     def recover_button_in_banner(self) -> int | None:
         """The index of the `backup-audit-alert` banner carrying
@@ -1536,9 +1569,7 @@ class BackupsActions:
         (those aren't built yet).
         """
         if self._folders_in_settings():
-            self.driver.set_state(
-                {"nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "folders"}]}}
-            )
+            navigate_settings_subpage(self.driver, "folders")
         else:
             self.driver.navigate_to("devices")
 
@@ -1582,16 +1613,32 @@ class BackupsActions:
         self.driver.click("folder-row", index=index)
         time.sleep(0.5)
 
-    def folder_titles(self) -> list[str]:
-        """Every folder row's visible text, in list order. A row the list
-        rebuilt away between the count and the read reads as ``""``."""
-        titles = []
-        for i in range(self.folder_count()):
+    def folder_titles(self, budget: float = FOLDER_ROW_READ_BUDGET_S) -> list[str]:
+        """Every folder row's visible text, in list order — the ONE bounded
+        reader of the row list.
+
+        linux rebuilds the ``folder-row`` list as it populates, so a row
+        counted by ``folder_count()`` can be gone by ``folder_title(i)``
+        (``LookupError``). That pass read a list that no longer exists, so it
+        starts again over the new one; a list that never reads whole within
+        ``budget`` raises the last ``LookupError``. Callers keep their own wait
+        for a row to appear and never do count-then-read themselves."""
+        deadline = time.monotonic() + budget
+        while True:
             try:
-                titles.append(self.folder_title(i))
+                return [self.folder_title(i) for i in range(self.folder_count())]
             except LookupError:
-                titles.append("")
-        return titles
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)  # sleep-ok: bounded poll cadence inside the deadline, not a settle guess
+
+    def folder_index(self, name: str) -> int | None:
+        """The index of the first row whose title contains ``name``, or ``None``
+        — one pass over :meth:`folder_titles`, no wait for the row to appear."""
+        for i, title in enumerate(self.folder_titles()):
+            if name in title:
+                return i
+        return None
 
     def wait_for_folder_row(self, name: str, timeout: float = FOLDER_CREATE_WAIT_S) -> int:
         """The index of the row whose title contains `name`, polled until it
@@ -1762,12 +1809,19 @@ class BackupsActions:
         for the toggle specifically; this generalizes it to any body widget).
         A single expand-then-wait can sit on a row a tick collapsed moments
         later and never re-open within the budget; re-expanding on every poll
-        is the fix — cheap and idempotent when the row is already open and
-        nothing is ticking."""
+        is the fix.
+
+        ``is_visible_scrolled``, not a bare ``is_visible``: the expand is a
+        toggle, so a poll that reads an open row's widget as absent shuts the
+        row. On windows a widget past the fold reads not-visible, and an error
+        bar over the page is enough to push the binding form there. For the
+        same reason windows never re-clicks a row whose widget it can count:
+        it realizes a row's body only while the row is open, so a counted
+        widget that is not visible yet is an open row still settling."""
         deadline = time.monotonic() + timeout
         idx = self.find_and_expand_folder(name)
         while True:
-            if self.driver.is_visible(element_id):
+            if self.driver.is_visible_scrolled(element_id):
                 return idx
             if time.monotonic() >= deadline:
                 # One more real wait_for so a genuine non-render (the row IS
@@ -1775,6 +1829,9 @@ class BackupsActions:
                 # self-diagnosing TimeoutError rather than a bare "gave up".
                 self.driver.wait_for(element_id, timeout=0.1)
                 return idx
+            if self.driver.is_windows() and self.driver.count(element_id) > 0:
+                time.sleep(0.3)  # sleep-ok: bounded poll cadence inside the deadline, not a settle guess
+                continue
             idx = self.find_and_expand_folder(name)
 
     def delete_folder(self) -> None:
@@ -1833,13 +1890,31 @@ class BackupsActions:
 
     def open_share_dialog(self) -> None:
         """Click the expanded row's Share… button, opening the reused
-        recipient-picker dialog (``recipient-picker-input`` + ``folder-share-confirm``)."""
-        self.driver.click("folder-share-button")
-        time.sleep(0.5)
+        recipient-picker dialog (``recipient-picker-input`` + ``folder-share-confirm``).
+
+        A row whose member roster lands after the click rebuilds and closes the
+        flow again (the race ``_bind_folder`` documents), so the click repeats
+        until the picker is there — only then, since the button toggles. Every
+        caller needs the picker next, so one that never comes raises here."""
+        deadline = time.monotonic() + 30.0
+        while True:
+            self.driver.click("folder-share-button")
+            settle = time.monotonic() + 5.0
+            while time.monotonic() < settle:
+                if self.driver.count("recipient-picker-input") >= 1:
+                    return
+                time.sleep(0.25)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Share… never opened the recipient picker; "
+                    f"{self.driver.diagnose('recipient-picker-input')}"
+                )
 
     def share_dialog_open(self) -> bool:
         """Whether the share dialog's reused recipient-picker input is visible."""
-        return self.driver.is_visible("recipient-picker-input")
+        # Scrolled: the picker is inline in the expanded row and can sit one
+        # scroll below the fold, which windows' IsOffscreen reads as not visible.
+        return self.driver.is_visible_scrolled("recipient-picker-input")
 
     def share_recipient(self, *, handle: str, actor_id_hex: str) -> None:
         """In the open share dialog, type a recipient identifier and confirm the
@@ -1849,12 +1924,16 @@ class BackupsActions:
         here — the picker isn't unified across clients, priority #1; tracked
         internally (§ Gotchas) for the full trace):
 
-        - linux's ``do_share_folder`` calls ``ConversationsClient::
-          actor_by_handle`` UNCONDITIONALLY — it has NO actor-id path at all, so
-          it needs the bare local-part ``handle`` (``domain: None`` always, no
-          ``@``-parsing; a qualified string would fail to resolve).
+        - linux's ``do_share_folder`` classifies via ``classify_recipient`` and
+          resolves a handle through the shared ``find_user_across_nests`` since
+          2026-11-05, carrying the found nest URL into the share — so it takes
+          the bare local-part ``handle`` (home nest alone) or a ``user@<peer>``;
+          it is covered by the handle branch below.
         - apple (and every other UniFFI app sharing ``resolveRecipient`` /
-          shared-Rust ``classify_recipient``) instead requires either
+          shared-Rust ``classify_recipient``) accepts either (macos and ios
+          also carry a cross-nest handle's ``nestUrl`` into the share since
+          2026-11-05 — ``test_folder_cross_nest_share_picker.py``); this action
+          still types the actor id there, because it needs
           ``local@domain`` (network round-trip: ``resolve_nest``'s SRV/DNS
           lookup for the domain, THEN ``resolve_handle`` against whatever node
           that returns) or a raw 64-hex actor id (classified locally, NO
@@ -1863,15 +1942,33 @@ class BackupsActions:
           "fauna.test") has no real DNS, so the handle path 404s at the OS
           resolver; the actor-id path sidesteps that entirely, hence
           ``actor_id_hex`` here.
-        - tui accepts EITHER (it classifies a bare 64-hex string as an actor id
-          locally and otherwise resolves the bare local-part handle), so the
-          handle branch below covers it; it is the superset of both shapes above
-          rather than a third divergence.
+        - tui accepts EITHER (since 2026-11-05 its picker classifies via
+          ``classify_recipient`` and resolves a handle through the shared
+          ``find_user``, a bare local-part on the home nest alone and a
+          ``user@<peer>`` on the peer nest, carrying that nest's URL into the
+          share — ``test_folder_cross_nest_share_picker.py``), so the handle
+          branch below covers it.
+        - windows accepts EITHER too since 2026-11-05: its picker classifies via
+          ``classify_recipient`` and resolves a handle through the shared
+          ``find_user``, which probes the home nest alone for a bare local-part
+          (its empty domain slot) — no DNS hop — so it types the bare handle
+          here, and every share this action drives on windows witnesses that
+          path.
         """
-        recipient = handle if (self.driver.is_linux() or self.driver.is_tui()) else actor_id_hex
+        typed_handle = self.driver.is_linux() or self.driver.is_tui() or self.driver.is_windows()
+        recipient = handle if typed_handle else actor_id_hex
         self.driver.clear_and_type("recipient-picker-input", recipient)
         self.driver.click("folder-share-confirm")
         time.sleep(1)
+
+    def share_recipient_typed(self, recipient: str) -> None:
+        """In the open share dialog, type ``recipient`` verbatim and confirm —
+        no per-app choice of input shape. For a journey whose input IS the
+        shape under test (a ``user@<peer>`` handle on another nest, which only
+        an app resolving through the shared ``find_user`` can share with); the
+        caller gates the apps that have not built it."""
+        self.driver.clear_and_type("recipient-picker-input", recipient)
+        self.driver.click("folder-share-confirm")
 
     def remove_shared_member(self, index: int = 0, row: int | None = None) -> None:
         """Remove the shared-with actor at ``index`` (rotates the content key).
@@ -1974,7 +2071,13 @@ class BackupsActions:
         SpinButton commit idiom."""
         scope = self._member_scope(index, row)
         self.driver.clear_and_type("folder-member-cap-input", cap, scope=scope)
-        self.driver.click("folder-member-cap-input", scope=scope)
+        if self.driver.is_web():
+            # Web's input commits on the DOM `change` event; a Playwright fill
+            # fires only `input`, and a click never blurs — Enter on a text
+            # input fires `change` when the value differs.
+            self.driver.press_key("folder-member-cap-input", "Enter", scope=scope)
+        else:
+            self.driver.click("folder-member-cap-input", scope=scope)
         time.sleep(1)
 
     def writer_uncapped_warning_visible(self, index: int = 0, row: int | None = None) -> bool:
@@ -2333,6 +2436,13 @@ class BackupsActions:
         """
         return self.driver.get_attr("folder-on-demand-toggle", "value")
 
+    def on_demand_os_enable_hint(self) -> str | None:
+        """The expanded row's ``folder-on-demand-os-enable-hint`` text, ``None`` when
+        absent: it renders only while the OS holds the set's domain disabled."""
+        if self.driver.is_absent("folder-on-demand-os-enable-hint"):
+            return None
+        return self.driver.get_text("folder-on-demand-os-enable-hint")
+
     def toggle_on_demand(self, *, timeout: float = 10.0) -> str | None:
         """Flip the per-set on-demand presence on the expanded owner row,
         returning the settled ``"on"``/``"off"`` state.
@@ -2471,10 +2581,7 @@ class BackupsActions:
         row closes the body and every gesture below then addresses nothing —
         the trap ``helpers/folder_content.bind_location_under_set`` documents,
         and the one this helper cost a run to rediscover."""
-        idx = next(
-            (i for i in range(self.folder_count()) if folder in self.folder_title(i)),
-            None,
-        )
+        idx = self.folder_index(folder)
         if idx is None:
             raise AssertionError(f"folder {folder!r} not found among the rows")
         if not self.audience_select_visible():
@@ -2804,7 +2911,12 @@ class BackupsActions:
             if self.driver.is_visible(element_id):
                 return
             time.sleep(0.3)
-        raise TimeoutError(f"{element_id} did not appear within {timeout}s")
+        try:
+            tree = self.driver.tree()
+        except Exception as e:  # a driver without the dump still names the miss
+            tree = f"<no tree: {e}>"
+        # Convention 6: name what IS on screen, not just what is missing.
+        raise TimeoutError(f"{element_id} did not appear within {timeout}s; tree=\n{tree[:6000]}")
 
     def create_folder_via_wizard(
         self,
@@ -3017,12 +3129,29 @@ class BackupsActions:
         self._wait_visible("offline-share-own-code")
 
     def offline_share_own_code(self) -> str:
-        """`offline-share-own-code` — this device's compare code, which IS its
-        actor key. The whole security of the ceremony is that a human reads
-        this aloud and the other person checks it, so a test that asserts
-        anything here should assert it equals the actor id, never merely that
-        it is non-empty."""
-        return self.driver.get_text("offline-share-own-code").strip()
+        """`offline-share-own-code` — this device's compare code, which LEADS
+        with its actor key. The whole security of the ceremony is that a human
+        reads this aloud and the other person checks it, so a test that asserts
+        anything here should assert on the actor id, never merely that it is
+        non-empty.
+
+        ⚠ The panel paints the bare key until the seat binds, then the code
+        with its addressing (`offline_share_view`), and a bare code cannot be
+        dialled. So this reads the settled code, polling for the addressing
+        rather than taking the first paint (convention 14); a seat that never
+        publishes any falls through to the bare code for the caller's own
+        assertion to name."""
+        code = ""
+
+        def addressed() -> bool:
+            nonlocal code
+            code = self.driver.get_text("offline-share-own-code").strip()
+            return "-" in code
+
+        deadline = time.monotonic() + budgets.OFFLINE_SEAT_BIND_S
+        while not addressed() and time.monotonic() < deadline:
+            time.sleep(0.25)
+        return code
 
     def type_offline_peer_code(self, code: str) -> None:
         """`offline-share-peer-code-input` — the counterpart's code. Kept

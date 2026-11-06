@@ -527,18 +527,14 @@ class TestDryRun:
         carries the AGENT's entitlements — no `com.apple.security.application-groups`
         at all, since its state lives in the user domain and it never opens the
         TCC-protected container (installers/macos.md § Identifier domain, item 6)
-        — each embedded `.appex` carries ITS OWN, and the app carries BOTH its
-        groups (the shared File Provider group and the app-only account keychain
-        group).
+        — each embedded `.appex` carries ITS OWN, and the app carries the shared
+        File Provider group.
 
         The appex arm rides this test rather than a parallel one because it is the
         SAME defect in a second nested bundle, and the same one line of
-        `sign-app-bundle.sh` decides both. It matters more for the extension: the
-        File Provider appex is sandboxed and names ONE group (its replica
-        container), while the app names two — the account keychain group exists
-        precisely so that a sandboxed extension can never reach the identity seed
-        (installers/macos.md § Identifier domain). A `--deep` app signature would
-        hand it that group.
+        `sign-app-bundle.sh` decides both: a `--deep` app signature hands every
+        nested bundle the app's claims, and a sandboxed extension must carry only
+        what its own file names (installers/macos.md § Identifier domain).
 
         Why an artifact-level pin on top of the entitlements-FILE pin
         (`test_apple_identifier_pins.py`): `codesign --deep --entitlements`
@@ -572,7 +568,6 @@ class TestDryRun:
         bundle = entitlements(app)
         assert bundle.get("com.apple.security.application-groups") == [
             "7457N3M72H.group.social.fauna.shared",
-            "7457N3M72H.group.social.fauna.account",
         ], bundle
 
         # The extensions. Their PRESENCE is the other half of what this pins: the
@@ -954,6 +949,26 @@ class TestDryRun:
             "the sync agent's LaunchAgent must not redirect stdout/stderr to a file " \
             "launchd never rotates"
 
+    def test_sync_postinstall_upgrade_drops_a_pre_fix_redirect(self, pkg_path, tmp_path):
+        """The SHIPPED sync scripts, run over a planted pre-fix plist (the
+        0.1.2 redirect into ~/Library/Logs/Fauna/sync-agent.log), leave a plist
+        with no redirect — so upgrading reaches the log bound. Sandboxed
+        (`helpers/postinstall_sandbox.py`): no sudo, the real launchd and home
+        untouched. The source-tree twin is tier_1
+        (`tests/test_macos_sync_postinstall_upgrade.py`)."""
+        from helpers.postinstall_sandbox import Sandbox, pre_fix_plist
+
+        scripts = _extract_component_scripts(pkg_path, tmp_path, "fauna-sync.pkg")
+        box = Sandbox(tmp_path / "sandbox")
+        box.plant(pre_fix_plist(box.home))
+        result = box.run_postinstall(scripts["postinstall"], scripts["common.sh"])
+        assert result.returncode == 0, \
+            f"sync postinstall failed:\n{result.stdout}\n{result.stderr}"
+        after = box.plist_text()
+        assert "StandardOutPath" not in after and "StandardErrorPath" not in after, \
+            f"the shipped postinstall kept a pre-fix redirect on upgrade:\n{after}"
+        assert any(c.startswith("launchctl bootstrap ") for c in box.calls()), box.calls()
+
     def test_welcome_html_present(self, pkg_path, tmp_path):
         """The welcome.html resource is included in the metapackage."""
         subprocess.run(
@@ -1330,6 +1345,29 @@ class TestFullInstall:
             assert os.path.exists(p), f"{label}.plist missing after upgrade"
             assert os.path.getmtime(p) == mtimes_before[label], \
                 f"{label}.plist was overwritten during upgrade"
+
+    def test_upgrade_rewrites_a_pre_fix_redirecting_plist(self, pkg_path):
+        """A box last installed before the log fix carries a sync LaunchAgent
+        redirecting stdout/stderr into ~/Library/Logs/Fauna/sync-agent.log,
+        which launchd never rotates (on macOS it reached 1.2 GB). Plant that
+        plist, upgrade, and the real install must leave no redirect behind —
+        else every pre-fix user keeps an unbounded log (observability.md
+        § Persistence & privacy)."""
+        from helpers.postinstall_sandbox import plist_path, pre_fix_plist
+
+        username = _get_console_user()
+        user_home = _get_user_home(username)
+        plist = plist_path(user_home)
+        plist.write_text(pre_fix_plist(user_home))
+        os.chown(plist, pwd.getpwnam(username).pw_uid, -1)
+
+        result = _install_pkg(pkg_path)
+        assert result.returncode == 0, \
+            f"Upgrade install failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        with open(plist, "rb") as f:
+            after = plistlib.load(f)
+        assert "StandardOutPath" not in after and "StandardErrorPath" not in after, \
+            f"the upgrade kept the pre-fix redirect: {after}"
 
     def test_uninstall(self, pkg_path):
         """fauna-uninstall removes daemons/agents + binaries, preserves data."""

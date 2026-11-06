@@ -34,19 +34,14 @@ pub struct BackupsHandles {
     pub destinations_refresh: Rc<dyn Fn()>,
 }
 
-/// Bridges `BackupsMachine` notifications to the GTK main loop: each
-/// `on_changed` pushes a tick onto an `async-channel` the render loop drains.
-/// The same `GtkObserver` shape the Devices/Folders pages use — gestures run
-/// on the client's tokio runtime, so the thread-safe sender is the hand-off.
-struct GtkBackupsObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl BackupsObserver for GtkBackupsObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges `BackupsMachine` notifications to the GTK main loop: each
+    /// `on_changed` pushes a tick onto an `async-channel` the render loop drains.
+    /// The same `GtkObserver` shape the Devices/Folders pages use — gestures run
+    /// on the client's tokio runtime, so the thread-safe sender is the hand-off.
+    GtkBackupsObserver,
+    BackupsObserver
+);
 
 /// Build the full backups view: navigation split with snapshot list on the
 /// left and file list on the right.

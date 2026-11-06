@@ -19,17 +19,19 @@ final class ActionViewController: FPUIActionExtensionViewController {
     ) {
         guard
             let action = FileProviderAction(rawValue: actionIdentifier),
-            let set = extensionContext.domainIdentifier?.rawValue
+            let domainIdentifier = extensionContext.domainIdentifier?.rawValue
         else {
             cancel()
             return
         }
         // Item identifier = the folder-relative rel path; the root container
-        // maps to "" (set-level), which Share treats as the whole set.
+        // maps to "", which Share spells as the set's member-sharing route
+        // (`macos.md` § Sync → *Finder's Share entry*, link 2). A domain naming
+        // no set of this nest has no route: cancel.
         let rels = itemIdentifiers.map {
             $0 == .rootContainer ? "" : $0.rawValue
         }
-        guard let url = action.deepLink(set: set, rels: rels)?.url else {
+        guard let url = action.url(domainIdentifier: domainIdentifier, rels: rels) else {
             cancel()
             return
         }

@@ -271,15 +271,43 @@ pub struct MintOptionModel {
     pub holder_candidates: Vec<String>,
 }
 
+/// The holder role a scope's catalog family is sealed to — the one mapping
+/// [`mint_options`] derives its holder candidates from and a `Mint` is checked
+/// against (`nests.md` § Mint: the holder is derived from the scope).
+/// `content.read{mail}`, `content.read{calendar}` and the bundled
+/// `content.label-write` belong with the `"mda"` holder; `content.read{post}`
+/// with the generic `"content-processor"` holder. `None` for any scope this
+/// generic picker does not mint (a folder read mints through its own flow).
+pub fn holder_role_for_scope(scope: &GrantEventScope) -> Option<&'static str> {
+    match (scope.class.as_str(), scope.kind.as_deref()) {
+        (ScopeTuple::CLASS_CONTENT_LABEL_WRITE, None) => {
+            Some(fauna_client_bridges::MDA_HOLDER_ROLE)
+        }
+        (
+            ScopeTuple::CLASS_CONTENT_READ,
+            Some(ScopeTuple::KIND_MAIL | ScopeTuple::KIND_CALENDAR),
+        ) => Some(fauna_client_bridges::MDA_HOLDER_ROLE),
+        (ScopeTuple::CLASS_CONTENT_READ, Some(ScopeTuple::KIND_POST)) => {
+            Some(fauna_client_bridges::CONTENT_PROCESSOR_ROLE)
+        }
+        _ => None,
+    }
+}
+
 /// Build the trust facet's mint-picker options from what the owner's mail
 /// custody (`fauna.state.mail`) and period-key custody (`period_keys`, the
 /// `fauna.state.subscriptions` fold)
 /// can actually derive and which content-processor holders the nest has
 /// enrolled — the one shared catalog every app's picker renders (priority #2;
 /// `nests.md` § Mint). Deterministic order: Mail, Calendar, then one option
-/// per held tier in custody order.
+/// per held **author-created** tier in custody order — never the reserved
+/// `followers`, `only-me` or `room` tier, whose keys
+/// [`derive_scope_payload`] refuses as a grant payload
+/// ([`DerivePayloadError::ReservedTier`]; `nests.md` § Mint → *Which tiers*,
+/// ruled 2026-10-23), so the probe below drops them with no second list to
+/// drift.
 ///
-/// Holder derivation is by role: mail/calendar target the `"mda"` holder(s);
+/// Holder derivation is by role ([`holder_role_for_scope`]): mail/calendar target the `"mda"` holder(s);
 /// a post-tier grant targets the generic `"content-processor"` holder(s) (the
 /// web-serve paywall holder today — `monetization.md` § Pillar 2). The
 /// `content.read{folder}` scope is deliberately absent: paywalled folders
@@ -289,10 +317,11 @@ pub fn mint_options(
     mail: &MailConfig,
     holders: &[MintHolder],
 ) -> Vec<MintOptionModel> {
-    let candidates = |role: &str| -> Vec<String> {
+    let candidates = |scope: &GrantEventScope| -> Vec<String> {
+        let role = holder_role_for_scope(scope);
         holders
             .iter()
-            .filter(|h| h.role == role)
+            .filter(|h| Some(h.role.as_str()) == role)
             .map(|h| h.bridge_id.clone())
             .collect()
     };
@@ -320,9 +349,9 @@ pub fn mint_options(
 
     let mut options = Vec::new();
 
-    let mda = candidates(fauna_client_bridges::MDA_HOLDER_ROLE);
+    let mail = read_scope(ScopeTuple::KIND_MAIL, None);
+    let mda = candidates(&mail);
     if !mda.is_empty() {
-        let mail = read_scope(ScopeTuple::KIND_MAIL, None);
         if derivable(&mail) {
             options.push(MintOptionModel {
                 use_case: MintUseCase::Mail,
@@ -349,7 +378,7 @@ pub fn mint_options(
         }
     }
 
-    let generic = candidates(fauna_client_bridges::CONTENT_PROCESSOR_ROLE);
+    let generic = candidates(&read_scope(ScopeTuple::KIND_POST, None));
     if !generic.is_empty() {
         for tier in &period_keys.tiers {
             let scope = read_scope(ScopeTuple::KIND_POST, Some(&tier.tier_name));
@@ -630,8 +659,9 @@ pub enum ReplacedKey {
     /// to the old holder ends.
     Holder([u8; 32]),
     /// The holder stays, the attested writer differs from the roster's: every
-    /// third-party grant to the holder whose `content.write` tuple names the
-    /// old writer ends.
+    /// third-party grant to the holder whose `content.write` or `deposit`
+    /// tuple names the old writer ends (`third-party-kinds.md` § Principal
+    /// write authority).
     Writer {
         holder: [u8; 32],
         old_writer: [u8; 32],
@@ -679,9 +709,12 @@ pub fn grants_ended_by_key_replacement(
     }
 }
 
-/// Whether `tuple` is a `content.write` license confined to `writer`.
+/// Whether `tuple` is a `content.write` or `deposit` license confined to
+/// `writer` — the two classes whose tuple names its writer (`folder-deposit.md`
+/// § The depositor signs, the owner's device verifies).
 fn names_writer(tuple: &GrantEventScope, writer: &[u8; 32]) -> bool {
-    tuple.class == fauna_core::grant_event::CLASS_CONTENT_WRITE
+    (tuple.class == fauna_core::grant_event::CLASS_CONTENT_WRITE
+        || tuple.class == fauna_core::grant_event::CLASS_DEPOSIT)
         && tuple
             .factor()
             .and_then(fauna_core::grant_event::parse_writer_factor)
@@ -2260,6 +2293,37 @@ mod tests {
         );
     }
 
+    /// A writer replacement ends the deposit grant naming the old writer too,
+    /// and keeps the one naming the new writer (`third-party-kinds.md`
+    /// § Principal write authority; `folder-deposit.md` § The depositor signs,
+    /// the owner's device verifies).
+    #[test]
+    fn a_replaced_writer_ends_the_deposit_grant_naming_the_old_writer() {
+        let p = [0x44u8; 32];
+        let kp = ActorKeypair::generate();
+        let mut cfg = writer_ledger(p, &kp);
+        for (id, writer) in [(8u8, OLD_W), (9, NEW_W)] {
+            let scope =
+                crate::grant_log::event_scope_of(&[ScopeTuple::folder_deposit(17, &writer)]);
+            record_mint(
+                &mut cfg,
+                kp.signing_key(),
+                [id; 16],
+                p,
+                scope,
+                0,
+                99_000,
+                71,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            ended(&cfg, keys(Some(p), Some(OLD_W)), keys(Some(p), Some(NEW_W))),
+            [6, 8],
+            "the old writer's content.write and deposit grants end; the new writer's stay"
+        );
+    }
+
     #[test]
     fn both_keys_replaced_ends_what_the_holder_reached() {
         let p = [0x44u8; 32];
@@ -2449,6 +2513,52 @@ mod tests {
         // (the web-serve paywall holder), never the MDA.
         assert_eq!(opts[0].holder_candidates, vec!["web-serve".to_string()]);
         assert_eq!(opts[1].holder_candidates, vec!["web-serve".to_string()]);
+    }
+
+    /// The reserved system tiers produce no option, however their keys came to
+    /// be held (`nests.md` § Mint → *Which tiers*, ruled 2026-10-23): the free
+    /// `followers` key is recorded at the first approved follow and the hidden
+    /// `only-me` key by an archive import, so on a real device they sit in
+    /// custody beside the paid tiers — and the one-tap trust offer mints
+    /// EVERY option this catalog derives, which is why the catalog, not the
+    /// tap, carries the rule. The paid tier beside them is still offered.
+    #[test]
+    fn reserved_tiers_held_in_custody_produce_no_post_option() {
+        use fauna_core::subscription::{FOLLOWERS_TIER, OWNER_ONLY_TIER};
+        let mail = MailConfig::default();
+        let mut custody = fauna_core::data::SubscriptionsConfig::default();
+        for (tier, byte) in [
+            (FOLLOWERS_TIER, 0x33u8),
+            ("gold", 0x11),
+            (OWNER_ONLY_TIER, 0x44),
+        ] {
+            fauna_client_subscriptions::custody::record_new_tier(
+                &mut custody,
+                fauna_core::identity::ActorId([9u8; 32]),
+                tier,
+                [byte; 32],
+                1000,
+            );
+        }
+        let opts = mint_options(&custody, &mail, &[mda_holder(), web_serve_holder()]);
+        assert_eq!(
+            opts.iter().map(|o| o.tier.as_deref()).collect::<Vec<_>>(),
+            vec![Some("gold")],
+            "only the author's paid tier is offered; followers and only-me are held but never listed"
+        );
+        assert_eq!(opts[0].use_case, MintUseCase::PaywalledPosts);
+
+        // Held alone, a reserved tier yields an empty catalog — the honest
+        // no-op the trust offer renders as "nothing to decide yet".
+        let mut only_reserved = fauna_core::data::SubscriptionsConfig::default();
+        fauna_client_subscriptions::custody::record_new_tier(
+            &mut only_reserved,
+            fauna_core::identity::ActorId([9u8; 32]),
+            FOLLOWERS_TIER,
+            [0x33; 32],
+            1000,
+        );
+        assert!(mint_options(&only_reserved, &mail, &[web_serve_holder()]).is_empty());
     }
 
     #[test]

@@ -61,19 +61,31 @@ pub(crate) fn attach_autosave<M: DraftsHost + 'static>(
 ) {
     let manager = Arc::downgrade(&manager);
     let generation = Rc::new(Cell::new(0u64));
+    // The identity this loop saves for. Read at attach time — every caller
+    // attaches from the post-auth hook, after the switch's
+    // `reset_actor_scoped_state` has bumped it — and checked at every fire.
+    let armed_for = crate::actor_scope::current_generation();
     // Each tick re-arms the debounce. The loop ends once the manager this
     // observer was registered on is dropped (session rebuild replaces the
     // eternal singleton's observer list, or a swappable manager is
     // retired on re-auth) — the last strong ref goes with it, the
     // observer list drops, the sender drops, and `recv` closes.
     crate::async_helper::spawn_wake_loop(rx, move || {
-        arm_debounce(&generation, &manager, &sync, &runtime, log_prefix);
+        arm_debounce(
+            &generation,
+            armed_for,
+            &manager,
+            &sync,
+            &runtime,
+            log_prefix,
+        );
         glib::ControlFlow::Continue
     });
 }
 
 fn arm_debounce<M: DraftsHost + 'static>(
     generation: &Rc<Cell<u64>>,
+    armed_for: u64,
     manager: &Weak<M>,
     sync: &Arc<DraftsSync<Arc<NestClient>>>,
     runtime: &tokio::runtime::Handle,
@@ -83,19 +95,89 @@ fn arm_debounce<M: DraftsHost + 'static>(
     let sync = Arc::clone(sync);
     let runtime = runtime.clone();
     arm_generation_debounce(generation, autosave_debounce(), move || {
-        // Re-upgrade at fire time, not at arm time: the session may have
-        // retired during the debounce window, and a stale strong ref taken
-        // earlier would resurrect a torn-down session's manager.
-        let Some(manager) = manager.upgrade() else {
-            return;
-        };
         // Snapshot on the GTK main thread (the manager's state lives here),
         // then seal + upload off the main thread on the tokio runtime.
-        let snapshot = manager.drafts_snapshot_bytes();
+        let now = crate::actor_scope::current_generation();
+        let Some(snapshot) = snapshot_still_owed(&manager, armed_for, now) else {
+            return;
+        };
         runtime.spawn(async move {
             if let Err(e) = sync.save_if_changed(&snapshot).await {
                 tracing::warn!("{log_prefix}: autosave failed: {e}");
             }
         });
     });
+}
+
+/// The snapshot a fired debounce owes its save, or `None` when it owes none.
+///
+/// Two retirements, both read at FIRE time, never at arm time:
+///
+/// * **The manager is gone** — `feed`'s swappable manager retired on re-auth.
+///   A strong ref taken at arm time would resurrect it.
+/// * **The identity changed since the loop was attached** (`armed_for` is
+///   [`crate::actor_scope::current_generation`] at attach, `now` at fire).
+///   `conversations`' manager is an eternal singleton, so the `Weak` above
+///   never dies for it: a debounce the outgoing account armed in the last
+///   [`autosave_debounce`] before a switch (any `notify()` arms one — a roster
+///   poke, a probe landing, opening the composer) would otherwise fire after
+///   the switch's `clear_for_identity_change` and snapshot the WIPED manager —
+///   or, later still, the incoming account's restored draft — and save it
+///   through the outgoing account's `DraftsSync`. The leave-flush has just set
+///   that sync's baseline to the real draft, so the empty snapshot reads as
+///   changed and overwrites the outgoing account's draft on its plane
+///   (`conversation-drafts.md` § Persistence: a restore the outgoing account
+///   started fills nothing after an identity change — its saves retire with
+///   it, `account-scoping.md` § The scoping taxonomy). tui never meets this:
+///   it builds a fresh manager per sign-in, so its `Weak` does the job.
+fn snapshot_still_owed<M: DraftsHost>(
+    manager: &Weak<M>,
+    armed_for: u64,
+    now: u64,
+) -> Option<Vec<u8>> {
+    if now != armed_for {
+        return None;
+    }
+    Some(manager.upgrade()?.drafts_snapshot_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Host(Vec<u8>);
+    impl DraftsHost for Host {
+        fn drafts_snapshot_bytes(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+    }
+
+    /// **A debounce the outgoing identity armed saves nothing after the
+    /// switch** — the conversations manager outlives it, so only the
+    /// generation can retire it. Mutation: drop the generation check in
+    /// [`snapshot_still_owed`] and this reds (the wiped manager's empty
+    /// snapshot would be saved over the outgoing account's draft).
+    #[test]
+    fn a_debounce_armed_before_an_identity_change_owes_no_save() {
+        let eternal = Arc::new(Host(Vec::new()));
+        let weak = Arc::downgrade(&eternal);
+        assert_eq!(snapshot_still_owed(&weak, 3, 4), None);
+    }
+
+    /// The common path is unchanged: same identity, live manager → its snapshot.
+    #[test]
+    fn a_debounce_of_the_current_identity_saves_its_snapshot() {
+        let host = Arc::new(Host(b"draft".to_vec()));
+        assert_eq!(
+            snapshot_still_owed(&Arc::downgrade(&host), 4, 4),
+            Some(b"draft".to_vec())
+        );
+    }
+
+    /// A retired (swappable) manager still owes nothing, as before.
+    #[test]
+    fn a_debounce_whose_manager_retired_owes_no_save() {
+        let weak = Arc::downgrade(&Arc::new(Host(b"draft".to_vec())));
+        assert_eq!(snapshot_still_owed(&weak, 4, 4), None);
+    }
 }

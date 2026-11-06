@@ -54,10 +54,11 @@
                              (backups.md § User actions). A ComboBox, matching
                              linux's dropdown — the shape the shared e2e's
                              driver.select() drives on every native client.
-                             Items are built in code-behind so each ComboBoxItem's
-                             AutomationProperties.Name can carry the WIRE set name
-                             (windows select matches Name EXACTLY) while its
-                             Content shows the display label. -->
+                             Items are built in code-behind (BackupsPage.FolderOption)
+                             so each ComboBoxItem paints its label — a kind entry's
+                             resolved — as Content and Name, and carries the
+                             machine row's name as Tag and AutomationId, the
+                             locale-stable key the bridge's select matches. -->
                         <ComboBox x:Name="FolderSelector" MinWidth="160"
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.BackupFolderSelector}"
                                   SelectionChanged="FolderSelector_SelectionChanged" />
@@ -251,12 +252,27 @@
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreSnapshotSelect}"
                               DisplayMemberPath="Label" HorizontalAlignment="Stretch"
                               SelectionChanged="RestoreSnapshotSelect_SelectionChanged" />
-                    <StackPanel Orientation="Horizontal" Spacing="16"
+                    <!-- restore-kind-checkbox x5, in BackupsViewModel.RestoreKinds order
+                         (mail, calendar, card, post, conv): an unticked kind's picked
+                         snapshot does not arm restore-confirm-button. MinWidth 0 so the
+                         five fit one row (a CheckBox's default MinWidth is 120). -->
+                    <StackPanel Orientation="Horizontal" Spacing="12"
                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindsCheckboxes}"
                                 AutomationProperties.Name="restore-kinds-checkboxes">
-                        <CheckBox x:Name="RestoreKindMail" IsChecked="True"
+                        <CheckBox x:Name="RestoreKindMail" IsChecked="True" MinWidth="0" Tag="0"
+                                  Checked="RestoreKind_Toggled" Unchecked="RestoreKind_Toggled"
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
-                        <CheckBox x:Name="RestoreKindCalendar" IsChecked="True"
+                        <CheckBox x:Name="RestoreKindCalendar" IsChecked="True" MinWidth="0" Tag="1"
+                                  Checked="RestoreKind_Toggled" Unchecked="RestoreKind_Toggled"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
+                        <CheckBox x:Name="RestoreKindContacts" IsChecked="True" MinWidth="0" Tag="2"
+                                  Checked="RestoreKind_Toggled" Unchecked="RestoreKind_Toggled"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
+                        <CheckBox x:Name="RestoreKindPosts" IsChecked="True" MinWidth="0" Tag="3"
+                                  Checked="RestoreKind_Toggled" Unchecked="RestoreKind_Toggled"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
+                        <CheckBox x:Name="RestoreKindConversations" IsChecked="True" MinWidth="0" Tag="4"
+                                  Checked="RestoreKind_Toggled" Unchecked="RestoreKind_Toggled"
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.RestoreKindCheckbox}" />
                     </StackPanel>
                     <TextBox x:Name="RestoreConfirmInput"
@@ -281,10 +297,52 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <TextBlock x:Name="DetailHeader" Grid.Row="0" Padding="16,12"
                                Style="{StaticResource SubtitleTextBlockStyle}" />
+
+                    <!-- ══ Whole-snapshot restore (ui/backups.md § Whole-snapshot
+                         restore) ══ The open folder snapshot's whole tree into a
+                         typed directory, above snapshot-detail-files (macOS's
+                         placement). The destination is a typed path the untagged
+                         Choose… FolderPicker fills (the folder-location-path-input
+                         precedent), so the e2e test types into it. Collapsed with no
+                         snapshot open and on a kind entry's snapshot, which restores
+                         from the Restore section. Each line is Visible only for its
+                         phase, so a wait on snapshot-restore-result waits for a
+                         finished run. The destination box has a row to itself: a
+                         `*` column beside Auto buttons can be squeezed to 0 px. -->
+                    <StackPanel x:Name="SnapshotRestorePanel" Grid.Row="1" Padding="16,0,16,8"
+                                Spacing="6" Visibility="Collapsed">
+                        <TextBox x:Name="SnapshotRestoreDestinationBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotRestoreDestinationInput}"
+                                 PlaceholderText="{loc:Localize Key=backups/snapshot_restore_destination_placeholder}"
+                                 TextChanged="SnapshotRestoreDestination_TextChanged" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="SnapshotRestoreChooseButton"
+                                    Content="{loc:Localize Key=backups/choose_destination}"
+                                    Click="SnapshotRestoreChoose_Click" />
+                            <Button x:Name="SnapshotRestoreButton"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotRestoreButton}"
+                                    Content="{loc:Localize Key=backups/snapshot_restore_button}"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    IsEnabled="False" Click="SnapshotRestore_Click" />
+                        </StackPanel>
+                        <StackPanel x:Name="SnapshotRestoreProgressRow" Orientation="Horizontal"
+                                    Spacing="8" Visibility="Collapsed">
+                            <ProgressRing IsActive="True" Width="16" Height="16" />
+                            <!-- AutomationId only, no static Name: get_text reads the
+                                 peer Name, which follows Text only when unset. -->
+                            <TextBlock x:Name="SnapshotRestoreProgress"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotRestoreProgress}"
+                                       TextWrapping="Wrap" FontSize="12" Opacity="0.7" />
+                        </StackPanel>
+                        <TextBlock x:Name="SnapshotRestoreResult"
+                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotRestoreResult}"
+                                   TextWrapping="Wrap" FontSize="12" Visibility="Collapsed" />
+                    </StackPanel>
 
                     <!-- MinHeight/MaxHeight bound this row like restore-history-list's
                          own ScrollViewer (180) above. MinHeight matters even for a
@@ -294,8 +352,17 @@
                          on-screen target. MaxHeight keeps a many-file snapshot on its
                          own internal scroll instead of stretching the outer
                          ScrollViewer's content past reason. -->
-                    <ListView x:Name="FileList" Grid.Row="1" MinHeight="150" MaxHeight="320"
+                    <ListView x:Name="FileList" Grid.Row="2" MinHeight="150" MaxHeight="320"
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.SnapshotDetailFiles}">
+                        <!-- A kind entry's snapshot lists no files: this one line
+                             says it restores from the Restore section, inside
+                             snapshot-detail-files (§ Snapshot-list shape → *Kind
+                             entries*). Collapsed on a folder snapshot. -->
+                        <ListView.Header>
+                            <TextBlock x:Name="KindDetailNotice" Padding="12,8"
+                                       TextWrapping="Wrap" Visibility="Collapsed"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </ListView.Header>
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="models:SnapshotFileDisplayRow">
                                 <!-- The row root carries a Name (like snapshot-item's) — a bare
@@ -329,7 +396,7 @@
                         </ListView.ItemTemplate>
                     </ListView>
 
-                    <TextBlock x:Name="NoFilesText" Grid.Row="1"
+                    <TextBlock x:Name="NoFilesText" Grid.Row="2"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </Grid>

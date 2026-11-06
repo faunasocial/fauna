@@ -40,22 +40,62 @@ use std::path::Path;
 /// directory if missing and restricting the file to owner-only on unix.
 /// Callers take the OS-level lock themselves — non-blocking `try_lock()` /
 /// `try_lock_shared()` or blocking `lock()`, whichever their contract needs.
+///
+/// **Owner-only from the first instant, and never through a symlink (unix).**
+/// Holding a lock file's descriptor is an availability lever since the agent's
+/// presence lock (`fauna_account_store::locks::AgentPresenceLock`): another OS
+/// user who opens the file can keep a shared lock the agent's acquire then
+/// waits on. So the file is CREATED with mode `0600` — no umask window between
+/// the create and a chmod; a path that is a symlink, or that no longer names
+/// the inode this open got, is refused before anything is changed through it;
+/// and a pre-existing file is tightened to `0600` through the descriptor
+/// (`fchmod`), a failure refusing the open rather than being ignored. The
+/// symlink refusal is an identity check after the open rather than
+/// `O_NOFOLLOW`: this crate links no `libc`, and the lock files live in
+/// owner-only directories, where a swap between the open and the check is no
+/// other user's to make.
 pub fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    open_lock_file_observed(path, |_| {})
+}
+
+/// [`open_lock_file`] with `after_open` called on the descriptor straight
+/// after the open, before the identity check and the `fchmod` — the one point
+/// at which the create mode alone decides the file's permissions. Production
+/// passes a no-op; the tests read the mode there, since afterwards the
+/// `fchmod` would mask a dropped create mode.
+fn open_lock_file_observed(path: &Path, after_open: impl FnOnce(&File)) -> std::io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    // A zero-content lock file, not secret-bearing — the umask-window class a
-    // write-then-chmod secret write must worry about does not apply here.
-    // Reviewed and cleared, no rewrite needed.
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(false);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    after_open(&file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let at_path = std::fs::symlink_metadata(path)?;
+        let opened = file.metadata()?;
+        if at_path.file_type().is_symlink()
+            || at_path.dev() != opened.dev()
+            || at_path.ino() != opened.ino()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "lock file {} is a symlink or was replaced during the open",
+                    path.display()
+                ),
+            ));
+        }
+        if opened.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
     }
     Ok(file)
 }
@@ -89,5 +129,100 @@ mod tests {
             b"x",
             "re-opening a lock file must never truncate it"
         );
+    }
+
+    /// Owner-only from the open itself: under a umask that would leave the
+    /// file world-readable and -writable, the mode read straight after the
+    /// open is already `0600`. The umask is process-wide, so the open runs in
+    /// a child of this test binary (`FAUNA_FS_LOCK_UMASK_CHILD`) started under
+    /// `umask 000`, never under the other tests' threads.
+    #[cfg(unix)]
+    #[test]
+    fn creates_the_file_owner_only_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(path) = std::env::var_os("FAUNA_FS_LOCK_UMASK_CHILD") {
+            let _file = open_lock_file(Path::new(&path)).unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "owner-only straight after the open");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("umask.lock");
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"umask 000 && exec "$0" --exact "$1""#)
+            .arg(std::env::current_exe().unwrap())
+            .arg("fs_lock::tests::creates_the_file_owner_only_under_a_permissive_umask")
+            .env("FAUNA_FS_LOCK_UMASK_CHILD", &path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child's open under umask 000");
+        assert!(path.exists(), "the child created the file");
+    }
+
+    /// A pre-existing file left permissive is tightened by the open, and a
+    /// symlink at the lock path is refused without touching its target.
+    #[cfg(unix)]
+    #[test]
+    fn tightens_an_existing_file_and_refuses_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("old.lock");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let _file = open_lock_file(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "an existing lock file is tightened");
+
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = tmp.path().join("link.lock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(
+            open_lock_file(&link).is_err(),
+            "a symlinked lock path is refused"
+        );
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o644,
+            "nothing is changed through the symlink"
+        );
+    }
+
+    /// The create mode alone makes the file owner-only: the mode is read off the
+    /// descriptor straight after the open, before the `fchmod` could tighten
+    /// it, so dropping `options.mode(0o600)` while the `fchmod` stays reddens
+    /// this and nothing else. Same umask-000 child as the pin above.
+    #[cfg(unix)]
+    #[test]
+    fn the_create_mode_alone_is_owner_only_before_any_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(path) = std::env::var_os("FAUNA_FS_LOCK_CREATE_MODE_CHILD") {
+            let mut seen = None;
+            let _file = open_lock_file_observed(Path::new(&path), |f| {
+                seen = Some(f.metadata().unwrap().permissions().mode());
+            })
+            .unwrap();
+            assert_eq!(
+                seen.expect("the hook ran") & 0o777,
+                0o600,
+                "owner-only at the create, before any chmod"
+            );
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("create-mode.lock");
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"umask 000 && exec "$0" --exact "$1""#)
+            .arg(std::env::current_exe().unwrap())
+            .arg("fs_lock::tests::the_create_mode_alone_is_owner_only_before_any_chmod")
+            .env("FAUNA_FS_LOCK_CREATE_MODE_CHILD", &path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child's open under umask 000");
+        assert!(path.exists(), "the child created the file");
     }
 }

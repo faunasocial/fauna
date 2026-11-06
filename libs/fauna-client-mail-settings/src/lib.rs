@@ -40,6 +40,11 @@ pub mod export;
 pub mod forwarders;
 pub mod forwarding;
 pub mod import;
+#[cfg(all(
+    feature = "rpc-glue",
+    any(not(target_arch = "wasm32"), feature = "web-mail-tunnel")
+))]
+mod import_source;
 pub mod inbox_scorer;
 pub mod lists;
 pub mod local_domains;
@@ -161,8 +166,9 @@ pub use webdav_policy::{
 // the type in this crate's surface (it lives in `fauna-core`).
 pub use fauna_core::secret::SecretBytes;
 pub use machine::{
-    HistoryWrite, IdentitySigner, MailSettingsMachine, NestClient, RetirementClock,
-    SealedModelWriter, SpamModelClientWrite, SpamModelWriteOutcome, WebdavServedSets,
+    DavSealPubkeys, DeploymentStatus, HistoryWrite, IdentitySigner, MailSettingsMachine,
+    NestClient, RegisteredRecipientPubkeys, RetirementClock, SealedModelWriter,
+    SpamModelClientWrite, SpamModelWriteOutcome, WebdavServedSets,
 };
 // The client model-write op the moderation-queue / mail-spam surfaces build and
 // hand to `MailSettingsMachine::apply_spam_model_write` (re-exported so a consumer

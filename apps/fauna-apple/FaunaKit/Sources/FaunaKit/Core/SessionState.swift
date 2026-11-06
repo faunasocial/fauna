@@ -8,7 +8,7 @@ public class SessionState {
     /// agent-driven login honest when its shell hand-off is deferred); it is
     /// cleared by `reset`/`logout` — `clearAuthenticatedOverride()` — and by
     /// nothing else. The direct peer of linux's `authenticated_override`
-    /// (`apps/fauna-linux/src/main.rs`).
+    /// (`apps/fauna-linux/src/lib.rs`).
     public var authenticatedOverride: Bool?
 
     /// The MOUNTED-SHELL probe: "is this app showing its authenticated main
@@ -54,6 +54,19 @@ public class SessionState {
     public var nodeUrl: String?
     public var deviceId: String?
     public var handle: String?
+    /// The account's cached nest domain (the registry entry's `domain`, the
+    /// nest's current primary) — written beside `handle` from the same registry
+    /// material at launch and on every self-identity refresh, cleared with it.
+    public var domain: String?
+
+    /// The profile SELF header's display handle — `<handle>@<current primary>`
+    /// through the shared resolver (`account_display_handle`;
+    /// `mail-primary-domain-rename.md` § Display-handle interaction: the display
+    /// follows the primary, so a rename moves it with no new alias). `nil` while
+    /// nothing resolves — never the bare handle (tui's `session_display_handle`).
+    public var displayHandle: String? {
+        accountDisplayHandle(sessionHandle: handle ?? "", entryHandle: handle, entryDomain: domain)
+    }
 
     /// First-setup mail / CalDAV enable latch (onboarding.md § Enable-email at
     /// claim + § Enable-CalDAV at claim). The wizard runs **pre-identity**, so

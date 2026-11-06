@@ -376,6 +376,14 @@ pub fn room_class_attr_token(class: RoomClass) -> String {
     class.attr_token().to_string()
 }
 
+/// FFI-exported twin of [`RoomSearchResultKind::attr_token`] — the `kind`
+/// attribute of `room-search-result-item[i]` (`message` or `post`), so a
+/// native app reads it from the shared mapping instead of spelling it.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn room_search_result_kind_attr_token(kind: RoomSearchResultKind) -> String {
+    kind.attr_token().to_string()
+}
+
 /// FFI-exported twin of [`RoomNotice::for_facts`] — which notice, if any,
 /// `thread-room-notice` states for a room's `awaiting_key`,
 /// `moderation_unverified` and `bridge_disconnected`.
@@ -1192,6 +1200,9 @@ mod tests {
             );
         }
         assert_eq!(room_member_chip_text("ada".to_string(), None), "ada");
+        for kind in [RoomSearchResultKind::Message, RoomSearchResultKind::Post] {
+            assert_eq!(room_search_result_kind_attr_token(kind), kind.attr_token());
+        }
         assert_eq!(
             room_join_rule_editor_choices(),
             JoinRule::EDITOR_CHOICES.to_vec()

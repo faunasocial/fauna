@@ -23,6 +23,9 @@ public struct BridgeCardContent: View {
     let isDesktop: Bool
     let compact: Bool
     let index: Int
+    /// The follows group opens expanded: its add-follow row and its rows are
+    /// the card's own controls, as on every other app (`bridges.md` § Follows).
+    @State private var followsExpanded = true
 
     public init(bridge: BridgeInfo, vm: BridgeManagerVM, isDesktop: Bool, compact: Bool, index: Int) {
         self.bridge = bridge
@@ -62,6 +65,9 @@ public struct BridgeCardContent: View {
                     if bridge.linked && bridge.supportsFollows {
                         followsContent
                     }
+                    if bridge.linked && bridge.supportsFollowRequests {
+                        followRequestsContent
+                    }
                     sourceAskRows
                 }
             }
@@ -89,6 +95,9 @@ public struct BridgeCardContent: View {
             LabeledContent(identity.label) {
                 Text(identity.display).font(.caption.monospaced()).textSelection(.enabled)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(Ids.bridgeIdentity)
+            .automationValue(Ids.bridgeIdentity, text: { "\(identity.label): \(identity.display)" })
         }
 
         ForEach(bridge.settings) { setting in
@@ -96,18 +105,31 @@ public struct BridgeCardContent: View {
             // (`fauna_client_bridges::setting_control`) — no spelling is matched here.
             switch settingControl(settingType: setting.type) {
             case .toggle:
+                let id = "\(Ids.bridgeSetting)[\(setting.key)]"
+                let checked = setting.value.boolValue ?? false
                 Toggle(setting.label, isOn: Binding(
-                    get: { setting.value.boolValue ?? false },
+                    get: { checked },
                     set: { newVal in
                         Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: newVal) }
                     }
                 ))
+                .accessibilityIdentifier(id)
+                .automationActivate(
+                    id,
+                    value: { checked ? "on" : "off" },
+                    attributes: { ["checked": checked ? "true" : "false"] }
+                ) {
+                    Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: !checked) }
+                }
             case .number:
                 BridgeNumberSettingRow(setting: setting, vm: vm, bridge: bridge)
-            case .text, .select, .unknown:
-                // Read-only line: apple has no editable text or picker row yet,
-                // and a setting_type this build predates (a newer nest) is
-                // shown, never dropped.
+            case .text:
+                BridgeTextSettingRow(setting: setting, vm: vm, bridge: bridge)
+            case .select:
+                BridgeSelectSettingRow(setting: setting, vm: vm, bridge: bridge)
+            case .unknown:
+                // Read-only line: a setting_type this build predates (a newer
+                // nest) is shown, never dropped.
                 LabeledContent(setting.label) {
                     Text(setting.value.stringValue ?? "").font(.caption)
                 }
@@ -261,17 +283,29 @@ public struct BridgeCardContent: View {
 
     // MARK: - Follows
 
+    private var followIdBinding: Binding<String> {
+        Binding(get: { vm.followId }, set: { vm.followId = $0 })
+    }
+
+    private var followPetnameBinding: Binding<String> {
+        Binding(get: { vm.followPetname }, set: { vm.followPetname = $0 })
+    }
+
     @ViewBuilder
     private var followsContent: some View {
         let bridgeFollows = vm.follows[bridge.id] ?? []
 
-        DisclosureGroup(L.bridges.follows) {
+        DisclosureGroup(L.bridges.follows, isExpanded: $followsExpanded) {
             HStack {
-                TextField(L.bridges.idToFollow, text: Binding(get: { vm.followId }, set: { vm.followId = $0 }))
+                TextField(L.bridges.idToFollow, text: followIdBinding)
                     .modifier(DesktopTextFieldStyle(isDesktop: isDesktop))
-                TextField(L.bridges.petname, text: Binding(get: { vm.followPetname }, set: { vm.followPetname = $0 }))
+                    .accessibilityIdentifier(Ids.bridgeFollowIdInput)
+                    .automationField(Ids.bridgeFollowIdInput, text: followIdBinding)
+                TextField(L.bridges.petname, text: followPetnameBinding)
                     .modifier(DesktopTextFieldStyle(isDesktop: isDesktop))
                     .frame(width: 120)
+                    .accessibilityIdentifier(Ids.bridgeFollowPetnameInput)
+                    .automationField(Ids.bridgeFollowPetnameInput, text: followPetnameBinding)
                 Button(L.bridges.addFollow) {
                     Task { await vm.addFollow(bridgeId: bridge.id) }
                 }
@@ -304,11 +338,56 @@ public struct BridgeCardContent: View {
                     }
                 }
                 .accessibilityIdentifier(Ids.bridgeFollowItem)
-                .automationValue(Ids.bridgeFollowItem, text: { follow.id })
+                // The row reads as its nickname, else its id (`bridges.md` § Follows).
+                .automationValue(Ids.bridgeFollowItem, text: { follow.petname.flatMap { $0.isEmpty ? nil : $0 } ?? follow.id })
             }
         }
         .accessibilityIdentifier(Ids.bridgeFollowsList)
         .automationValue(Ids.bridgeFollowsList, text: { "" })
+    }
+
+    // MARK: - Follow requests (`bridges.md` § Follow requests)
+
+    /// Pending requests under the follows list: heading with the count (kept at
+    /// zero), one row per request painting the row's `display`, Approve / Refuse
+    /// forwarding its `id` and re-reading — non-optimistic, no confirm.
+    @ViewBuilder
+    private var followRequestsContent: some View {
+        let requests = vm.followRequests[bridge.id] ?? []
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L.bridges.followRequests(count: String(requests.count)))
+                .font(.subheadline.weight(.semibold))
+            ForEach(requests) { request in
+                HStack {
+                    Text(request.display)
+                        .font(.caption)
+                    Spacer()
+                    Button(L.bridges.approveFollowRequest) {
+                        Task { await vm.answerFollowRequest(bridgeId: bridge.id, id: request.id, approve: true) }
+                    }
+                    .modifier(MiniControlSize(compact: compact))
+                    .accessibilityIdentifier(Ids.bridgeFollowRequestApprove)
+                    .automationActivate(Ids.bridgeFollowRequestApprove) {
+                        Task { await vm.answerFollowRequest(bridgeId: bridge.id, id: request.id, approve: true) }
+                    }
+                    Button(L.bridges.refuseFollowRequest, role: .destructive) {
+                        Task { await vm.answerFollowRequest(bridgeId: bridge.id, id: request.id, approve: false) }
+                    }
+                    .modifier(MiniControlSize(compact: compact))
+                    .accessibilityIdentifier(Ids.bridgeFollowRequestRefuse)
+                    .automationActivate(Ids.bridgeFollowRequestRefuse) {
+                        Task { await vm.answerFollowRequest(bridgeId: bridge.id, id: request.id, approve: false) }
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(Ids.bridgeFollowRequestItem)
+                .automationValue(Ids.bridgeFollowRequestItem, text: { request.display })
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.bridgeFollowRequestsList)
+        .automationValue(Ids.bridgeFollowRequestsList, text: { L.bridges.followRequests(count: String(requests.count)) })
     }
 
     // MARK: - The ward's feed-source ask (`family-safety.md` § Feed-source approvals)
@@ -407,6 +486,7 @@ private struct BridgeNumberSettingRow: View {
     @State private var text = ""
 
     var body: some View {
+        let id = "\(Ids.bridgeSetting)[\(setting.key)]"
         LabeledContent(setting.label) {
             TextField("", text: $text)
                 #if os(iOS)
@@ -414,6 +494,8 @@ private struct BridgeNumberSettingRow: View {
                 #endif
                 .multilineTextAlignment(.trailing)
                 .onSubmit(commit)
+                .accessibilityIdentifier(id)
+                .automationField(id, text: $text, commit: commit)
         }
         // Re-syncs the buffer only when the COMMITTED value changes (post-
         // refresh) — `.task(id:)`, not `.onAppear`, so in-progress typed text
@@ -427,6 +509,59 @@ private struct BridgeNumberSettingRow: View {
     private func commit() {
         guard let parsed = parseCountI64(input: text) else { return }
         Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: parsed) }
+    }
+}
+/// A `text` `BridgeSetting` row: type-then-commit on submit, the number row's
+/// shape (bridges.md § Bridge settings — the change saves on the spot, no save
+/// control). Registers `bridge-setting[<key>]` as a typeable field whose commit
+/// is the same submit.
+private struct BridgeTextSettingRow: View {
+    let setting: BridgeSetting
+    let vm: BridgeManagerVM
+    let bridge: BridgeInfo
+    @State private var text = ""
+
+    var body: some View {
+        let id = "\(Ids.bridgeSetting)[\(setting.key)]"
+        LabeledContent(setting.label) {
+            TextField("", text: $text)
+                .multilineTextAlignment(.trailing)
+                .onSubmit(commit)
+                .accessibilityIdentifier(id)
+                .automationField(id, text: $text, commit: commit)
+        }
+        .task(id: setting.value.stringValue) {
+            text = setting.value.stringValue ?? ""
+        }
+    }
+
+    private func commit() {
+        let value = text
+        Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: value) }
+    }
+}
+
+/// A `select` `BridgeSetting` row: a picker over the setting's declared options;
+/// choosing one saves at once.
+private struct BridgeSelectSettingRow: View {
+    let setting: BridgeSetting
+    let vm: BridgeManagerVM
+    let bridge: BridgeInfo
+
+    var body: some View {
+        let id = "\(Ids.bridgeSetting)[\(setting.key)]"
+        Picker(setting.label, selection: Binding(
+            get: { setting.value.stringValue ?? "" },
+            set: { newVal in
+                Task { await vm.updateSetting(bridge: bridge, key: setting.key, value: newVal) }
+            }
+        )) {
+            ForEach(Array((setting.options ?? []).enumerated()), id: \.offset) { _, option in
+                Text(option.label).tag(option.value.stringValue ?? "")
+            }
+        }
+        .accessibilityIdentifier(id)
+        .automationValue(id, text: { setting.value.stringValue }, value: { setting.value.stringValue })
     }
 }
 #endif // !FAUNA_KIDS

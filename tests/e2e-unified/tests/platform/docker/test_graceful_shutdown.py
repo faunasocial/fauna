@@ -23,6 +23,7 @@ from drivers.port_util import popen_group_kwargs, reap_descendants_of
 
 from .helpers import (
     authed_ws,
+    await_registered,
     claim_admin_api,
     docker_build,
     find_free_port,
@@ -45,6 +46,14 @@ pytestmark = [
     pytest.mark.tier_4,
     pytest.mark.self_contained_docker,
 ]
+
+
+# Ceilings, never targets (convention 14): the close frame arrives once the
+# stop's SIGTERM reaches the nest and its drain flushes — under the 15 s stop
+# grace plus the slow-stop hold below — and a loaded box only stretches that.
+_CLOSE_BUDGET_S = 45.0
+# `docker stop -t 15` returns by the grace's end plus the daemon's own latency.
+_STOP_RETURN_S = 60.0
 
 
 @pytest.fixture(scope="module")
@@ -70,8 +79,8 @@ def test_docker_stop_emits_ws_1001(docker_image):
         admin = claim_admin_api(port, claim_code)
         ws = authed_ws(port, bytes(admin["signing_key"].verify_key).hex(), admin["token"])
         try:
-            # Let the server-side subscription land.
-            time.sleep(0.5)
+            # The drain counts only a registered connection: wait for that, not a time.
+            await_registered(ws)
             # SIGTERM via `docker stop`, non-blocking so we can read the close
             # frame concurrently. -t 15 matches the compose stop_grace_period.
             stop = subprocess.Popen(
@@ -81,9 +90,9 @@ def test_docker_stop_emits_ws_1001(docker_image):
             )
             reap_descendants_of(stop.pid)
             try:
-                code = read_close_code(ws, timeout=20.0)
+                code = read_close_code(ws, timeout=_CLOSE_BUDGET_S)
             finally:
-                stop.wait(timeout=30)
+                stop.wait(timeout=_STOP_RETURN_S)
             assert code == 1001, (
                 f"docker stop must close the WS with 1001 (Going Away); got {code!r}. "
                 "1000 would stop the client's reconnect loop forever; None means a "
@@ -157,7 +166,7 @@ def test_slow_nest_stop_fits_s6_grace(docker_image, tmp_path):
         admin = claim_admin_api(port, claim_code)
         ws = authed_ws(port, bytes(admin["signing_key"].verify_key).hex(), admin["token"])
         try:
-            time.sleep(0.5)
+            await_registered(ws)
             began = time.monotonic()
             stop = subprocess.Popen(
                 ["docker", "stop", "-t", "15", name],
@@ -166,10 +175,10 @@ def test_slow_nest_stop_fits_s6_grace(docker_image, tmp_path):
             )
             reap_descendants_of(stop.pid)
             try:
-                code = read_close_code(ws, timeout=20.0)
+                code = read_close_code(ws, timeout=_CLOSE_BUDGET_S)
                 closed_after = time.monotonic() - began
             finally:
-                stop.wait(timeout=30)
+                stop.wait(timeout=_STOP_RETURN_S)
             assert code == 1001, (
                 f"a {_SLOW_STOP_S} s nest stop must still close the WS with 1001; "
                 f"got {code!r} after {closed_after:.1f} s. None means the nest was "

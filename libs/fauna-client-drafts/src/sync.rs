@@ -71,6 +71,14 @@ use crate::store::{DraftsClient, DraftsClientError};
 /// drafts, and they hold at any window. This is the coalescing knob.
 pub const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
 
+/// How long one rail's leave-flush may take before the door goes on without it
+/// (`docs/goal/behavior/reserved-folders.md` § The leave-flush promise): a slow
+/// or unreachable nest must not hang quitting or signing out. Each rail is
+/// bounded on its own, so one rail's timeout never costs another its save.
+/// tui and web read it here; windows' teardown flush still carries its own
+/// 5 s budget.
+pub const LEAVE_FLUSH_BUDGET: Duration = Duration::from_secs(3);
+
 /// The env seam the e2e harness uses to neutralise the debounce for a test, in
 /// whole milliseconds. Gated, so a `strings` sweep of a release artifact finds
 /// not even the name (convention 15's verification method reads the built
@@ -91,11 +99,13 @@ pub const E2E_AUTOSAVE_DEBOUNCE_ENV: &str = "FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_
 /// `docs/goal/architecture/e2e-automation-surface-gating.md` § The source-IMAP
 /// trust seed states the general shape).
 ///
-/// **web is the one exception, and it is a target limit, not a choice:**
-/// `wasm32-unknown-unknown` has no process environment, so `std::env::var` is
-/// always `Err(NotPresent)` there and web always gets [`AUTOSAVE_DEBOUNCE`].
-/// Web's substitute is its own `__faunaTestAgent` 150 ms override, which
-/// shortens where this lengthens — see `fauna-wasm`'s face.
+/// **web takes the seam through another door:** `wasm32-unknown-unknown` has
+/// no process environment, so `std::env::var` is always `Err(NotPresent)`
+/// there and this answers [`AUTOSAVE_DEBOUNCE`]; the harness writes the same
+/// name into the page origin's `localStorage` instead (the escrow-trust seed's
+/// shape), which `fauna-wasm`'s `e2eDraftsAutosaveWindowMs` reads through
+/// [`parse_e2e_autosave_debounce`]. Without it web keeps its own
+/// `__faunaTestAgent` 150 ms cadence, which shortens where this lengthens.
 ///
 /// **What the seam is FOR is lengthening, not shortening.** A leave-flush
 /// witness has to prove the draft reached the nest via the app's leave door and
@@ -115,12 +125,23 @@ pub fn autosave_debounce() -> Duration {
 
 /// Test-capable builds only — see [`autosave_debounce`].
 ///
+/// The value grammar is [`parse_e2e_autosave_debounce`]'s.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn e2e_autosave_debounce_override() -> Option<Duration> {
+    parse_e2e_autosave_debounce(&std::env::var(E2E_AUTOSAVE_DEBOUNCE_ENV).ok()?)
+}
+
+/// The seam's value grammar, shared by both places the harness puts it: the
+/// process environment ([`autosave_debounce`]) and web's page-origin
+/// `localStorage` under the same name (`fauna-wasm`'s
+/// `e2eDraftsAutosaveWindowMs`), since a page reads no environment. Empty or
+/// whitespace is "not set".
+///
 /// A malformed value **panics** rather than falling back: only the e2e harness
 /// sets this, so a typo is a harness bug, and silently serving the production
 /// 1.5 s would turn it into a flaky witness that reads like a product gap.
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-fn e2e_autosave_debounce_override() -> Option<Duration> {
-    let raw = std::env::var(E2E_AUTOSAVE_DEBOUNCE_ENV).ok()?;
+pub fn parse_e2e_autosave_debounce(raw: &str) -> Option<Duration> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -148,6 +169,34 @@ fn e2e_autosave_debounce_override() -> Option<Duration> {
 fn e2e_autosave_debounce_override() -> Option<Duration> {
     None
 }
+
+/// The waits between a launch load's attempts after a transport failure —
+/// about three minutes in all, then the failure is returned and the next
+/// launch tries again.
+///
+/// Why a retry at all: the launch `fauna.drafts.get` carries the kind's 5 s
+/// deadline, and the save gate stays shut until a load succeeds. Before this, a
+/// single slow answer at launch — a loaded box, a reconnect, the first boot
+/// after a reload — left the session with no synced drafts and no autosave
+/// until the user restarted the app (found on web, where a reload's first read
+/// routinely outlived the deadline).
+///
+/// Bounded, not endless, because the loop holds the session's transport: a load
+/// begun for an account the user has since left would otherwise keep that
+/// client alive. Late delivery itself is harmless — the caller's identity-epoch
+/// check drops a reply for a departed account.
+pub const LAUNCH_LOAD_RETRY_DELAYS: [Duration; 10] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+];
 
 /// Per-rail load-gate + last-saved baseline guarding a [`DraftsClient`]. One
 /// instance per actor per rail on each Fauna app, held for the app's
@@ -224,11 +273,51 @@ impl<R: RpcRequester> DraftsSync<R> {
     /// hands the returned bytes to `ConversationsManager::restore_drafts_at`,
     /// with the identity epoch it read before calling this;
     /// `Ok(None)` is first run (keep the empty store).
+    ///
+    /// **A transport failure is retried** on [`LAUNCH_LOAD_RETRY_DELAYS`]
+    /// before it is returned, so a nest that is slow or unreachable for a moment at launch
+    /// does not cost the user their synced drafts for the whole session
+    /// (`conversation-drafts.md` § Persistence, *A launch load lost to the
+    /// transport is retried*). A seal failure is never retried: the same bytes
+    /// would fail the same way. The future can therefore run for minutes —
+    /// spawn it, never await it on a path that holds a page or a build back.
+    ///
+    /// A late load is safe because every rail's restore FILLS — it never
+    /// overwrites a draft the user is composing into: the conversations rail's
+    /// `DraftStore::restore_from_bytes`, the posts rail's `PostDrafts::fill`
+    /// and the events rail's `EventDrafts::fill`. A new rail owes the same
+    /// before it may load here.
     pub async fn load(&self) -> Result<Option<Vec<u8>>, DraftsClientError<R::Error>> {
-        let loaded = self
-            .client
-            .load_with_predecessors(&self.rail, &self.predecessors)
-            .await?;
+        self.load_retrying(&LAUNCH_LOAD_RETRY_DELAYS, fauna_sleep::sleep)
+            .await
+    }
+
+    /// [`load`](Self::load) over an explicit schedule and sleep — the seam the
+    /// tests drive without a timer.
+    async fn load_retrying<S, F>(
+        &self,
+        delays: &[Duration],
+        mut sleep: S,
+    ) -> Result<Option<Vec<u8>>, DraftsClientError<R::Error>>
+    where
+        S: FnMut(Duration) -> F,
+        F: core::future::Future<Output = ()>,
+    {
+        let mut delays = delays.iter();
+        let loaded = loop {
+            match self
+                .client
+                .load_with_predecessors(&self.rail, &self.predecessors)
+                .await
+            {
+                Ok(loaded) => break loaded,
+                Err(DraftsClientError::Transport(e)) => match delays.next() {
+                    Some(delay) => sleep(*delay).await,
+                    None => return Err(DraftsClientError::Transport(e)),
+                },
+                Err(seal) => return Err(seal),
+            }
+        };
         let mut st = self.state.lock().unwrap();
         st.loaded = true;
         st.last_saved = loaded.clone();
@@ -496,5 +585,133 @@ mod tests {
             !block_on(s.save_if_changed(b"empty view")).unwrap(),
             "and the gate must stay shut, so nothing overwrites the unread rail"
         );
+    }
+
+    /// A nest that fails the first `fail_gets` drafts reads with a transport
+    /// error — the launch read outliving its deadline — then answers from the
+    /// shared [`FakeNest`].
+    struct FlakyNest {
+        inner: SharedNest,
+        fail_gets: std::sync::atomic::AtomicU32,
+        gets: std::sync::atomic::AtomicU32,
+    }
+
+    impl FlakyNest {
+        fn new(nest: Arc<FakeNest>, fail_gets: u32) -> Self {
+            Self {
+                inner: SharedNest(nest),
+                fail_gets: std::sync::atomic::AtomicU32::new(fail_gets),
+                gets: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl RpcRequester for &FlakyNest {
+        type Error = String;
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            use std::sync::atomic::Ordering;
+            if kind == KIND_GET {
+                self.gets.fetch_add(1, Ordering::SeqCst);
+                let failing = self
+                    .fail_gets
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok();
+                if failing {
+                    return Err("the nest took too long to respond".to_string());
+                }
+            }
+            let Ok(reply) = self.inner.request(kind, payload).await;
+            Ok(reply)
+        }
+    }
+
+    /// A retrying load's outcome beside the waits it asked for.
+    type RecordedLoad<E> = (Result<Option<Vec<u8>>, DraftsClientError<E>>, Vec<Duration>);
+
+    /// Run `sync`'s retrying load over [`LAUNCH_LOAD_RETRY_DELAYS`] with a sleep
+    /// that records each wait instead of taking it.
+    fn load_recording_waits<R: RpcRequester>(
+        sync: &DraftsSync<R>,
+        delays: &[Duration],
+    ) -> RecordedLoad<R::Error> {
+        let waits = std::cell::RefCell::new(Vec::new());
+        let result = block_on(sync.load_retrying(delays, |d| {
+            waits.borrow_mut().push(d);
+            core::future::ready(())
+        }));
+        (result, waits.into_inner())
+    }
+
+    /// **A launch load lost to the transport is retried until it lands** — the
+    /// defect this pins: one slow answer at launch used to leave the save gate
+    /// shut, so the session neither showed the drafts another device wrote nor
+    /// saved any of its own until the app was restarted.
+    #[test]
+    fn a_launch_load_lost_to_the_transport_is_retried_until_it_lands() {
+        let nest = Arc::new(FakeNest::default());
+        // Another device's drafts rest on the nest.
+        let other = sync(nest.clone());
+        block_on(other.load()).unwrap();
+        block_on(other.save_if_changed(b"from device B")).unwrap();
+
+        let flaky = FlakyNest::new(nest.clone(), 2);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+        let (result, waits) = load_recording_waits(&s, &LAUNCH_LOAD_RETRY_DELAYS);
+
+        assert_eq!(
+            result.unwrap().as_deref(),
+            Some(b"from device B".as_slice()),
+            "the third attempt must deliver what the first two lost"
+        );
+        assert_eq!(waits, LAUNCH_LOAD_RETRY_DELAYS[..2].to_vec());
+        assert!(
+            block_on(s.save_if_changed(b"typed after the late load")).unwrap(),
+            "the late success must lift the save gate"
+        );
+    }
+
+    /// The retry is bounded: after the schedule the transport error is returned
+    /// and the gate stays shut, so nothing is saved over drafts this session
+    /// never read.
+    #[test]
+    fn a_launch_load_gives_up_after_the_schedule_with_the_gate_still_shut() {
+        let nest = Arc::new(FakeNest::default());
+        let flaky = FlakyNest::new(nest.clone(), u32::MAX);
+        let s = DraftsSync::new(&flaky, &keypair(), "conversations");
+        let (result, waits) = load_recording_waits(&s, &LAUNCH_LOAD_RETRY_DELAYS);
+
+        assert!(matches!(result, Err(DraftsClientError::Transport(_))));
+        assert_eq!(waits, LAUNCH_LOAD_RETRY_DELAYS.to_vec());
+        assert_eq!(
+            flaky.gets.load(std::sync::atomic::Ordering::SeqCst) as usize,
+            LAUNCH_LOAD_RETRY_DELAYS.len() + 1,
+            "one first try plus one per scheduled wait"
+        );
+        assert!(!block_on(s.save_if_changed(b"would clobber")).unwrap());
+        assert_eq!(*nest.puts.lock().unwrap(), 0);
+    }
+
+    /// A seal failure is not retried: the same bytes fail the same way, and
+    /// waiting minutes to say so would only delay the error.
+    #[test]
+    fn a_seal_failure_is_returned_at_once() {
+        let nest = Arc::new(FakeNest::default());
+        let stranger = ActorKeypair::from_secret([77u8; 32]);
+        let other = DraftsSync::new(SharedNest(nest.clone()), &stranger, "conversations");
+        block_on(other.load()).unwrap();
+        block_on(other.save_if_changed(b"not yours")).unwrap();
+
+        let s = sync(nest);
+        let (result, waits) = load_recording_waits(&s, &LAUNCH_LOAD_RETRY_DELAYS);
+        assert!(matches!(result, Err(DraftsClientError::Seal(_))));
+        assert!(waits.is_empty(), "a seal failure must not wait: {waits:?}");
     }
 }

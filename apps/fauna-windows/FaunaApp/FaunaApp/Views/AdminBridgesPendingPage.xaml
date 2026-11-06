@@ -224,6 +224,37 @@
         </StackPanel>
     </ScrollViewer>
 
+    <!-- admin-bridges-reject-confirm. Same inline-overlay shape (and reason) as the
+         rotate confirm below; shown while the shared machine's `armed` is Reject. -->
+    <Grid x:Name="RejectOverlay" Visibility="Collapsed"
+          Background="{ThemeResource SmokeFillColorDefaultBrush}">
+        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRejectConfirm}"
+                AutomationProperties.Name="admin-bridges-reject-confirm"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="20"
+                MaxWidth="460"
+                HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/bridges_reject/title}" />
+                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRejectWarningText}"
+                           TextWrapping="Wrap"
+                           Text="{loc:Localize Key=admin/bridges_reject/warning}" />
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRejectCancelButton}"
+                            Content="{loc:Localize Key=admin/bridges_reject/cancel}"
+                            Click="ConfirmCancel_Click" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRejectConfirmButton}"
+                            Content="{loc:Localize Key=admin/bridges_reject/confirm}"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Click="ConfirmButton_Click" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+
     <!-- admin-bridges-rotate-confirm. An INLINE overlay (not a ContentDialog) so
          its Visibility flips SYNCHRONOUSLY on the rotate click — the shared e2e
          asserts is_visible on the warning text immediately after the click (no
@@ -251,11 +282,11 @@
                 <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateCancelButton}"
                             Content="{loc:Localize Key=admin/bridges_rotate/cancel}"
-                            Click="RotateCancel_Click" />
+                            Click="ConfirmCancel_Click" />
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesRotateConfirmButton}"
                             Content="{loc:Localize Key=admin/bridges_rotate/confirm}"
                             Style="{StaticResource AccentButtonStyle}"
-                            Click="RotateConfirm_Click" />
+                            Click="ConfirmButton_Click" />
                 </StackPanel>
             </StackPanel>
         </Border>

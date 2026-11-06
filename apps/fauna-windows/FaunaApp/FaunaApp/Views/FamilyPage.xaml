@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:FaunaApp.Views"
     xmlns:loc="using:FaunaApp.Markup"
+    xmlns:controls="using:FaunaApp.Controls"
     xmlns:vm="using:FaunaApp.Core.ViewModels"
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
@@ -186,46 +187,24 @@
                                   SelectionChanged="UnknownPeerDmSelect_SelectionChanged" />
                     </StackPanel>
 
-                    <!-- ── Content policy (family-safety.md § Content policy) ──
-                         The guardian's per-category render floor over the four
-                         negative canonical categories, each inherit|collapse|block
-                         from the one shared ContentFloorOptions() catalog (so the
-                         value list cannot drift from what fauna.family.policy.update
-                         accepts), plus the Guardian Notify knob (category + count
-                         only, never content). Same markup shape as the two reach
-                         selects above: no AutomationProperties.Name on a combo whose
-                         label e2e reads via get_text. -->
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="{loc:Localize Key=family/policy_content_nsfw_label}" />
-                        <ComboBox x:Name="ContentNsfwSelect"
-                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentNsfwSelect}"
-                                  MinWidth="160"
-                                  SelectionChanged="ContentNsfwSelect_SelectionChanged" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="{loc:Localize Key=family/policy_content_spam_label}" />
-                        <ComboBox x:Name="ContentSpamSelect"
-                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentSpamSelect}"
-                                  MinWidth="160"
-                                  SelectionChanged="ContentSpamSelect_SelectionChanged" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="{loc:Localize Key=family/policy_content_phishing_label}" />
-                        <ComboBox x:Name="ContentPhishingSelect"
-                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentPhishingSelect}"
-                                  MinWidth="160"
-                                  SelectionChanged="ContentPhishingSelect_SelectionChanged" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="{loc:Localize Key=family/policy_content_commercial_label}" />
-                        <ComboBox x:Name="ContentCommercialSelect"
-                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentCommercialSelect}"
-                                  MinWidth="160"
-                                  SelectionChanged="ContentCommercialSelect_SelectionChanged" />
+                    <!-- ── Content rules (family-safety.md § App surface → Content
+                         rules; nest-rules.md § The shared rule editor (b)) ──
+                         The guardian's mounting of the shared rule-editor
+                         (Controls/RuleEditorPanel), where the four per-category
+                         selects stood: loaded from the SELECTED ward's content policy
+                         (FfiRuleEditor.ForGuardian — each rule of its document shows as
+                         a row) and saved by the editor's OWN button through
+                         FfiFamilyClient.SaveContentRules, never batched behind the
+                         policy Save below, which sends the content pillar absent.
+                         The Guardian Notify knob (category + count only, never
+                         content) stays this form's. Named, or the container is pruned
+                         from UIA. -->
+                    <StackPanel x:Name="RulesSection" Spacing="8"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyRulesSection}"
+                                AutomationProperties.Name="family-policy-rules-section">
+                        <TextBlock FontWeight="SemiBold"
+                                   Text="{loc:Localize Key=rule_editor/family_section}" />
+                        <controls:RuleEditorPanel x:Name="RulesEditor" />
                     </StackPanel>
                     <ToggleSwitch x:Name="ContentNotifyToggle"
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyContentNotifyToggle}"
@@ -265,6 +244,14 @@
                                  MinWidth="100"
                                  TextChanged="ScreenDailyMinutesBox_TextChanged" />
                     </StackPanel>
+                    <!-- § Screen time's conforming-client bound, stated on the surface
+                         that exposes the knob (family-client-enforcement.md § Screen
+                         time) — `family-policy-screen-hint`, user-approved 2026-10-16. -->
+                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyScreenHint}"
+                               Text="{loc:Localize Key=family/policy_screen_caveat}"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Opacity="0.7"
+                               TextWrapping="Wrap" />
 
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicySaveButton}"
                             Style="{StaticResource AccentButtonStyle}"

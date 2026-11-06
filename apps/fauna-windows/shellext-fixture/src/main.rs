@@ -7,9 +7,10 @@
 //! `SyncDb`), so a tracked file needs only three things, all of which this tool
 //! arranges against the **already-running** `fauna-sync` service:
 //!
-//!   1. config maps the folder as **on-demand + bound to a folder**
-//!      (driven at runtime via the service's own pipe: `AddLocation` +
-//!      `SetLocationSyncMode("on-demand")` + the ref-keyed `SetLocationFolder`), and
+//!   1. config maps the folder as **bound to a folder**, on-demand by default or
+//!      always-resident with `--mode always` (driven at runtime via the service's
+//!      own pipe: `AddLocation` + `SetLocationSyncMode(<mode>)` + the ref-keyed
+//!      `SetLocationFolder`; the status read resolves both modes), and
 //!   2. a `sync_entries` row at the folder-relative path with a non-`Deleted`
 //!      state (seeded directly into the set's identity-keyed state DB,
 //!      `%LOCALAPPDATA%\Fauna\sync\fsid-<ref>.db`), and
@@ -30,12 +31,15 @@
 //! never staged into the MSI.
 //!
 //! ```text
-//! fauna-shellext-fixture seed     --dir <folder> --file <name> --folder <set> [--folder-id <ref>] [--content <text>]
+//! fauna-shellext-fixture seed     --dir <folder> --file <name> --folder <set> [--folder-id <ref>] [--mode <on-demand|always>] [--content <text>]
 //! fauna-shellext-fixture status   --file <abs-path>
 //! fauna-shellext-fixture teardown --dir <folder> --folder <set> [--folder-id <ref>] [--file <name>]
 //! ```
 //! `--folder-id` is the set's `FolderRef` wire form (default [`FIXTURE_REF`]):
 //! the binding is keyed by it, and so is the state DB the status read opens.
+//! `--mode` is the location's sync mode (default `on-demand`): `always` binds an
+//! always-resident root, whose files are ordinary files on any service, so its
+//! folder is enumerable even with a capability present.
 //! `seed`/`status` print `STATUS=<Synced|CloudOnly|...>` and `FILE=<abs-path>` on
 //! success so the PowerShell orchestrator can parse the result.
 
@@ -96,6 +100,17 @@ fn folder_ref(args: &[String]) -> Result<FolderRef> {
     }
 }
 
+/// The location's sync mode (`--mode`, else `on-demand`), in the wire spelling
+/// `SetLocationSyncMode` takes. Anything else is refused here rather than by the
+/// service, so a typo never leaves a half-seeded binding.
+fn sync_mode(args: &[String]) -> Result<String> {
+    let mode = flag(args, "--mode").unwrap_or_else(|| "on-demand".to_string());
+    match mode.as_str() {
+        "on-demand" | "always" => Ok(mode),
+        other => bail!("--mode must be on-demand or always, got {other}"),
+    }
+}
+
 /// The set's identity-keyed state DB — the path the agent's status read opens
 /// (`SyncPaths::sync_db_path_for_ref`).
 fn set_db_path(args: &[String], set: FolderRef) -> Result<PathBuf> {
@@ -142,6 +157,7 @@ fn seed(args: &[String]) -> Result<()> {
     let file = require(args, "--file")?;
     let folder = require(args, "--folder")?;
     let set = folder_ref(args)?;
+    let mode = sync_mode(args)?;
     let content =
         flag(args, "--content").unwrap_or_else(|| "fauna shell-ext fixture\n".to_string());
 
@@ -155,17 +171,17 @@ fn seed(args: &[String]) -> Result<()> {
     let abs_file = abs_file.to_string_lossy().to_string();
 
     // 2. Drive the target service's config via its own pipe so the folder is a
-    //    served on-demand + bound root. `SetLocationSyncMode`/`SetLocationFolder`
+    //    served, bound root in `mode`. `SetLocationSyncMode`/`SetLocationFolder`
     //    reconcile, which no-ops without a provisioned capability — so against a
-    //    NO-capability service NO cfapi root is registered and the folder stays a
-    //    normal, enumerable folder (the whole point of the harness).
+    //    NO-capability service NO cfapi root is registered and an on-demand folder
+    //    stays a normal, enumerable folder (the whole point of the harness).
     let client = connect(args)?;
     call(&client, RequestMethod::AddLocation { path: dir.clone() })?;
     call(
         &client,
         RequestMethod::SetLocationSyncMode {
             path: dir.clone(),
-            mode: "on-demand".to_string(),
+            mode,
         },
     )?;
     call(

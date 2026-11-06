@@ -105,6 +105,12 @@ FORBIDDEN_PORTS = (3000, 8443, 8444, 8080)
 # that does not resolve (a box not provisioned yet) is skipped.
 SIBLING_HOSTS = ("dev.fauna.build", "test.fauna.build", "fauna.build")
 
+# The one box whose :22 may answer (the hand-applied key-only sshd admitted from
+# the dev host's address alone — deployment-threat-model.md § Concern 1a). Its
+# one home: the binaries gate's :22 exception and the firewall copy's door rule
+# both read it here, because this file ships and the binaries gate does not.
+ADMITTED_22_HOST = "dev.fauna.build"
+
 
 class _TransientApiError(Exception):
     """A retryable API failure (5xx or a network-level error)."""

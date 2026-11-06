@@ -4,7 +4,7 @@ import Foundation
 
 // The live-read twin of `SupervisionSnapshotSeedTests`: a SUCCESSFUL
 // `fauna.family.status` read moves the client-enforced inputs — the content
-// floor, `content_notify`, the screen-time policy and the lock's guardian —
+// guardian policy, `content_notify`, the screen-time policy and the lock's guardian —
 // from the reply's supervision fold (`FfiFamilyStatus.supervision`), never from
 // its raw `policy` (`family-client-enforcement.md` § Implementation status
 // today). The shared `SupervisionSnapshot::from_status` gates every supervised
@@ -25,10 +25,6 @@ import Foundation
 
 private func guardian(handle: String = "alex") -> FfiFamilyGuardianInfo {
     FfiFamilyGuardianInfo(actorId: Data(repeating: 0xAB, count: 32), handle: handle)
-}
-
-private func floor(nsfw: String = "block") -> FfiContentPolicy {
-    FfiContentPolicy(nsfw: nsfw, spam: "inherit", phishing: "inherit", commercial: "inherit")
 }
 
 private func flaggedNsfw() -> [ContentLabelEntry] {
@@ -59,47 +55,47 @@ private func status(
         ageBand: nil, supervision: supervision)
 }
 
-/// A reply that still carries a policy document naming a floor, Notify and a
+/// A reply that still carries a policy document naming guardian rules, Notify and a
 /// window, but names NO guardian. No current nest sends one, but a client must
 /// stay correct against nests of other versions, and the shared fold hands
 /// this reply no supervision at all.
 private func guardianlessReplyWithAPolicy() -> FfiFamilyStatus {
     status(
         supervisedBy: nil,
-        policy: reachPolicy(contentPolicy: floor(), screenTime: window(), contentNotify: true),
+        policy: reachPolicy(contentPolicy: nsfwBlockRule(), screenTime: window(), contentNotify: true),
         supervision: nil)
 }
 
-// MARK: - ContentPolicyStore — the floor and content_notify
+// MARK: - ContentPolicyStore — the guardian policy and content_notify
 
-@Test("a successful read whose policy names no guardian binds no floor and no Notify")
-func aGuardianlessPolicyBindsNoFloor() {
+@Test("a successful read whose policy names no guardian binds no guardian policy and no Notify")
+func aGuardianlessPolicyBindsNoGuardianPolicy() {
     let after = ContentPolicyStore.merged(
         previous: ContentPolicyInputs(),
         policy: .succeeded(ContentPolicyStore.guardianHalf(of: guardianlessReplyWithAPolicy())),
         own: .failed)
 
     #expect(after.contentPolicy == nil,
-            "a policy naming no guardian binds no floor — reading the raw `policy` binds it to an unsupervised viewer")
+            "a policy naming no guardian binds no guardian policy — reading the raw `policy` binds it to an unsupervised viewer")
     #expect(!after.contentNotify, "nor turns Guardian Notify counting on")
     #expect(after.verdictFor(flaggedNsfw()) != "block")
 }
 
-@Test("a successful read binds the floor and content_notify from the supervision fold")
-func theFloorAndNotifyBindFromTheFold() {
+@Test("a successful read binds the guardian policy and content_notify from the supervision fold")
+func theGuardianPolicyAndNotifyBindFromTheFold() {
     let reply = status(
         supervisedBy: guardian(),
         policy: nil,
         supervision: FfiSupervisionSnapshot(
-            supervisedBy: guardian(), contentPolicy: floor(), contentNotify: true, screenTime: nil))
+            supervisedBy: guardian(), contentPolicy: nsfwBlockRule(), contentNotify: true, screenTime: nil))
 
     let after = ContentPolicyStore.merged(
         previous: ContentPolicyInputs(),
         policy: .succeeded(ContentPolicyStore.guardianHalf(of: reply)),
         own: .failed)
 
-    #expect(after.contentPolicy == floor(), "the floor moves from the fold")
-    #expect(after.contentNotify, "content_notify moves from the fold, independently of the floor")
+    #expect(after.contentPolicy == nsfwBlockRule(), "the guardian policy moves from the fold")
+    #expect(after.contentNotify, "content_notify moves from the fold, independently of the guardian policy")
     #expect(after.verdictFor(flaggedNsfw()) == "block")
 }
 

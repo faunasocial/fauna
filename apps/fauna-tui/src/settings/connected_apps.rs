@@ -41,62 +41,17 @@ use fauna_client_connected_apps::{
         ComposedText, LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text,
     },
     machine::opens_settings_card,
+    observer::NullObserver,
 };
 use fauna_client_mail_settings::{MailSettingsMachine, resolve_mua_username};
 use fauna_core::secret::SecretString;
 use fauna_i18n::strings::settings::mail as mail_t;
 use fauna_i18n::strings::{atproto_settings as card_t, connected_apps as t};
 
+pub(crate) use fauna_client_connected_apps::ConnectedAppsGesture;
+
 use super::{Action, SettingsField, SettingsState};
 use crate::element::{Element, Field, Gesture};
-
-/// The machine notifies synchronously after every mutation, but this page reads
-/// a fresh `snapshot()` after each awaited `Op` instead (the Mail/Bluesky
-/// shape), so the callback has nothing to do.
-struct NoopObserver;
-
-impl ConnectedAppsObserver for NoopObserver {
-    fn on_changed(&self) {}
-}
-
-/// One gesture on the page, carried by `Op::ConnectedApps` across the spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConnectedAppsGesture {
-    /// The nav-edge re-read.
-    Refresh,
-    SubmitCode(String),
-    /// A `fauna://consent/<request_uri>` route's open (`App::apply_route`).
-    OpenHandoff(String),
-    Resolve {
-        consent_id_hex: String,
-        approved: bool,
-    },
-    Block(String),
-    /// Lift a per-client block, by the blocked client's id.
-    Unblock(String),
-    Revoke(String),
-    /// Set the account's external-apps switch to the carried value
-    /// (`atproto-external-apps-enable`).
-    SetExternalApps(bool),
-}
-
-impl ConnectedAppsGesture {
-    pub(crate) async fn run(self, machine: &ConnectedAppsMachine) {
-        match self {
-            Self::Refresh => machine.refresh().await,
-            Self::SubmitCode(code) => machine.submit_code(code).await,
-            Self::OpenHandoff(request_uri) => machine.open_handoff(request_uri).await,
-            Self::Resolve {
-                consent_id_hex,
-                approved,
-            } => machine.resolve_request(consent_id_hex, approved).await,
-            Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
-            Self::Unblock(client_id) => machine.unblock(client_id).await,
-            Self::Revoke(key) => machine.revoke(key).await,
-            Self::SetExternalApps(enabled) => machine.set_external_apps_enabled(enabled).await,
-        }
-    }
-}
 
 /// The page's state. The machine is built once at the post-auth hook
 /// (`attach_session`), the `MailAliasesState` shape; `clear_session` drops it.
@@ -134,7 +89,7 @@ impl ConnectedAppsState {
         secret_hex: &str,
         runtime: super::AccountRuntimeSlot,
     ) -> Self {
-        let observer: Arc<dyn ConnectedAppsObserver> = Arc::new(NoopObserver);
+        let observer: Arc<dyn ConnectedAppsObserver> = Arc::new(NullObserver);
         let seams = super::atproto::consent_grant_seams(secret_hex, Arc::clone(&nest), runtime);
         let machine =
             fauna_client_connected_apps::build_connected_apps_machine(nest, observer, mail);

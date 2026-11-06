@@ -163,19 +163,15 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver};
-
-    struct NopObs;
-    impl OnboardingObserver for NopObs {
-        fn on_changed(&self) {}
-    }
+    use fauna_onboarding_machine::OnboardingMachine;
+    use fauna_onboarding_machine::observer::NullObserver;
 
     use crate::testid::widget_names;
 
     #[test]
     fn page_exposes_all_ui_yaml_ids() {
         crate::testid::run_on_gtk_thread(|| {
-            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let m = OnboardingMachine::new(Arc::new(NullObserver));
             let (root, refresh) = build(m);
             refresh();
             let names = widget_names(&root);
@@ -217,7 +213,7 @@ mod tests {
             // A resumed standard-path run has a slot with a claim code and no
             // DNS records at all — the standard path's records were ours to
             // write, not the registrar's.
-            let records_less = OnboardingMachine::new(Arc::new(NopObs));
+            let records_less = OnboardingMachine::new(Arc::new(NullObserver));
             records_less.seed_awaiting_manual_dns(
                 "https://nest.example".into(),
                 "alice".into(),
@@ -229,7 +225,7 @@ mod tests {
                 "a resumed standard-path run has no records, so Copy all must be inert"
             );
 
-            let with_records = OnboardingMachine::new(Arc::new(NopObs));
+            let with_records = OnboardingMachine::new(Arc::new(NullObserver));
             with_records.seed_awaiting_manual_dns(
                 "https://nest.example".into(),
                 "alice".into(),

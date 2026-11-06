@@ -240,6 +240,7 @@ def test_folder_on_demand_toggle_on_enrols_a_place_less_device_once(
     MUTATION is the UI click; the roster read is VERIFICATION only.
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from helpers.set_names import addressed
     from helpers.waiting import wait_until
 
     app = logged_in_app
@@ -251,8 +252,9 @@ def test_folder_on_demand_toggle_on_enrols_a_place_less_device_once(
     )
 
     def roster(name: str) -> list[dict]:
+        # A sealed set rests no plaintext name: address it by its hash.
         with client:
-            return client.call("fauna.folders.members.list", {"name": name})["members"]
+            return client.call("fauna.folders.members.list", addressed(name))["members"]
 
     name = _create_expanded_sync_folder(b)
     assert b.on_demand_toggle_visible(), (
@@ -326,7 +328,7 @@ def test_folder_on_demand_toggle_on_a_member_row_is_hide_only(folder_share_recip
     import time
 
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from helpers.waiting import wait_until
     from tests.api import conv_api
@@ -336,8 +338,8 @@ def test_folder_on_demand_toggle_on_a_member_row_is_hide_only(folder_share_recip
     recipient_id = recipient["actor_id_hex"]
     b = app.backups
 
-    stranger = register_handled_actor(
-        port, handle="od" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    stranger = admit_adult(
+        nest, "od" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN, token=True
     )
     kp = wait_until(
         lambda: conv_api.keypackage_fetch(port, stranger, recipient_id),

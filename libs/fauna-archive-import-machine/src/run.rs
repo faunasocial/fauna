@@ -27,6 +27,7 @@
 //! parser streams it member by member — and expensive only to *upload*.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use fauna_archive::model::{ArchiveAlbum, ArchiveEvent, ArchiveMediaRef, ArchivePost};
@@ -40,12 +41,13 @@ use fauna_core::data::{ContentHash, MediaItem, PostBody, Timestamp};
 
 use crate::audience::{PostAudience, map_audience};
 use crate::machine::{
-    ArchiveImportMachine, DispatchError, RunHandle, StopRequest, TestAnchor, index_archive,
-    resolve_date_range, set_snapshot_error,
+    ArchiveImportDispatchError, ArchiveImportMachine, RunHandle, StopRequest, TestAnchor,
+    index_archive, resolve_date_range, set_snapshot_error,
 };
 use crate::nest::{
     ArchiveNest, ArchiveNestError, ImportedEvent, MediaSeal, SharedSource, TierGate, UploadedMedia,
 };
+use crate::offload::off_runtime;
 use crate::snapshot::{
     ArchiveImportSnapshot, ArchiveImportStatus, ArchiveImportStep, AudienceMode, RunState,
 };
@@ -89,7 +91,7 @@ impl Drop for InFlight<'_> {
 /// folder left resumable (§ The wizard and its machine, step 5).
 enum AuthorOutcome {
     Skip(SkipEntry),
-    Fatal(DispatchError),
+    Fatal(ArchiveImportDispatchError),
 }
 
 /// A seam failure on ONE record: transport is fatal (the whole run stops and
@@ -101,7 +103,9 @@ fn classify(
     external_id: &ExternalId,
 ) -> AuthorOutcome {
     match error {
-        ArchiveNestError::Transport(_) => AuthorOutcome::Fatal(DispatchError::Nest(error)),
+        ArchiveNestError::Transport(_) => {
+            AuthorOutcome::Fatal(ArchiveImportDispatchError::Nest(error))
+        }
         other => AuthorOutcome::Skip(SkipEntry {
             category,
             external_id: Some(external_id.clone()),
@@ -257,12 +261,12 @@ impl ArchiveImportMachine {
     ///
     /// Nothing is minted here: tiers are provisioned lazily at the first
     /// non-public post, so a public-only import never touches tiers.
-    pub(crate) async fn start(&self) -> Result<(), DispatchError> {
+    pub(crate) async fn start(&self) -> Result<(), ArchiveImportDispatchError> {
         // Start is step 4's button and nothing else's: it creates a folder and
         // uploads an archive, so reaching it from anywhere but the Confirm
         // screen would commit an import the user never saw the totals for.
         if self.inner.lock().expect("snapshot mutex").step != ArchiveImportStep::Confirm {
-            return Err(DispatchError::InvalidState(
+            return Err(ArchiveImportDispatchError::InvalidState(
                 "confirm the import first".into(),
             ));
         }
@@ -271,14 +275,18 @@ impl ArchiveImportMachine {
         // archive: a path change forgets the source (`machine::set_archive_path`),
         // which is exactly what makes refusing here sufficient.
         if self.source.lock().expect("source mutex").is_none() {
-            return Err(DispatchError::InvalidState("open the archive first".into()));
+            return Err(ArchiveImportDispatchError::InvalidState(
+                "open the archive first".into(),
+            ));
         }
         let summary = self
             .summary
             .lock()
             .expect("summary mutex")
             .clone()
-            .ok_or_else(|| DispatchError::InvalidState("open the archive first".into()))?;
+            .ok_or_else(|| {
+                ArchiveImportDispatchError::InvalidState("open the archive first".into())
+            })?;
         let (archive_path, scope, total) = {
             let snap = self.inner.lock().expect("snapshot mutex");
             (
@@ -291,7 +299,8 @@ impl ArchiveImportMachine {
 
         let import_id = {
             let mut bytes = [0u8; 32];
-            getrandom::fill(&mut bytes).map_err(|e| DispatchError::Archive(e.to_string()))?;
+            getrandom::fill(&mut bytes)
+                .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))?;
             hex::encode(bytes)
         };
         let folder = self.create_named_folder(&summary.platform).await?;
@@ -324,8 +333,8 @@ impl ArchiveImportMachine {
             .await?;
 
         // `stop` only — NOT `test_anchor`. The test arm is armed BEFORE Start
-        // by contract (`set_test_pause_after_records` /
-        // `set_test_hold_after_records`; the e2e journeys' causal anchors,
+        // by contract (`set_pause_after_records_for_test` /
+        // `set_hold_after_records_for_test`; the e2e journeys' causal anchors,
         // convention 14), so clearing it here would disarm the hooks' only
         // usage. It cannot leak either: it is one-shot (`test_anchor_due`
         // spends it), the run's tail spends an un-fired one, and its sole
@@ -343,6 +352,9 @@ impl ArchiveImportMachine {
         snap.folder_name = Some(folder);
         snap.total = total;
         snap.imported = 0;
+        snap.comments_unplaced = 0;
+        snap.archive_profile = None;
+        snap.profile_applied = false;
         snap.skipped = 0;
         snap.errored = 0;
         snap.current_category = None;
@@ -359,7 +371,10 @@ impl ArchiveImportMachine {
 
     /// `<Label> archive <YYYY-MM-DD>`, with `-2`, `-3`, … on a name the
     /// Folders list already holds (§ Storage — one folder per import).
-    async fn create_named_folder(&self, platform: &Platform) -> Result<String, DispatchError> {
+    async fn create_named_folder(
+        &self,
+        platform: &Platform,
+    ) -> Result<String, ArchiveImportDispatchError> {
         let base = format!("{} archive {}", platform.label(), today_ymd());
         for attempt in 1..=100u32 {
             let name = if attempt == 1 {
@@ -374,11 +389,16 @@ impl ArchiveImportMachine {
                 Err(other) => return Err(other.into()),
             }
         }
-        Err(DispatchError::InvalidState(
+        Err(ArchiveImportDispatchError::InvalidState(
             "a hundred archive folders were already imported today".into(),
         ))
     }
+}
 
+/// The drive loop's face, exported beside `machine.rs`'s `snapshot` /
+/// `hydrate` / `dispatch` (the `MailImportMachine::run_import` shape).
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+impl ArchiveImportMachine {
     /// The drive loop the app spawns after a successful `Start`/`Resume`
     /// (native `tokio::spawn`, wasm `spawn_local`). Returns when the run
     /// finishes, pauses, cancels or fails.
@@ -388,13 +408,13 @@ impl ArchiveImportMachine {
     /// would author the same records twice and then checkpoint conflicting
     /// maps over each other. The refusal returns before the error tail below,
     /// so it leaves the live run's rendered state exactly as it was.
-    pub async fn run_import(&self) -> Result<(), DispatchError> {
+    pub async fn run_import(&self) -> Result<(), ArchiveImportDispatchError> {
         if self
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Err(DispatchError::InvalidState(
+            return Err(ArchiveImportDispatchError::InvalidState(
                 "an import is already running".into(),
             ));
         }
@@ -410,10 +430,14 @@ impl ArchiveImportMachine {
         }
         result
     }
+}
 
-    async fn run_import_inner(&self) -> Result<(), DispatchError> {
+impl ArchiveImportMachine {
+    async fn run_import_inner(&self) -> Result<(), ArchiveImportDispatchError> {
         let Some(mut run) = self.run.lock().expect("run mutex").clone() else {
-            return Err(DispatchError::InvalidState("no import to run".into()));
+            return Err(ArchiveImportDispatchError::InvalidState(
+                "no import to run".into(),
+            ));
         };
         refuse_newer(&run)?;
         let source = self
@@ -421,14 +445,19 @@ impl ArchiveImportMachine {
             .lock()
             .expect("source mutex")
             .clone()
-            .ok_or_else(|| DispatchError::InvalidState("open the archive first".into()))?;
+            .ok_or_else(|| {
+                ArchiveImportDispatchError::InvalidState("open the archive first".into())
+            })?;
 
         // Phase: the raw zip — ground truth, kept forever (§ Storage).
         if run.state.phase == ImportPhase::RawUpload {
             // The whole archive is materialized once here. Sealing it as a
             // stream through the chunk store is a captured follow-up; the
             // seam takes `Vec<u8>` today.
-            let bytes = read_all(&source)?;
+            let bytes = {
+                let source = Arc::clone(&source);
+                off_runtime(move || read_all(&source)).await??
+            };
             // The marker learns the zip's length and hash from this one whole
             // read, so a later resume can tell the export it is handed back
             // from any other (`machine::verify_handed_back`).
@@ -447,12 +476,18 @@ impl ArchiveImportMachine {
         // Phase: the model — EVERY category, so nothing the export carried is
         // lost even where phase one authors nothing from it.
         if run.state.phase == ImportPhase::Model {
-            let (_, summary) = index_archive(&source)?;
+            let (_, summary) = {
+                let source = Arc::clone(&source);
+                off_runtime(move || index_archive(&source)).await??
+            };
             self.nest
                 .write_file(&run.folder, SUMMARY_PATH, encode(&summary)?)
                 .await?;
             for category in Category::ALL {
-                let (entities, errors) = collect_category(&source, category.clone())?;
+                let (entities, errors) = {
+                    let (source, category) = (Arc::clone(&source), category.clone());
+                    off_runtime(move || collect_category(&source, category)).await??
+                };
                 for error in errors {
                     let entry = SkipEntry {
                         category: category.clone(),
@@ -479,10 +514,10 @@ impl ArchiveImportMachine {
         // itself complete and the Done screen would claim records nobody
         // authored.
         if run.state.is_finished() {
-            self.conclude(match run.state.phase {
-                ImportPhase::Cancelled => RunState::Cancelled,
-                _ => RunState::Completed,
-            });
+            match run.state.phase {
+                ImportPhase::Cancelled => self.conclude(RunState::Cancelled),
+                _ => self.complete().await,
+            }
             return Ok(());
         }
 
@@ -540,7 +575,7 @@ impl ArchiveImportMachine {
                 .read_file(&run.folder, &model_path(&category))
                 .await?
                 .ok_or_else(|| {
-                    DispatchError::Archive(format!(
+                    ArchiveImportDispatchError::Archive(format!(
                         "{} is missing from the archive folder",
                         model_path(&category)
                     ))
@@ -653,12 +688,47 @@ impl ArchiveImportMachine {
         *self.stop.lock().expect("stop mutex") = StopRequest::None;
         run.state.phase = ImportPhase::Finished;
         self.checkpoint(&mut run).await?;
-        self.conclude(RunState::Completed);
+        // The Done step's unplaced-comments line, counted from the folders
+        // this run just finished writing; a failed read leaves it unsaid.
+        match crate::comments::read_folded_comments(self.nest.as_ref()).await {
+            Ok(folded) => {
+                self.inner.lock().expect("snapshot mutex").comments_unplaced = folded.unplaced
+            }
+            Err(e) => tracing::warn!("archive import: folded comments: {e}"),
+        }
+        // The Done step's profile prefill offer — read, never applied.
+        self.offer_archive_profile(&run.folder).await;
+        self.complete().await;
         Ok(())
     }
 
+    /// A run reached its end state: phase two's counts onto the snapshot
+    /// first, so the Done step paints ruling 11's line with it; then the
+    /// step advances; then the announce round for the run's platform (ruling
+    /// 4), which sends and so may take a while — it runs after the Done step
+    /// is showing, still inside the run. Both are warnings only: a failed
+    /// folder read leaves the line unsaid, a failed send is re-driven by the
+    /// links' own pending queue. Without attached links this is the bare
+    /// conclusion.
+    async fn complete(&self) {
+        let links = self.links.lock().expect("links mutex").clone();
+        if let Some(links) = &links {
+            match links.counts().await {
+                Ok(counts) => self.set_link_counts(counts),
+                Err(e) => tracing::warn!("archive import: link counts: {e}"),
+            }
+        }
+        self.conclude(RunState::Completed);
+        if let Some(links) = links {
+            let platform = self.snapshot().source_kind.platform();
+            if let Err(e) = links.announce_round(&platform).await {
+                tracing::warn!("archive import: announce round: {e}");
+            }
+        }
+    }
+
     /// `Pause` — the loop stops at the next record with the folder resumable.
-    pub(crate) fn pause(&self) -> Result<(), DispatchError> {
+    pub(crate) fn pause(&self) -> Result<(), ArchiveImportDispatchError> {
         self.request_stop(StopRequest::Pause, "no import to pause")
     }
 
@@ -672,7 +742,7 @@ impl ArchiveImportMachine {
     /// precedent commits synchronously too. A loop that IS in flight sees the
     /// flag at its next record and makes the same transition itself; the two
     /// converge on `Cancelled` whichever runs first.
-    pub(crate) async fn cancel(&self) -> Result<(), DispatchError> {
+    pub(crate) async fn cancel(&self) -> Result<(), ArchiveImportDispatchError> {
         self.request_stop(StopRequest::Cancel, "no import to cancel")?;
         if self.running.load(Ordering::Acquire) {
             return Ok(());
@@ -694,9 +764,13 @@ impl ArchiveImportMachine {
         Ok(())
     }
 
-    fn request_stop(&self, request: StopRequest, absent: &str) -> Result<(), DispatchError> {
+    fn request_stop(
+        &self,
+        request: StopRequest,
+        absent: &str,
+    ) -> Result<(), ArchiveImportDispatchError> {
         if self.run.lock().expect("run mutex").is_none() {
-            return Err(DispatchError::InvalidState(absent.into()));
+            return Err(ArchiveImportDispatchError::InvalidState(absent.into()));
         }
         *self.stop.lock().expect("stop mutex") = request;
         if let Some(waker) = self.stop_waker.lock().expect("stop waker mutex").take() {
@@ -712,7 +786,7 @@ impl ArchiveImportMachine {
     /// restart the folder's own `raw/` copy can serve range reads on platforms
     /// that can bridge them, and where it cannot the user hands the archive
     /// back through the Archive step's path field.
-    pub(crate) async fn resume(&self) -> Result<(), DispatchError> {
+    pub(crate) async fn resume(&self) -> Result<(), ArchiveImportDispatchError> {
         let Some((folder, raw_name)) = self
             .run
             .lock()
@@ -720,14 +794,16 @@ impl ArchiveImportMachine {
             .as_ref()
             .map(|r| (r.folder.clone(), r.marker.raw_file_name.clone()))
         else {
-            return Err(DispatchError::InvalidState("no import to resume".into()));
+            return Err(ArchiveImportDispatchError::InvalidState(
+                "no import to resume".into(),
+            ));
         };
         // Resume is for a run that stopped. Against one still in flight it
         // would only invite the app to spawn a second loop over the same
         // folder, which `run_import` then refuses — better to say so here,
         // where the button is.
         if self.inner.lock().expect("snapshot mutex").run_state == Some(RunState::Running) {
-            return Err(DispatchError::InvalidState(
+            return Err(ArchiveImportDispatchError::InvalidState(
                 "the import is already running".into(),
             ));
         }
@@ -739,7 +815,7 @@ impl ArchiveImportMachine {
             {
                 Some(source) => *self.source.lock().expect("source mutex") = Some(source),
                 None => {
-                    return Err(DispatchError::InvalidState(
+                    return Err(ArchiveImportDispatchError::InvalidState(
                         "open the archive again to resume".into(),
                     ));
                 }
@@ -922,13 +998,17 @@ impl ArchiveImportMachine {
         let blobs = if paths.is_empty() {
             Vec::new()
         } else {
-            read_media(ctx.source, &paths).map_err(|reason| {
-                AuthorOutcome::Skip(SkipEntry {
-                    category: item.category.clone(),
-                    external_id: Some(item.external_id.clone()),
-                    reason,
-                })
-            })?
+            let (source, wanted) = (Arc::clone(ctx.source), paths.clone());
+            off_runtime(move || read_media(&source, &wanted))
+                .await
+                .map_err(AuthorOutcome::Fatal)?
+                .map_err(|reason| {
+                    AuthorOutcome::Skip(SkipEntry {
+                        category: item.category.clone(),
+                        external_id: Some(item.external_id.clone()),
+                        reason,
+                    })
+                })?
         };
         let authoring = PostAuthoring::imported(item.created_at, ctx.platform.token());
         let mut items = Vec::with_capacity(blobs.len());
@@ -955,7 +1035,9 @@ impl ArchiveImportMachine {
                         &authoring,
                     )
                 }
-                .map_err(|e| AuthorOutcome::Fatal(DispatchError::Archive(e.to_string())))?
+                .map_err(|e| {
+                    AuthorOutcome::Fatal(ArchiveImportDispatchError::Archive(e.to_string()))
+                })?
             }
             gated => {
                 gates
@@ -966,8 +1048,9 @@ impl ArchiveImportMachine {
                 // One seal id per post, as the compose leg mints one: the
                 // media and the sealed body must open under the same key.
                 let mut seal_id = [0u8; 32];
-                getrandom::fill(&mut seal_id)
-                    .map_err(|e| AuthorOutcome::Fatal(DispatchError::Archive(e.to_string())))?;
+                getrandom::fill(&mut seal_id).map_err(|e| {
+                    AuthorOutcome::Fatal(ArchiveImportDispatchError::Archive(e.to_string()))
+                })?;
                 for (name, bytes) in &blobs {
                     let seal = MediaSeal {
                         seal_id,
@@ -1005,7 +1088,9 @@ impl ArchiveImportMachine {
                     seal_id,
                     &authoring,
                 )
-                .map_err(|e| AuthorOutcome::Fatal(DispatchError::Archive(e.to_string())))?;
+                .map_err(|e| {
+                    AuthorOutcome::Fatal(ArchiveImportDispatchError::Archive(e.to_string()))
+                })?;
                 // Written ahead: from here on a crash replays these exact
                 // bytes instead of sealing a second post (`InFlightPost`).
                 self.write_ahead(
@@ -1026,7 +1111,7 @@ impl ArchiveImportMachine {
                 // bytes than the ones the signed post points at would leave a
                 // post nobody could ever open.
                 if echoed != hex::encode(build.encrypted_ref) {
-                    return Err(AuthorOutcome::Fatal(DispatchError::Archive(
+                    return Err(AuthorOutcome::Fatal(ArchiveImportDispatchError::Archive(
                         "the nest's sealed-body reply does not name the uploaded blob".into(),
                     )));
                 }
@@ -1069,7 +1154,7 @@ impl ArchiveImportMachine {
         &self,
         run: &mut RunHandle,
         pending: InFlightPost,
-    ) -> Result<(), DispatchError> {
+    ) -> Result<(), ArchiveImportDispatchError> {
         let category = category_of_kind(&pending.external_id.kind).unwrap_or(Category::Posts);
         let resent = async {
             let echoed = self
@@ -1087,7 +1172,7 @@ impl ArchiveImportMachine {
                 // The same check the first attempt made: the store must name
                 // the blob the signed post points at.
                 if gated_ref_of(&pending.post_bytes).is_some_and(|r| echoed != hex::encode(r)) {
-                    return Err(DispatchError::Archive(
+                    return Err(ArchiveImportDispatchError::Archive(
                         "the nest's sealed-body reply does not name the uploaded blob".into(),
                     ));
                 }
@@ -1143,7 +1228,7 @@ impl ArchiveImportMachine {
     /// or written ([`refuse_newer`]): the stored bytes stay exactly as the
     /// newer build wrote them. The hydrate never hands such a state to a run
     /// in the first place; this is the write-side half of that rule.
-    async fn checkpoint(&self, run: &mut RunHandle) -> Result<(), DispatchError> {
+    async fn checkpoint(&self, run: &mut RunHandle) -> Result<(), ArchiveImportDispatchError> {
         refuse_newer(run)?;
         run.state.updated_at = Timestamp::now();
         *self.run.lock().expect("run mutex") = Some(run.clone());
@@ -1159,7 +1244,7 @@ impl ArchiveImportMachine {
         &self,
         platform: &Platform,
         state: &ImportState,
-    ) -> Result<BTreeSet<ExternalId>, DispatchError> {
+    ) -> Result<BTreeSet<ExternalId>, ArchiveImportDispatchError> {
         let mut ids: BTreeSet<ExternalId> = state
             .imported
             .iter()
@@ -1180,7 +1265,10 @@ impl ArchiveImportMachine {
         Ok(ids)
     }
 
-    async fn post_media_paths(&self, folder: &str) -> Result<BTreeSet<String>, DispatchError> {
+    async fn post_media_paths(
+        &self,
+        folder: &str,
+    ) -> Result<BTreeSet<String>, ArchiveImportDispatchError> {
         let Some(bytes) = self
             .nest
             .read_file(folder, &model_path(&Category::Posts))
@@ -1256,19 +1344,20 @@ pub(crate) const UNKNOWN_ENTITY_REASON: &str =
 /// (`ImportState::holds_unknown`): such an import is not resumable by this
 /// build, and nothing here may rewrite its state (`transport.md` § Schema
 /// and forward-compat discipline → *Rule 3 in full*).
-pub(crate) fn refuse_newer(run: &RunHandle) -> Result<(), DispatchError> {
+pub(crate) fn refuse_newer(run: &RunHandle) -> Result<(), ArchiveImportDispatchError> {
     if run.state.holds_unknown() || run.marker.holds_unknown() {
-        return Err(DispatchError::NewerImport);
+        return Err(ArchiveImportDispatchError::NewerImport);
     }
     Ok(())
 }
 
-fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, DispatchError> {
-    fauna_cbor::encode_canonical(value).map_err(|e| DispatchError::Archive(e.to_string()))
+fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, ArchiveImportDispatchError> {
+    fauna_cbor::encode_canonical(value)
+        .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))
 }
 
-fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, DispatchError> {
-    fauna_cbor::decode_strict(bytes).map_err(|e| DispatchError::Archive(e.to_string()))
+fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ArchiveImportDispatchError> {
+    fauna_cbor::decode_strict(bytes).map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))
 }
 
 /// One `archive-import-error-log` line. Shared with the resume, which rebuilds
@@ -1359,7 +1448,7 @@ fn count_skipped(state: &ImportState, category: &Category) -> u64 {
 }
 
 /// The Scope step, as the folder stores it.
-fn scope_of(snap: &ArchiveImportSnapshot) -> Result<ImportScope, DispatchError> {
+fn scope_of(snap: &ArchiveImportSnapshot) -> Result<ImportScope, ArchiveImportDispatchError> {
     let categories = snap
         .categories
         .iter()
@@ -1387,15 +1476,16 @@ fn scope_of(snap: &ArchiveImportSnapshot) -> Result<ImportScope, DispatchError> 
 /// The whole archive as bytes — what the raw upload sends today, and what a
 /// resume's handed-back check hashes. Positional, so it works over a file
 /// source and an in-memory one alike.
-pub(crate) fn read_all(source: &SharedSource) -> Result<Vec<u8>, DispatchError> {
-    let len = usize::try_from(source.len())
-        .map_err(|_| DispatchError::Archive("the archive is too large for this device".into()))?;
+pub(crate) fn read_all(source: &SharedSource) -> Result<Vec<u8>, ArchiveImportDispatchError> {
+    let len = usize::try_from(source.len()).map_err(|_| {
+        ArchiveImportDispatchError::Archive("the archive is too large for this device".into())
+    })?;
     let mut bytes = vec![0u8; len];
     let mut at = 0usize;
     while at < len {
         let read = source
             .read_at(at as u64, &mut bytes[at..])
-            .map_err(|e| DispatchError::Archive(e.to_string()))?;
+            .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))?;
         if read == 0 {
             break;
         }
@@ -1410,12 +1500,13 @@ pub(crate) fn read_all(source: &SharedSource) -> Result<Vec<u8>, DispatchError> 
 fn collect_category(
     source: &SharedSource,
     category: Category,
-) -> Result<(Vec<Entity>, Vec<fauna_archive::EntityError>), DispatchError> {
+) -> Result<(Vec<Entity>, Vec<fauna_archive::EntityError>), ArchiveImportDispatchError> {
     let readable: &dyn ArchiveSource = &**source;
-    let mut reader =
-        ArchiveReader::open(readable).map_err(|e| DispatchError::Archive(e.to_string()))?;
-    let (parser, _) = fauna_archive::detect(reader.directory())
-        .ok_or_else(|| DispatchError::Archive("archive no longer recognized".into()))?;
+    let mut reader = ArchiveReader::open(readable)
+        .map_err(|e| ArchiveImportDispatchError::Archive(e.to_string()))?;
+    let (parser, _) = fauna_archive::detect(reader.directory()).ok_or_else(|| {
+        ArchiveImportDispatchError::Archive("archive no longer recognized".into())
+    })?;
     let mut entities = Vec::new();
     let mut errors = Vec::new();
     for record in parser.stream(&mut reader, category) {
@@ -1447,7 +1538,10 @@ const MAX_RECORD_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 /// escapes each UTF-8 byte of a non-ASCII path separately, so an album called
 /// `Fotky z časové osy` reaches the model one way and the zip the other. Both
 /// failing is the record's skip, carrying the member error.
-fn read_media(source: &SharedSource, paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub(crate) fn read_media(
+    source: &SharedSource,
+    paths: &[String],
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let readable: &dyn ArchiveSource = &**source;
     let mut reader = ArchiveReader::open(readable).map_err(|e| e.to_string())?;
     // `Vec::with_capacity(paths.len())` is safe to size from the record because
@@ -1511,14 +1605,14 @@ mod tests {
     use fauna_core::subscription::OWNER_ONLY_TIER;
 
     use crate::machine::{ArchiveImportMachine, StopRequest};
-    use crate::nest::fakes::{FakeNest, VecOpener};
+    use crate::nest::fakes::{FakeNest, MemoryOpener};
     use crate::snapshot::{ArchiveImportAction as Act, ArchiveImportStep, AudienceMode, RunState};
     use crate::state::{ImportPhase, model_path};
 
     const ARCHIVE_PATH: &str = "/exports/facebook.zip";
 
-    fn opener_for(zip: Vec<u8>) -> VecOpener {
-        let mut opener = VecOpener::default();
+    fn opener_for(zip: Vec<u8>) -> MemoryOpener {
+        let opener = MemoryOpener::default();
         opener.insert(ARCHIVE_PATH, zip);
         opener
     }
@@ -1565,6 +1659,49 @@ mod tests {
                 record.external_id
             );
         }
+    }
+
+    /// Records which contact each archive signal went to.
+    #[derive(Default)]
+    struct RecordingPoster(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl crate::link::ArchiveSignalPoster for RecordingPoster {
+        async fn post(
+            &self,
+            contact_hex: &str,
+            _bytes: Vec<u8>,
+        ) -> Result<(), crate::nest::ArchiveNestError> {
+            self.0.lock().unwrap().push(contact_hex.to_string());
+            Ok(())
+        }
+    }
+
+    /// Rulings 4 and 11 ride the run itself: with links attached, a run
+    /// that completes puts their counts on the snapshot and announces the
+    /// platform to every accepted contact — no app glues the round onto its
+    /// own spawn. A contact the roster does not list as accepted is not
+    /// announced to.
+    #[tokio::test]
+    async fn a_completed_run_with_attached_links_announces_to_every_accepted_contact() {
+        let nest = Arc::new(FakeNest::new());
+        let (accepted, pending) = ("ab".repeat(32), "cd".repeat(32));
+        nest.set_contact(&accepted, "accepted");
+        nest.set_contact(&pending, "pending");
+        let m = ready_on(nest.clone(), fixture_zip("facebook-json")).await;
+        let poster = Arc::new(RecordingPoster::default());
+        let keypair = fauna_core::identity::ActorKeypair::from_secret([7; 32]);
+        m.attach_links(Arc::new(crate::link::ArchiveLinks::new(
+            nest.clone(),
+            poster.clone(),
+            &keypair,
+        )));
+        m.dispatch(Act::Start).await.unwrap();
+        m.run_import().await.unwrap();
+        let s = m.snapshot();
+        assert_eq!(s.run_state, Some(RunState::Completed));
+        assert_eq!((s.link_claimed, s.link_unmatched), (0, 0));
+        assert_eq!(*poster.0.lock().unwrap(), vec![accepted]);
     }
 
     #[tokio::test]
@@ -1683,6 +1820,75 @@ mod tests {
         // Tier provisioning: each reserved tier once.
         assert_eq!(nest.owner_only_calls(), 1);
         assert_eq!(nest.followers_calls(), 1);
+    }
+
+    /// Slice 5: an Instagram archive runs through the same machine as a
+    /// Facebook one. Its export records no per-post audience, so every post
+    /// lands owner-only (an `Unknown` audience is never public), under the
+    /// Instagram origin and teaser.
+    #[tokio::test]
+    async fn an_instagram_run_authors_its_posts_owner_only_under_the_instagram_origin() {
+        let (m, nest) = ready(fixture_zip("instagram-json")).await;
+        assert_eq!(
+            m.snapshot().source_kind,
+            crate::snapshot::ArchiveSourceKind::Instagram
+        );
+        m.dispatch(Act::Start).await.unwrap();
+        m.run_import().await.unwrap();
+        let s = m.snapshot();
+        assert_eq!(s.step, ArchiveImportStep::Done);
+        assert_eq!(s.run_state, Some(RunState::Completed));
+        let folder = s.folder_name.clone().expect("folder");
+        assert!(folder.starts_with("Instagram archive "), "{folder}");
+        assert!(nest.files_in(&folder).iter().any(|f| f.starts_with("raw/")));
+
+        // 2 feed posts + 1 archived post: the parser skipped the record with
+        // no timestamp, and the machine the post naming a photo the export
+        // left out (as it does for Facebook).
+        let posts = nest.posts();
+        assert_eq!(
+            posts.len(),
+            3,
+            "skipped: {:?}",
+            nest.read_state(&folder).skipped
+        );
+        for post in &posts {
+            assert_eq!(
+                post.origin.as_ref().map(|o| o.platform.as_str()),
+                Some("instagram")
+            );
+            assert!(
+                post.gated
+                    .as_ref()
+                    .is_some_and(|g| g.tier == OWNER_ONLY_TIER),
+                "every Instagram post is owner-only: {:?}",
+                post.gated
+            );
+            assert_eq!(post.body_text(), "Instagram import");
+        }
+        assert!(
+            posts
+                .iter()
+                .any(|p| p.created_at == Timestamp(1_600_000_000_000_000))
+        );
+        assert_eq!(
+            nest.followers_calls(),
+            0,
+            "no post asked for the followers tier"
+        );
+        assert_eq!(nest.events().len(), 0);
+
+        let state = nest.read_state(&folder);
+        assert_eq!(state.phase, ImportPhase::Finished);
+        assert_eq!(state.imported.len(), 3);
+        for reason in ["creation_timestamp", "not_in_the_export.jpg"] {
+            assert!(
+                state.skipped.iter().any(|r| r.reason.contains(reason)),
+                "{reason}: {:?}",
+                state.skipped
+            );
+        }
+        assert_unique_imports(&state);
     }
 
     #[tokio::test]
@@ -2370,7 +2576,7 @@ mod tests {
     #[tokio::test]
     async fn the_test_pause_hook_pauses_after_n_records_once() {
         let (m, nest) = ready(fixture_zip("facebook-json")).await;
-        m.set_test_pause_after_records(2);
+        m.set_pause_after_records_for_test(2);
         m.dispatch(Act::Start).await.unwrap();
         m.run_import().await.expect("a pause is not an error");
 
@@ -2422,7 +2628,7 @@ mod tests {
             }
         };
 
-        m.set_test_hold_after_records(1);
+        m.set_hold_after_records_for_test(1);
         m.dispatch(Act::Start).await.unwrap();
         let running = spawn_run(&m);
         tokio::time::timeout(std::time::Duration::from_secs(10), held(&m))
@@ -2444,7 +2650,7 @@ mod tests {
             ImportPhase::Authoring { next_index: 1, .. }
         ));
 
-        m.set_test_hold_after_records(1);
+        m.set_hold_after_records_for_test(1);
         m.dispatch(Act::Resume).await.unwrap();
         let running = spawn_run(&m);
         tokio::time::timeout(std::time::Duration::from_secs(10), held(&m))
@@ -2469,7 +2675,7 @@ mod tests {
     #[tokio::test]
     async fn an_arm_larger_than_the_run_is_spent_when_the_run_completes() {
         let (m, _nest) = ready(fixture_zip("facebook-json")).await;
-        m.set_test_pause_after_records(1_000);
+        m.set_pause_after_records_for_test(1_000);
         m.dispatch(Act::Start).await.unwrap();
         m.run_import().await.unwrap();
 
@@ -2887,11 +3093,11 @@ mod tests {
         });
         assert!(matches!(
             m.cancel().await,
-            Err(crate::machine::DispatchError::NewerImport)
+            Err(crate::machine::ArchiveImportDispatchError::NewerImport)
         ));
         assert!(matches!(
             m.run_import().await,
-            Err(crate::machine::DispatchError::NewerImport)
+            Err(crate::machine::ArchiveImportDispatchError::NewerImport)
         ));
         assert_eq!(
             nest.read_file(folder, STATE_PATH).await.unwrap().unwrap(),
@@ -2908,7 +3114,7 @@ mod tests {
         });
         assert!(matches!(
             m.cancel().await,
-            Err(crate::machine::DispatchError::NewerImport)
+            Err(crate::machine::ArchiveImportDispatchError::NewerImport)
         ));
         assert_eq!(
             nest.read_file(folder, STATE_PATH).await.unwrap().unwrap(),

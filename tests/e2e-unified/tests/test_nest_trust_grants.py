@@ -23,7 +23,7 @@ import uuid
 
 import pytest
 
-from helpers.nest_trust_setup import login_as_admin, seed_mda_holder
+from helpers.nest_trust_setup import MdaHolder, login_as_admin, seed_mda_holder
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
@@ -130,7 +130,6 @@ def test_revoking_a_grant_leaves_now_stays_in_history_and_darkens_the_nest(
     (deletes the `(owner, grant_id)` row; the holder's next fetch goes dark)
     then `grant_log::record_revoke`* — nest first, because revoke narrows.
     """
-    app.nest_trust.require_mint_test_setup_supported()
     nest = trust_grant_nest
     _login_as_admin(app, nest)
     tier = _mint_paywalled_grant(app)
@@ -196,7 +195,6 @@ def test_a_lapsing_grant_reads_expiring_then_paused_and_renew_recovers_it(
     14's fake clock, never a sleep. Only the render clock moves: renew stamps
     its new window from the real clock, exactly as in production.
     """
-    app.nest_trust.require_mint_test_setup_supported()
     app.nest_trust.require_trust_clock_supported()
     nest = trust_grant_nest
     _login_as_admin(app, nest)
@@ -255,7 +253,7 @@ def test_a_lapsing_grant_reads_expiring_then_paused_and_renew_recovers_it(
     ), f"the newest History row must be the renew, got {texts!r}"
 
 
-def _seed_mda_holder(nest) -> bytes:
+def _seed_mda_holder(nest) -> MdaHolder:
     """The shared `mda` holder enrollment (`helpers.nest_trust_setup.seed_mda_holder`)."""
     return seed_mda_holder(nest)
 
@@ -275,14 +273,13 @@ def test_the_picker_mints_mail_and_calendar_trust_to_the_mail_holder(
     payload derives from) and an `mda` holder enrolled — this test sets up
     both, the first through the Mail settings page.
     """
-    app.nest_trust.require_mint_test_setup_supported()
     app.mail_settings.require_scripted_mua_seed_supported()
     nest = trust_grant_nest
     _login_as_admin(app, nest)
 
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    holder_x25519 = _seed_mda_holder(nest)
+    holder = _seed_mda_holder(nest)
 
     app.linked_nests.navigate()
     assert app.linked_nests.is_page_visible()
@@ -321,9 +318,112 @@ def test_the_picker_mints_mail_and_calendar_trust_to_the_mail_holder(
 
     # Both deposits reached the nest, sealed to the mda holder.
     rows = _wait_grant_rows(nest, lambda r: len(r) == 2, "both grants deposited")
-    assert all(row[1] == holder_x25519 for row in rows), (
+    assert all(row[1] == holder.pubkey for row in rows), (
         "both grants must be held by the mda holder the options derived"
     )
+
+
+def _registered_recipient_pubkeys(nest) -> tuple[bytes, bytes]:
+    """`(mail, calendar)` X25519 pubkeys the admin's app registered — the
+    `actor_mls_pubkeys` row the MDA's `fetch_recipient_mls_pubkey` answers
+    from, so the seal target of every mail and calendar record it seals."""
+    owner = bytes.fromhex(nest["admin"]["actor_id_hex"])
+    conn = sqlite3.connect(nest["db_path"], timeout=10.0)
+    try:
+        row = conn.execute(
+            "SELECT mls_pubkey, calendar_pubkey FROM actor_mls_pubkeys WHERE actor_id = ?",
+            (owner,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "enabling mail must register the admin's recipient keys"
+    return bytes(row[0]), bytes(row[1])
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_a_calendar_grant_opens_calendar_records_and_never_mail(
+    app, trust_grant_nest, run_seal_helper
+):
+    """The calendar/card key split's proof (`owner-key-material.md` § Path
+    B-sibling-5 → *Capability payload*; `key-material-hierarchy.md` § Don't do
+    these): the payload of the "Read my calendar" grant is the calendar's own
+    secret, so the holder that unseals it opens a `calendar-record` sealed to
+    the owner's registered calendar key and NOT a `mail-record` sealed to the
+    registered mail key — and the mail grant's payload opens no calendar record.
+
+    Both grants are minted through the picker (convention 8); the holder side
+    is the seal-helper's `open-records-with-grant` — the production drain's
+    `UnsealCapabilityGrant` with the holder's secret, then every key tried on
+    every record under the record's OWN kind, so a refusal is the AEAD (the key
+    split), never a kind check. The records are sealed to the keys the owner's
+    app registered on the nest, the MDA's seal targets.
+    """
+    import base64
+    import json
+
+    app.mail_settings.require_scripted_mua_seed_supported()
+    nest = trust_grant_nest
+    _login_as_admin(app, nest)
+
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    holder = _seed_mda_holder(nest)
+
+    app.linked_nests.navigate()
+    assert app.nest_trust.mint_button_present(), (
+        f"mail enabled + an mda holder ⇒ the mint control shows. error: {app.error_text()!r}"
+    )
+    for count, label in enumerate(
+        (app.nest_trust.MAIL_LABEL, app.nest_trust.CALENDAR_LABEL), start=1
+    ):
+        app.nest_trust.open_mint()
+        app.nest_trust.select_scope(label)
+        app.nest_trust.confirm_mint()
+        assert app.nest_trust.wait_for_grant_count(count), (
+            f"the {label!r} grant never rendered. error: {app.error_text()!r}"
+        )
+    _wait_grant_rows(nest, lambda r: len(r) == 2, "both grants deposited")
+
+    mail_pub, calendar_pub = _registered_recipient_pubkeys(nest)
+    assert mail_pub != calendar_pub, "the calendar key must be its own, not the mail key"
+
+    def seal(kind: str, plaintext: bytes, pubkey: bytes) -> str:
+        return base64.b64encode(run_seal_helper("seal-mail-record", {
+            "plaintext_b64": base64.b64encode(plaintext).decode(),
+            "recipient_x25519_pubkey_b64": base64.b64encode(pubkey).decode(),
+            "kind": kind,
+        })).decode()
+
+    event = b"BEGIN:VCALENDAR\r\nSUMMARY:split-proof\r\nEND:VCALENDAR\r\n"
+    records = [
+        {"kind": "calendar", "envelope_b64": seal("calendar", event, calendar_pub)},
+        {"kind": "mail", "envelope_b64": seal("mail", b"Subject: split-proof", mail_pub)},
+    ]
+
+    opened = {}
+    for _grant_id, blob in _grant_blobs(nest):
+        out = json.loads(run_seal_helper("open-records-with-grant", {
+            "grant_blob_b64": base64.b64encode(bytes(blob)).decode(),
+            "holder_x25519_secret_b64": base64.b64encode(holder.secret).decode(),
+            "records": records,
+        }))
+        scopes = sorted({s for rec in out for s in rec["opened_by"]})
+        opened[tuple(scopes)] = out
+    calendar_grant = opened.get(("content.read{calendar}",))
+    mail_grant = opened.get(("content.read{mail}",))
+    assert calendar_grant is not None and mail_grant is not None, (
+        "each grant must open exactly its own kind's record; per grant, the "
+        f"scopes that opened anything: {sorted(opened)!r}"
+    )
+    assert calendar_grant[0]["opened_by"] == ["content.read{calendar}"], calendar_grant
+    assert base64.b64decode(calendar_grant[0]["plaintext_b64"]) == event
+    assert calendar_grant[1]["opened_by"] == [], (
+        f"the calendar grant opened a mail record: {calendar_grant[1]!r}"
+    )
+    assert mail_grant[0]["opened_by"] == [], (
+        f"the mail grant opened a calendar record: {mail_grant[0]!r}"
+    )
+    assert mail_grant[1]["opened_by"] == ["content.read{mail}"], mail_grant
 
 
 def _grant_index_for_tier(app, tier: str) -> int:
@@ -353,9 +453,7 @@ def test_a_blessed_nests_trust_renews_itself_and_a_one_off_trust_lasts_hours(
     clock, exactly as in production; its bump is read off the nest's own
     `capability_grants` row.
     """
-    app.nest_trust.require_mint_test_setup_supported()
     app.nest_trust.require_trust_clock_supported()
-    app.nest_trust.require_duration_and_blessing_supported()
     nest = trust_grant_nest
     _login_as_admin(app, nest)
     app.nest_trust.advance_trust_clock(0)
@@ -482,7 +580,6 @@ def _wrap_epochs_and_factors(blob: bytes) -> tuple[list[int], set[str | None]]:
     return epochs, factors
 
 
-@pytest.mark.tui
 @pytest.mark.feature("nests-and-trust")
 def test_a_subscribed_labelers_trust_renews_with_its_epoch_keys(
     app, trust_grant_nest, run_seal_helper
@@ -507,14 +604,14 @@ def test_a_subscribed_labelers_trust_renews_with_its_epoch_keys(
     new end (a dropped key set would leave the new end's epoch uncovered
     whenever the boundary is crossed, and the nest would refuse the bump).
 
-    tui only (the `@pytest.mark.tui` mark): every app now builds the
-    grant-wired catalog machine that mints the subscription's grant (since
-    2026-09-29), but the journey's driving seam is the tui's; the other apps'
-    legs are not wired.
+    Every app (no app mark, since 2026-10-26): each builds the grant-wired
+    catalog machine that mints the subscription's grant (since 2026-09-29),
+    and both halves of the walk are driven elsewhere on every app — the
+    catalog subscribe by `test_labeler_catalog.py`, the trust clock and the
+    renew by this module's unmarked lapse-and-renew test.
     """
     from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
 
-    app.nest_trust.require_mint_test_setup_supported()
     app.nest_trust.require_trust_clock_supported()
     nest = trust_grant_nest
     _login_as_admin(app, nest)

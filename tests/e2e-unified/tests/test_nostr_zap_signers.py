@@ -51,6 +51,7 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.linux,
     pytest.mark.web,
+    pytest.mark.android,
 ]
 
 # A syntactically valid 64-hex signer pubkey, typed UPPERCASE on purpose: the

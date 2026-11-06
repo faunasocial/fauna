@@ -25,13 +25,26 @@ use crate::token_store::TokenStore;
 /// device registry left with its route, 2026-10-02.)
 pub struct SyncState {
     pub chunk_resolver: Arc<ChunkResolver>,
+    /// The per-actor meter on the home nests a `fauna.sync.serve.announce`
+    /// forwards to (`sync_handlers::FOREIGN_FORWARD_METER`).
+    pub foreign_forward_meter: Arc<crate::bridge_rate_limit::Limiter>,
+}
+
+impl SyncState {
+    /// The state over `chunk_resolver`, every other part fresh.
+    pub fn with_resolver(chunk_resolver: Arc<ChunkResolver>) -> Self {
+        Self {
+            chunk_resolver,
+            foreign_forward_meter: Arc::new(crate::bridge_rate_limit::Limiter::with_config(
+                crate::sync_handlers::FOREIGN_FORWARD_METER,
+            )),
+        }
+    }
 }
 
 impl Default for SyncState {
     fn default() -> Self {
-        Self {
-            chunk_resolver: Arc::new(ChunkResolver::new(None, None, false)),
-        }
+        Self::with_resolver(Arc::new(ChunkResolver::new(None, None, false)))
     }
 }
 
@@ -475,6 +488,12 @@ pub struct ActivityPubState {
     /// steer (`inbox_routes::new_actor_fetch_limiter`). Both maps are swept by
     /// `rate_limit::spawn_retain_sweeper` (`lib.rs`).
     pub actor_fetch_limiter: Option<Arc<crate::rate_limit::IpRateLimiter>>,
+    /// The DM leg's per-recipient inbound rate — direct Notes one local
+    /// account accepts a minute, whatever actors and sources send them
+    /// (`dm_leg::new_dm_recipient_limiter`). Keyed by the box's own accounts,
+    /// a small stable set, so the map needs no sweeper. `None` disables it
+    /// (test states); production always sets it.
+    pub dm_recipient_limiter: Option<Arc<crate::activitypub::dm_leg::DmRecipientLimiter>>,
 }
 
 #[cfg(feature = "activitypub")]
@@ -484,6 +503,7 @@ impl Default for ActivityPubState {
             delivery_nudge: Arc::new(tokio::sync::Notify::new()),
             inbox_limiter: None,
             actor_fetch_limiter: None,
+            dm_recipient_limiter: None,
         }
     }
 }
@@ -955,7 +975,7 @@ impl crate::routes::AppState {
             #[cfg(feature = "test-hooks")]
             post_fanout_initiations: std::sync::Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
-            account_lock_refusals: std::sync::Arc::new(Default::default()),
+            account_lock_hook: std::sync::Arc::new(Default::default()),
             #[cfg(feature = "test-hooks")]
             epoch_sealing_test_override: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
@@ -993,6 +1013,7 @@ impl crate::routes::AppState {
             )),
             starttls_prober: std::sync::Arc::new(crate::mail_deliverability::NullStarttlsProber),
             link_preview: crate::link_preview::LinkPreviewState::new(),
+            mail_import_tunnel: crate::mail_import_tunnel::TunnelState::new(),
             #[cfg(feature = "test-hooks")]
             link_preview_override: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),

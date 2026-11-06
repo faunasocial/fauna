@@ -159,6 +159,13 @@ pub struct NostrState {
     /// mutation: nothing except the ceremony itself or the confirm gesture can
     /// change the answer within a session.
     pub npub_confirmation_owed: bool,
+    /// The newest read's generation, claimed at dispatch by every [`Op`] that
+    /// ends in a re-read and checked at commit, so a superseded read landing
+    /// late is dropped instead of overwriting newer state — the store-ready
+    /// edge spawns a re-read while the nav-to-tab read may still be awaited,
+    /// so both landing orders are reachable. The
+    /// `NotificationsState::read_gen` shape.
+    pub read_gen: std::cell::Cell<u64>,
 }
 
 impl NostrState {
@@ -278,7 +285,15 @@ pub fn nav_enter_op(app: &App) -> Option<Op> {
     Some(Op::Refresh {
         nest: app.nostr.nest.clone()?,
         account: app.settings.account_store.clone(),
+        read_gen: claim_read_gen(&app.nostr),
     })
+}
+
+/// Claim the next [`NostrState::read_gen`] for a read about to be dispatched.
+fn claim_read_gen(state: &NostrState) -> u64 {
+    let read_gen = state.read_gen.get() + 1;
+    state.read_gen.set(read_gen);
+    read_gen
 }
 
 // ── Field access ─────────────────────────────────────────────────────────────
@@ -464,10 +479,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 account,
                 mode,
                 params: WireValue::Map(params),
+                read_gen: claim_read_gen(st),
             })
         }
         Action::Unlink => Some(Op::Unlink {
             nest: st.nest.clone()?,
+            read_gen: claim_read_gen(st),
         }),
         Action::CopyPubkey => {
             if let Some(npub) = st.npub() {
@@ -478,6 +495,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::ToggleContent { key, value } => Some(Op::SetSettings {
             nest: st.nest.clone()?,
             settings: WireValue::Map(BTreeMap::from_iter([(key, WireValue::Bool(value))])),
+            read_gen: claim_read_gen(st),
         }),
         Action::AddRelay => {
             let nest = st.nest.clone()?;
@@ -507,6 +525,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::SetSettings {
                 nest,
                 settings: relay_list_payload(&relays),
+                read_gen: claim_read_gen(st),
             })
         }
         Action::RemoveRelay { index } => {
@@ -519,6 +538,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::SetSettings {
                 nest,
                 settings: relay_list_payload(&relays),
+                read_gen: claim_read_gen(st),
             })
         }
         Action::AddFollow => {
@@ -533,11 +553,17 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             };
             st.follow_pubkey_input.clear();
             st.follow_petname_input.clear();
-            Some(Op::AddFollow { nest, id, petname })
+            Some(Op::AddFollow {
+                nest,
+                id,
+                petname,
+                read_gen: claim_read_gen(st),
+            })
         }
         Action::RemoveFollow { id } => Some(Op::RemoveFollow {
             nest: st.nest.clone()?,
             id,
+            read_gen: claim_read_gen(st),
         }),
         Action::ConnectApp => Some(Op::CreateInvite {
             nest: st.nest.clone()?,
@@ -577,21 +603,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 nest,
                 pubkey,
                 label,
+                read_gen: claim_read_gen(st),
             })
         }
         #[cfg(feature = "zaps")]
         Action::RemoveZapSigner { pubkey } => Some(Op::RemoveZapSigner {
             nest: st.nest.clone()?,
             pubkey,
+            read_gen: claim_read_gen(st),
         }),
         Action::ConfirmNpub => Some(Op::ConfirmNpub {
             nest: st.nest.clone()?,
             account: account?,
+            read_gen: claim_read_gen(st),
         }),
         // Reuses the existing unlink gesture's own Op — "the existing page
         // machinery", not a bespoke one (`nostr.md`:75).
         Action::DismissNpubToNewKey => Some(Op::Unlink {
             nest: st.nest.clone()?,
+            read_gen: claim_read_gen(st),
         }),
     }
 }
@@ -599,7 +629,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 // ── Network half ─────────────────────────────────────────────────────────────
 
 /// The network half of a Nostr gesture — owns only `Arc`s + owned data, so it
-/// can be awaited on the agent's path or spawned on the keyboard's.
+/// can be awaited on the agent's path or spawned on the keyboard's. Every
+/// variant ending in a re-read carries the `read_gen` it claimed at dispatch
+/// ([`NostrState::read_gen`]).
 pub enum Op {
     /// `fauna.bridges.list` + `list_follows` (nav edge only — the other
     /// variants below call the plain [`refresh`] helper directly after their
@@ -612,6 +644,7 @@ pub enum Op {
     Refresh {
         nest: Arc<NestClient>,
         account: Option<AccountStoreHandle>,
+        read_gen: u64,
     },
     /// `fauna.bridges.link`, then — best-effort — a confirm write: a fresh
     /// link (first-ever, or after "no / nothing is linked" unlinked the old
@@ -623,9 +656,11 @@ pub enum Op {
         account: Option<AccountStoreHandle>,
         mode: String,
         params: WireValue,
+        read_gen: u64,
     },
     Unlink {
         nest: Arc<NestClient>,
+        read_gen: u64,
     },
     /// A partial settings blob. The nest merges by key
     /// (`nostr/db.rs::update_settings` — each field a separate gated `UPDATE`),
@@ -633,21 +668,22 @@ pub enum Op {
     SetSettings {
         nest: Arc<NestClient>,
         settings: WireValue,
+        read_gen: u64,
     },
     AddFollow {
         nest: Arc<NestClient>,
         id: String,
         petname: Option<String>,
+        read_gen: u64,
     },
     RemoveFollow {
         nest: Arc<NestClient>,
         id: String,
+        read_gen: u64,
     },
     /// `fauna.nostr.bunker.create_invite` — mints a pending connection and
     /// returns the one-time `bunker://…` string.
-    CreateInvite {
-        nest: Arc<NestClient>,
-    },
+    CreateInvite { nest: Arc<NestClient> },
     /// `fauna.nostr.zap_signers.add` — designate a signer, then refresh.
     ///
     /// This is a **wired gate surface** (`zaps.signer.designate`,
@@ -660,6 +696,7 @@ pub enum Op {
         nest: Arc<NestClient>,
         pubkey: String,
         label: String,
+        read_gen: u64,
     },
     /// `fauna.nostr.zap_signers.remove` — stop trusting one signer.
     ///
@@ -671,6 +708,7 @@ pub enum Op {
     RemoveZapSigner {
         nest: Arc<NestClient>,
         pubkey: String,
+        read_gen: u64,
     },
     /// The account-plane confirm write, then re-check + refresh (the
     /// same nav-enter path, so the banner's disappearance is a fresh read
@@ -679,6 +717,7 @@ pub enum Op {
     ConfirmNpub {
         nest: Arc<NestClient>,
         account: AccountStoreHandle,
+        read_gen: u64,
     },
 }
 
@@ -707,6 +746,8 @@ pub enum Outcome {
         /// refresh, meaning "leave `NostrState::npub_confirmation_owed`
         /// unchanged" (module docs on [`Op::Refresh`]).
         npub_confirmation_owed: Option<bool>,
+        /// The [`NostrState::read_gen`] the read claimed at dispatch.
+        read_gen: u64,
     },
     /// An invite was minted: the one-time connect string, plus the refreshed
     /// roster it created a pending row in. Carried as its own variant because
@@ -723,12 +764,17 @@ pub enum Outcome {
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::Refresh { nest, account } => refresh_and_check_npub(nest, account).await,
+            Op::Refresh {
+                nest,
+                account,
+                read_gen,
+            } => refresh_and_check_npub(nest, account, read_gen).await,
             Op::Link {
                 nest,
                 account,
                 mode,
                 params,
+                read_gen,
             } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client.link(BRIDGE_ID, mode, params).await {
@@ -740,36 +786,45 @@ impl Op {
                         if let Some(account) = &account {
                             let _ = account.confirm_nostr_npub(now_secs()).await;
                         }
-                        refresh_and_check_npub(nest, account).await
+                        refresh_and_check_npub(nest, account, read_gen).await
                     }
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::Unlink { nest } => {
+            Op::Unlink { nest, read_gen } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client.unlink(BRIDGE_ID).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::SetSettings { nest, settings } => {
+            Op::SetSettings {
+                nest,
+                settings,
+                read_gen,
+            } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client.set_settings(BRIDGE_ID, settings).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::AddFollow { nest, id, petname } => {
+            Op::AddFollow {
+                nest,
+                id,
+                petname,
+                read_gen,
+            } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client.add_follow(BRIDGE_ID, id, petname, None).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::RemoveFollow { nest, id } => {
+            Op::RemoveFollow { nest, id, read_gen } => {
                 let client = BridgesClient::new(Arc::clone(&nest));
                 match client.remove_follow(BRIDGE_ID, id).await {
-                    Ok(()) => refresh(nest).await,
+                    Ok(()) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
@@ -795,6 +850,7 @@ impl Op {
                 nest,
                 pubkey,
                 label,
+                read_gen,
             } => {
                 let client = NostrZapSignerClient::new(Arc::clone(&nest));
                 // The reply carries the STORED row (lowercased), but we re-list
@@ -802,24 +858,32 @@ impl Op {
                 // same non-optimistic posture every other mutation here takes —
                 // and it is what makes the rendered row the nest's row.
                 match client.add(pubkey, label).await {
-                    Ok(_) => refresh(nest).await,
+                    Ok(_) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
             #[cfg(feature = "zaps")]
-            Op::RemoveZapSigner { nest, pubkey } => {
+            Op::RemoveZapSigner {
+                nest,
+                pubkey,
+                read_gen,
+            } => {
                 let client = NostrZapSignerClient::new(Arc::clone(&nest));
                 match client.remove(pubkey).await {
-                    Ok(_) => refresh(nest).await,
+                    Ok(_) => refresh(nest, read_gen).await,
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::ConfirmNpub { nest, account } => {
+            Op::ConfirmNpub {
+                nest,
+                account,
+                read_gen,
+            } => {
                 match account.confirm_nostr_npub(now_secs()).await {
                     // Re-checks rather than assuming `Some(false)`: the fresh
                     // read is what makes this non-optimistic like every other
                     // mutation on this page.
-                    Ok(_) => refresh_and_check_npub(nest, Some(account)).await,
+                    Ok(_) => refresh_and_check_npub(nest, Some(account), read_gen).await,
                     Err(e) => Outcome::Failed(format!("{e:#}")),
                 }
             }
@@ -833,7 +897,7 @@ fn now_secs() -> i64 {
     fauna_core::data::Timestamp::now_secs_or_zero()
 }
 
-async fn refresh(nest: Arc<NestClient>) -> Outcome {
+async fn refresh(nest: Arc<NestClient>, read_gen: u64) -> Outcome {
     let client = BridgesClient::new(Arc::clone(&nest));
     let bridges = match client.list().await {
         Ok(r) => r.bridges,
@@ -903,6 +967,7 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
         features,
         // Never touched by the plain refresh — see the field doc.
         npub_confirmation_owed: None,
+        read_gen,
     }
 }
 
@@ -911,6 +976,7 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
 async fn refresh_and_check_npub(
     nest: Arc<NestClient>,
     account: Option<AccountStoreHandle>,
+    read_gen: u64,
 ) -> Outcome {
     // No account runtime yet degrades to "not owed" inside the shared read,
     // the same direction it takes on any other failure.
@@ -925,7 +991,7 @@ async fn refresh_and_check_npub(
         }),
     )
     .await;
-    let mut outcome = refresh(nest).await;
+    let mut outcome = refresh(nest, read_gen).await;
     if let Outcome::Loaded {
         npub_confirmation_owed,
         ..
@@ -951,7 +1017,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             #[cfg(feature = "zaps")]
             features,
             npub_confirmation_owed,
+            read_gen,
         } => {
+            // A newer read has been dispatched since this one: its reply is
+            // the one to paint (`NostrState::read_gen`).
+            if read_gen != st.read_gen.get() {
+                return;
+            }
             let was_linked = st.linked();
             st.registered = registered;
             st.status = status.map(|b| *b);
@@ -1784,6 +1856,7 @@ mod tests {
                 #[cfg(feature = "zaps")]
                 features: None,
                 npub_confirmation_owed: None,
+                read_gen: 0,
             },
         );
         assert!(
@@ -1791,6 +1864,51 @@ mod tests {
             "the pasted key must not survive the link that consumed it"
         );
         assert!(app.nostr.linked());
+    }
+
+    /// A read superseded by a newer one is dropped when it lands late — the
+    /// nav-to-tab read issued before the account store opened (no stamp, so
+    /// not owed) landing after the store-ready edge's re-ask must not repaint
+    /// the older answer.
+    #[test]
+    fn a_superseded_read_landing_late_is_dropped() {
+        let mut app = nostr_app();
+        app.nostr.nest = Some(NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        ));
+        let Some(Op::Refresh {
+            read_gen: nav_gen, ..
+        }) = nav_enter_op(&app)
+        else {
+            panic!("the tab refetches");
+        };
+        let Some(Op::Refresh {
+            read_gen: store_gen,
+            ..
+        }) = nav_enter_op(&app)
+        else {
+            panic!("the tab refetches");
+        };
+        let loaded = |owed: bool, read_gen: u64| Outcome::Loaded {
+            registered: true,
+            status: Some(Box::new(status(true, Some("generated"), vec![]))),
+            follows: vec![],
+            bunker_apps: vec![],
+            #[cfg(feature = "zaps")]
+            zap_signers: vec![],
+            #[cfg(feature = "zaps")]
+            features: None,
+            npub_confirmation_owed: Some(owed),
+            read_gen,
+        };
+
+        apply_outcome(&mut app, loaded(true, store_gen));
+        apply_outcome(&mut app, loaded(false, nav_gen));
+        assert!(
+            app.nostr.npub_confirmation_owed,
+            "the older read must not overwrite the newer answer"
+        );
     }
 
     /// A failed op surfaces on the page error; the next success clears it.
@@ -1814,6 +1932,7 @@ mod tests {
                 #[cfg(feature = "zaps")]
                 features: None,
                 npub_confirmation_owed: None,
+                read_gen: 0,
             },
         );
         assert!(!app.errors.contains_key(&Page::Nostr));
@@ -1910,6 +2029,7 @@ mod tests {
                 #[cfg(feature = "zaps")]
                 features: None,
                 npub_confirmation_owed: None,
+                read_gen: 0,
             },
         );
         assert_eq!(

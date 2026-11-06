@@ -14,10 +14,7 @@ them itself and keeps them for 90 days. They never land in anyone's inbox. A
 broken report, or one about a domain your nest does not serve, is dropped
 quietly, and the provider that sent it is never told to retry.
 
-Two things are an admin's to choose, on the mail admin page: how long the
-reports are kept, and whether to also ask providers for *forensic* reports —
-one per failed message, naming the people it was sent to. Those are off unless
-an admin turns them on, and the switch says what they carry.
+Three things are an admin's to choose, on the mail admin page: how long the reports are kept; whether to also ask providers for *forensic* reports — one per failed message, naming the people it was sent to; and whether your nest sends reports of its own. Forensic reports are off unless an admin turns them on, and the switch says what they carry. Your nest's own reports go once a day to each domain that asks for them in its DMARC record, about the mail it received claiming to be from that domain; they are on unless an admin switches off **Send daily DMARC reports to other domains**.
 
 An admin reads the daily reports on the Mail reports page: the totals for a period and domain, the busiest sources and senders, and each report in full.
 
@@ -43,29 +40,32 @@ Stamped 2026-10-17 at 3daf881ad6.
    - `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_forensic_report_is_stored_without_recipients_in_the_index`
 9. [app] An admin can read the reports peers sent about their domains: how many messages they saw and how many passed, for a chosen period and domain, the top sources and senders, each report, and any one report in full — `docs/goal/behavior/dmarc-reporting.md` § What the page shows
    - `tests/e2e-unified/tests/test_admin_mail_reports.py::test_mail_reports_page_shows_a_mailed_in_report`
+10. [app] An admin can turn off the daily reports the nest sends to other domains, and turn them back on — `docs/goal/behavior/dmarc-reporting.md` § Generation is on by default
+   - `tests/e2e-unified/tests/test_admin_mail.py::test_outbound_dmarc_reports_switch_round_trips`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ce18d539.dirty standalone |
-| windows |  no run recorded | |
-| macos |  no run recorded | |
-| ios |  no run recorded | |
+| web | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| linux | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| windows | ✅ full | 0.1.5-dev+5e765178.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.5-dev+cab1c46a standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_oversize_report_keeps_an_envelope_for_triage_and_retention_prunes_it` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_forensic_opt_in_asks_peers_for_reports_in_the_expected_record` | nest (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_forensic_report_is_stored_without_recipients_in_the_index` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_admin_mail_reports.py::test_mail_reports_page_shows_a_mailed_in_report` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 1 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed, nest (macos): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_report_is_stored_and_listed_never_delivered` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_oversize_report_keeps_an_envelope_for_triage_and_retention_prunes_it` | nest (linux): passed, nest (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_forensic_opt_in_asks_peers_for_reports_in_the_expected_record` | nest (linux): passed, nest (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_dmarc_policy_save_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_dmarc_reports.py::test_dmarc_forensic_report_is_stored_without_recipients_in_the_index` | nest (linux): passed, nest (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin_mail_reports.py::test_mail_reports_page_shows_a_mailed_in_report` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_admin_mail.py::test_outbound_dmarc_reports_switch_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

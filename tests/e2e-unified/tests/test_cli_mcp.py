@@ -60,56 +60,36 @@ refused unless the approving account's ATProto identity is active.
 import json
 import os
 import stat
-import subprocess
 import time
-import urllib.parse
 from pathlib import Path
 
 import pytest
 
 from actions.api_actor import ApiActor
 from actions.connected_apps import ConnectedAppsActions
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from drivers.cli_mcp import CliArgv, CliMcpSession
 from helpers.atproto_consent import (  # noqa: F401 — pytest fixtures adopted by import
     HANDLE_DOMAIN,
     consent_bridge,
     consent_nest,
-    consent_nest_env,
     consent_spa_url,
 )
+from helpers.client_metadata_server import (  # noqa: F401 — pytest fixtures adopted by import
+    CLI_CLIENT_ID,
+    CLI_CLIENT_NAME,
+    cli_metadata,
+    consent_nest_env,
+)
 from helpers.budgets import ORCHESTRATION_STEP_S, RPC_ROUNDTRIP_S
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3]
 
-_REPO = Path(__file__).resolve().parents[3]
-
-#: The scope the catalog asks for — every arm one of its tools needs
-#: (`fauna_cli::catalog::consent_scope`, pinned there by a unit test).
-_CONSENT_SCOPE = (
-    "fauna:feed:read fauna:feed:read:account fauna:identity:op:post.author "
-    "fauna:notifications:read fauna:notifications:write "
-    "fauna:identity:op:profile.author fauna:identity:op:conversation.read "
-    "fauna:identity:op:conversation.send fauna:profile:read"
-)
-#: The shell's client identity until the organisation's document is published
-#: (`apps/cli.md` § Open decisions 1): the loopback development client.
-_CLIENT_ID = "http://localhost?scope=" + urllib.parse.quote(_CONSENT_SCOPE, safe="")
-
-@pytest.fixture(scope="module")
-def cli_binary():
-    """The device shell, built through its build-if-stale recipe (never bare
-    cargo) so a stale binary is never what the journey drives. A failed build
-    fails the module — it is the app under test, never an environment skip."""
-    built = subprocess.run(["just", "cli-debug"], cwd=_REPO, capture_output=True, text=True)
-    target = Path(os.environ.get("CARGO_TARGET_DIR") or _REPO / "target")
-    binary = target / "debug" / ("fauna-cli.exe" if os.name == "nt" else "fauna-cli")
-    if built.returncode != 0 or not binary.exists():
-        pytest.fail(
-            f"`just cli-debug` did not build the device shell:\n"
-            f"{built.stdout[-2000:]}\n{built.stderr[-2000:]}"
-        )
-    return str(binary)
+#: The cli's client identity: the organisation's published document
+#: (`apps/cli.md` § Open decisions 1), which ``cli_metadata`` serves through
+#: the mapped host.
+_CLIENT_ID = CLI_CLIENT_ID
 
 
 @pytest.fixture
@@ -208,6 +188,13 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
         "typing the cli's code must open its card in the tray. "
         f"error: {ca.current_error_text()!r}"
     )
+    card = ca.request_text(index)
+    # The card names the cli by its published document, and says what the
+    # grant reaches (`apps/cli.md` § Hosting cases).
+    assert CLI_CLIENT_NAME in card, f"the card names the published client: {card!r}"
+    assert S.connected_apps.consent_assistant_reach in card, (
+        f"the cli's card says the grant reaches the assistant: {card!r}"
+    )
     ca.approve_request(index)
     assert ca.current_error_text() == "", ca.current_error_text()
 
@@ -280,12 +267,7 @@ def test_an_llm_host_connects_the_cli_reads_the_feed_and_posts_as_the_user(
     # marked read through the write arm, and the count reads 0. ──
     # The nest is module-scoped and the journey runs once per transport, so the
     # second actor's handle carries the transport (a handle registers once).
-    bob = register_handled_actor(
-        consent_nest["port"],
-        handle=f"bob{cli.transport}",
-        domain=HANDLE_DOMAIN,
-        base_url=consent_nest["url"],
-    )
+    bob = admit_adult(consent_nest, f"bob{cli.transport}", domain=HANDLE_DOMAIN, token=True)
     ApiActor(
         consent_nest["url"], bob["token"], bob["actor_id_hex"], bytes(bob["signing_key"])
     ).like_post(post_id)
@@ -561,10 +543,16 @@ def test_the_admin_plane_serves_an_admin_consented_principal_and_no_member(
         if t["name"].startswith("admin_bridges_") and not t["annotations"]["readOnlyHint"]
     ]
     assert not roster_writes, f"the pending-bridge roster offers reads only: {roster_writes}"
+    # DKIM's key acts (mint, rotate, reveal) are no tool; its rotation
+    # interval and selector list on admin-dns are (`apps/cli.md` § Implementation
+    # status today, the admin plane's served kinds).
     mail_secrets = [
         t["name"]
         for t in tools
-        if any(s in t["name"] for s in ("srs", "unsubscribe_secret", "microsoft", "dkim"))
+        if any(
+            s in t["name"]
+            for s in ("srs", "unsubscribe_secret", "microsoft", "dkim_key", "dkim_rotate")
+        )
     ]
     assert not mail_secrets, f"the mail page's secrets are no tool: {mail_secrets}"
     coached = cli.request("prompts/get", {"name": "approve_pending_bridge"})
@@ -683,10 +671,7 @@ def test_two_accounts_are_two_principals_and_a_call_names_which(
     from conftest import _login_app_as
 
     alice = consent_nest["user"]
-    bob = register_handled_actor(
-        consent_nest["port"], handle="bobaccounts", domain=HANDLE_DOMAIN,
-        base_url=consent_nest["url"],
-    )
+    bob = admit_adult(consent_nest, "bobaccounts", domain=HANDLE_DOMAIN, token=True)
     _activate_atproto(consent_nest, bob)
     cli.initialize()
 

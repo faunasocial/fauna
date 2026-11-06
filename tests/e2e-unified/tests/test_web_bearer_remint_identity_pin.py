@@ -33,7 +33,6 @@ from __future__ import annotations
 import pytest
 
 from common.launch_harness import make_launch_harness, reached_authenticated_app
-from helpers.app_surface import skip_unbuilt
 from helpers.budgets import IDENTITY_REFRESH_S
 from helpers.waiting import session_generation
 
@@ -143,14 +142,9 @@ def test_post_auth_identity_change_bearer_remint_channel(web_pin_env):
     )
 
     generation_before = session_generation(driver)
-    if generation_before is None:
-        skip_unbuilt(
-            driver,
-            surface="the session_generation teardown counter",
-            detail="mid-session identity-changed escalation must bump it at "
-            "initiation, same as sign-out/switch/factory-reset",
-            tracked="",
-        )
+    assert generation_before is not None, (
+        "the app publishes no session_generation teardown counter"
+    )
 
     driver.call_command("bearer_force_refresh")
 

@@ -50,7 +50,7 @@ pub fn spawn_tlsrpt_outbound_retention_sweeper(
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InboundVerdictsSnapshot {
     pub spf: String,
     pub dmarc: String,

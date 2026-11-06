@@ -776,7 +776,7 @@ pub(crate) fn examine_group_in(
 
 /// **The byte sequence a provider KV key contains iff it carries this group's
 /// state AND openMLS itself wrote it** — openMLS's own serialisation of its own
-/// `GroupId`, which its storage keys embed verbatim. Fauna's own seven
+/// `GroupId`, which its storage keys embed verbatim. Fauna's own
 /// `fauna:`-prefixed per-channel markers (`engine.rs`) also carry a group's
 /// state, keyed by the raw `ChannelId` instead — this needle does not, and
 /// cannot, find those.
@@ -2317,7 +2317,7 @@ mod tests {
     /// serialised MLS id, and no key of another group or of the account's global
     /// state does.**
     ///
-    /// **Narrower than "every key of a group".** Fauna's own seven `fauna:`-prefixed per-channel marker families
+    /// **Narrower than "every key of a group".** Fauna's own `fauna:`-prefixed per-channel marker families
     /// (`PENDING_COMMIT_HASH_PREFIX` and its siblings in `engine.rs`) are also
     /// channel-scoped provider KV entries, keyed by the raw `ChannelId`, not by
     /// openMLS's serialised `GroupId` — so this rule and [`group_sides`] (below) are

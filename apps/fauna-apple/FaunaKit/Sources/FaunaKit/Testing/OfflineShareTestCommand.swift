@@ -45,12 +45,7 @@ public enum OfflineShareTestCommand {
     /// refuse: the setter takes effect immediately, before or after a seat
     /// binds.
     public static func applyAdvanceClock(_ command: [String: Any]) {
-        // JSON numbers arrive as `NSNumber`; take the widest read, matching
-        // `DelegationClockTestCommand`'s parser. A missing/unparseable value
-        // is `0` — the documented reset, and the same default tui's arm uses.
-        let offset = (command["now_offset_secs"] as? NSNumber)?.int64Value
-            ?? (command["now_offset_secs"] as? Int).map(Int64.init)
-            ?? 0
+        let offset = TestCommandArgs.nowOffsetSecs(command)
         offlineShareAdvanceClock(nowOffsetSecs: offset)
     }
 
@@ -75,6 +70,67 @@ public enum OfflineShareTestCommand {
             return .report(String(dropped))
         } catch {
             return .refused("offline_share_drop_connections: \(error)")
+        }
+    }
+
+    /// `offline_share_hold_serves` — turn THIS PROCESS's share-plane SERVE hold
+    /// on or off (`fauna_sync_engine::share_serve_tally`), so the next manifest
+    /// a peer asks this seat for parks unanswered and `share_serve_tally`'s
+    /// `parked` count says so (convention 14: "part-way through a transfer" is a
+    /// state a journey waits for, never a race). Process-wide, nothing
+    /// auto-resets it; a missing `hold` reads as `false`, the lift, like tui's
+    /// arm. Cannot refuse.
+    public static func applyHoldServes(_ command: [String: Any]) {
+        offlineShareHoldServes(on: (command["hold"] as? Bool) ?? false)
+    }
+
+    /// The `share_serve_tally` state key's body — `{manifests: {path: n},
+    /// chunks: {path: n}, parked: n, held: b}`, the FFI mirror of the shared
+    /// recorder's snapshot (`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`). A plain
+    /// lock-and-clone, legal on the state-serialisation path.
+    public static func serveTallyState() -> [String: Any] {
+        let tally = shareServeTally()
+        return [
+            "manifests": tally.manifests,
+            "chunks": tally.chunks,
+            "parked": tally.parked,
+            "held": tally.held,
+        ]
+    }
+
+    /// `offline_share_probe_set` — dial the peer named by `peer_code` as this
+    /// seat's own identity, claim the set in the admission exchange and report
+    /// what came back (`fauna_sync_engine::share_probe`), asking on after a
+    /// refused admission as a hostile client would. The report rides the
+    /// machine-result slot as a JSON string, which `probe_shared_set` decodes.
+    /// Fails loudly (convention 11) with no signed-in session; the FFI itself
+    /// refuses when no ceremony seat is bound.
+    public static func applyProbeSet(_ command: [String: Any], api: APIClient?) async -> Outcome {
+        guard let api else {
+            return .refused("offline_share_probe_set: no fauna client to probe from")
+        }
+        let hashes = (command["manifest_hashes"] as? [Any])?.compactMap { $0 as? String } ?? []
+        let peerCode = command["peer_code"] as? String ?? ""
+        let groupIdHex = command["group_id_hex"] as? String ?? ""
+        do {
+            let report = try await api.offlineShareProbeSetForTest(
+                peerCode: peerCode, groupIdHex: groupIdHex, manifestHashes: hashes)
+            let body: [String: Any] = [
+                "dialed": report.dialed,
+                "dial_error": report.dialError ?? NSNull(),
+                "admitted": report.admitted,
+                "admit_error": report.admitError ?? NSNull(),
+                "rows": report.rows,
+                "paths": report.paths,
+                "rows_error": report.rowsError ?? NSNull(),
+                "manifest_hashes": report.manifestHashes,
+                "manifests": report.manifests,
+                "manifest_errors": report.manifestErrors,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            return .report(String(decoding: data, as: UTF8.self))
+        } catch {
+            return .refused("offline_share_probe_set: \(error)")
         }
     }
 }

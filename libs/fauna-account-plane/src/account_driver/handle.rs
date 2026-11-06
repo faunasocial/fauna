@@ -25,6 +25,8 @@ use crate::preference_put::put_preference_local;
 use crate::principal_custody::{EnrollmentRefusal, PrincipalBundleStatus, PrincipalCustody};
 
 use super::e2e_holds::Prompt;
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+use super::e2e_readers::{EscrowWrapCoordinate, escrow_wrap_coordinates};
 use super::enrollment::EnrollmentRetirement;
 use super::now_ms;
 use super::pass::PumpReport;
@@ -45,6 +47,11 @@ pub(crate) enum Cmd {
         kind: String,
         value: Vec<u8>,
         reply: oneshot::Sender<Result<LwwStamp>>,
+    },
+    /// The moderation rows' write door ([`AccountStoreHandle::write_moderation`]).
+    WriteModeration {
+        changes: Vec<fauna_core::moderation_rows::ModerationChange>,
+        reply: oneshot::Sender<Result<bool>>,
     },
     RegisterContentScope {
         scope: ContentScope,
@@ -342,6 +349,15 @@ pub(crate) enum Cmd {
         value: fauna_core::share_endpoints::ShareEndpoints,
         reply: oneshot::Sender<Result<u64>>,
     },
+    TombstoneShareEndpoints {
+        channel_id: [u8; 32],
+        member: [u8; 32],
+        reply: oneshot::Sender<Result<bool>>,
+    },
+    TombstoneShareEndpointsOfSet {
+        channel_id: [u8; 32],
+        reply: oneshot::Sender<Result<usize>>,
+    },
     /// The offline-share ceremony's two fleet-scope custody write-throughs and
     /// its group-plane adoption, boxed because a `GroupHeldRootRecord` carries
     /// the scope's machinery root and a snapshot is a whole ceremony's rows.
@@ -364,6 +380,30 @@ pub(crate) enum Cmd {
     },
     GroupRosterSnapshot {
         reply: oneshot::Sender<Result<crate::group_scope_view::GroupRosterSnapshot>>,
+    },
+    /// The group pump leg's three doors ([`AccountStoreHandle::group_pump_scopes`],
+    /// [`AccountStoreHandle::put_group_endpoints`],
+    /// [`AccountStoreHandle::walk_group_scope`]); the entry is boxed like
+    /// the other door values.
+    GroupPumpScopes {
+        own_actor: fauna_core::identity::ActorId,
+        reply: oneshot::Sender<Result<Vec<crate::group_pump::GroupPumpScope>>>,
+    },
+    PutGroupEndpoints {
+        entry: Box<fauna_core::device_endpoints::DeviceEndpointsEntry>,
+        at_ms: i64,
+        reply: oneshot::Sender<Result<usize>>,
+    },
+    WalkGroupScope {
+        scope_id: [u8; 32],
+        channel: std::sync::Arc<dyn crate::group_pump::GroupFeedChannel>,
+        reply: oneshot::Sender<Result<crate::account_state_plane::WalkReport>>,
+    },
+    /// The lift's write ([`AccountStoreHandle::put_group_file`]).
+    PutGroupFile {
+        scope_id: [u8; 32],
+        draft: Box<crate::group_set::GroupFileDraft>,
+        reply: oneshot::Sender<Result<u64>>,
     },
     /// Which device principals hold the generation key at this store's
     /// resolved tip (`generation_tip::keyed_principals_at_tip`) — the
@@ -408,7 +448,12 @@ pub(crate) enum Cmd {
     /// rotation's): the publish step run now, answered `Ok` only when no row
     /// of `kind` this device wrote stays unsent. `what` names those rows in
     /// the refusal. Pass-bound, like the local-write wake's publish it runs
-    /// early.
+    /// early — and the one pass-bound command whose park is BOUNDED: still
+    /// parked at `FIRST_PASS_WAIT` it is refused not ready
+    /// (`NotReadyReason::PublishPending`, through [`Cmd::refuse`]), nothing
+    /// sent, the rows owed to the runtime's next publish
+    /// (`account-client-lifecycle.md` § The client-side lifecycle, the pump
+    /// bullet → *Commands and passes*, the awaited publish's bound).
     PublishOwn {
         kind: &'static str,
         what: &'static str,
@@ -468,6 +513,12 @@ pub(crate) enum Cmd {
         roster: Vec<(String, Option<[u8; 32]>)>,
         reply: oneshot::Sender<Result<FleetMembersView>>,
     },
+    /// Where this replica's `fauna.state.escrow-wrap` rows sit on the fleet
+    /// feed ([`AccountStoreHandle::escrow_wrap_coordinates`]) — e2e-only.
+    #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+    EscrowWrapCoordinates {
+        reply: oneshot::Sender<Result<Vec<EscrowWrapCoordinate>>>,
+    },
     /// The fleet ids this replica's verified fleet view excludes
     /// ([`AccountStoreHandle::removed_device_ids`]).
     RemovedDeviceIds {
@@ -504,7 +555,8 @@ impl Cmd {
     /// - **The reads** (preferences, kinds, a group scope's rows, the slot's
     ///   status and grant, the cached nest facts, a caller-owned meta row) —
     ///   local: one store read or a slot read.
-    /// - **`PutPreference`, `EnqueueIntent`, `RegisterContentScope`** —
+    /// - **`PutPreference`, `WriteModeration`, `EnqueueIntent`,
+    ///   `RegisterContentScope`** —
     ///   local: a store write of their own (the publish is the publish
     ///   step's), or app-fed state every pass re-derives from at its start.
     /// - **`MetaGet`, `MetaPut`** — local: one meta-table read or write on a
@@ -542,6 +594,14 @@ impl Cmd {
     ///   revocation severance) does read and write group scopes across its
     ///   awaits, but adoption is an `apply_class2` merge — monotone — so one
     ///   landing between those awaits is seen a pass later, never overwritten.
+    /// - **The group pump leg's doors** — local, for `AdoptGroupRows`'
+    ///   reason: the scope read is a store read, the endpoints write a
+    ///   machinery-root plane write with no feed, and the walk's merges are
+    ///   the same monotone `apply_class2`. The walk alone waits on a network
+    ///   while it is served, so the pass is not polled for its length; the
+    ///   channel the caller hands in bounds every request
+    ///   (`fauna_sync_engine::share_glue`'s group leg), and a scope's walk is
+    ///   a few pages.
     /// - **The custody, group and share door puts** ([`Cmd::tip_sealed_kind`])
     ///   — local **while an admissible generation tip resolves**: the local
     ///   write is then store work only, and the publish is the publish
@@ -549,9 +609,15 @@ impl Cmd {
     ///   deposit and a publish, under the plane's mint lock, which a pass's
     ///   own tip-sealed put may be holding — so inside a pass the put is
     ///   parked instead ([`serve_local_cmd`] asks
-    ///   [`AccountStatePlane::origination_mints`] first) and mints after it.
+    ///   [`AccountStatePlane::origination_mints`] first), re-asked at every
+    ///   breath of the pass and served at the first where a tip resolves,
+    ///   minted after the pass when it ends first, refused not-ready at the
+    ///   bound (`super::drive::drive_pass`, the tip wait).
     /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `PublishOwn`
-    ///   (the publish step, which a pass runs too); `Settled` (the
+    ///   (the publish step, which a pass runs too — one publisher of each
+    ///   plane's ordered log per process, and a network leg, so it is
+    ///   neither served at a breath nor run beside the pass; its park alone
+    ///   is bounded, `FIRST_PASS_WAIT`, refused not-ready past it); `Settled` (the
     ///   barrier — answered between passes by definition);
     ///   `RestoreFromCustodian` (it walks both account-state planes, as a
     ///   pass does, so it never interleaves with one); `RetireEnrollment`
@@ -561,11 +627,14 @@ impl Cmd {
     ///   pass's own retires and re-seals).
     pub(crate) fn is_local(&self) -> bool {
         match self {
+            #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+            Cmd::EscrowWrapCoordinates { .. } => true,
             Cmd::DataVersion { .. }
             | Cmd::GetPreference { .. }
             | Cmd::StatesOfKind { .. }
             | Cmd::DeploymentSeedPublished { .. }
             | Cmd::PutPreference { .. }
+            | Cmd::WriteModeration { .. }
             | Cmd::RegisterContentScope { .. }
             | Cmd::EnqueueIntent { .. }
             | Cmd::PrincipalBundleStatus { .. }
@@ -573,6 +642,10 @@ impl Cmd {
             | Cmd::CachedNestFacts { .. }
             | Cmd::GroupScopeStates { .. }
             | Cmd::GroupRosterSnapshot { .. }
+            | Cmd::GroupPumpScopes { .. }
+            | Cmd::PutGroupEndpoints { .. }
+            | Cmd::WalkGroupScope { .. }
+            | Cmd::PutGroupFile { .. }
             | Cmd::KeyedPrincipals { .. }
             | Cmd::P2pParticipation { .. }
             | Cmd::SetP2pParticipation { .. }
@@ -617,6 +690,8 @@ impl Cmd {
             | Cmd::SetNestBlessed { .. }
             | Cmd::PutCustodiesHeld { .. }
             | Cmd::PutShareEndpoints { .. }
+            | Cmd::TombstoneShareEndpoints { .. }
+            | Cmd::TombstoneShareEndpointsOfSet { .. }
             | Cmd::PutGroupHeldRoot { .. }
             | Cmd::PutGroupReceptionKey { .. }
             | Cmd::AdoptGroupRows { .. }
@@ -672,7 +747,9 @@ impl Cmd {
         match self {
             Cmd::PutCustodianEndpoints { .. } => Some(mp::KIND_CUSTODIAN_ENDPOINTS),
             Cmd::PutCustodiesHeld { .. } => Some(mp::KIND_CUSTODIES_HELD),
-            Cmd::PutShareEndpoints { .. } => Some(mp::KIND_SHARE_ENDPOINTS),
+            Cmd::PutShareEndpoints { .. }
+            | Cmd::TombstoneShareEndpoints { .. }
+            | Cmd::TombstoneShareEndpointsOfSet { .. } => Some(mp::KIND_SHARE_ENDPOINTS),
             Cmd::PutGroupHeldRoot { .. } => Some(mp::KIND_GROUP_MACHINERY_ROOT),
             Cmd::PutGroupReceptionKey { .. } => Some(mp::KIND_GROUP_RECEPTION_KEY),
             Cmd::WriteContactOverlay { .. } | Cmd::FoldContactOverlay { .. } => {
@@ -713,6 +790,72 @@ impl Cmd {
                 Some(mp::KIND_FOLDER_KEYS)
             }
             _ => None,
+        }
+    }
+
+    /// Answer a tip-sealed door put ([`Self::tip_sealed_kind`]) — or an
+    /// awaited publish ([`Cmd::PublishOwn`]) — with `err`, unserved: the
+    /// parked put's refusal at the tip wait's bound, the parked publish's at
+    /// the same bound (`super::drive::drive_pass`). Every such command's
+    /// reply carries a `Result`; any other command is a caller bug, logged
+    /// and dropped (its caller sees the channel close).
+    pub(crate) fn refuse(self, err: anyhow::Error) {
+        match self {
+            // The publish's reply is a string: the handle's `publish_own`
+            // re-wraps it, and the mail seam's `StoreError::Save` of that
+            // text is the not-ready class `is_not_ready` recognises.
+            Cmd::PublishOwn { reply, .. } => drop(reply.send(Err(format!("{err:#}")))),
+            Cmd::PutCustodianEndpoints { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutCustodiesHeld { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutShareEndpoints { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::TombstoneShareEndpoints { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::TombstoneShareEndpointsOfSet { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutGroupHeldRoot { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutGroupReceptionKey { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteContactOverlay { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::FoldContactOverlay { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeGroupShares { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeAtprotoIdentity { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeCustody { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::ConfirmNostrNpub { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteBackupDestinations { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeDestinationMarks { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteDns { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteMailImportSource { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteKindManifest { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutAppCredential { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::RevokeAppCredential { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutFollow { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::Unfollow { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteMailState { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::ClearMailRotation { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::PutMailCredential { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MarkMailCredentialWrapped { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MarkMailCredentialTokenMinted { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::RevokeMailCredential { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::RetireMailGeneration { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeSuccessionLedger { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::RepointSuccessionLedger { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::RaiseGrantMarks { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeSubscriptions { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::SettlePendingRemoval { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeDeploymentSeeds { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergePeerAnchors { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::WriteRefusedChanges { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::SetNestBlessed { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::MergeFolderKeys { reply, .. } => drop(reply.send(Err(err))),
+            Cmd::SettleFolderRemoval { reply, .. } => drop(reply.send(Err(err))),
+            other => {
+                debug_assert!(false, "refuse: not a tip-sealed put");
+                tracing::error!(
+                    "account runtime: refuse called on a {} command — dropped",
+                    if other.is_local() {
+                        "local"
+                    } else {
+                        "pass-bound"
+                    }
+                );
+            }
         }
     }
 }
@@ -920,6 +1063,137 @@ impl HolderWalkSeat {
     }
 }
 
+/// What a second connection to this runtime's store needs — the store dir,
+/// the replica seal key, the account and the CURRENT writer: the share
+/// plane's group feed opens its serve store from these
+/// (`docs/goal/behavior/group-set.md` § decision 6, the feed on the share
+/// serve set), the store's multi-connection posture. Only the native host
+/// knows them; it seats them at every assembly ([`ServeStoreSeat::seat`]),
+/// so a writer the succession probe rotated is the one a reader finds next.
+#[derive(Clone)]
+pub struct ServeStoreFacts {
+    /// The per-actor store dir.
+    pub store_dir: std::path::PathBuf,
+    /// The replica seal key — `None` on an unsealed (test) store.
+    pub seal_key: Option<fauna_core::crypto::ReplicaSealKey>,
+    /// The account the store belongs to, hex.
+    pub actor_id_hex: String,
+    /// The writer the store is stamped with at this assembly.
+    pub writer: fauna_account_store::types::WriterId,
+}
+
+impl std::fmt::Debug for ServeStoreFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The seal key never reaches a log.
+        f.debug_struct("ServeStoreFacts")
+            .field("store_dir", &self.store_dir)
+            .field("sealed", &self.seal_key.is_some())
+            .field("actor_id_hex", &self.actor_id_hex)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a runtime's [`ServeStoreFacts`] rest — seated by the native host at
+/// every assembly, shared by the driver and every clone of the handle; empty
+/// on a host that seats none (web: no second connection exists there).
+///
+/// It also holds the [`SecondConnection`]s opened FROM those facts by a
+/// consumer outside the runtime (the share plane's group feed): the runtime's
+/// own shutdown cannot wait for them — their consumer closes them, and learns
+/// of the shutdown only from [`AccountStoreHandle::closed`] — so the shared
+/// stop releases and awaits them after the shutdown
+/// ([`AccountStoreHandle::release_second_connections`]).
+#[derive(Clone, Default)]
+pub struct ServeStoreSeat {
+    facts: Arc<std::sync::Mutex<Option<ServeStoreFacts>>>,
+    opened: Arc<std::sync::Mutex<Vec<SecondConnection>>>,
+}
+
+impl std::fmt::Debug for ServeStoreSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServeStoreSeat")
+            .field("seated", &self.current().is_some())
+            .finish()
+    }
+}
+
+impl ServeStoreSeat {
+    /// Seat this assembly's facts, replacing an earlier assembly's.
+    pub fn seat(&self, facts: ServeStoreFacts) {
+        if let Ok(mut seat) = self.facts.lock() {
+            *seat = Some(facts);
+        }
+    }
+
+    fn current(&self) -> Option<ServeStoreFacts> {
+        self.facts.lock().ok()?.clone()
+    }
+}
+
+/// The future a [`SecondConnection`]'s close is awaited through.
+pub type SecondConnectionClose =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+/// A second connection to this runtime's store, opened from its
+/// [`ServeStoreFacts`] by a consumer OUTSIDE the runtime — the share plane's
+/// group feed (`group-set.md` § decision 6) — and registered with
+/// [`AccountStoreHandle::register_second_connection`] so a sign-out's erase
+/// never meets it open (`account-scoping.md` § Erasure follows scope, *The
+/// stop's receipt covers the runtime's SECOND connections too*).
+///
+/// Three halves, each a closure so this crate names no serving type:
+/// `release` lets go of the consumer's handle on the connection (the
+/// consumer's other holders may outlive the stop); `is_closed` says whether
+/// the connection is closed already (a registration a re-wire replaced is
+/// pruned by it); `close` makes a future that resolves once it is closed —
+/// a factory, because two stops of one runtime both wait.
+pub struct SecondConnection {
+    what: &'static str,
+    release: Option<Box<dyn FnOnce() + Send>>,
+    is_closed: Box<dyn Fn() -> bool + Send>,
+    close: Box<dyn Fn() -> SecondConnectionClose + Send>,
+}
+
+impl SecondConnection {
+    /// A registration named `what` in the stop's elapse warning.
+    pub fn new(
+        what: &'static str,
+        release: impl FnOnce() + Send + 'static,
+        is_closed: impl Fn() -> bool + Send + 'static,
+        close: impl Fn() -> SecondConnectionClose + Send + 'static,
+    ) -> Self {
+        Self {
+            what,
+            release: Some(Box::new(release)),
+            is_closed: Box::new(is_closed),
+            close: Box::new(close),
+        }
+    }
+
+    /// What the stop's elapse warning names this connection by.
+    pub fn what(&self) -> &'static str {
+        self.what
+    }
+
+    /// Let go of the consumer's handle on the connection; a second call does
+    /// nothing.
+    pub fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+
+    /// Whether the connection is closed already.
+    pub fn is_closed(&self) -> bool {
+        (self.is_closed)()
+    }
+
+    /// A future that resolves once the connection is closed.
+    pub fn close(&self) -> SecondConnectionClose {
+        (self.close)()
+    }
+}
+
 /// The `Send + Clone` face of the runtime. All store access crosses this
 /// handle; dropping every clone shuts the store thread down (the plain-quit
 /// teardown), and [`Self::shutdown`] does it deterministically (sign-out).
@@ -956,6 +1230,9 @@ pub struct AccountStoreHandle {
     /// The holder reach [`Self::walk_fleet`] hands a non-holder's walk to —
     /// empty until the host seats one ([`Self::seat_holder_walk`]).
     pub(super) holder_walk: HolderWalkSeat,
+    /// The facts a second store connection opens from — seated by the
+    /// native host at every assembly ([`Self::serve_store_facts`]).
+    pub(super) serve_store: ServeStoreSeat,
 }
 
 /// The identity half of the succession-ledger seam: the account this runtime
@@ -1214,6 +1491,37 @@ impl AccountStoreHandle {
                 value,
                 reply,
             })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// This account's muted words and hidden report subjects
+    /// (`fauna.state.moderation`) — the fold of its live rows, each family
+    /// oldest-stamp first. A local read; `moderation_rows` owns the
+    /// mechanics. The first-listing gate is the caller's
+    /// (`preference_surfaces` waits for it before every read).
+    pub async fn moderation(&self) -> Result<fauna_core::data::ModerationConfig> {
+        crate::moderation_rows::moderation_of(
+            &self
+                .states_of_kind(fauna_protocol::merge_policy::KIND_MODERATION)
+                .await?,
+        )
+    }
+
+    /// Write the moderation rows `changes` names, in order — per-row
+    /// latest-wins puts and stamped tombstones on the delegable plane, each
+    /// skipped when the store already matches (`moderation_rows` owns the
+    /// mechanics; `ModerationConfig::changes_to` computes them). Whether
+    /// anything was written. Local, like [`Self::put_preference`]: the
+    /// publish step ships the rows.
+    pub async fn write_moderation(
+        &self,
+        changes: Vec<fauna_core::moderation_rows::ModerationChange>,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::WriteModeration { changes, reply })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
@@ -2402,6 +2710,24 @@ impl AccountStoreHandle {
         Ok(crate::group_state_plane::reception_keys_from_rows(rows))
     }
 
+    /// A group set's content-key ring — [`crate::group_set::group_set_keys`]
+    /// across the handle: the same scope rows and reception keys, folded by
+    /// the same [`crate::group_set::held_group_generations`], so a host that
+    /// reaches the store only through this handle (the sync agent's engine
+    /// build, `p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 7) reads exactly what the in-store reader reads. A local read
+    /// — never a network call.
+    pub async fn group_set_keys(
+        &self,
+        scope_id: [u8; 32],
+    ) -> Result<crate::group_set::GroupContentKeys> {
+        let rows = self.group_scope_states(scope_id).await?;
+        let reception = self.group_reception_keys().await?;
+        Ok(crate::group_set::GroupContentKeys::from(
+            &crate::group_set::held_group_generations(&scope_id, &rows, &reception),
+        ))
+    }
+
     /// Adopt a ceremony's machinery snapshot into this account's own group
     /// plane for the scope `root` names — birth, roster entries and the first
     /// mint, through `apply_class2`'s ordinary first-contact strictness.
@@ -2462,6 +2788,89 @@ impl AccountStoreHandle {
         let (reply, rx) = oneshot::channel();
         self.cmd
             .send(Cmd::GroupRosterSnapshot { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Every group scope this replica holds and is a live member of, read
+    /// into what the group pump leg pulls ([`crate::group_pump::pump_scope`]):
+    /// the witness to present and the other members' dial targets. A local
+    /// read — never a network call.
+    pub async fn group_pump_scopes(
+        &self,
+        own_actor: fauna_core::identity::ActorId,
+    ) -> Result<Vec<crate::group_pump::GroupPumpScope>> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::GroupPumpScopes { own_actor, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Write this device's own `fauna.group.endpoints` cell into every held
+    /// scope where it is missing or says something else (decision 8 of
+    /// `p2p-shared-set-build.md` § Build design — the group set), stamped
+    /// `at_ms`; answers how many scopes were written. A local write, no feed:
+    /// the other members pull it.
+    pub async fn put_group_endpoints(
+        &self,
+        entry: fauna_core::device_endpoints::DeviceEndpointsEntry,
+        at_ms: i64,
+    ) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::PutGroupEndpoints {
+                entry: Box::new(entry),
+                at_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Walk one held group scope's feed over an admitted peer channel — the
+    /// pull of the group pump leg, the member's own per-writer frontier its
+    /// cursor. Refused when this device holds no root for the scope.
+    pub async fn walk_group_scope(
+        &self,
+        scope_id: [u8; 32],
+        channel: std::sync::Arc<dyn crate::group_pump::GroupFeedChannel>,
+    ) -> Result<crate::account_state_plane::WalkReport> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::WalkGroupScope {
+                scope_id,
+                channel,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// The lift's write (`p2p-shared-set-build.md` § Build design — the
+    /// group set, decision 7): one of the group set's pending own rows, put
+    /// as this device's signed `fauna.group.file` row
+    /// ([`crate::group_set::put_group_file`]) — the device key and its
+    /// authorization are this runtime's, so the author's carriage is signed
+    /// here, in the app process. Answers the writer seq the entry landed on.
+    /// A local write, no feed: the other members pull it. Refused when this
+    /// device holds no root for the scope or no device authorization.
+    pub async fn put_group_file(
+        &self,
+        scope_id: [u8; 32],
+        draft: crate::group_set::GroupFileDraft,
+    ) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::PutGroupFile {
+                scope_id,
+                draft: Box::new(draft),
+                reply,
+            })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
@@ -2597,6 +3006,44 @@ impl AccountStoreHandle {
         let (reply, rx) = oneshot::channel();
         self.cmd
             .send(Cmd::PutShareEndpoints { value, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Tombstone one `fauna.state.share-endpoints` row — the share pass's
+    /// sweep of a departed member's cached endpoint, on a POSITIVE roster
+    /// reading only (`p2p.md` § Cross-user shared-set transfer → *A departed
+    /// member's cached endpoint*, ruling 2; the reading is the caller's).
+    /// `Ok(false)` when no live row was there to delete — a second sweep of
+    /// the same row writes nothing.
+    pub async fn tombstone_share_endpoints(
+        &self,
+        channel_id: [u8; 32],
+        member: [u8; 32],
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::TombstoneShareEndpoints {
+                channel_id,
+                member,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
+    /// Tombstone every live `fauna.state.share-endpoints` row of one set —
+    /// the positive local event of a set this replica itself LEFT or was
+    /// removed from (`p2p.md` § Cross-user shared-set transfer → *A departed
+    /// member's cached endpoint*, ruling 2's last sentence), issued by the
+    /// caller that dropped the binding, never by a pass that merely does not
+    /// hold the set. Answers how many rows it tombstoned — `0` on a repeat.
+    pub async fn tombstone_share_endpoints_of_set(&self, channel_id: [u8; 32]) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::TombstoneShareEndpointsOfSet { channel_id, reply })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
@@ -2839,6 +3286,44 @@ impl AccountStoreHandle {
             .await
     }
 
+    /// This assembly's [`ServeStoreFacts`] — what a second connection to
+    /// the store opens from (the share plane's group feed). `None` until the
+    /// native host has seated them, and on a host that seats none.
+    pub fn serve_store_facts(&self) -> Option<ServeStoreFacts> {
+        self.serve_store.current()
+    }
+
+    /// Register a [`SecondConnection`] opened from
+    /// [`Self::serve_store_facts`], on every clone of this handle. Closed
+    /// registrations are pruned here, so a consumer that re-opens (a re-bind,
+    /// a rotated writer) does not grow the list.
+    pub fn register_second_connection(&self, connection: SecondConnection) {
+        if let Ok(mut opened) = self.serve_store.opened.lock() {
+            opened.retain(|c| !c.is_closed());
+            opened.push(connection);
+        }
+    }
+
+    /// Release every registered [`SecondConnection`] and answer the futures
+    /// its closes resolve through, each named — what the shared stop awaits,
+    /// bounded, AFTER [`Self::shutdown`]: the consumers' own holders let go
+    /// only once they see [`Self::closed`], so the runtime's receipt cannot
+    /// cover them without a deadlock. Idempotent: a second stop of the same
+    /// runtime releases nothing more and waits on the same closes.
+    pub fn release_second_connections(&self) -> Vec<(&'static str, SecondConnectionClose)> {
+        let Ok(mut opened) = self.serve_store.opened.lock() else {
+            return Vec::new();
+        };
+        opened.retain(|c| !c.is_closed());
+        opened
+            .iter_mut()
+            .map(|c| {
+                c.release();
+                (c.what(), c.close())
+            })
+            .collect()
+    }
+
     /// Seat the holder reach [`Self::walk_fleet`] hands a non-holder's walk
     /// to, on every clone of this handle — the host's act after start
     /// ([`HolderWalkSeat`]). A later seat replaces an earlier one.
@@ -3056,6 +3541,24 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
+    /// e2e-only: where this replica's `fauna.state.escrow-wrap` rows sit on
+    /// the fleet feed — each live row's logical key, the blinded item key the
+    /// nest knows it by, and the writers whose relay copies this replica holds
+    /// there. The recovery-kit let-go journey reads it before the account's
+    /// one device signs out, so the nest can stage the holder that no longer
+    /// has the wrap — the plane's copy included (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j), the third road). A local
+    /// read; gated (convention 15 rule (a)) like every e2e reader.
+    #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+    pub async fn escrow_wrap_coordinates(&self) -> Result<Vec<EscrowWrapCoordinate>> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::EscrowWrapCoordinates { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
     /// The fleet ids this replica's merged device-set state excludes — the
     /// same derivation the peer leg's removed-device snapshot runs
     /// (`fleet_removal::removed_device_ids` over this runtime's store and
@@ -3158,15 +3661,7 @@ impl AccountStoreHandle {
     /// local work in a pass ends in one (`pass_breath`) — and the retirement
     /// then runs within the stop.
     pub async fn shutdown_for_sign_out(&self) -> EnrollmentRetirement {
-        // The first request wins: a second stop of the same runtime (the
-        // host's superseded arm racing its teardown) must not move the cut.
-        self.sign_out.send_if_modified(|requested| {
-            let first = requested.is_none();
-            if first {
-                *requested = Some(now_ms());
-            }
-            first
-        });
+        self.raise_pass_cut();
         let (reply, rx) = oneshot::channel();
         let retirement = if self.cmd.send(Cmd::RetireEnrollment { reply }).await.is_ok() {
             rx.await
@@ -3176,6 +3671,41 @@ impl AccountStoreHandle {
         };
         self.shutdown().await;
         retirement
+    }
+
+    /// [`Self::shutdown`] that does not wait out the pass in flight: the pass
+    /// is cut [`SIGN_OUT_PASS_GRACE`] after the request, at its next yield
+    /// point — the cut [`Self::shutdown_for_sign_out`] makes, without its
+    /// enrollment retirement — and the store then closes.
+    ///
+    /// For a host dismissed while another process waits on the store being
+    /// released: the sync agent's mount on an un-provision, after which the
+    /// app erases that store (a sign-out) or mounts it afresh (a switch),
+    /// holding a bounded receipt for it (`apps/sync-agent.md` § Control plane
+    /// split → *The `UnprovisionCapability` reply is a receipt*). A pass whose
+    /// nest is unreachable runs for most of a minute — every nest-backed step
+    /// pays its own deadline (measured 2026-11-04 on windows: 55 s, each step
+    /// about 5 s) — and a plain shutdown parks behind all of it. The cut is a
+    /// crash at an await point, which the store survives by construction
+    /// ([`SIGN_OUT_PASS_GRACE`]'s doc); what the pass had not sent stays owed
+    /// to the next pass of whichever process holds the engine, and a pass
+    /// that ends within the grace still drains whole.
+    pub async fn shutdown_cutting_the_pass(&self) {
+        self.raise_pass_cut();
+        self.shutdown().await;
+    }
+
+    /// Raise the claim every pass is cut by, [`SIGN_OUT_PASS_GRACE`] after it.
+    /// The first request wins: a second stop of the same runtime (the host's
+    /// superseded arm racing its teardown) must not move the cut.
+    fn raise_pass_cut(&self) {
+        self.sign_out.send_if_modified(|requested| {
+            let first = requested.is_none();
+            if first {
+                *requested = Some(now_ms());
+            }
+            first
+        });
     }
 
     /// The dead generations of this account's fleet scope — each keyed by no
@@ -3899,6 +4429,31 @@ where
             let r = crate::custody_rows::put_share_endpoints(local.fleet_plane, me, &value).await;
             return wrote(r, |_| true, local.publish_due, reply);
         }
+        Cmd::TombstoneShareEndpoints {
+            channel_id,
+            member,
+            reply,
+        } => {
+            let r = crate::custody_rows::tombstone_share_endpoints(
+                local.store,
+                local.fleet_plane,
+                me,
+                &channel_id,
+                &member,
+            )
+            .await;
+            return wrote(r, |moved| *moved, local.publish_due, reply);
+        }
+        Cmd::TombstoneShareEndpointsOfSet { channel_id, reply } => {
+            let r = crate::custody_rows::tombstone_share_endpoints_of_set(
+                local.store,
+                local.fleet_plane,
+                me,
+                &channel_id,
+            )
+            .await;
+            return wrote(r, |moved| *moved > 0, local.publish_due, reply);
+        }
         // The private contact overlay: a read-modify-write on this one store
         // thread (nothing between the read and the put yields), through the
         // fleet plane's writer door — `contact_overlay_rows` owns the mechanics.
@@ -4466,6 +5021,10 @@ where
                 .await,
             );
         }
+        #[cfg(any(debug_assertions, feature = "e2e-agent"))]
+        Cmd::EscrowWrapCoordinates { reply } => {
+            let _ = reply.send(escrow_wrap_coordinates(local.store, local.fleet_plane).await);
+        }
         Cmd::RemovedDeviceIds { reply } => {
             let _ = reply
                 .send(crate::fleet_removal::removed_device_ids(local.store, local.trust).await);
@@ -4609,6 +5168,12 @@ where
                 return Served::Reassemble;
             }
         }
+        // The moderation rows: per-row puts and tombstones on the delegable
+        // plane — `moderation_rows` owns the mechanics.
+        Cmd::WriteModeration { changes, reply } => {
+            let r = crate::moderation_rows::write_changes(local.store, local.plane, &changes).await;
+            return wrote(r, |written| *written, local.publish_due, reply);
+        }
         // Recorded, not merged into the walk set here: every pass
         // re-derives (and unions `registered` back in) before it
         // reads the set, so the registration lands on the next one.
@@ -4692,6 +5257,142 @@ where
         Cmd::GroupRosterSnapshot { reply } => {
             let _ = reply
                 .send(crate::group_scope_view::GroupRosterSnapshot::load_held(local.store).await);
+        }
+        Cmd::GroupPumpScopes { own_actor, reply } => {
+            let r = async {
+                let mut out = Vec::new();
+                // The ceremony fold supplies the initiator's first dial of a
+                // recipient; a fold that will not read costs that stand-in
+                // only, never the pull of every member whose cell has landed.
+                let ceremonies = crate::group_share_rows::read_group_shares(local.store)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("group pump: ceremony records unreadable: {e:#}");
+                        Default::default()
+                    });
+                for (scope_id, _root) in held_group_roots_of(local.store).await? {
+                    let scope = fauna_protocol::scope::GroupScope::new(scope_id).to_string();
+                    let rows = local.store.group_scope_states(&scope).await?;
+                    out.extend(crate::group_pump::pump_scope(
+                        scope_id,
+                        &rows,
+                        &own_actor,
+                        &ceremonies,
+                    ));
+                }
+                Ok(out)
+            }
+            .await;
+            let _ = reply.send(r);
+        }
+        Cmd::PutGroupEndpoints {
+            entry,
+            at_ms,
+            reply,
+        } => {
+            let r = async {
+                let own = local.writer_key.verifying_key().to_bytes();
+                let own_hex = fauna_core::hex32::encode(&own);
+                // The cell carries this device's cert (the file row's
+                // carriage); a device with none writes no cell.
+                let Some(authorization) = local.principal_slot.device_authorization_carriage()
+                else {
+                    anyhow::bail!(
+                        "this device holds no device authorization to sign its endpoints cell with"
+                    );
+                };
+                let mut written = 0;
+                for (scope_id, root) in held_group_roots_of(local.store).await? {
+                    let scope = fauna_protocol::scope::GroupScope::new(scope_id).to_string();
+                    let rows = local.store.group_scope_states(&scope).await?;
+                    if !crate::group_pump::own_endpoints_due(&rows, &own_hex, &entry) {
+                        continue;
+                    }
+                    let (item, value, stamp) = crate::group_pump::own_endpoints_cell(
+                        &scope_id,
+                        local.writer_key,
+                        authorization.clone(),
+                        &entry,
+                        at_ms,
+                    )?;
+                    crate::group_state_plane::GroupStatePlane::new(
+                        local.store,
+                        &crate::group_state_plane::NoFeed,
+                        &root,
+                        local.writer_key,
+                        &scope_id,
+                    )?
+                    .put(&item, value, Some(stamp))
+                    .await?;
+                    written += 1;
+                }
+                Ok(written)
+            }
+            .await;
+            return wrote(r, |_| false, local.publish_due, reply);
+        }
+        Cmd::WalkGroupScope {
+            scope_id,
+            channel,
+            reply,
+        } => {
+            let r = async {
+                let Some((_, root)) = held_group_roots_of(local.store)
+                    .await?
+                    .into_iter()
+                    .find(|(id, _)| *id == scope_id)
+                else {
+                    anyhow::bail!(
+                        "this device holds no root for the group scope it was asked to walk"
+                    );
+                };
+                let rpc = crate::group_pump::ChannelRequester(channel);
+                crate::group_state_plane::GroupStatePlane::new(
+                    local.store,
+                    &rpc,
+                    &root,
+                    local.writer_key,
+                    &scope_id,
+                )?
+                .walk()
+                .await
+            }
+            .await;
+            return wrote(r, |_| false, local.publish_due, reply);
+        }
+        Cmd::PutGroupFile {
+            scope_id,
+            draft,
+            reply,
+        } => {
+            let r = async {
+                let Some((_, root)) = held_group_roots_of(local.store)
+                    .await?
+                    .into_iter()
+                    .find(|(id, _)| *id == scope_id)
+                else {
+                    anyhow::bail!(
+                        "this device holds no root for the group scope it was asked to lift into"
+                    );
+                };
+                let Some(authorization) = local.principal_slot.device_authorization_carriage()
+                else {
+                    anyhow::bail!(
+                        "this device holds no device authorization to sign a lifted row with"
+                    );
+                };
+                crate::group_set::put_group_file(
+                    local.store,
+                    &root,
+                    local.writer_key,
+                    &scope_id,
+                    authorization,
+                    &draft,
+                )
+                .await
+            }
+            .await;
+            return wrote(r, |_| false, local.publish_due, reply);
         }
         // Every pass-bound variant is the serve loop's.
         _ => unreachable!(
@@ -4862,4 +5563,16 @@ mod escrow_holders_tests {
         ];
         assert_eq!(escrow_holders_of(&entries), vec![[0xAA; 32], [0xBB; 32]]);
     }
+}
+
+/// The held group scopes and their machinery roots, read from this store's
+/// held-root rows ([`crate::group_state_plane::held_group_roots`], the one
+/// enumeration).
+async fn held_group_roots_of<B: StoreBackend>(
+    store: &AccountStore<B>,
+) -> Result<Vec<([u8; 32], fauna_core::crypto::GroupMachineryRoot)>> {
+    let held = store
+        .states_of_kind(fauna_protocol::merge_policy::KIND_GROUP_MACHINERY_ROOT)
+        .await?;
+    Ok(crate::group_state_plane::held_group_roots(&held))
 }

@@ -8,10 +8,7 @@ guide: docs/guides/your-own-cloud.md § The trust model, in plain words
 
 ## What a user gets
 
-There is nothing to choose: inside the released image every network-facing part runs as its own user,
-the parts that parse hostile mail are sandboxed, none can read another's keys or
-your sealed data, a helper cannot forge its own enrolment, and the nest reports all
-of that to its admin over its own connection, so nobody needs a shell to check it.
+There is nothing to choose: inside Fauna's container image for the nest every part that talks to the network runs under a system account of its own, the parts that handle mail run in a sandbox, no helper can read another's keys or the nest's encrypted store of your data, a mail helper cannot sign in to the nest under a forged identity, and a mail helper that starts without these walls shows up as a warning in the admin's log in the app, so nobody needs a command line to find out.
 A stop is a clean goodbye to every connected app.
 
 ## Coverage contract
@@ -62,13 +59,13 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| windows | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| macos | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| ios | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| android | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| windows | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| macos | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -93,7 +90,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_slow_nest_stop_fits_s6_grace` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_confinement_degraded_docker.py::test_an_unsandboxed_mail_helper_warns_in_the_admins_log` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_lenient_box_forged_enrollment_is_accepted` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py::test_a_request_in_flight_at_stop_is_answered_before_the_1001_close` | nest (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py::test_a_request_in_flight_at_stop_is_answered_before_the_1001_close` | nest (linux): passed, nest (macos): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_forgery_docker.py::test_a_helper_cannot_fake_where_a_connection_comes_from` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_each_service_runs_under_its_own_uid` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_nests_secrets_to_its_own_uid` | nest (linux): passed |

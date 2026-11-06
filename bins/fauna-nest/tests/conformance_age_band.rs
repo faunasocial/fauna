@@ -32,7 +32,6 @@ use bytes::Bytes;
 use ed25519_dalek::Signer;
 
 use fauna_core::identity::ActorKeypair;
-use fauna_core::obligation::ContentFloor;
 use fauna_nest::db::CacheDb;
 use fauna_nest::routes::{AppState, RegistrationConfig};
 use fauna_nest::rpc_router::RpcRouter;
@@ -240,8 +239,21 @@ async fn banded_mint_carries_the_band_through_admission_to_status_and_defaults()
     assert!(!policy.federation_contact);
     assert_eq!(policy.feed_sources, "block");
     assert_eq!(policy.unknown_peer_dm.as_deref(), Some("hold"));
-    let cp = policy.content_policy.expect("U13 default sets floors");
-    assert_eq!(cp.nsfw, ContentFloor::Block);
+    let cp = policy
+        .content_policy
+        .expect("U13 default sets content rules");
+    let nsfw = cp
+        .document
+        .as_ref()
+        .expect("the defaults are a rule document")
+        .rules
+        .iter()
+        .find(|r| r.factor == "nsfw")
+        .expect("U13 rules nsfw");
+    assert_eq!(
+        nsfw.verdict,
+        fauna_core::content_policy::ContentVerdict::Block
+    );
     assert_eq!(policy.content_notify, Some(true));
     let features = policy.features.expect("U13 default sets the feature tier");
     assert_eq!(

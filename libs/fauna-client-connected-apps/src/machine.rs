@@ -4,7 +4,7 @@
 //! `snapshot()`. `std::sync::Mutex`, never held across an `await` — the shape
 //! every page machine in `libs/` shares.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use fauna_atproto_settings_machine::consent_grant::{self, AnswerError};
@@ -63,6 +63,11 @@ const BLOCK_ERROR_KEY: &str = "connected_apps.error_block";
 const BIND_ERROR_KEY: &str = "connected_apps.error_bind";
 /// Fallback name for a row with no resolved name and no client id.
 const UNNAMED_KEY: &str = "connected_apps.unnamed";
+/// The version row's author line (`file-version-author`; `folder-deposit.md`
+/// ruling 3) — [`ConnectedAppsMachine::version_author`].
+const VERSION_AUTHOR_KEY: &str = "media.version_author";
+const VERSION_AUTHOR_DEPOSITED_KEY: &str = "media.version_author_deposited";
+const VERSION_AUTHOR_DEPOSITED_UNKNOWN_KEY: &str = "media.version_author_deposited_unknown";
 /// A signer client still waiting for the app to connect.
 const SIGNER_PENDING_KEY: &str = "connected_apps.signer_pending";
 /// A NIP-46 signer's one scope, in words — it may ask the nest to sign Nostr
@@ -111,6 +116,9 @@ struct State {
     /// `false`: the flag's own default is ON.
     external_apps_off: bool,
     error: Option<LocalizedText>,
+    /// The depositor keys a roster read has been asked for
+    /// ([`ConnectedAppsMachine::depositor_read_wanted`]) — each key once.
+    depositor_reads: BTreeSet<[u8; 32]>,
 }
 
 /// One roster row's keys, by its row key and its `client_id`.
@@ -199,6 +207,73 @@ impl ConnectedAppsMachine {
             record: s.record.clone(),
             error: s.error.clone(),
         }
+    }
+
+    /// The author line of a file version (`file-version-author`): the recorder
+    /// alone, or — on a version a connected app deposited and the owner's
+    /// device adopted (`folder-deposit.md` ruling 3) — the depositing app's
+    /// name from the last roster read, "<app> via <owner>", and "a connected
+    /// app via <owner>" when no row of it names `deposited_by` (a member's
+    /// app, a roster not yet read, an app since removed). `deposited_by` is the
+    /// version's hex writer key; `author_display` its recorder's label.
+    pub fn version_author(
+        &self,
+        author_display: String,
+        deposited_by: Option<String>,
+    ) -> LocalizedText {
+        let Some(deposited_by) = deposited_by else {
+            return LocalizedText::key_arg(VERSION_AUTHOR_KEY, "author", author_display);
+        };
+        let writer = fauna_core::hex32::decode(&deposited_by).ok();
+        let s = self.state.lock().unwrap();
+        // The app's own name only: a row the roster could not name reads as
+        // the generic wording, never as "an unnamed app".
+        let app = writer.and_then(|w| {
+            let key = &s
+                .principal_keys
+                .iter()
+                .find(|r| r.keys.writer == Some(w))?
+                .key;
+            let row = s.principals.iter().find(|r| &r.key == key)?;
+            (row.name.key == VERBATIM_KEY).then(|| row.name.args.get("text").cloned())?
+        });
+        match app {
+            Some(app) => LocalizedText::key_args(
+                VERSION_AUTHOR_DEPOSITED_KEY,
+                [("app", app), ("author", author_display)],
+            ),
+            None => LocalizedText::key_arg(
+                VERSION_AUTHOR_DEPOSITED_UNKNOWN_KEY,
+                "author",
+                author_display,
+            ),
+        }
+    }
+
+    /// Whether naming the depositors `deposited_by` lists (hex writer keys,
+    /// [`Self::version_author`]) wants a roster read ([`Self::refresh`]) — a
+    /// key the roster cannot name now, asked once per key and marked as asked
+    /// by this call. A loaded roster can predate the depositor: the approve's
+    /// own re-read runs before the app redeems its code at `/oauth/token`,
+    /// where the nest writes the principal row, so "the roster was read" is
+    /// not "the roster can name it". Once per key keeps a key no roster will
+    /// ever name (a member's seat, a revoked app) to one read, never a loop.
+    pub fn depositor_read_wanted(&self, deposited_by: Vec<String>) -> bool {
+        let mut s = self.state.lock().unwrap();
+        let mut wanted = false;
+        for key in &deposited_by {
+            let Ok(writer) = fauna_core::hex32::decode(key) else {
+                continue;
+            };
+            let named = s.loaded
+                && s.principal_keys
+                    .iter()
+                    .any(|r| r.keys.writer == Some(writer));
+            if !named && s.depositor_reads.insert(writer) {
+                wanted = true;
+            }
+        }
+        wanted
     }
 
     /// Re-read the whole page. Non-optimistic: every gesture below ends here,

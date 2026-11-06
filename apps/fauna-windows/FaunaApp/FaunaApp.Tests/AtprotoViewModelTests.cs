@@ -568,6 +568,24 @@ public class AtprotoViewModelTests
         Assert.False(without.Vm.ShowHistoryBackfill);
     }
 
+    /// <summary>The opt-in's text is the card's composed label, naming the count a
+    /// backfill would publish (atproto-pds-bridge.md § Projection &amp; backfill) — never
+    /// the count-less static string. No string table under unit test: the resolved
+    /// text is the key the machine composed.</summary>
+    [Fact]
+    public async Task The_backfill_optin_reads_the_cards_composed_count_label()
+    {
+        var label = new LocalizedText(
+            "atproto_settings.history_backfill_count_label",
+            new Dictionary<string, string> { ["count"] = "3" });
+        var (vm, _) = await LoadedAsync(Snapshot(
+            pending: new TransitionCardModel("hosted_visible", new[] { Text("k") }, true, label, false)));
+        Assert.Equal("atproto_settings.history_backfill_count_label", vm.HistoryBackfillLabel);
+
+        var (none, _) = await LoadedAsync(Snapshot(pending: null));
+        Assert.Equal(string.Empty, none.HistoryBackfillLabel);
+    }
+
     /// <summary>An in-flight confirm disables both card actions, so a double-tap
     /// cannot stage a second transition over one already running.</summary>
     [Fact]
@@ -644,6 +662,20 @@ public class AtprotoViewModelTests
         Assert.True(vm.ShowHostedPanel);
         Assert.True(vm.ShowDidMethodRadio);
         Assert.Contains("alice.example.com", vm.HandlePreview);
+    }
+
+    /// <summary>Each DID-method radio publishes its own selection in the depth rungs'
+    /// vocabulary, the <c>state</c> read every app answers the same way.</summary>
+    [Theory]
+    [InlineData("plc", "active", "inactive")]
+    [InlineData("web", "inactive", "active")]
+    public async Task The_did_method_radios_publish_active_and_inactive(string method, string plc, string web)
+    {
+        UseRealStrings();
+        var (vm, _) = await LoadedAsync(Snapshot(didMethod: method));
+
+        Assert.Equal(plc, vm.DidMethodPlcState);
+        Assert.Equal(web, vm.DidMethodWebState);
     }
 
     /// <summary>After the mint the method is a FACT, displayed not chosen — switching
@@ -867,11 +899,22 @@ public class AtprotoViewModelTests
         Assert.True((await LoadedAsync(Snapshot(level: "hosted_full"))).Vm.ShowFullPds);
     }
 
+    /// <summary>The delegation group is gated on the delegation, not the level
+    /// (ui/atproto.md § Layout &amp; flow, ruled 2026-10-23): the held row renders below
+    /// full PDS wherever a verified delegation exists; with none, the group (empty
+    /// state + first grant) is full-PDS-only. Mirrors tui's
+    /// <c>the_delegation_row_is_gated_on_the_delegation_not_the_level</c>.</summary>
     [Fact]
-    public async Task The_kill_switch_state_attr_mirrors_the_snapshot()
+    public async Task The_delegation_group_is_gated_on_the_delegation_not_the_level()
     {
-        Assert.Equal("on", (await LoadedAsync(Snapshot(externalAppsEnabled: true))).Vm.ExternalAppsState);
-        Assert.Equal("off", (await LoadedAsync(Snapshot(externalAppsEnabled: false))).Vm.ExternalAppsState);
+        foreach (var level in new[] { "off", "linked", "hosted_visible" })
+        {
+            var (vm, _) = await LoadedAsync(Snapshot(level: level));
+            Assert.False(vm.ShowDelegationPanel);
+            vm.ShowDelegationRow = true;
+            Assert.True(vm.ShowDelegationPanel);
+        }
+        Assert.True((await LoadedAsync(Snapshot(level: "hosted_full"))).Vm.ShowDelegationPanel);
     }
 
     // ── Gestures are forwarded, never simulated ─────────────────────────────
@@ -885,13 +928,11 @@ public class AtprotoViewModelTests
         vm.SetDidMethod("web");
         vm.SetHistoryBackfill(true);
         await vm.ConfirmTransitionAsync();
-        await vm.SetExternalAppsEnabledAsync(false);
 
         Assert.Contains("CancelTransition", m.Calls);
         Assert.Contains("SetDidMethod:web", m.Calls);
         Assert.Contains("SetHistoryBackfill:True", m.Calls);
         Assert.Contains("ConfirmTransition", m.Calls);
-        Assert.Contains("SetExternalAppsEnabled:False", m.Calls);
     }
 
     /// <summary>A refused gesture surfaces on the page's error banner rather than
@@ -940,6 +981,21 @@ public class AtprotoViewModelTests
         Assert.Single(vm.Credentials);
         Assert.Equal("Reveal", vm.Credentials[0].RevealText);
         Assert.True(vm.Credentials[0].CanReveal);
+        Assert.True(vm.Credentials[0].ShowReveal);
+    }
+
+    /// <summary>A row whose secret this device cannot read back offers no reveal
+    /// control at all (linux, web and apple withhold it the same way): a disabled
+    /// button would read as an already-revealed row, its label as the secret.</summary>
+    [Fact]
+    public async Task A_row_this_device_cannot_read_back_renders_no_reveal_control()
+    {
+        UseRealStrings();
+        var (vm, _) = await LoadedAsync(Snapshot(
+            level: "hosted_full",
+            credentials: new[] { Credential(credentialId: "ivory", revealable: false) }));
+
+        Assert.False(vm.Credentials[0].ShowReveal);
     }
 
     /// <summary>The F1 get_text contract: <c>atproto-app-credential-reveal</c>'s
@@ -1002,6 +1058,23 @@ public class AtprotoViewModelTests
         Assert.Single(vm.Credentials);
         Assert.Equal("fresh-secret", vm.Credentials[0].RevealText);
         Assert.False(vm.Credentials[0].CanReveal);
+    }
+
+    /// <summary>The reveal control carries the secret, so a row revealed this session
+    /// keeps it even when the row itself is not revealable.</summary>
+    [Fact]
+    public async Task A_secret_shown_this_session_keeps_its_control_on_an_unrevealable_row()
+    {
+        UseRealStrings();
+        var (vm, m) = await LoadedAsync(Snapshot(level: "hosted_full", credentials: Array.Empty<AppCredentialRow>()));
+        m.OnMint = (label, dmAllowed) => (
+            Snapshot(level: "hosted_full", credentials: new[] { Credential(credentialId: "new-cred", label: label, revealable: false) }),
+            "fresh-secret");
+
+        await vm.MintCredentialAsync("Ivory", false);
+
+        Assert.True(vm.Credentials[0].ShowReveal);
+        Assert.Equal("fresh-secret", vm.Credentials[0].RevealText);
     }
 
     /// <summary>Minting a SECOND credential must not disturb the first row's

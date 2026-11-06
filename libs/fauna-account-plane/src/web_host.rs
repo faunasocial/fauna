@@ -44,14 +44,15 @@
 //!
 //! The data path is the app session (ruling (4)'s decision (e)): web's one
 //! socket per actor carries the enrollment legs and the pass alike, so there
-//! is no `process_rpc`.
+//! is no `process_rpc`, and that socket is bound to the tab's device in band
+//! ([`crate::web_device_bind`]) beside the store task, for the task's life.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fauna_account_store::indexeddb::IndexedDbBackend;
-use fauna_account_store::locks::{EngineLock, EngineLockOutcome, SeedLegLock, SeedLegLockOutcome};
+use fauna_account_store::locks::{EngineLock, SeedLegLock};
 use fauna_account_store::root::StoreRoot;
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::WriterId;
@@ -70,6 +71,7 @@ use crate::principal_bundle::{
     self, PrincipalBundle, SecretStore, SlotSection, WriterKeyProvenance,
 };
 use crate::principal_succession::{self, CeremonyProbe, LostSlotHeal};
+use crate::web_device_bind::{DeviceBindSeats, PinnedIdentity};
 
 /// Web's slot section: the tab's own (ruling (4)'s decision (c)). The medium
 /// has no synchronous cross-tab lock — Web Locks is async and the slot seam
@@ -108,21 +110,13 @@ impl EngineElection for WebElection {
     type Held = EngineLock;
 
     async fn try_acquire(&self) -> ElectionOutcome<EngineLock> {
-        match EngineLock::try_acquire(&self.store_name).await {
-            EngineLockOutcome::Held(lock) => ElectionOutcome::Held(lock),
-            EngineLockOutcome::Refused => ElectionOutcome::Refused,
-            EngineLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
-        }
+        EngineLock::try_acquire(&self.store_name).await.into()
     }
 
     type SeedLegs = SeedLegLock;
 
     async fn try_acquire_seed_legs(&self) -> ElectionOutcome<SeedLegLock> {
-        match SeedLegLock::try_acquire(&self.store_name).await {
-            SeedLegLockOutcome::Held(lock) => ElectionOutcome::Held(lock),
-            SeedLegLockOutcome::Refused => ElectionOutcome::Refused,
-            SeedLegLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
-        }
+        SeedLegLock::try_acquire(&self.store_name).await.into()
     }
 
     async fn agent_present(&self) -> Presence {
@@ -224,6 +218,11 @@ pub struct WebRuntimeParams<R, D = NoCustodianDial> {
     /// socket whose actor is the device key, and a streaming fetch of the
     /// segment byte route. `None` answers the gesture `Err`.
     pub custodian_dial: Option<D>,
+    /// The serving origin's pinned nest identity, the session's one socket
+    /// binding to the tab's device in band over it (decision (e)). `None`
+    /// binds nothing — a runtime that stops as soon as it is ready has no
+    /// socket to keep online.
+    pub device_bind: Option<PinnedIdentity>,
 }
 
 /// Start the account runtime for one account in this tab. Returns once the
@@ -232,7 +231,7 @@ pub struct WebRuntimeParams<R, D = NoCustodianDial> {
 /// comes up. The caller keeps the handle for the account's session and calls
 /// [`AccountStoreHandle::shutdown`] before another account signs in.
 pub async fn start<S, R, D>(
-    params: WebRuntimeParams<R, D>,
+    mut params: WebRuntimeParams<R, D>,
     credentials: Arc<S>,
 ) -> Result<AccountStoreHandle>
 where
@@ -247,19 +246,41 @@ where
         DriverConfig {
             actor_id_hex: params.actor_id_hex.clone(),
             backstop_interval: params.backstop_interval,
+            tip_wait: crate::account_driver::FIRST_PASS_WAIT,
             memberships: params.memberships.clone(),
             trusted_escrow_holders: params.trusted_escrow_holders.clone(),
             attested_predecessors: params.attested_predecessors.clone(),
             enrollment_target_device_id: params.enrollment_target_device_id.clone(),
+            // No web app default is ratified (`devices.md` § Device names):
+            // web's row is born under the placeholder.
+            enrollment_device_label: None,
         },
         params.reconnects.clone(),
         params.pushes.as_ref().map(broadcast::Receiver::resubscribe),
     );
     let (ready_tx, ready_rx) = oneshot::channel();
-    wasm_bindgen_futures::spawn_local(worker(params, credentials, driver, ready_tx));
+    let (bind_stop_tx, bind_stop_rx) = oneshot::channel();
+    let device_bind = params
+        .device_bind
+        .take()
+        .map(|pinned_identity| DeviceBindSeats {
+            rpc: params.rpc.clone(),
+            credentials: Arc::clone(&credentials),
+            actor_id: ActorId(
+                fauna_core::hex32::decode(&params.actor_id_hex).expect("decoded above"),
+            ),
+            pinned_identity,
+            grant_registered: handle.subscribe_grant_registered(),
+            engine_role: handle.subscribe_engine_role(),
+            reconnects: params.reconnects.clone(),
+        });
+    wasm_bindgen_futures::spawn_local(worker(params, credentials, driver, ready_tx, bind_stop_tx));
     ready_rx
         .await
         .map_err(|_| anyhow::anyhow!("account runtime: the store task ended during assembly"))??;
+    if let Some(seats) = device_bind {
+        wasm_bindgen_futures::spawn_local(crate::web_device_bind::run(seats, bind_stop_rx));
+    }
     Ok(handle)
 }
 
@@ -412,6 +433,9 @@ where
             &writer_key,
             &slot,
             inputs.enrollment_target_device_id,
+            // Web has no app default (`devices.md` § Device names names six,
+            // web's not among them): the placeholder, as in its ceremony.
+            None,
             inputs.allow_rotation,
             inputs.own_row_removed,
         )
@@ -463,12 +487,14 @@ where
 }
 
 /// The store task's body: assemble, hand the driver one assembly at a time,
-/// until it says the runtime is over.
+/// until it says the runtime is over. `_bind_stop` dropping with it ends the
+/// device bind.
 async fn worker<S, R, D>(
     params: WebRuntimeParams<R, D>,
     credentials: Arc<S>,
     mut driver: AccountDriver,
     ready_tx: oneshot::Sender<Result<()>>,
+    _bind_stop: oneshot::Sender<()>,
 ) where
     S: SecretStore + 'static,
     R: KeyedRpcRequester + Clone + 'static,

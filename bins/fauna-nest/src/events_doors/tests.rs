@@ -137,6 +137,11 @@ async fn the_webhook_walk_selects_by_the_live_reach() {
     );
     assert_eq!(reached[0].hook.client_id, "https://app.example/client.json");
     assert!(reached[0].scopes.iter().any(|s| s == EVENTS));
+    assert_eq!(
+        reached[0].sub,
+        hex::encode(ACCOUNT),
+        "a Fauna-family grant's own subject"
+    );
     assert!(
         crate::events_webhook::targets(&state.db, &ACCOUNT, B_NOTES)
             .await
@@ -155,6 +160,158 @@ async fn the_webhook_walk_selects_by_the_live_reach() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn a_hooks(reached: &[crate::events_webhook::Target]) -> usize {
+    reached
+        .iter()
+        .filter(|t| t.hook.client_id == "https://app.example/client.json")
+        .count()
+}
+
+/// The walk reads the grant family as every principal call does —
+/// a server whose family the user ended is POSTed nothing.
+#[tokio::test]
+async fn the_webhook_walk_skips_a_principal_whose_grant_family_ended() {
+    let (state, _a, _b) = fixture(&[A_RECORDS, EVENTS]).await;
+    let walk = || crate::events_webhook::targets(&state.db, &ACCOUNT, A_NOTES);
+    assert_eq!(
+        a_hooks(&walk().await.unwrap()),
+        1,
+        "sanity: reached while live"
+    );
+    // The fixture's grant id is the client id's bytes.
+    assert!(
+        state
+            .db
+            .revoke_atproto_session(&ACCOUNT, b"https://app.example/client.json")
+            .await
+            .unwrap()
+    );
+    assert_eq!(a_hooks(&walk().await.unwrap()), 0);
+}
+
+/// A grant past its own `expires_at` — session row unrevoked — is a lapsed
+/// token: the walk POSTs that server nothing, as `list_event_webhooks`'
+/// expiry arm says.
+#[tokio::test]
+async fn the_webhook_walk_skips_a_principal_whose_grant_expired() {
+    let (state, _a, _b) = fixture(&[A_RECORDS, EVENTS]).await;
+    let walk = || crate::events_webhook::targets(&state.db, &ACCOUNT, A_NOTES);
+    assert_eq!(
+        a_hooks(&walk().await.unwrap()),
+        1,
+        "sanity: reached while live"
+    );
+    // Expired in the past; revoked_at stays NULL, so only the expiry arm acts.
+    let changed = state
+        .db
+        .conn()
+        .await
+        .execute(
+            "UPDATE atproto_oauth_grants SET expires_at = 1 WHERE client_id = ?1",
+            ["https://app.example/client.json"],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "the fixture's one grant row was expired");
+    assert_eq!(a_hooks(&walk().await.unwrap()), 0);
+}
+
+/// The HTTP door must consult the per-principal cap: a source-shape pin, as
+/// the counter's own test pins only the counter, not its use.
+#[test]
+fn the_http_handler_passes_the_long_poll_cap() {
+    let src = include_str!("../events_doors.rs");
+    let begin = src
+        .find("event_poll_begin(")
+        .expect("the handler takes a poll slot");
+    let call = &src[begin..];
+    let call = &call[..call.find(')').expect("call closes")];
+    assert!(
+        call.contains("MAX_LONG_POLLS"),
+        "event_poll_begin must be passed MAX_LONG_POLLS, got: {call}"
+    );
+    assert_eq!(
+        src.matches("event_poll_begin(").count(),
+        1,
+        "one poll-slot call site: a second would need its own pin"
+    );
+}
+
+/// A login-plane suspension ends the session rows and keeps the
+/// grant rows — the walk follows the session, as the per-call resolve does.
+#[tokio::test]
+async fn the_webhook_walk_skips_a_principal_whose_session_was_swept() {
+    let (state, _a, _b) = fixture(&[A_RECORDS, EVENTS]).await;
+    state
+        .db
+        .revoke_all_atproto_sessions(&ACCOUNT)
+        .await
+        .unwrap();
+    assert!(
+        crate::events_webhook::targets(&state.db, &ACCOUNT, A_NOTES)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A superseded identity has no reach left to be told about —
+/// the admission's own supersession read.
+#[tokio::test]
+async fn the_webhook_walk_skips_a_superseded_account() {
+    let (state, _a, _b) = fixture(&[A_RECORDS, EVENTS]).await;
+    let successor = [0xB2; 32];
+    state
+        .db
+        .create_user(&successor, "free", "test")
+        .await
+        .unwrap();
+    state
+        .db
+        .conn()
+        .await
+        .execute(
+            "INSERT INTO actor_successions \
+                 (old_actor_id, new_actor_id, statement, seq, succeeded_at) \
+             VALUES (?1, ?2, ?3, 1, 1)",
+            rusqlite::params![&ACCOUNT[..], &successor[..], &b"s"[..]],
+        )
+        .unwrap();
+    assert!(
+        crate::events_webhook::targets(&state.db, &ACCOUNT, A_NOTES)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// An ATProto-family grant on an account with no active ATProto
+/// identity has no subject its tokens could carry — the walk skips it rather
+/// than naming the account by its internal id.
+#[tokio::test]
+async fn the_webhook_walk_never_names_the_account_by_its_internal_id() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+    let state = Arc::new(AppState::for_test(db));
+    principal(
+        &state,
+        "app.example",
+        0x71,
+        A_WRITER,
+        &format!("atproto {A_RECORDS} {EVENTS}"),
+        &[A_RECORDS, EVENTS],
+        Some("https://app.example/fauna/events"),
+    )
+    .await;
+    let reached = crate::events_webhook::targets(&state.db, &ACCOUNT, A_NOTES)
+        .await
+        .unwrap();
+    assert!(
+        reached.iter().all(|t| t.sub != hex::encode(ACCOUNT)),
+        "the internal account id is no subject: {reached:?}"
+    );
+    assert!(reached.is_empty());
 }
 
 async fn put(
@@ -224,7 +381,8 @@ fn pushed(rx: &mut mpsc::Receiver<Bytes>) -> Vec<SyncChangedPayload> {
 }
 
 /// The headline: B's change lands first, A's after it; A's poll names only
-/// its own scope, and the cursor walks past both.
+/// its own scope, and the cursor moves only to A's own heads — never on B's
+/// write.
 #[tokio::test]
 async fn a_poll_names_only_the_scopes_the_session_can_list() {
     let (state, a, b) = fixture(&[A_RECORDS, EVENTS]).await;
@@ -244,13 +402,57 @@ async fn a_poll_names_only_the_scopes_the_session_can_list() {
     put(&state, &b, B_NOTES, &B_WRITER, 2).await;
     let after_b = poll(&state, &a, Some(first.cursor)).await.unwrap();
     assert!(after_b.frames.is_empty(), "another publisher's change");
-    assert!(
-        after_b.cursor > first.cursor,
-        "the cursor still walks past it"
+    assert_eq!(
+        after_b.cursor, first.cursor,
+        "the cursor does not move on a write A cannot list — it would tell A \
+         that another publisher wrote, and when"
     );
     put(&state, &a, A_NOTES, &A_WRITER, 2).await;
     let after_a = poll(&state, &a, Some(after_b.cursor)).await.unwrap();
     assert_eq!(scopes(&after_a), vec![A_NOTES]);
+    assert!(after_a.cursor > first.cursor);
+}
+
+/// A first poll after only another publisher wrote names nothing
+/// and leaves the cursor where it started.
+#[tokio::test]
+async fn a_cursor_never_counts_another_publishers_writes() {
+    let (state, a, b) = fixture(&[A_RECORDS, EVENTS]).await;
+    put(&state, &b, B_NOTES, &B_WRITER, 1).await;
+    put(&state, &b, B_NOTES, &B_WRITER, 2).await;
+    let reply = poll(&state, &a, None).await.unwrap();
+    assert!(reply.frames.is_empty());
+    assert_eq!(reply.cursor, 0);
+}
+
+/// One principal holds at most `MAX_LONG_POLLS` HTTP long-polls on
+/// one account; a slot comes back when its poll ends, and another
+/// principal's polls are counted apart.
+#[test]
+fn the_long_poll_is_capped_per_principal() {
+    use super::MAX_LONG_POLLS;
+    let ws = crate::ws::WsState::new();
+    let held: Vec<_> = (0..MAX_LONG_POLLS)
+        .map(|_| {
+            ws.event_poll_begin(&ACCOUNT, b"p1", MAX_LONG_POLLS)
+                .expect("under the cap")
+        })
+        .collect();
+    assert!(
+        ws.event_poll_begin(&ACCOUNT, b"p1", MAX_LONG_POLLS)
+            .is_none(),
+        "one past the cap is refused"
+    );
+    assert!(
+        ws.event_poll_begin(&ACCOUNT, b"p2", MAX_LONG_POLLS)
+            .is_some(),
+        "another principal's polls are its own"
+    );
+    drop(held);
+    assert!(
+        ws.event_poll_begin(&ACCOUNT, b"p1", MAX_LONG_POLLS)
+            .is_some()
+    );
 }
 
 /// A token without the events arm reaches no poll — the gate's half — even
@@ -377,13 +579,13 @@ async fn a_state_put_reaches_only_a_personalization_session() {
     assert!(pushed(&mut b_rx).is_empty(), "records only");
 
     // Poll: P is named `state` with the cursor at the put; A is named nothing
-    // but walks past it.
+    // and its cursor does not move — the put is not a `seq` A may list.
     let p_poll = poll(&state, &p, None).await.unwrap();
     assert_eq!(scopes(&p_poll), vec![STATE]);
     assert_eq!(p_poll.cursor, head);
     let a_poll = poll(&state, &a, None).await.unwrap();
     assert!(a_poll.frames.is_empty());
-    assert_eq!(a_poll.cursor, head);
+    assert_eq!(a_poll.cursor, 0);
 
     // Webhook: the walk selects P alone, and its token's cursor reaches the
     // `state` head.

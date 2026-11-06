@@ -443,128 +443,83 @@ fn public_post_sidecar_keeps_real_image_mime() {
     assert!(!thumb_sidecar.has_c2pa);
 }
 
-// --- seal_thumbnail_only (the SyncEngine producer entrypoint) ---
+// --- render_thumbnail_only (the folder-file producer entrypoint) ---
 //
-// `seal_thumbnail_only` is for producers that store the primary by another path
-// (the device-sync chunk pipeline) and need ONLY the thumbnail sidecar blob +
-// its content hash. It must seal the thumbnail identically to `process_and_seal`
-// (same audience, same sidecar shape, same `blake3(sealed bytes)` hash), so a
-// client fetches it direct-by-hash and decrypts it the same way.
+// `render_thumbnail_only` is for producers that store a folder file through the
+// chunk pipeline: they need ONLY the thumbnail's pixels, which they seal through
+// the same pipeline under the file's own root (`media.md` § Encryption at rest →
+// *A thumbnail rests as its file rests*).
 
-/// A >300px image yields a sealed thumbnail whose hash matches the one
-/// `process_and_seal` would record in the primary sidecar, with the same
-/// octet-stream sidecar for an AEAD audience.
+/// A >300px image yields a JPEG thumbnail — the very pixels `process_media`
+/// renders for it.
 #[cfg(feature = "process_media")]
 #[test]
-fn seal_thumbnail_only_matches_process_and_seal_for_aead_image() {
-    use fauna_media::pipeline::seal_thumbnail_only;
+fn render_thumbnail_only_renders_the_process_media_thumbnail() {
+    use fauna_media::pipeline::render_thumbnail_only;
     let png = build_png(800, 600); // > 300×300 ⇒ a thumbnail is rendered
-    let audience = library_audience();
-    let class = audience.class();
 
-    let only = seal_thumbnail_only(&png, &audience).expect("a >300px image yields a thumbnail");
-    assert!(!only.bytes.is_empty(), "sealed thumbnail bytes present");
+    let only = render_thumbnail_only(&png).expect("a >300px image yields a thumbnail");
+    assert_eq!(&only[..2], &[0xFF, 0xD8], "an unsealed JPEG");
     assert_eq!(
-        only.hash,
-        *blake3::hash(&only.bytes).as_bytes(),
-        "recorded hash is blake3 of the sealed bytes"
-    );
-    assert_eq!(only.sidecar.class, class);
-    assert_eq!(
-        only.sidecar.mime, "application/octet-stream",
-        "an AEAD-sealed thumbnail's sidecar MIME is octet-stream"
-    );
-    assert!(!only.sidecar.has_c2pa);
-    assert_eq!(
-        only.sidecar.thumbnail_hash, None,
-        "thumbnails don't have thumbnails"
-    );
-
-    // The hash must equal what process_and_seal records in the primary sidecar
-    // (modulo per-call AEAD nonce randomness, the SHAPE is identical) — assert it
-    // is a real recorded routing hash, not absent.
-    let payload = process_and_seal(&png, &audience);
-    assert!(
-        payload.primary_sidecar.thumbnail_hash.is_some(),
-        "process_and_seal also records a thumbnail hash for the same image"
+        Some(only),
+        fauna_media::process::process_media(&png).thumbnail_bytes,
+        "the pixels `process_media` renders"
     );
 }
 
 /// A ≤300px image and a non-image both yield no thumbnail.
 #[cfg(feature = "process_media")]
 #[test]
-fn seal_thumbnail_only_none_for_small_or_nonimage() {
-    use fauna_media::pipeline::seal_thumbnail_only;
-    let audience = library_audience();
+fn render_thumbnail_only_none_for_small_or_nonimage() {
+    use fauna_media::pipeline::render_thumbnail_only;
 
     let small = build_png(100, 100); // ≤ 300×300 ⇒ no thumbnail
     assert!(
-        seal_thumbnail_only(&small, &audience).is_none(),
+        render_thumbnail_only(&small).is_none(),
         "a ≤300px image yields no thumbnail"
     );
 
     let not_an_image = b"this is plainly not an image".to_vec();
     assert!(
-        seal_thumbnail_only(&not_an_image, &audience).is_none(),
+        render_thumbnail_only(&not_an_image).is_none(),
         "non-image bytes yield no thumbnail"
     );
 }
 
-// --- seal_thumbnail_only_from_path (the >64 MiB streaming-upload entrypoint) ---
+// --- render_thumbnail_only_from_path (the >64 MiB streaming-upload entrypoint) ---
 //
-// `seal_thumbnail_only_from_path` reads the source image incrementally from disk
-// (`image::ImageReader::open`), so the device-sync streaming-upload path
+// `render_thumbnail_only_from_path` reads the source image incrementally from
+// disk (`image::ImageReader::open`), so the device-sync streaming-upload path
 // (>64 MiB files) stays O(thumbnail) memory instead of loading the whole file.
-// It must seal the thumbnail IDENTICALLY to `seal_thumbnail_only` on the same
-// image bytes — same sidecar shape and `blake3(sealed bytes)` hash contract — so
-// a client fetches + decrypts a streamed-file thumbnail the same way.
 
-/// A >300px image file yields a sealed thumbnail whose sidecar matches what
-/// `seal_thumbnail_only` produces for the same bytes (both AEAD-octet-stream).
+/// A >300px image file yields a JPEG thumbnail, as the in-memory entrypoint
+/// does for the same bytes.
 #[cfg(feature = "process_media")]
 #[test]
-fn seal_thumbnail_only_from_path_matches_in_memory_for_aead_image() {
-    use fauna_media::pipeline::{seal_thumbnail_only, seal_thumbnail_only_from_path};
+fn render_thumbnail_only_from_path_matches_in_memory() {
+    use fauna_media::pipeline::{render_thumbnail_only, render_thumbnail_only_from_path};
     let png = build_png(800, 600); // > 300×300 ⇒ a thumbnail is rendered
-    let audience = library_audience();
-    let class = audience.class();
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("photo.png");
     std::fs::write(&path, &png).unwrap();
 
-    let from_path = seal_thumbnail_only_from_path(&path, &audience)
-        .expect("a >300px image file yields a thumbnail");
-    assert!(
-        !from_path.bytes.is_empty(),
-        "sealed thumbnail bytes present"
-    );
+    let from_path =
+        render_thumbnail_only_from_path(&path).expect("a >300px image file yields a thumbnail");
+    assert_eq!(&from_path[..2], &[0xFF, 0xD8], "an unsealed JPEG");
+    let in_memory = render_thumbnail_only(&png).expect("in-memory thumbnail");
     assert_eq!(
-        from_path.hash,
-        *blake3::hash(&from_path.bytes).as_bytes(),
-        "recorded hash is blake3 of the sealed bytes"
+        image_dimensions(&from_path),
+        image_dimensions(&in_memory),
+        "the same thumbnail geometry"
     );
-    assert_eq!(from_path.sidecar.class, class);
-    assert_eq!(
-        from_path.sidecar.mime, "application/octet-stream",
-        "an AEAD-sealed thumbnail's sidecar MIME is octet-stream"
-    );
-    assert!(!from_path.sidecar.has_c2pa);
-    assert_eq!(
-        from_path.sidecar.thumbnail_hash, None,
-        "thumbnails don't have thumbnails"
-    );
+}
 
-    // The in-memory entrypoint on the same bytes produces the same sidecar shape
-    // (the only difference is per-call AEAD nonce randomness in `bytes`/`hash`).
-    let in_memory = seal_thumbnail_only(&png, &audience).expect("in-memory thumbnail");
-    assert_eq!(from_path.sidecar.class, in_memory.sidecar.class);
-    assert_eq!(from_path.sidecar.mime, in_memory.sidecar.mime);
-    assert_eq!(from_path.sidecar.has_c2pa, in_memory.sidecar.has_c2pa);
-    assert_eq!(
-        from_path.sidecar.thumbnail_hash,
-        in_memory.sidecar.thumbnail_hash
-    );
+/// The pixel geometry of an encoded image.
+#[cfg(feature = "process_media")]
+fn image_dimensions(bytes: &[u8]) -> (u32, u32) {
+    let img = image::load_from_memory(bytes).expect("decodes");
+    (img.width(), img.height())
 }
 
 /// A ≤300px image file, a non-image file, and a missing path all yield no
@@ -572,28 +527,27 @@ fn seal_thumbnail_only_from_path_matches_in_memory_for_aead_image() {
 /// path).
 #[cfg(feature = "process_media")]
 #[test]
-fn seal_thumbnail_only_from_path_none_for_small_nonimage_or_missing() {
-    use fauna_media::pipeline::seal_thumbnail_only_from_path;
-    let audience = library_audience();
+fn render_thumbnail_only_from_path_none_for_small_nonimage_or_missing() {
+    use fauna_media::pipeline::render_thumbnail_only_from_path;
     let dir = tempfile::tempdir().unwrap();
 
     let small_path = dir.path().join("tiny.png");
     std::fs::write(&small_path, build_png(100, 100)).unwrap();
     assert!(
-        seal_thumbnail_only_from_path(&small_path, &audience).is_none(),
+        render_thumbnail_only_from_path(&small_path).is_none(),
         "a ≤300px image file yields no thumbnail"
     );
 
     let text_path = dir.path().join("notes.txt");
     std::fs::write(&text_path, b"this is plainly not an image").unwrap();
     assert!(
-        seal_thumbnail_only_from_path(&text_path, &audience).is_none(),
+        render_thumbnail_only_from_path(&text_path).is_none(),
         "a non-image file yields no thumbnail"
     );
 
     let missing_path = dir.path().join("does-not-exist.png");
     assert!(
-        seal_thumbnail_only_from_path(&missing_path, &audience).is_none(),
+        render_thumbnail_only_from_path(&missing_path).is_none(),
         "a missing file declines gracefully rather than panicking"
     );
 }

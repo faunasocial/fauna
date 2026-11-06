@@ -131,8 +131,10 @@ public class TestAgent {
             }
             await commandHandler?(state)
         case "reset":
+            TestAgentBootstrap.faultAtResetIfAsked()
             await commandHandler?(["__action": "reset"])
         case "logout":
+            TestAgentBootstrap.faultAtResetIfAsked()
             await commandHandler?(["__action": "logout"])
         case "call_machine_method":
             // Per docs/goal/behavior/onboarding.md §"E2E bridge contract".

@@ -112,6 +112,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use fauna_client_backup::custodian::HeldGeneration;
 use fauna_client_backup::reseed::FolderLabel;
+use fauna_core::blob_seal::SealStamp;
 use fauna_core::chunk::ChunkManifest;
 use fauna_core::data::ContentHash;
 use fauna_core::file_download::{BlobFetcher, FileDownloadKeys};
@@ -459,7 +460,7 @@ impl StagedSeal {
     pub fn seal_file(
         plain: &Path,
         bodies: &Path,
-        seal_root: Option<([u8; 32], Option<u64>)>,
+        seal_root: Option<([u8; 32], Option<SealStamp>)>,
     ) -> Result<Self> {
         let file = std::fs::File::open(plain)
             .with_context(|| format!("open {} to seal", plain.display()))?;
@@ -472,7 +473,7 @@ impl StagedSeal {
     pub fn seal_reader(
         plain: impl std::io::Read,
         bodies: &Path,
-        seal_root: Option<([u8; 32], Option<u64>)>,
+        seal_root: Option<([u8; 32], Option<SealStamp>)>,
     ) -> Result<Self> {
         std::fs::create_dir_all(bodies)
             .with_context(|| format!("create seal staging {}", bodies.display()))?;
@@ -516,9 +517,9 @@ impl StagedSeal {
         hex::encode(self.sealed.manifest.file_hash.digest())
     }
 
-    /// As [`SealedBlob::content_key_version`].
-    pub(crate) fn content_key_version(&self) -> Option<u64> {
-        self.sealed.content_key_version
+    /// As [`SealedBlob::content_stamp`].
+    pub(crate) fn content_stamp(&self) -> Option<SealStamp> {
+        self.sealed.content_stamp
     }
 
     /// The chunk manifest (the plaintext view), as [`SealedBlob::manifest`].
@@ -1788,7 +1789,7 @@ impl CustodianStore {
             manifest_bytes,
             manifest_hash,
             chunks: store_keys.into_iter().zip(bodies).collect(),
-            content_key_version: None,
+            content_stamp: None,
         })
     }
 
@@ -3175,7 +3176,7 @@ mod tests {
             out.chunks, held.chunks,
             "every (store key, body) pair must come back untouched"
         );
-        assert_eq!(out.content_key_version, None);
+        assert_eq!(out.content_stamp, None);
     }
 
     /// The as-is read refuses a path the store does not hold live, rather than
@@ -3373,7 +3374,7 @@ mod tests {
             manifest,
             manifest_bytes,
             chunks: vec![(key, ciphertext.to_vec())],
-            content_key_version: None,
+            content_stamp: None,
         }
     }
 

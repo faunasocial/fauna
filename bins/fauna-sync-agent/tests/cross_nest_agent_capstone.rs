@@ -366,7 +366,9 @@ impl Owner {
                         ..Default::default()
                     },
                     fauna_core::data::ContentHash::from_digest_raw(digest),
-                    change.content_key_version,
+                    change
+                        .content_key_version
+                        .map(fauna_core::blob_seal::SealStamp::Version),
                     rel,
                 )
                 .await

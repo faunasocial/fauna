@@ -3772,9 +3772,9 @@ mod tests {
     /// once the sibling that *could* join has flushed.
     #[test]
     fn a_device_launched_before_the_mint_is_not_addressed_and_the_push_arm_says_so_below_warn() {
-        use crate::test_tracing::capture_tracing_at_info;
         use fauna_conversations::backend::WelcomeChannelKind;
         use fauna_conversations::session::report_welcome_ingest_failure;
+        use fauna_test_tracing::capture_tracing_at_info;
 
         let replica = MemReplica::default();
         let conv_nest = Arc::new(FakeConvNest::default());
@@ -3925,7 +3925,7 @@ mod tests {
     /// stranded on a device that merely missed the push.
     #[test]
     fn two_online_devices_both_consume_one_welcome_and_neither_flush_reports_a_conflict() {
-        use crate::test_tracing::capture_tracing_at_info;
+        use fauna_test_tracing::capture_tracing_at_info;
 
         let replica = MemReplica::default();
         let conv_nest = Arc::new(FakeConvNest::default());

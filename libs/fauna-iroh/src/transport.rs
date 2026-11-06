@@ -366,6 +366,15 @@ impl PeerTransport for IrohTransport {
     fn local_identity(&self) -> EndpointKey {
         self.local_id
     }
+
+    /// iroh's graceful endpoint close: every connection — whatever stream or
+    /// handle still holds it — ends with a close its peer receives, and this
+    /// returns once that has been sent. Dropping the endpoint instead aborts
+    /// it ("dropped without calling `Endpoint::close`"), and a connection a
+    /// stream still held is never closed toward its peer.
+    async fn close(&self) {
+        self.endpoint.close().await;
+    }
 }
 
 /// An established iroh-QUIC connection to one peer.
@@ -498,9 +507,17 @@ mod tests {
             .expect("bind raw endpoint")
     }
 
+    /// The endpoint's IPv4 loopback dial addresses. Only an IPv4 socket's port
+    /// pairs with `127.0.0.1` — `fauna_core::device_endpoints`'s own rule: the
+    /// endpoint binds a `[::]` socket beside the IPv4 one, on its own port,
+    /// and where that socket is v6-only (the Windows default) nothing listens
+    /// on `127.0.0.1:<its port>`. A dialer offered that address sends into a
+    /// dead port, and on Windows the port-unreachable that comes back leaves
+    /// the dialer's socket receiving nothing more, so the dial never completes.
     fn loopback_addrs(ep: &Endpoint) -> Vec<SocketAddr> {
         ep.bound_sockets()
             .into_iter()
+            .filter(SocketAddr::is_ipv4)
             .map(|a| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()))
             .collect()
     }
@@ -578,6 +595,74 @@ mod tests {
         drop(stream);
         drop(conn);
         peer_task.await.expect("peer task");
+    }
+
+    /// A listener that goes away **tells the peers connected to it**: closing
+    /// the transport ends a peer's connection with the listener's own close,
+    /// so the peer stops sending at once. Taken down the way the peer leg's
+    /// stand-down takes a listener down — close, then every handle dropped —
+    /// a peer must never be left to find out by its idle timer.
+    ///
+    /// Why it matters beyond a slow notice: until the timer fires the peer
+    /// keeps sending into a port nothing listens on, and on Windows each such
+    /// send draws an ICMP port-unreachable that the peer's iroh socket reports
+    /// as `WSAECONNRESET`, after which that socket delivers no datagram at all
+    /// — every other connection of the peer dies with it (`p2p.md`
+    /// § Implementation status today, the same-account peer data plane).
+    ///
+    /// The assertion is the close's reason, never its timing (convention 14):
+    /// the ceiling below is a budget a green run never pays.
+    #[tokio::test]
+    async fn closing_the_transport_tells_a_connected_peer_the_connection_is_over() {
+        let mut l_sk = [0u8; 32];
+        l_sk[0] = 0xe1;
+        let listener = IrohTransport::builder(l_sk)
+            .bind_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .build()
+            .await
+            .expect("listener build");
+        let target = loopback_addrs(&listener.endpoint).into_iter().fold(
+            EndpointAddr::new(
+                EndpointId::from_bytes(listener.local_identity().as_bytes()).expect("listener id"),
+            ),
+            |a, sa| a.with_ip_addr(sa),
+        );
+        let mut incoming = listener.listen().await.expect("listen");
+
+        let peer = raw_loopback_endpoint(0xe2).await;
+        let conn = peer
+            .connect(target, DEFAULT_ALPN)
+            .await
+            .expect("peer connect");
+        use futures_util::StreamExt;
+        let accepted = incoming
+            .next()
+            .await
+            .expect("an inbound conn")
+            .expect("conn ok");
+        // The peer opens a stream and speaks first, as a requester does; the
+        // listener accepts it, as the serving channel does.
+        let (mut send, _recv) = conn.open_bi().await.expect("peer open_bi");
+        send.write_all(b"?").await.expect("peer write");
+        let served = accepted.accept_stream().await.expect("accept_stream");
+
+        // The stand-down's order: the listener closes, then its handles go —
+        // all but the served stream, which the channel's own I/O task holds
+        // past the stand-down, and which keeps the connection open with it.
+        listener.close().await;
+        drop(accepted);
+        drop(incoming);
+        drop(listener);
+
+        let why = tokio::time::timeout(Duration::from_secs(120), conn.closed())
+            .await
+            .expect("the peer's connection never ended at all");
+        drop(served);
+        assert!(
+            !format!("{why:?}").contains("TimedOut"),
+            "the peer learned the listener was gone only from its idle timer ({why:?}): \
+             until then it sent into a dead port"
+        );
     }
 
     /// The slice-4 deliverable: a `fauna_peer_channel::PeerChannel`
@@ -1066,6 +1151,12 @@ mod tests {
             PathKind::Lan,
             "a LAN candidate dial goes direct"
         );
+        // Closed, never only dropped: the shared listener holds this trial's
+        // connection, and a dialer that vanishes without a close leaves it
+        // sending into a dead port — on Windows the port-unreachable that
+        // answers leaves the listener receiving nothing, and the next trial's
+        // dial times out (`closing_the_transport_tells_a_connected_peer_…`).
+        dialer.close().await;
         (bound_in, dialed_in)
     }
 

@@ -1,0 +1,19 @@
+{
+  "profile_user": [
+    {
+      "media_map_data": {
+        "Profile Photo": {
+          "uri": "media/profile/202001/profile_1.jpg",
+          "creation_timestamp": 1580000000,
+          "title": ""
+        }
+      },
+      "string_map_data": {
+        "Username": { "href": "", "value": "test.owner.fixture", "timestamp": 0 },
+        "Name": { "href": "", "value": "Test Owner", "timestamp": 0 },
+        "Bio": { "href": "", "value": "Fixture bio â\u009d¤", "timestamp": 0 },
+        "Website": { "href": "", "value": "https://example.invalid/owner", "timestamp": 0 }
+      }
+    }
+  ]
+}

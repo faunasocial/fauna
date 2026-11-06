@@ -1,5 +1,7 @@
 import { asset } from '$app/paths';
-import { adoptStoreKey, announceStartOver, forgetStoreKey, registerIdentityStoreChunk } from './identity-store';
+import { joinChunk } from './chunk-join';
+import { adoptStoreKey, announceStartOver, forgetStoreKey } from './identity-store';
+import { clearTabPin } from './tabPin';
 
 // Re-exported so existing call sites keep importing the snapshot type and its
 // accessors from `#lib/wasm-launch`; they live in their own module only so
@@ -33,9 +35,8 @@ export function ensureLaunchWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_launch.js');
       await mod.default(asset('fauna_wasm_launch_bg.wasm'));
-      // The identity store's key, if this page holds it, goes in before
-      // anything reads the registry through this chunk (identity-store.ts).
-      registerIdentityStoreChunk(mod);
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -527,5 +528,10 @@ export async function identityStoreStartOverNow(): Promise<void> {
   await ensureLaunchWasm();
   identityStoreFns().identityStoreStartOver();
   forgetStoreKey();
+  // The pin names an account start-over just erased — drop it with them, as
+  // `accountsClearAll` does: a surviving pin makes the shell's boot drop it and
+  // RELOAD, and a reload locks the store, so the passphrase chosen a moment ago
+  // would be asked for again before the wizard.
+  clearTabPin();
   announceStartOver();
 }

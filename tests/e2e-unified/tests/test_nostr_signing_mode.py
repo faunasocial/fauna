@@ -13,8 +13,9 @@ the raw value, or a fixed string, fails one of the two.
 
 tier_3: a real `fauna-nest` binary. tui first, the lead app; the id was promoted
 from windows' platform elements to the shared page 2026-10-16. web and linux
-carry their markers; android paints the id (compile-verified) and gains its
-marker with its first witness run, the other two apps in their own lifts.
+carry their markers, macos and ios since 2026-10-30, android since 2026-10-31
+(its `NostrScreen` paints the id from the same shared label map; not yet run on a
+device), windows since 2026-11-04 (its `NostrPage` paints the id from the same map).
 """
 import pytest
 
@@ -22,7 +23,10 @@ from actions.api_actor import ApiActor
 from helpers.nostr_keys import new_keypair
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web]
+pytestmark = [
+    pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.android, pytest.mark.windows,
+]
 
 _LABELS = {
     "generated": S.nostr.account.mode_generated,

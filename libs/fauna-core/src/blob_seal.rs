@@ -61,6 +61,87 @@ use crate::chunk::ChunkManifest;
 use crate::data::ContentHash;
 use anyhow::{Context, Result};
 
+/// **Which content key sealed a set's bytes** — the one key identity the
+/// engine carries through every seal, open, retained manifest, chunk-index
+/// entry, serve re-derivation and row stamp, for both set families
+/// (`docs/goal/behavior/p2p-shared-set-build.md` § Build design — the group
+/// set, decision 4).
+///
+/// - [`Version`](Self::Version) — a **folder set**'s M2 content-key generation
+///   (`FolderContentKeys`, totally ordered, a `u64`).
+/// - [`Generation`](Self::Generation) — a **group set**'s 32-byte generation
+///   id: content-derived and only partially ordered, so it has no `u64` and no
+///   code may synthesize one (decision 2). Nothing orders two of these; a
+///   reader only asks whether its ring holds one.
+///
+/// An unstamped seal (owner root, plaintext) is `None` around this type, never
+/// a third arm. At rest and on the wire the two arms are two columns / fields
+/// (`content_key_version`, `content_generation`), at most one of them set
+/// ([`Self::from_parts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SealStamp {
+    /// A folder set's M2 content-key generation.
+    Version(u64),
+    /// A group set's 32-byte generation id.
+    Generation([u8; 32]),
+}
+
+impl SealStamp {
+    /// The folder family's version, `None` on a group stamp — the read every
+    /// version-ordered question (rotation, re-seal, the floor) asks, so a
+    /// generation id never answers one.
+    #[must_use]
+    pub fn version(self) -> Option<u64> {
+        match self {
+            SealStamp::Version(v) => Some(v),
+            SealStamp::Generation(_) => None,
+        }
+    }
+
+    /// The group family's generation id, `None` on a folder stamp.
+    #[must_use]
+    pub fn generation(self) -> Option<[u8; 32]> {
+        match self {
+            SealStamp::Version(_) => None,
+            SealStamp::Generation(g) => Some(g),
+        }
+    }
+
+    /// Rebuild a stamp from its two at-rest / wire fields. Both set is a
+    /// malformed row — refused, never resolved by preferring one.
+    ///
+    /// # Errors
+    /// Both a version and a generation present.
+    pub fn from_parts(version: Option<u64>, generation: Option<[u8; 32]>) -> Result<Option<Self>> {
+        match (version, generation) {
+            (None, None) => Ok(None),
+            (Some(v), None) => Ok(Some(SealStamp::Version(v))),
+            (None, Some(g)) => Ok(Some(SealStamp::Generation(g))),
+            (Some(_), Some(_)) => anyhow::bail!(
+                "a content stamp names both a folder version and a group generation — malformed"
+            ),
+        }
+    }
+
+    /// A stamp as its two at-rest / wire fields.
+    #[must_use]
+    pub fn parts(stamp: Option<Self>) -> (Option<u64>, Option<[u8; 32]>) {
+        (
+            stamp.and_then(SealStamp::version),
+            stamp.and_then(SealStamp::generation),
+        )
+    }
+}
+
+impl std::fmt::Display for SealStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SealStamp::Version(v) => write!(f, "version {v}"),
+            SealStamp::Generation(g) => write!(f, "generation {}", hex::encode(&g[..8])),
+        }
+    }
+}
+
 /// One blob, sealed and ready for any sink.
 ///
 /// `chunks` and `manifest_bytes` are exactly the bodies a sink must persist;
@@ -84,9 +165,10 @@ pub struct SealedBlob {
     /// plaintext one — the discriminator every reader already applies via
     /// [`ChunkManifest::store_keys`].
     pub chunks: Vec<(ContentHash, Vec<u8>)>,
-    /// The M2 content-key generation the chunks were sealed under, to stamp into
-    /// a change record. `None` for owner-only / plaintext seals.
-    pub content_key_version: Option<u64>,
+    /// The content key the chunks were sealed under — a folder set's M2
+    /// version or a group set's generation id — to stamp into a change record.
+    /// `None` for owner-only / plaintext seals.
+    pub content_stamp: Option<SealStamp>,
 }
 
 impl SealedBlob {
@@ -129,7 +211,10 @@ pub use crate::chunk_seal::seal_chunk_body;
 /// hash and the same store keys. That is what makes a destination's dedup and a
 /// custodian's local store converge on retries, and what the byte-identity
 /// property above rests on.
-pub fn seal_blob(bytes: &[u8], seal_root: Option<([u8; 32], Option<u64>)>) -> Result<SealedBlob> {
+pub fn seal_blob(
+    bytes: &[u8],
+    seal_root: Option<([u8; 32], Option<SealStamp>)>,
+) -> Result<SealedBlob> {
     let mut chunks: Vec<(ContentHash, Vec<u8>)> = Vec::new();
     let sealed = seal_reader(bytes, seal_root, |key, body| {
         chunks.push((key, body));
@@ -140,7 +225,7 @@ pub fn seal_blob(bytes: &[u8], seal_root: Option<([u8; 32], Option<u64>)>) -> Re
         manifest_bytes: sealed.manifest_bytes,
         manifest_hash: sealed.manifest_hash,
         chunks,
-        content_key_version: sealed.content_key_version,
+        content_stamp: sealed.content_stamp,
     })
 }
 
@@ -153,8 +238,8 @@ pub struct SealedManifest {
     pub manifest_bytes: Vec<u8>,
     /// `blake3(manifest_bytes)`.
     pub manifest_hash: ContentHash,
-    /// As [`SealedBlob::content_key_version`].
-    pub content_key_version: Option<u64>,
+    /// As [`SealedBlob::content_stamp`].
+    pub content_stamp: Option<SealStamp>,
     /// As [`SealedBlob::stored_bytes`]: every body handed to the sink, in
     /// manifest order and repeats included, plus the manifest.
     pub stored_bytes: u64,
@@ -177,7 +262,7 @@ pub struct SealedManifest {
 /// [`chunk_file`]: crate::chunker::chunk_file
 pub fn seal_reader(
     mut reader: impl std::io::Read,
-    seal_root: Option<([u8; 32], Option<u64>)>,
+    seal_root: Option<([u8; 32], Option<SealStamp>)>,
     mut sink: impl FnMut(ContentHash, Vec<u8>) -> Result<()>,
 ) -> Result<SealedManifest> {
     use crate::chunker::{AVG_CHUNK, MAX_CHUNK, MIN_CHUNK, SINGLE_CHUNK_THRESHOLD};
@@ -281,7 +366,7 @@ pub fn seal_reader(
         manifest,
         manifest_bytes,
         manifest_hash,
-        content_key_version: seal_root.and_then(|(_, version)| version),
+        content_stamp: seal_root.and_then(|(_, stamp)| stamp),
     })
 }
 
@@ -292,6 +377,33 @@ mod tests {
 
     const ROOT_A: [u8; 32] = [7u8; 32];
     const ROOT_B: [u8; 32] = [9u8; 32];
+
+    /// The stamp's two at-rest fields round-trip, a generation id never
+    /// answers a version question, and a row naming both is refused.
+    #[test]
+    fn a_seal_stamp_round_trips_its_two_fields_and_refuses_both() {
+        let g = [0xabu8; 32];
+        for stamp in [
+            None,
+            Some(SealStamp::Version(7)),
+            Some(SealStamp::Generation(g)),
+        ] {
+            let (v, gen_id) = SealStamp::parts(stamp);
+            assert_eq!(SealStamp::from_parts(v, gen_id).unwrap(), stamp);
+        }
+        assert_eq!(SealStamp::Generation(g).version(), None);
+        assert_eq!(SealStamp::Version(7).generation(), None);
+        assert!(SealStamp::from_parts(Some(1), Some(g)).is_err());
+    }
+
+    /// A group seal stamps the generation id it sealed under, verbatim.
+    #[test]
+    fn a_group_seal_stamps_its_generation_id() {
+        let g = [0x5cu8; 32];
+        let sealed = seal_blob(&body(), Some((ROOT_A, Some(SealStamp::Generation(g))))).unwrap();
+        assert_eq!(sealed.content_stamp, Some(SealStamp::Generation(g)));
+        assert!(sealed.manifest.stored_hashes.is_some());
+    }
 
     fn body() -> Vec<u8> {
         // Larger than the sync-engine compressor's 4 KiB floor and highly
@@ -314,7 +426,7 @@ mod tests {
     #[test]
     fn a_sealed_blobs_manifest_carries_no_plaintext_hashes() {
         let bytes = body();
-        let sealed = seal_blob(&bytes, Some((ROOT_A, Some(4)))).unwrap();
+        let sealed = seal_blob(&bytes, Some((ROOT_A, Some(SealStamp::Version(4))))).unwrap();
         let decoded: ChunkManifest = crate::encoding::canonical_decode(&sealed.manifest_bytes)
             .expect("decode the uploaded manifest");
         assert!(
@@ -407,7 +519,7 @@ mod tests {
         let sealed = seal_blob(&body(), None).unwrap();
 
         assert!(sealed.manifest.stored_hashes.is_none());
-        assert_eq!(sealed.content_key_version, None);
+        assert_eq!(sealed.content_stamp, None);
         assert_eq!(sealed.manifest.store_keys(), sealed.manifest.chunk_hashes);
     }
 
@@ -415,8 +527,8 @@ mod tests {
     /// to pick the right content key at open time.
     #[test]
     fn the_content_key_generation_rides_through() {
-        let sealed = seal_blob(&body(), Some((ROOT_A, Some(4)))).unwrap();
-        assert_eq!(sealed.content_key_version, Some(4));
+        let sealed = seal_blob(&body(), Some((ROOT_A, Some(SealStamp::Version(4))))).unwrap();
+        assert_eq!(sealed.content_stamp, Some(SealStamp::Version(4)));
     }
 
     /// The cap is measured against what lands on disk, not the plaintext size.
@@ -440,7 +552,7 @@ mod tests {
     #[test]
     fn seal_chunk_body_is_the_batch_seals_per_chunk_pipeline() {
         let bytes = body();
-        let sealed = seal_blob(&bytes, Some((ROOT_A, Some(3)))).unwrap();
+        let sealed = seal_blob(&bytes, Some((ROOT_A, Some(SealStamp::Version(3))))).unwrap();
 
         let manifest = chunk_file(&bytes);
         let plain = extract_chunks(&bytes, &manifest);
@@ -488,10 +600,14 @@ mod tests {
         for len in [0, 1, threshold - 1, threshold, threshold + 20 * 1024 * 1024] {
             let bytes = noise(len);
             let mut streamed: Vec<(ContentHash, Vec<u8>)> = Vec::new();
-            let sealed = seal_reader(&bytes[..], Some((ROOT_A, Some(2))), |key, body| {
-                streamed.push((key, body));
-                Ok(())
-            })
+            let sealed = seal_reader(
+                &bytes[..],
+                Some((ROOT_A, Some(SealStamp::Version(2)))),
+                |key, body| {
+                    streamed.push((key, body));
+                    Ok(())
+                },
+            )
             .unwrap();
 
             let mut expected = chunk_file(&bytes);
@@ -510,7 +626,7 @@ mod tests {
             );
             assert_eq!(sealed.manifest_hash, ContentHash::of_raw(&expected_bytes));
             assert!(streamed == bodies, "sealed bodies differ at len {len}");
-            assert_eq!(sealed.content_key_version, Some(2));
+            assert_eq!(sealed.content_stamp, Some(SealStamp::Version(2)));
             assert_eq!(
                 sealed.stored_bytes,
                 bodies.iter().map(|(_, b)| b.len() as u64).sum::<u64>()

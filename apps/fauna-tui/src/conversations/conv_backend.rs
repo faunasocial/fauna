@@ -158,6 +158,10 @@ fn start_with_db(
     // arm's key resolver, the custody-ingest sink and the removal resume read
     // and write (`fauna.state.folder-keys`).
     let folder_keys = crate::settings::folder_key_door(runtime.clone());
+    // The account's period keys — the archive folder reader's tier seals
+    // (the `Archive` rail's source, below); taken here, before the custody
+    // sink moves `runtime` into its resolver.
+    let period_keys = crate::settings::period_key_door(runtime.clone());
     // The grant log the removal resume's paywall keep-alive records in.
     let grant_log = crate::settings::nests::ledger_door(runtime.clone());
     let Some(manager) = state.manager.clone() else {
@@ -343,7 +347,8 @@ fn start_with_db(
     // before the lease existed. A tui launch whose device-id store will not open
     // must still index its mail; losing the *coordination* is the cheap half.
     let lease_seat = lease_device_hex
-        .and_then(|hex| fauna_core::hex32::decode(&hex).ok())
+        .as_deref()
+        .and_then(|hex| fauna_core::hex32::decode(hex).ok())
         .map(|device_id| IndexLeaseSeat {
             device_id,
             class: ParticipantClass::PluggedInDesktop,
@@ -393,7 +398,7 @@ fn start_with_db(
     // may serve; the endpoint lock decides whether it does. Not under the
     // in-crate tests, which would serve a real endpoint in this user's agent
     // dir.
-    #[cfg(all(unix, not(test)))]
+    #[cfg(all(any(unix, windows), not(test)))]
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         let slot = runtime.clone();
         state.oracle_door =
@@ -594,6 +599,58 @@ fn start_with_db(
         ),
     ));
 
+    // The `Archive` rail (`archive-import.md` § What each category becomes):
+    // the imported archives' message threads, read from their sealed folders
+    // through the archive machine's own seam and projected read-only by the
+    // manager. Needs this device's sync id (the folder reader's chunk store);
+    // without one the rail simply lists nothing. Read once now, and again on
+    // every visit to the conversations page (`App::set_page`), so a finished
+    // import shows up without a re-login.
+    if let Some(device_id) = lease_device_hex
+        .as_deref()
+        .and_then(|hex| fauna_core::hex32::decode(hex).ok())
+    {
+        match fauna_archive_import_machine::rpc_glue::build_archive_nest(
+            Arc::clone(&nest),
+            device_id,
+            period_keys,
+            folder_keys.clone(),
+            Arc::clone(&mail),
+        ) {
+            Ok(archive) => {
+                // Phase two's sink (`archive-import.md` § Linking and merging,
+                // ruling 2), over the same seam, registered beside the custody
+                // sink above, and driven once now (ruling 4: the pending sends
+                // re-driven at session start). `lib.rs`'s links tick drives it
+                // again whenever the sink leaves work owed.
+                if let Ok(keypair) = ActorKeypair::from_secret_hex(secret_hex) {
+                    let links = crate::archive_glue::wire_archive_links(
+                        &session,
+                        Arc::clone(&archive),
+                        &keypair,
+                    );
+                    crate::archive_glue::spawn_links_drive(
+                        Arc::clone(&links),
+                        Arc::clone(&state.archive_links_drive),
+                        tx.clone(),
+                    );
+                    state.archive_links = Some(links);
+                }
+                fauna_archive_import_machine::threads::register_archive_threads(
+                    &session.manager(),
+                    archive,
+                );
+                let session = Arc::clone(&session);
+                tokio::spawn(async move {
+                    if let Err(e) = session.manager().refresh_archive_threads().await {
+                        tracing::warn!("conv-backend: archive threads: {e}");
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("conv-backend: no archive thread source: {e}"),
+        }
+    }
+
     // Publish the session before starting the loop so its liveness `Weak` stays
     // upgradeable; a re-login builds a fresh state, dropping this Arc and
     // ending the loop.
@@ -718,6 +775,12 @@ pub async fn e2e_resolve_send_new(
     body: &str,
 ) -> Result<Option<String>, String> {
     let m = manager(state)?;
+    // A NEW conversation with exactly `recipient`: discard any stashed new-thread
+    // draft first. `start_new_conversation` keeps one by design (conversations.md
+    // § Persistence), and the account-scoped drafts outlive the per-module
+    // relaunch, so an earlier test's seeded chip (profile start-DM) would ride
+    // into this send as a second recipient whose key packages nobody published.
+    m.cancel_new_conversation();
     m.start_new_conversation();
     m.set_new_thread_recipient_input(recipient.to_string());
     m.resolve_recipient().await;

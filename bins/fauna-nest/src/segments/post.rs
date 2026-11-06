@@ -413,7 +413,10 @@ pub async fn store_post_with_expiry(
 /// goes to the author's `__post` segment exactly as any stored post's, so every
 /// single-post read resolves it; the projection is
 /// [`CacheDb::put_delivered_post_index_only`] — marked, and never in the Search
-/// corpus. Idempotent like [`store_post`].
+/// corpus. Idempotent like [`store_post`] for a re-delivery from a home
+/// already in the row's custody; a delivery from another home adds that
+/// home's custody, and a row listed nest-wide is left as it is (the returned
+/// [`crate::db::posts::DeliveredStore`]).
 pub async fn store_delivered_post(
     mgr: &SegmentManager,
     cache_db: &CacheDb,
@@ -421,7 +424,7 @@ pub async fn store_delivered_post(
     body: &[u8],
     home_url: &str,
     home_nest_id: &[u8; 32],
-) -> Result<()> {
+) -> Result<crate::db::posts::DeliveredStore> {
     if let Some(schema) = cache_db
         .content_schema(post_id)
         .await?
@@ -432,6 +435,9 @@ pub async fn store_delivered_post(
             hex::encode(post_id)
         );
     }
+    // Every home's delivery writes the segment record (content-addressed, so a
+    // second home's is idempotent) and its own custody (`federated-follow.md`
+    // § Decision 3, *What a reader-named home is trusted for*).
     let Some(post) = crate::db::posts::decode_stored_post(body) else {
         anyhow::bail!("delivered post {} does not decode", hex::encode(post_id));
     };
@@ -1292,6 +1298,14 @@ mod tests {
             Use::Reader(
                 "reads the references a post being deleted carried, to reverse its \
                  counters; returns nothing of the body",
+            ),
+        ),
+        (
+            "activitypub/inbox_routes.rs",
+            "retract_reaction",
+            Use::Reader(
+                "reads a synthetic reaction post's body on an inbound `Undo`, only to \
+                 reverse the counters its mint moved; returns nothing of the body",
             ),
         ),
         (

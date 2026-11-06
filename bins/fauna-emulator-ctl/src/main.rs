@@ -675,7 +675,10 @@ fn main() {
         signal(15, signal_handler); // SIGTERM
     }
 
-    eprintln!("listening on {}", cfg.bind);
+    // The bound address, not the requested one: with `--bind 127.0.0.1:0` the
+    // OS picks the port, and this line is how a caller (the integration tests)
+    // learns it without a drop-then-rebind race.
+    eprintln!("listening on {}", listener.local_addr().unwrap_or(cfg.bind));
 
     listener.set_nonblocking(true).ok();
     loop {

@@ -322,6 +322,24 @@ public class ReportingTests : IDisposable
     }
 
     [Fact]
+    public void Queue_RowLineSaysHowOldTheReportIs()
+    {
+        // moderation.md § App surface: the queue row says how old the report is,
+        // by the shared relative-time fold (web's relativeTime, apple's
+        // ValueFormat.relativeTime) — never an absolute timestamp for a recent one.
+        const long nowMs = 1_700_000_000_000L;
+        var fiveMinutesAgoMicros = (nowMs - 5L * 60_000L) * 1_000L;
+        var queued = QueueRow("q1", new FfiReportSubject.Post("pp"), true, note: "n");
+        var row = AdminNestViewModel.MapReportRow(queued with { createdAt = fiveMinutesAgoMicros }, nowMs);
+
+        // Whatever the fold renders for five minutes ago ("5m ago" in English)
+        // — not FormatUnixLocal's absolute "YYYY-MM-DD HH:MM".
+        var fiveMinutesAgo = ValueFormat.RelativeTime(nowMs, nowMs - 5L * 60_000L);
+        Assert.Contains($" · {fiveMinutesAgo} — n", row.Line);
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", row.Line);
+    }
+
+    [Fact]
     public void Queue_RowLineCarriesNoteAndExcerptInOrder()
     {
         var row = AdminNestViewModel.MapReportRow(

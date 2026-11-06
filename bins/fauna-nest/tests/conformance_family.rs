@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 
 use fauna_core::identity::ActorKeypair;
-use fauna_core::obligation::{ContentFloor, ContentPolicy};
+use fauna_core::obligation::ContentPolicy;
 use fauna_core::screen_time::ScreenTimePolicy;
 use fauna_nest::bridge_management::{
     BridgeError, BridgeFollow, BridgeLinkMode, BridgeProvider, BridgeProviderRegistry,
@@ -1112,10 +1112,7 @@ async fn status_round_trips_the_exact_stored_policy_to_both_roles() {
 /// (`family-safety.md` § Wire & data shape → *Policy-update compatibility*:97 —
 /// "absent means leave that pillar unchanged"; the four reach knobs keep their
 /// replace semantics). RED-first against a naive full-replace, which would reset
-/// the content/screen columns to their defaults on the second update. Also pins
-/// the closed-enum write validation (§ :97 — "the nest refuses what it cannot
-/// name"): a present content sub-document carrying a floor the nest cannot parse
-/// (`ContentFloor::Unknown`) is refused, and the refusal clobbers nothing.
+/// the content/screen columns to their defaults on the second update.
 #[tokio::test]
 async fn v1x_pillars_persist_and_a_v1_shaped_update_leaves_them_intact() {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
@@ -1164,13 +1161,10 @@ async fn v1x_pillars_persist_and_a_v1_shaped_update_leaves_them_intact() {
         unknown_sender_mail: "hold".into(),
         federation_contact: false,
         feed_sources: "block".into(),
-        content_policy: Some(ContentPolicy {
-            nsfw: ContentFloor::Block,
-            spam: ContentFloor::Collapse,
-            phishing: ContentFloor::Inherit,
-            commercial: ContentFloor::Inherit,
-            document: None,
-        }),
+        content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[
+            ("nsfw", fauna_core::content_policy::ContentVerdict::Block),
+            ("spam", fauna_core::content_policy::ContentVerdict::Collapse),
+        ])),
         screen_time: Some(ScreenTimePolicy {
             window_start: Some(1260), // 21:00
             window_end: Some(420),    // 07:00 — wraps midnight
@@ -1250,61 +1244,15 @@ async fn v1x_pillars_persist_and_a_v1_shaped_update_leaves_them_intact() {
         after.unknown_peer_dm, with_pillars.unknown_peer_dm,
         "a v1-shaped save must not relax the bridge-DM gate"
     );
-
-    // 3) A present content sub-document carrying a floor the nest cannot name is
-    //    refused at write (closed-enum validation) — and refusing it clobbers
-    //    nothing.
-    //    `ContentFloor::Unknown` is never serialized (it is the collapsing
-    //    arm), so the newer writer is modelled on the wire: a floor value this
-    //    build has never heard of.
-    let mut bad: fauna_protocol::Value = decode(&encode(&FamilyPolicyUpdateRequest {
-        supervised_actor_id: ByteBuf::from(child.to_vec()),
-        policy: ReachPolicy {
-            content_policy: Some(ContentPolicy::default()),
-            ..Default::default()
-        },
-        extra: Default::default(),
-    }))
-    .unwrap();
-    {
-        use fauna_protocol::Value;
-        let Value::Map(top) = &mut bad else {
-            panic!("a request is a map")
-        };
-        let Some(Value::Map(policy)) = top.get_mut("policy") else {
-            panic!("policy")
-        };
-        let Some(Value::Map(content)) = policy.get_mut("content_policy") else {
-            panic!("content_policy")
-        };
-        content.insert("nsfw".into(), Value::String("quarantine".into()));
-    }
-    let err = dispatch(
-        &r,
-        st.clone(),
-        guardian,
-        "fauna.family.policy.update",
-        encode(&bad),
-    )
-    .await
-    .expect_err("unparseable content floor refused");
-    assert_eq!(err.code, "fauna.family.invalid_params");
-    assert_eq!(
-        ward_policy().await.content_policy,
-        with_pillars.content_policy,
-        "a refused write leaves the stored pillar intact"
-    );
 }
 
 /// The guardian's content rule document (`nest-rules.md` § The shared rule
 /// editor (b)): the shared editor writes it as `ContentPolicy.document` through
-/// `fauna.family.policy.update`. Storing it clears the four floors (the editor
-/// showed each set floor as a rule, so the document is the whole rule set); a
-/// floors-only write — an app still painting the four selects — leaves it
-/// unchanged; a document the shared validator refuses for publisher `guardian`
-/// is refused and clobbers nothing.
+/// `fauna.family.policy.update`. An absent content policy leaves it unchanged,
+/// a present one carrying no document is refused; a document the shared validator refuses for publisher
+/// `guardian` is refused and clobbers nothing.
 #[tokio::test]
-async fn a_guardian_rule_document_persists_clears_the_floors_and_is_validated() {
+async fn a_guardian_rule_document_persists_and_is_validated() {
     use fauna_core::content_policy::{
         BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
         ScorerKind,
@@ -1355,15 +1303,7 @@ async fn a_guardian_rule_document_persists_clears_the_floors_and_is_validated() 
         ..Default::default()
     };
 
-    // A floor set the old way first.
-    update(with_content(ContentPolicy {
-        nsfw: ContentFloor::Block,
-        ..Default::default()
-    }))
-    .await
-    .expect("floors ok");
-
-    // The editor's write: a document carrying the floor as a rule, plus one more.
+    // The editor's write: a document of two rules.
     let rule = |factor: &str, verdict, code: &str| ContentRule {
         factor: factor.into(),
         min_permille: 500,
@@ -1393,22 +1333,23 @@ async fn a_guardian_rule_document_persists_clears_the_floors_and_is_validated() 
         .await
         .expect("a stored document is a content pillar");
     assert_eq!(stored.document.as_ref(), Some(&document));
-    assert_eq!(
-        [stored.nsfw, stored.spam, stored.phishing, stored.commercial],
-        [ContentFloor::Inherit; 4],
-        "storing a document clears the floors"
-    );
 
-    // A floors-only write leaves the document in force.
-    update(with_content(ContentPolicy {
-        commercial: ContentFloor::Collapse,
-        ..Default::default()
-    }))
-    .await
-    .expect("floors-only ok");
+    // A PRESENT content policy carrying no document is refused, and the
+    // stored document stays in force. It is what an app built
+    // before the content floors retired sends for "block nsfw"
+    // (`{ nsfw: "block" }` decodes to a document-less policy): answering
+    // success while storing nothing would tell the guardian the ward is
+    // protected when it is not. Absent (`None`) still means unchanged.
+    let err = update(with_content(ContentPolicy::default()))
+        .await
+        .expect_err("a document-less content policy is refused");
+    assert_eq!(err.code, "fauna.family.invalid_params");
     let after = ward_content().await.unwrap();
     assert_eq!(after.document.as_ref(), Some(&document));
-    assert_eq!(after.commercial, ContentFloor::Collapse);
+    update(ReachPolicy::default())
+        .await
+        .expect("an absent content policy is a write that leaves it unchanged");
+    assert_eq!(ward_content().await.unwrap(), after);
 
     // The shared validator decides: a rule without a reason, and a content-id
     // list (a region's instrument only), are refused, clobbering nothing.
@@ -1441,11 +1382,7 @@ async fn a_guardian_rule_document_persists_clears_the_floors_and_is_validated() 
     }))
     .await
     .expect("an empty document ok");
-    assert_eq!(
-        ward_content().await,
-        None,
-        "no floor and no document is no pillar"
-    );
+    assert_eq!(ward_content().await, None, "no document is no pillar");
 }
 
 #[tokio::test]

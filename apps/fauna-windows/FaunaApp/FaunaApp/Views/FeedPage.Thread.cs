@@ -58,6 +58,7 @@ public sealed partial class FeedPage
             if (!ReferenceEquals(_detailDialog, dialog)) return;
             CloseThreadPage(restoreDetail: false);
             _detailDialog = null;
+            _repaintDetailLabel = null;
         };
     }
 

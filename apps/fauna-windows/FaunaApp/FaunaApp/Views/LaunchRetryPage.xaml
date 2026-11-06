@@ -28,6 +28,13 @@
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchRecoverButton}"
                         Visibility="Collapsed"
                         Click="OnRecoverClick" />
+                <!-- nest-retirement.md § Layout & flow: ALWAYS shown here — unlike
+                     launch-recover-button it needs no custodied seed, only a cloud
+                     token, and the commonest reason to retire a box is that it is
+                     already broken or gone. Opens nest_retire. -->
+                <Button x:Name="RetireButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.LaunchRetireButton}"
+                        Click="OnRetireClick" />
             </StackPanel>
         </StackPanel>
     </Grid>

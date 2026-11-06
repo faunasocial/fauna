@@ -48,6 +48,12 @@ pytestmark = [
     # retention-count setup control is the shared one in `FoldersContent`.
     pytest.mark.macos,
     pytest.mark.ios,
+    # android carries every id the journey drives: `MediaScreen` mounts the
+    # `file-version-show-pruned-toggle`, badge and undelete button over
+    # `MediaVM`'s include-pruned listing (`MediaContentTest`), `FoldersScreen`
+    # the version-retention pair and `folder-nest-save-button`, and the media
+    # upload rides the same host-set file seam web uses.
+    pytest.mark.android,
 ]
 
 

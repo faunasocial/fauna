@@ -47,7 +47,8 @@ def hosted_world(
     ``env`` for a caller that runs the binary again (the custody module's
     seizure). Tears everything down on exit."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import open_registration, register_handled_actor
+    from common.auth import open_registration
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest, _repo_root, _seeded_environment
     from drivers.port_util import (
         find_free_port,
@@ -84,9 +85,7 @@ def hosted_world(
     spa_proxy_server = None
     try:
         admin = nest["admin"]
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
 
         # ── Bridge cold boot against the fakes + admin approval (the
         # test_atproto_identity_mint boot sequence). ──

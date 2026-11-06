@@ -4,7 +4,7 @@ use fauna_core::content_policy::{
     BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, GRAMMAR_VERSION, Publisher,
     REASON_DEFAULT_KEY, ScorerKind, decode_document, encode_document,
 };
-use fauna_core::obligation::{ContentFloor, ContentPolicy, GUARDIAN_FLOOR_TRIGGER_PERMILLE};
+use fauna_core::obligation::{ContentPolicy, GUARDIAN_FLOOR_TRIGGER_PERMILLE};
 use fauna_core::region_authority::RegionCode;
 
 use super::*;
@@ -362,52 +362,7 @@ fn a_newer_grammar_is_shown_and_never_overwritten() {
 }
 
 #[test]
-fn a_set_guardian_floor_shows_as_a_rule() {
-    let policy = ContentPolicy {
-        nsfw: ContentFloor::Block,
-        spam: ContentFloor::Collapse,
-        phishing: ContentFloor::Inherit,
-        commercial: ContentFloor::Unknown,
-        document: None,
-    };
-    let editor = RuleEditor::load_guardian(Some(&policy));
-    let doc = editor.document();
-    let rules: Vec<_> = doc
-        .rules
-        .iter()
-        .map(|r| (r.factor.as_str(), r.verdict, r.min_permille))
-        .collect();
-    assert_eq!(
-        rules,
-        [
-            (
-                "nsfw",
-                ContentVerdict::Block,
-                GUARDIAN_FLOOR_TRIGGER_PERMILLE
-            ),
-            (
-                "spam",
-                ContentVerdict::Collapse,
-                GUARDIAN_FLOOR_TRIGGER_PERMILLE
-            ),
-            // An unknown floor renders blocked, so it shows as a block rule.
-            (
-                "commercial",
-                ContentVerdict::Block,
-                GUARDIAN_FLOOR_TRIGGER_PERMILLE
-            ),
-        ]
-    );
-    // A floor carries no reason of its own: the guardian writes one before saving.
-    assert_eq!(keys(&editor.validate()), ["rule_editor.defect.no_reason"]);
-
-    let none = RuleEditor::load_guardian(None);
-    assert!(none.document().rules.is_empty());
-    assert!(none.can_save());
-}
-
-#[test]
-fn the_guardian_document_and_its_floors_load_together() {
+fn the_guardian_editor_opens_on_the_guardians_document() {
     let mut document = ContentPolicyDocument::empty();
     document.rules.push(ContentRule {
         factor: "phishing".into(),
@@ -418,14 +373,17 @@ fn the_guardian_document_and_its_floors_load_together() {
         extra: BTreeMap::new(),
     });
     let policy = ContentPolicy {
-        nsfw: ContentFloor::Collapse,
-        document: Some(document),
+        document: Some(document.clone()),
         ..ContentPolicy::default()
     };
-    let doc = RuleEditor::load_guardian(Some(&policy)).document();
-    let factors: Vec<_> = doc.rules.iter().map(|r| r.factor.as_str()).collect();
-    assert_eq!(factors, ["phishing", "nsfw"]);
-    assert_ne!(doc.rules[0].reason_code, doc.rules[1].reason_code);
+    assert_eq!(
+        RuleEditor::load_guardian(Some(&policy)).document(),
+        document
+    );
+
+    let none = RuleEditor::load_guardian(None);
+    assert!(none.document().rules.is_empty());
+    assert!(none.can_save());
 }
 
 #[test]

@@ -17,12 +17,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-/// Builds the wss/ws URL for the bearer-authenticated endpoint:
-/// `{base}/api/v1/ws/{actor_id_hex}` (transport.md § Connection lifecycle).
-pub fn actor_ws_url(nest_url: &str, actor_id_hex: &str) -> String {
-    let base = fauna_core::web::http_to_ws(nest_url);
-    format!("{base}/api/v1/ws/{actor_id_hex}")
-}
+/// The wss/ws URL for the bearer-authenticated endpoint
+/// (`{base}/api/v1/ws/{actor_id_hex}`); owned by `fauna_core::transport`.
+pub use fauna_core::transport::actor_ws_url;
 
 /// Builds the `Sec-WebSocket-Protocol: fauna.v1, bearer.<token>` header value
 /// for the bearer-subprotocol handshake.
@@ -45,18 +42,6 @@ pub fn rpc_ws_config() -> WebSocketConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn actor_ws_url_builds_the_bearer_path() {
-        assert_eq!(
-            actor_ws_url("https://nest.example", "abc123"),
-            "wss://nest.example/api/v1/ws/abc123"
-        );
-        assert_eq!(
-            actor_ws_url("http://127.0.0.1:8080", "deadbeef"),
-            "ws://127.0.0.1:8080/api/v1/ws/deadbeef"
-        );
-    }
 
     #[test]
     fn bearer_subprotocol_header_carries_the_token() {

@@ -20,10 +20,14 @@ import (
 // no call site can forget it. HKDF (OAUTHBEARER) is microsecond-cheap and stays
 // unthrottled. Hard-coded constants: no human ever chooses these.
 //
-// The gate is fair across sources: a freed slot goes to the queued
-// source holding the fewest slots, so one source (an IPv4 address, or an IPv6
-// /64 however many addresses it rotates through) cannot hold every slot while
-// another source waits. A lone source still uses every slot.
+// The gate is fair across networks, then sources: a freed
+// slot goes to the queued network (an IPv4 address, or an IPv6 /48) holding the
+// fewest slots, and inside it to the queued source (an IPv4 address, or an IPv6
+// /64 however many addresses it rotates through) holding the fewest — the
+// challenge store's /48 tier (deployment-threat-model.md § Concern 1a, H2). So
+// neither one source nor a flood spread over every /64 of one /48 can hold every
+// slot, or queue ahead of every slot, while another network waits. A lone source
+// still uses every slot.
 const (
 	// kdfMaxInFlight is the number of Argon2id runs allowed at once, bounding
 	// pre-auth KDF memory to kdfMaxInFlight × 64 MiB.
@@ -46,23 +50,40 @@ type kdfWaiter struct {
 	granted bool
 }
 
-// fairGate is the slot scheduler. inFlight counts held slots per source key;
-// queues holds each source's waiters in arrival order; order lists the sources
-// that have waiters, the most recently served last.
+// kdfSource is an attempt's fairness identity: its source key and the network
+// that source belongs to (kdfSourceKey).
+type kdfSource struct {
+	key, network string
+}
+
+// fairGate is the slot scheduler. inFlight and netInFlight count held slots per
+// source key and per network; queues holds each source's waiters in arrival
+// order; order lists the sources that have waiters and netOrder the networks
+// that have, each the most recently served last; netQueued counts a network's
+// sources in order.
 type fairGate struct {
-	mu       sync.Mutex
-	free     int
-	inFlight map[string]int
-	queues   map[string][]*kdfWaiter
-	order    []string
+	mu          sync.Mutex
+	free        int
+	inFlight    map[string]int
+	netInFlight map[string]int
+	queues      map[string][]*kdfWaiter
+	order       []kdfSource
+	netOrder    []string
+	netQueued   map[string]int
+}
+
+func newFairGate() *fairGate {
+	return &fairGate{
+		free:        kdfMaxInFlight,
+		inFlight:    map[string]int{},
+		netInFlight: map[string]int{},
+		queues:      map[string][]*kdfWaiter{},
+		netQueued:   map[string]int{},
+	}
 }
 
 var (
-	kdfGate = &fairGate{
-		free:     kdfMaxInFlight,
-		inFlight: map[string]int{},
-		queues:   map[string][]*kdfWaiter{},
-	}
+	kdfGate = newFairGate()
 	// kdfWait is a var only so tests can shorten it.
 	kdfWait = kdfMaxWait
 
@@ -101,27 +122,31 @@ func SaturateKDFGateForTest(wait time.Duration) (restore func()) {
 	}
 }
 
-// kdfSourceKey maps an attempt's source address to its fairness key: an IPv4
-// address as itself, an IPv6 address as its /64 (one host or one rotating
-// subnet is one source). A host:port form keys on its host; anything that does
-// not parse keys on its raw text.
-func kdfSourceKey(source string) string {
+// kdfSourceKey maps an attempt's source address to its fairness keys: the
+// source — an IPv4 address as itself, an IPv6 address as its /64 (one host or
+// one rotating subnet is one source) — and its network — an IPv4 address as
+// itself, an IPv6 address as its /48 (one end-site allocation, however many
+// /64s it spans). A host:port form keys on its host; anything that does not
+// parse keys both on its raw text.
+func kdfSourceKey(source string) (key, network string) {
 	addr, err := netip.ParseAddr(source)
 	if err != nil {
 		host, _, splitErr := net.SplitHostPort(source)
 		if splitErr != nil {
-			return source
+			return source, source
 		}
 		if addr, err = netip.ParseAddr(host); err != nil {
-			return source
+			return source, source
 		}
 	}
 	addr = addr.Unmap()
 	if addr.Is4() {
-		return addr.String()
+		return addr.String(), addr.String()
 	}
-	prefix, _ := addr.WithZone("").Prefix(64)
-	return prefix.String()
+	addr = addr.WithZone("")
+	p64, _ := addr.Prefix(64)
+	p48, _ := addr.Prefix(48)
+	return p64.String(), p48.String()
 }
 
 // acquireKDF takes a slot for an Argon2id run from source (the attempt's client
@@ -131,19 +156,20 @@ func acquireKDF(kind KdfKind, source string) (release func(), err error) {
 	if kind != KdfKindArgon2id {
 		return func() {}, nil
 	}
-	key := kdfSourceKey(source)
+	key, network := kdfSourceKey(source)
+	src := kdfSource{key, network}
 	g := kdfGate
 
 	g.mu.Lock()
 	if g.free > 0 {
 		// Dispatch is eager, so a free slot means nobody is queued.
-		g.grantLocked(key)
+		g.grantLocked(src)
 		g.mu.Unlock()
-		return admitted(key), nil
+		return admitted(src), nil
 	}
 	w := &kdfWaiter{ready: make(chan struct{})}
 	if len(g.queues[key]) == 0 {
-		g.order = append(g.order, key)
+		g.enqueueSourceLocked(src)
 	}
 	g.queues[key] = append(g.queues[key], w)
 	g.mu.Unlock()
@@ -152,21 +178,21 @@ func acquireKDF(kind KdfKind, source string) (release func(), err error) {
 	defer timer.Stop()
 	select {
 	case <-w.ready:
-		return admitted(key), nil
+		return admitted(src), nil
 	case <-timer.C:
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if w.granted {
 		// Granted in the race with the timer: the slot is ours.
-		return admitted(key), nil
+		return admitted(src), nil
 	}
-	g.dequeueLocked(key, w)
+	g.dequeueLocked(src, w)
 	return nil, ErrKDFBusy
 }
 
 // admitted counts an admitted run and returns its release.
-func admitted(key string) func() {
+func admitted(src kdfSource) func() {
 	kdfRuns.Add(1)
 	n := kdfInFlight.Add(1)
 	for {
@@ -179,50 +205,80 @@ func admitted(key string) func() {
 	return func() {
 		once.Do(func() {
 			kdfInFlight.Add(-1)
-			kdfGate.release(key)
+			kdfGate.release(src)
 		})
 	}
 }
 
-func (g *fairGate) grantLocked(key string) {
+func (g *fairGate) grantLocked(src kdfSource) {
 	g.free--
-	g.inFlight[key]++
+	g.inFlight[src.key]++
+	g.netInFlight[src.network]++
 }
 
-func (g *fairGate) release(key string) {
+func (g *fairGate) release(src kdfSource) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.free++
-	if g.inFlight[key]--; g.inFlight[key] <= 0 {
-		delete(g.inFlight, key)
+	if g.inFlight[src.key]--; g.inFlight[src.key] <= 0 {
+		delete(g.inFlight, src.key)
+	}
+	if g.netInFlight[src.network]--; g.netInFlight[src.network] <= 0 {
+		delete(g.netInFlight, src.network)
 	}
 	for g.free > 0 && len(g.order) > 0 {
-		// The queued source holding the fewest slots; ties go to the one served
-		// longest ago (earliest in order).
-		best := 0
-		for i, k := range g.order[1:] {
-			if g.inFlight[k] < g.inFlight[g.order[best]] {
-				best = i + 1
+		// The queued network holding the fewest slots, then its queued source
+		// holding the fewest; ties at each tier go to the one served longest
+		// ago (earliest in netOrder, then in order).
+		bestNet := 0
+		for i, n := range g.netOrder[1:] {
+			if g.netInFlight[n] < g.netInFlight[g.netOrder[bestNet]] {
+				bestNet = i + 1
 			}
 		}
-		k := g.order[best]
-		w := g.queues[k][0]
-		g.queues[k] = g.queues[k][1:]
-		g.order = append(g.order[:best], g.order[best+1:]...)
-		if len(g.queues[k]) == 0 {
-			delete(g.queues, k)
-		} else {
-			g.order = append(g.order, k)
+		network := g.netOrder[bestNet]
+		best := -1
+		for i, s := range g.order {
+			if s.network == network && (best < 0 || g.inFlight[s.key] < g.inFlight[g.order[best].key]) {
+				best = i
+			}
 		}
-		g.grantLocked(k)
+		s := g.order[best]
+		w := g.queues[s.key][0]
+		g.queues[s.key] = g.queues[s.key][1:]
+		g.order = append(g.order[:best], g.order[best+1:]...)
+		g.netOrder = append(g.netOrder[:bestNet], g.netOrder[bestNet+1:]...)
+		g.netQueued[network]--
+		if len(g.queues[s.key]) == 0 {
+			delete(g.queues, s.key)
+		} else {
+			g.order = append(g.order, s)
+			g.netQueued[network]++
+		}
+		if g.netQueued[network] > 0 {
+			g.netOrder = append(g.netOrder, network)
+		} else {
+			delete(g.netQueued, network)
+		}
+		g.grantLocked(s)
 		w.granted = true
 		close(w.ready)
 	}
 }
 
+// enqueueSourceLocked lists a source that has just gained its first waiter, and
+// its network if that has no queued source yet.
+func (g *fairGate) enqueueSourceLocked(src kdfSource) {
+	g.order = append(g.order, src)
+	if g.netQueued[src.network] == 0 {
+		g.netOrder = append(g.netOrder, src.network)
+	}
+	g.netQueued[src.network]++
+}
+
 // dequeueLocked drops a timed-out waiter from its source's queue.
-func (g *fairGate) dequeueLocked(key string, w *kdfWaiter) {
-	q := g.queues[key]
+func (g *fairGate) dequeueLocked(src kdfSource, w *kdfWaiter) {
+	q := g.queues[src.key]
 	for i, x := range q {
 		if x == w {
 			q = append(q[:i], q[i+1:]...)
@@ -230,13 +286,23 @@ func (g *fairGate) dequeueLocked(key string, w *kdfWaiter) {
 		}
 	}
 	if len(q) > 0 {
-		g.queues[key] = q
+		g.queues[src.key] = q
 		return
 	}
-	delete(g.queues, key)
-	for i, k := range g.order {
-		if k == key {
+	delete(g.queues, src.key)
+	for i, s := range g.order {
+		if s.key == src.key {
 			g.order = append(g.order[:i], g.order[i+1:]...)
+			break
+		}
+	}
+	if g.netQueued[src.network]--; g.netQueued[src.network] > 0 {
+		return
+	}
+	delete(g.netQueued, src.network)
+	for i, n := range g.netOrder {
+		if n == src.network {
+			g.netOrder = append(g.netOrder[:i], g.netOrder[i+1:]...)
 			break
 		}
 	}

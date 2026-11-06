@@ -4,6 +4,7 @@
   import { identity, reconnectTick, familyTabGated } from '#lib/store';
   import { t } from '#lib/i18n/strings';
   import { clearNotifications, clearUpTo, dismissNotification, getNotifications, isNotificationMuted, markNotificationsRead, navigableDestination, notificationRowText, notificationTypeGlyph, type UnifiedNotification } from '#lib/notifications';
+  import { contactsRevision } from '#lib/conversations';
   import type { NotificationDestination } from '#lib/wasm';
   import { setPendingSearchNav } from '#lib/search';
   import { isSafeNavUrl } from '#lib/safe-url';
@@ -33,6 +34,14 @@
     } catch {
       // Not readable yet — leave the list empty (nothing collapses).
     }
+  }
+
+  // The row's sentence names a fauna-native sender through the overlay
+  // projection (`notifications.md` § Localized body → *The sender arg*), so it
+  // is re-read whenever that projection moves (`$contactsRevision`).
+  function rowText(n: UnifiedNotification): string {
+    void $contactsRevision;
+    return notificationRowText(n);
   }
 
   function collapsed(n: UnifiedNotification): boolean {
@@ -178,7 +187,7 @@
       {#snippet rowBody()}
         <span data-testid={IDS.NOTIFICATION_TYPE_ICON} class="type-icon">{notificationTypeGlyph(notif.type)}</span>
         <div class="notif-content">
-          <span class="notif-summary">{notificationRowText(notif)}</span>
+          <span class="notif-summary">{rowText(notif)}</span>
           <!-- notif.created_at is epoch micros (NotifItem) → ms -->
           <span class="notif-meta muted">{notif.source} · {relativeTime(notif.created_at / 1000)}</span>
         </div>

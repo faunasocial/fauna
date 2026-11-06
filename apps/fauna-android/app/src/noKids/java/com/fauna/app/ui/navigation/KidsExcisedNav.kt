@@ -103,6 +103,12 @@ fun NavGraphBuilder.kidsExcisedDestinations(navController: NavHostController) {
     composable("settings/mail-import") {
         com.fauna.app.ui.screen.settings.MailImportScreen(navController)
     }
+    // Import from other services — the archive-import wizard
+    // (archive-import.md § The wizard and its machine), outside the kids
+    // flavor like the machine it renders.
+    composable("settings/archive-import") {
+        com.fauna.app.ui.screen.settings.ArchiveImportScreen(navController)
+    }
     composable("settings/mail-spam") {
         com.fauna.app.ui.screen.settings.MailSpamScreen(navController)
     }

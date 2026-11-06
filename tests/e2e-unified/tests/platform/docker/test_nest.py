@@ -96,8 +96,15 @@ def nest_container(docker_image):
 
 
 @pytest.mark.feature("get-the-app")
-def test_docker_image_structure(docker_image):
+def test_docker_image_structure(docker_image, nest_container):
     """Verify the shipped binaries exist and fauna user has UID 1000.
+
+    `nest_container` boots the same image to health: that is what makes this an
+    observation of a named build. The checks below run `docker run --rm` probes
+    that never answer `/api/v1/health`, and an own-artifact record names the
+    build a booted container reported there (`feature-catalog.md` § The ledger,
+    *own-artifact records*, ruling (b)) — without the boot the ledger declined
+    every record of this test, and its `[nest]` outcome stayed unrun.
 
     `fauna-bridge-imap` was retired (during the mail-bridge migration); the mail path
     now ships `fauna-mail-bridge` (MTA+MDA roles) + the `fauna-supervisor`

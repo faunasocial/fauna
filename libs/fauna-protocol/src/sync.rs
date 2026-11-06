@@ -1,5 +1,5 @@
 //! Device-sync control-plane WS-RPC payload types — `fauna.sync.{register,
-//! changes.{list,record},status,files,backup_status,devices.{list,delete}}`.
+//! changes.{list,record},status,files,backup_status,devices.{list,delete,rename}}`.
 //! A behavior-preserving transport migration of the bearer-authed device-sync
 //! routes (`sync_routes`) — Track B13 of the WS-RPC-everywhere migration
 //! (tracked internally). These kinds ride the **bearer**
@@ -323,6 +323,16 @@ pub struct SyncChangesListRequest {
     /// Additive 2026-09-16.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_under: Option<ByteBuf>,
+    /// **An item filter** on the state-entry arm: serve only the rows at this
+    /// 32-byte blinded `item_key`, every other gate unchanged — the by-key
+    /// read the HTTP record door's `GET /api/v1/records/{kind}/{key}` is
+    /// (`third-party-kinds.md` § The record doors), so a single-record read
+    /// loads that item's rows, never a page-by-page walk of the whole scope.
+    /// The echo stays a claim about the whole log, as with
+    /// [`Self::sealed_under`]. Absent keeps the serve byte-for-byte; a
+    /// malformed (non-32-byte) key is refused. Additive 2026-11-05.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_key: Option<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -351,12 +361,22 @@ pub struct SyncChange {
     /// generation — `mls-group-key-material.md` § M2 content-key mechanism.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_key_version: Option<u64>,
-    /// Hex thumbnail-blob hash the uploader recorded for this file (the
-    /// `UploadSidecar.thumbnail_hash` pointer fetched via the nest `?thumb=1`
-    /// routing). `None` for deletes, non-media files, and changes recorded before
-    /// a producer supplies one. The nest stores it opaque and echoes it back so
-    /// `fauna.media.list` can surface it as `MediaItem.thumbnail_hash`
-    /// (`docs/goal/ui/media.md` § State & data shape).
+    /// The **group set** twin of [`Self::content_key_version`]: the 32-byte
+    /// generation id whose derived content key sealed this version's manifest
+    /// and chunks (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 4). A group set has no `u64` version and none is ever
+    /// synthesized, so on that family `content_key_version` stays `None` and
+    /// this carries the stamp; at most one of the two is present
+    /// (`fauna_core::blob_seal::SealStamp::from_parts`). Additive 2026-10-29.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub content_generation: Option<[u8; 32]>,
+    /// Hex hash of the thumbnail's chunk **manifest** the uploader recorded for
+    /// this file — a thumbnail rests as its file rests, sealed under the file's
+    /// root and opened through the file's own walk at this row's stamp
+    /// (`docs/goal/ui/media.md` § Encryption at rest → *A thumbnail rests as its
+    /// file rests*). `None` for deletes, non-media files, and changes recorded
+    /// without one. The nest stores it opaque and echoes it back so
+    /// `fauna.media.list` can surface it as `MediaItem.thumbnail_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_hash: Option<String>,
     /// Hex actor id of the authenticated connection actor that recorded this
@@ -421,6 +441,17 @@ pub struct SyncChange {
     /// nest stores and echoes it like the other causal-stamp fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_retention: Option<bool>,
+    /// Hex 32-byte writer key of the **depositor**, on the change row the
+    /// owner's device records when it adopts a folder deposit
+    /// (`folder-deposit.md` § The depositor signs, the owner's device verifies
+    /// → *Ruling 3*). Covered by the writer-signed statement
+    /// (`crate::sync_writer_sig::SignedChange::deposited_by`): the owner's
+    /// signed word, not a nest stamp. The owner's app resolves it through its
+    /// connected-apps roster; a member's app reads "a connected app". The nest
+    /// stores and echoes it, and strips it on the public projection.
+    /// Additive 2026-11-05.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposited_by: Option<String>,
     /// **The explicit item-class discriminator** (W2.3,
     /// `account-sync-plane.md` § Feeds and cursors → *Feed row + wire
     /// evolution*;
@@ -569,9 +600,9 @@ pub struct SyncChangeRecordRequest {
     /// the nest stores it opaque and echoes it back on list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_key_version: Option<u64>,
-    /// Hex thumbnail-blob hash the uploader recorded for this file (see
-    /// [`SyncChange::thumbnail_hash`]). `None` until a producer supplies one; the
-    /// nest stores it opaque and surfaces it via `fauna.media.list`.
+    /// Hex hash of the thumbnail's chunk manifest the uploader recorded for this
+    /// file (see [`SyncChange::thumbnail_hash`]). `None` when it records none;
+    /// the nest stores it opaque and surfaces it via `fauna.media.list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_hash: Option<String>,
     /// Cross-nest relay (additive, Phase 3 — `federation-shared-folders.md` § Cross-nest shared
@@ -607,6 +638,11 @@ pub struct SyncChangeRecordRequest {
     /// Resolution marker — see [`SyncChange::is_resolution`]. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_resolution: Option<bool>,
+    /// The depositor's writer key — see [`SyncChange::deposited_by`]. Set only
+    /// by the owner's device adopting a folder deposit; inside the signed
+    /// statement. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposited_by: Option<String>,
     /// The writer's Ed25519 signature over this record's `SignedChange`
     /// statement (`crate::sync_writer_sig`; `mls-group-key-material.md` § M2 →
     /// *Writer-signed change records* (2)). 64 bytes. Required from birth on
@@ -921,6 +957,35 @@ pub struct SyncDeviceDeleteReply {
     pub deleted: bool,
     /// Number of folder memberships the device was removed from.
     pub folders_removed_from: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.sync.devices.rename ────────────────────────────────────────────────
+
+/// The user-chosen name (`docs/goal/behavior/devices.md` § Device names, rule
+/// (1)): the owner names any of their own rows from any of their apps. Writes
+/// the row's two label columns and nothing else — never `fauna.sync.register`,
+/// which also rewrites `capabilities` and `registered_at`. Actor-scoped like
+/// `fauna.sync.devices.delete`: another actor's row answers `not_found`.
+pub const KIND_SYNC_DEVICES_RENAME: &str = "fauna.sync.devices.rename";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncDeviceRenameRequest {
+    /// Hex-encoded 32-byte device id of the row to rename.
+    pub device_id: String,
+    /// The new name, **sealed** under the owner's root (salt = `device_id`,
+    /// random nonce), minted only through
+    /// `fauna_core::label_custody::seal_device_label`. Required: a user-chosen
+    /// name rests sealed-only, so the wire carries no plaintext label
+    /// (`path-sealing.md` § Sealed names & paths).
+    pub label_sealed: ByteBuf,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SyncDeviceRenameReply {
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

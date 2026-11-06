@@ -9,8 +9,14 @@ guide: docs/guides/calendar-and-contacts.md § Contacts: two different address b
 ## What a user gets
 
 A second segment of Contacts is your address book: the cards a standard contacts
-app keeps on your nest. Open a card and its name, phone and email are there, stored
-sealed and unsealed only on your device.
+app keeps on your nest. Open a card and its name, phone and email are there; the
+card is stored encrypted on your nest, which opens it with the password of a
+mail, calendar, contacts or file app you connect, and only for that app's
+signed-in session, and the Fauna app opens it on your own device. Beyond that,
+no permission you give your nest lets it read your address book. Your nest also
+sees what any server that delivers your messages must: who you're connected to —
+your contacts, whom you follow, the groups you're in — and when and how much you
+send.
 
 ## Coverage contract
 
@@ -31,19 +37,19 @@ Stamped 2026-10-21 at 77c610862e.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+c04c2468 standalone |
-| linux | ✅ full | 0.1.2-dev+c04c2468 standalone |
-| windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
-| ios | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
-| android | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
-| tui | ✅ full | 0.1.2-dev+c04c2468 standalone |
+| web | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| linux | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| windows | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| android |  no run recorded | |
+| tui | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_addressbook.py::test_address_book_lists_and_details_mda_sealed_card` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_body_rests_sealed_in_its_segment_and_serves_byte_identically` | nest (linux): passed, nest (windows): passed |
-| 2 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_addressbook.py::test_a_card_added_from_another_app_appears_while_on_the_address_book` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge` | nest (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_addressbook.py::test_address_book_lists_and_details_mda_sealed_card` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_body_rests_sealed_in_its_segment_and_serves_byte_identically` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 2 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_addressbook.py::test_a_card_added_from_another_app_appears_while_on_the_address_book` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 <!-- features-render:end -->

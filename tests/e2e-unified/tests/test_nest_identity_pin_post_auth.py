@@ -63,9 +63,9 @@ from common.launch_harness import make_launch_harness, reached_authenticated_app
 from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 from helpers.app_log_section import app_text
-from helpers.app_surface import skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment
 from helpers.budgets import IDENTITY_REFRESH_S
-from helpers.waiting import session_generation
+from helpers.waiting import await_session_actor, session_generation
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui,
@@ -134,6 +134,7 @@ def pin_env(request, pin_app, tmp_path):
             "node_url": spa_url,
             "nest": None,  # a browser reads no environment
             "secret_hex": bytes(user["signing_key"]).hex(),
+            "actor_id_hex": user["actor_id_hex"],
             "web_launch": True,
         }
         try:
@@ -154,6 +155,7 @@ def pin_env(request, pin_app, tmp_path):
         "node_url": nest["url"],
         "nest": nest,
         "secret_hex": bytes(nest["user"]["signing_key"]).hex(),
+        "actor_id_hex": nest["user"]["actor_id_hex"],
         "web_launch": False,
     }
     try:
@@ -292,13 +294,13 @@ def test_post_auth_identity_change_warns_then_recovers(pin_env):
     # the seed.
     #
     # ⚠ **Reading them after the seed is unsound, and that is what made this test
-    # red on ios**. Every app ALSO runs a boot-time
-    # post-auth re-check of its own — one-shot, decoupled, fire-and-forget (apple
-    # dispatches it from the post-auth glue, `FaunaApp.swift` /
-    # `FaunaMacApp.swift`'s `Task { await performPostAuthSilentSignIn() }`; linux
-    # from `FaunaClient::silent_sign_in()` in `main.rs`; each of the other four
-    # its own) — and on apple that glue runs well AFTER the `session.authenticated`
-    # flip `reached_authenticated_app` waits on. So the seed landed inside the
+    # red on ios**. An app may ALSO re-check on its
+    # own after sign-in, decoupled and fire-and-forget — apple then ran a boot-time
+    # one-shot challenge from its post-auth glue; tui, linux and apple now read
+    # the session mint's own reply instead (`transport-connection.md` § The dial
+    # budget), whose every re-mint carries the same verdict — and that check can
+    # land well AFTER the `session.authenticated` flip `reached_authenticated_app`
+    # waits on. So the seed landed inside the
     # one-shot's window, the ONE-SHOT produced the verdict, and the trigger below
     # then found a session already torn down (`PostAuthAccountFlows.swift`'s
     # `guard let ... session.secretHex`) and returned without a second teardown.
@@ -323,18 +325,12 @@ def test_post_auth_identity_change_warns_then_recovers(pin_env):
     # Convention 14: this escalation is a session
     # teardown exactly like sign-out/switch/factory-reset and must count itself
     # the same way, or a negative assert elsewhere ("did this gesture relaunch
-    # me?") would silently misreport across this one arm. Apps that have not built
-    # the counter yet declare the gap rather than skip the rest of this
-    # (still-valid) positive test.
+    # me?") would silently misreport across this one arm. All seven apps publish
+    # the counter, so an app that does not is a red.
     generation_before = session_generation(driver)
-    if generation_before is None:
-        skip_unbuilt(
-            driver,
-            surface="the session_generation teardown counter",
-            detail="mid-session identity-changed escalation must bump it at "
-            "initiation, same as sign-out/switch/factory-reset",
-            tracked="",
-        )
+    assert generation_before is not None, (
+        "the app publishes no session_generation teardown counter"
+    )
 
     # Seam 1: re-seed the pin on the LIVE session (no onboarding machine here).
     _seed_pin(driver, env["node_url"], BOGUS_PIN)
@@ -406,6 +402,12 @@ def test_post_auth_identity_change_warns_then_recovers(pin_env):
         ) from e
     assert driver.is_absent(IDENTITY_WARNING), (
         "after re-trusting, the warning should be gone and the user in the app"
+    )
+    # A shell is not a session: the re-trust must land a LIVE one, verified on
+    # this load (convention 11). On web and iOS the shell above can stand on
+    # cache alone, and web's flag once stayed false after this very re-trust.
+    await_session_actor(
+        driver, env["actor_id_hex"], budget_s=60, what="the re-trust"
     )
 
     # The stale pin was forgotten and the re-TOFU re-pinned the nest's genuine

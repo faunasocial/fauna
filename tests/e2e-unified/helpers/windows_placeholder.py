@@ -103,13 +103,18 @@ def wait_for_placeholder(path: str, timeout: float = _DEFAULT_TIMEOUT) -> bool:
         return False
 
 
-def hydrate_via_shell(path: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+def hydrate_via_shell(
+    path: str, timeout: float = 30.0, *, capture_stdout: bool = False
+) -> subprocess.CompletedProcess:
     """Read ``path`` from ANOTHER process, raising the cfapi fetch a double-click raises.
 
     ``cmd /c type`` streams the file's bytes, which is exactly the OS→provider
     ``FETCH_DATA`` a shell open produces — but from a process that exits, with no
-    GUI app left behind (see module docstring). Output is discarded: the bytes
-    are not the assertion, the attribute flip is.
+    GUI app left behind (see module docstring). Output is discarded by default:
+    the bytes are not the assertion, the attribute flip is. ``capture_stdout``
+    keeps them, for a caller that also asserts WHICH bytes the provider served
+    (``type`` passes a text body through unchanged; a body holding a Ctrl-Z or a
+    UTF-16 byte-order mark is not one to compare this way).
 
     Does NOT assert success — a cfapi fetch that no provider answers blocks for
     the platform's 60 s recall timeout and then fails
@@ -119,7 +124,7 @@ def hydrate_via_shell(path: str, timeout: float = 30.0) -> subprocess.CompletedP
     """
     return subprocess.run(
         ["cmd", "/c", "type", str(path)],
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         timeout=timeout,
         check=False,

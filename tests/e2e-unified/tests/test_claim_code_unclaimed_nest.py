@@ -98,7 +98,10 @@ def test_claim_code_invalid_renders_status_not_error_message(app):
     })
     status_text = app.get_text("claim-code-status")
     assert "code does not match" in status_text or "not match" in status_text.lower()
-    # Submit re-enabled so user can retry.
+    # Submit re-enabled so user can retry. The machine's `submit_enabled` is
+    # half the gate: a view also keeps Claim off over an empty input, and a code
+    # the machine called invalid is one the user typed.
+    app.driver.clear_and_type("claim-code-input", "not-the-code")
     assert app.is_enabled("claim-code-submit-button"), (
         "Invalid code should re-enable submit so the user can retry: "
         f"{app.driver.diagnose('claim-code-submit-button')} "

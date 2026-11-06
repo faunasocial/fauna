@@ -71,6 +71,7 @@ from .helpers import (
     register_primary_domain,
     remove_container,
     sni_https_request,
+    scanner_wired_network,
     start_container_with_ports,
     wait_for_health,
 )
@@ -123,27 +124,30 @@ def serving_nest(docker_image):
     http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
     name = f"fauna-rate-burst-{http_port}"
-    start_container_with_ports(
-        name,
-        {443: http_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
-    )
-    try:
-        wait_for_health(http_port, name)
-        admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
-        nest = {
-            "name": name,
-            "port": http_port,
-            "router_port": http_port,
-            "url": f"https://127.0.0.1:{http_port}",
-            "admin": admin,
-            "mail_ports": mail_ports,
-        }
-        register_primary_domain(nest, DOMAIN)
-        bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
-        yield nest
-    finally:
-        remove_container(name)
+    # Mail enable needs content scanners beside the nest (else `mail_unavailable_here`).
+    with scanner_wired_network("fauna-rate-burst") as (network, scan_env):
+        start_container_with_ports(
+            name,
+            {443: http_port, **mail_ports},
+            env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+            network=network,
+        )
+        try:
+            wait_for_health(http_port, name)
+            admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
+            nest = {
+                "name": name,
+                "port": http_port,
+                "router_port": http_port,
+                "url": f"https://127.0.0.1:{http_port}",
+                "admin": admin,
+                "mail_ports": mail_ports,
+            }
+            register_primary_domain(nest, DOMAIN)
+            bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
+            yield nest
+        finally:
+            remove_container(name)
 
 
 def _basic_auth(username: str, password: str) -> dict[str, str]:

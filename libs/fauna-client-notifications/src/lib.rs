@@ -24,7 +24,10 @@ mod muted;
 mod text;
 pub use destination::{NotificationDestination, notification_destination};
 pub use muted::{knock_push_muted, notification_muted, notification_push_muted};
-pub use text::{NotificationText, knock_push_text, notification_push_text, notification_text};
+pub use text::{
+    NotificationText, knock_push_text, notification_push_text, notification_text,
+    notification_text_naming,
+};
 
 /// Whether this row's dismiss is greyed at `now_micros` — a `security.notice`
 /// inside its retention window (`behavior/notifications.md` § Retention rule

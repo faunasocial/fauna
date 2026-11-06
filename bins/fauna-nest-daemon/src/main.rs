@@ -427,6 +427,9 @@ mod macos {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    // The commit this binary was compiled from, handed to the embedded nest
+    // before it serves health (`fauna_nest::build_identity` owns why).
+    fauna_nest::build_identity::stamp(fauna_build_commit::commit!());
     // The data dir roots the log file, so it resolves first; a failure here
     // has no file to reach yet — stderr is the only surface, and launchd's
     // `launchctl print system/social.fauna.nest` keeps the exit status.

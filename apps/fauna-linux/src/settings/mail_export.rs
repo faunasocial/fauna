@@ -718,6 +718,16 @@ fn render(ctx: &Rc<ExportCtx>, snap: &MailExportSnapshot) {
         w.strip_headers_toggle.set_active(snap.strip_headers);
     }
     ctx.syncing.set(false);
+    // The EXPLICIT `state` marker, as on the mailbox rows below: linux's agent
+    // otherwise answers a Switch's `true`/`false`, not the `on`/`off` the
+    // cross-app `MailExportActions.strip_headers_on` reads.
+    let (on, off) = if snap.strip_headers {
+        ("test-attr-state-on", "test-attr-state-off")
+    } else {
+        ("test-attr-state-off", "test-attr-state-on")
+    };
+    w.strip_headers_toggle.remove_css_class(off);
+    w.strip_headers_toggle.add_css_class(on);
 
     // Mailbox multi-select: rebuild the CheckButtons from the snapshot.
     {

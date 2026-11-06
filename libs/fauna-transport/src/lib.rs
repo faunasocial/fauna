@@ -336,6 +336,17 @@ pub trait PeerTransport: Send + Sync {
     /// This local endpoint's identity — an actor key (client) or a nest key
     /// (nest-as-endpoint mode).
     fn local_identity(&self) -> EndpointKey;
+
+    /// Take the endpoint down **gracefully**: every peer holding a connection
+    /// to it is told the connection is over, and this returns once that is
+    /// said. A holder that is handing its identity to another process, or
+    /// switching its listener off, calls this before letting go — dropping
+    /// the last handle instead leaves each connected peer sending into a
+    /// socket that is gone until its idle timer gives up.
+    ///
+    /// The default does nothing: a substrate with no connected peers to tell
+    /// (the in-memory test doubles) has nothing to close.
+    async fn close(&self) {}
 }
 
 #[cfg(test)]

@@ -185,6 +185,15 @@ public sealed partial class PaymentsAuthorSections : UserControl
         UpdateDerivedUi();
     }
 
+    private async void VoidClaim_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not FrameworkElement { Tag: PaymentClaimRow row }) return;
+        await _vm.VoidClaimAsync(row.Code);
+        UpdateDerivedUi();
+    }
+
+    private void KeepClaim_Click(object sender, RoutedEventArgs e) => _vm?.CancelVoidClaim();
+
     /// <summary>Rebuild <paramref name="combo"/>'s items from <paramref name="values"/>
     /// (Content = the value; <c>Tag</c> + an explicit <c>AutomationProperties.Name</c>
     /// also carry the raw value, so <c>driver.select(id, value)</c> matches exactly —

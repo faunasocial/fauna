@@ -2317,7 +2317,6 @@ impl CacheDb {
     /// inserted (`authorization-server.md` § Consent rule (b)). The poll behind
     /// a replaced row then reads it as expired, which is the honest answer to a
     /// client that superseded its own request.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)] // the request's facts, flat, as every start holds them
     pub async fn open_atproto_consent_request_for(
         &self,

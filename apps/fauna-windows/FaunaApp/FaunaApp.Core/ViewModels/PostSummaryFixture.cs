@@ -41,6 +41,9 @@ internal static class PostSummaryFixture
         string? gatedTier = null,
         string? gatedRoom = null,
         string? roomLabel = null,
+        string? repostedGatedTier = null,
+        string? repostedGatedRoom = null,
+        string? repostedRoomLabel = null,
         string? webSlug = null,
         bool gatedUnlocked = false,
         ContentLabelEntry[]? labels = null,
@@ -48,7 +51,10 @@ internal static class PostSummaryFixture
         string? legalTakedownRef = null,
         TipView? tips = null,
         bool unlockPurchasePending = false,
-        string? homeNestUrl = null) =>
+        string? homeNestUrl = null,
+        string? homeNestActorId = null,
+        PostReactionGroup[]? reactions = null,
+        string? adminBlockReason = null) =>
         new PostSummary(
             postId: postId,
             author: author,
@@ -74,6 +80,9 @@ internal static class PostSummaryFixture
             gatedTier: gatedTier,
             gatedRoom: gatedRoom,
             roomLabel: roomLabel,
+            repostedGatedTier: repostedGatedTier,
+            repostedGatedRoom: repostedGatedRoom,
+            repostedRoomLabel: repostedRoomLabel,
             webSlug: webSlug,
             gatedUnlocked: gatedUnlocked,
             labels: labels ?? System.Array.Empty<ContentLabelEntry>(),
@@ -81,7 +90,10 @@ internal static class PostSummaryFixture
             legalTakedownRef: legalTakedownRef,
             tips: tips,
             unlockPurchasePending: unlockPurchasePending,
-            homeNestUrl: homeNestUrl);
+            homeNestUrl: homeNestUrl,
+            homeNestActorId: homeNestActorId,
+            reactions: reactions ?? System.Array.Empty<PostReactionGroup>(),
+            adminBlockReason: adminBlockReason);
 
     private static RenderDocument EmptyDocument() =>
         new RenderDocument(System.Array.Empty<RenderBlock>());

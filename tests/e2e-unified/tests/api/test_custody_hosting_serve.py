@@ -100,11 +100,28 @@ def _refused(call) -> str:
 
 
 def _files(root: str):
+    """Every file under ``root`` with its bytes.
+
+    On windows the running nest holds an OS lock over the whole of each role
+    lock file (``fauna_core::fs_lock``'s zero-content ``<db>.lock``, taken
+    with ``File::try_lock``), and reading a locked range fails with EACCES —
+    measured 2026-11-02 on ``nest_subscription_mls.db.lock``. Such a file is
+    skipped only when it is EMPTY, which holds nothing the search could find;
+    any other file this process cannot read fails the test with its path, so
+    the search never clears a file it did not look into."""
     for dirpath, _, names in os.walk(root):
         for name in names:
             path = os.path.join(dirpath, name)
-            with open(path, "rb") as f:
-                yield path, f.read()
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except PermissionError as e:
+                if os.path.getsize(path) == 0:
+                    continue
+                raise PermissionError(
+                    f"{path} cannot be read, so the search for the readable text "
+                    f"cannot clear it: {e}") from e
+            yield path, data
 
 
 @pytest.mark.feature("admin-held-custody")

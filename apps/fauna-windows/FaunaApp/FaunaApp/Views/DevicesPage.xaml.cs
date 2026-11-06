@@ -71,6 +71,10 @@ public sealed partial class DevicesPage : Page
     /// (devices.md § Members without a matching entry).</summary>
     private string? _armedMemberId;
 
+    /// <summary>The open device-name editor (ui/devices.md § Device names) — keyed
+    /// by device_id, never the painted index; see <see cref="DevicesRenameEditor"/>.</summary>
+    private readonly DevicesRenameEditor _rename = new();
+
     public DevicesPage()
     {
         this.InitializeComponent();
@@ -147,7 +151,7 @@ public sealed partial class DevicesPage : Page
     private bool _storeResyncing;
     private bool _storeResyncAgain;
 
-    /// <summary>The store-change re-read of the open page: the machine's refresh
+    /// <summary>The store-change re-read of the open page: the machine's resync
     /// (its observer repaints the roster), the this-device row, the standing
     /// enrollment notice, the keyless-posture marks and the custody facet's FOLD —
     /// never its ceremony drive. Level-safe: a failed read keeps the painted rows,
@@ -170,7 +174,7 @@ public sealed partial class DevicesPage : Page
                 _storeResyncAgain = false;
                 try
                 {
-                    await _machine.Refresh();
+                    await _machine.Resync();
                 }
                 catch (Exception ex)
                 {
@@ -290,9 +294,12 @@ public sealed partial class DevicesPage : Page
     /// budget input's seed (the shared <c>budget_draft</c>), advanced to the
     /// committed text once a commit fires so the blur that follows an Enter
     /// never commits twice.</summary>
-    private sealed record HeldRow(byte[] GrantId, string Owner, string Scope, string Bytes, bool Stopped)
+    private sealed record HeldRow(byte[] GrantId, string Owner, string Scope, string Bytes, bool Stopped, string? RestoreAddress)
     {
         public string Draft { get; set; } = "";
+        /// <summary><c>custody-held-restore-address</c> is absent (Collapsed)
+        /// for a device-form hold.</summary>
+        public Visibility RestoreAddressVisibility => RestoreAddress is null ? Visibility.Collapsed : Visibility.Visible;
         public string StopLabel => Strings.Get(Stopped ? "devices/custody_stopped_bytes_remain" : "devices/custody_stop");
         public bool StopEnabled => !Stopped;
     }
@@ -328,7 +335,8 @@ public sealed partial class DevicesPage : Page
                     ? string.Join(", ", scoped.@scopes)
                     : Strings.Get("devices/custody_held_scope_account"),
                 S.CustodyHeldBytesText(h.@receipt),
-                h.@stopped)
+                h.@stopped,
+                DevicesCustodyFacet.HeldRestoreAddressText(h))
             { Draft = S.Resolve(h.@budgetDraft) })
             .ToList();
         HeldList.ItemsSource = held;
@@ -482,7 +490,7 @@ public sealed partial class DevicesPage : Page
         if (_machine is not null)
         {
             var snap = _machine.Snapshot();
-            RenderDevices(snap.devices, snap.ownP2pParticipation, snap.ownFingerprint);
+            RenderDevices(snap.devices, snap.ownFingerprint);
             RenderMembers(snap.members);
             machineError = snap.error is { } err ? S.Resolve(err) : null;
         }
@@ -528,7 +536,8 @@ public sealed partial class DevicesPage : Page
     /// logic lives) — empty when the device carries none, which the ItemsControl
     /// renders as nothing. <paramref name="Participation"/> is
     /// <c>device-p2p-participation-toggle</c>'s paint
-    /// (<see cref="DeviceParticipationPaint"/>). <paramref name="Keyless"/> is
+    /// (the machine's published <c>DeviceSummary.p2pParticipationPaint</c>, drawn
+    /// as is — never re-derived here). <paramref name="Keyless"/> is
     /// piece 1's <c>device-keyless-posture-badge</c> (the shared
     /// <c>keyless_posture</c> join, <see cref="DevicesCustodyFacet.IsKeyless"/>).
     /// Value-only consume, so the Visibility is a computed get-only on the row
@@ -536,9 +545,11 @@ public sealed partial class DevicesPage : Page
     /// type.</summary>
     private record DeviceRow(
         string Name, string Status, int Index, bool GuardianMarked, bool ThisMarked,
-        IReadOnlyList<string> FolderRoleBadges, DeviceParticipationPaint Participation, bool Keyless,
-        string? OwnFingerprint)
+        IReadOnlyList<string> FolderRoleBadges, P2pParticipationPaint? Participation, bool Keyless,
+        string? OwnFingerprint, string DeviceId, bool EditorOpen, string EditorDraft)
     {
+        public Visibility EditorVisibility
+            => EditorOpen ? Visibility.Visible : Visibility.Collapsed;
         /// <summary>The card's UIA Name: the label, or a fallback when it renders
         /// empty (a sealless register, or a seal this reader cannot open —
         /// `render_devices` keeps such a row). WinUI prunes a Name-less panel from
@@ -556,13 +567,16 @@ public sealed partial class DevicesPage : Page
             => ThisMarked ? Visibility.Visible : Visibility.Collapsed;
         public Visibility KeylessVisibility
             => Keyless ? Visibility.Visible : Visibility.Collapsed;
-        public bool ParticipationChecked => Participation.Checked;
-        public string ParticipationLabel => Strings.Get(Participation.LabelKey);
-        public bool ParticipationActionable => Participation.Actionable;
+        // A null paint draws nothing (the machine fills it on every row it publishes;
+        // android's DevicesScreen does the same) — no local fallback rule.
+        public bool ParticipationChecked => Participation?.@checked ?? false;
+        public string ParticipationLabel => Participation is { } p ? S.Resolve(p.@label) : "";
+        public bool ParticipationActionable => Participation?.@actionable ?? false;
+        public Visibility ParticipationVisibility
+            => Participation is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void RenderDevices(
-        IReadOnlyList<DeviceSummary> devices, bool? ownParticipation, string? ownFingerprint)
+    private void RenderDevices(IReadOnlyList<DeviceSummary> devices, string? ownFingerprint)
     {
         var thisRow = _thisDeviceRow;
         var rows = devices
@@ -588,9 +602,12 @@ public sealed partial class DevicesPage : Page
                         .Select(fs => S.ResolveNested(uniffi.fauna_ffi.FaunaFfiMethods.DevicePlaceLabel(
                             fs.originates, fs.accepts, fs.appliesDeletes)))
                         .ToList(),
-                    DeviceParticipationPaint.For(d, own, ownParticipation),
+                    d.@p2pParticipationPaint,
                     _custody.IsKeyless(d.@principal),
-                    ownFingerprint);
+                    ownFingerprint,
+                    d.deviceId,
+                    _rename.IsOpenFor(d.deviceId),
+                    _rename.IsOpenFor(d.deviceId) ? _rename.Draft : "");
             })
             .ToList();
         DevicesList.ItemsSource = rows;
@@ -663,6 +680,61 @@ public sealed partial class DevicesPage : Page
             return;
         }
         await _machine.RemoveDevice((uint)index);
+    }
+
+    // ── Device-name editor (device-rename-*; ui/devices.md § Device names) ──
+
+    /// <summary><c>device-rename-button[i]</c> — open the one editor over this card,
+    /// prefilled with the machine's <c>DeviceName(deviceId)</c> (the opened name,
+    /// never the painted label with its disambiguating suffix).</summary>
+    private void RenameOpen_Click(object sender, RoutedEventArgs e)
+    {
+        if (_machine is null || sender is not Button { DataContext: DeviceRow row })
+        {
+            ShellLog.Warn("DevicesPage", $"[rename] open dropped: machine={_machine is not null}");
+            return;
+        }
+        _rename.Open(row.DeviceId, _machine.DeviceName(row.DeviceId));
+        RenderPage();
+    }
+
+    private void RenameInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is TextBox box) _rename.SetDraft(box.Text);
+    }
+
+    private async void RenameInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter) return;
+        e.Handled = true;
+        await ConfirmRenameAsync();
+    }
+
+    private async void RenameConfirm_Click(object sender, RoutedEventArgs e)
+        => await ConfirmRenameAsync();
+
+    /// <summary><c>device-rename-confirm-button</c> — hand the typed text to the
+    /// machine, which sends nothing for a blank or unchanged name and paints a
+    /// refusal on <c>error-message</c>; the editor closes either way.</summary>
+    private async Task ConfirmRenameAsync()
+    {
+        if (_machine is null || _rename.DeviceId is not { } id)
+        {
+            ShellLog.Warn("DevicesPage", $"[rename] confirm dropped: machine={_machine is not null}");
+            return;
+        }
+        var text = _rename.Draft;
+        _rename.Close();
+        RenderPage();
+        await _machine.RenameDevice(id, text);
+        RenderPage();
+    }
+
+    /// <summary><c>device-rename-cancel-button</c> — close the editor; nothing is written.</summary>
+    private void RenameCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _rename.Close();
+        RenderPage();
     }
 
     /// <summary><c>device-p2p-participation-toggle[i]</c> — ask the machine to flip

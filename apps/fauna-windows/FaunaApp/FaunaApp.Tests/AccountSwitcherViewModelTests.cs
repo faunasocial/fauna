@@ -799,6 +799,22 @@ internal sealed class FakeAccountRegistry : FfiAccountRegistryFakeBase
         return true;
     }
 
+    /// <summary>Make <see cref="ConfirmIdentity"/> throw — a failed moment-1 write
+    /// (the wizard must stay on the confirm screen with the error).</summary>
+    public bool ThrowOnConfirmIdentity { get; set; }
+
+    /// <summary>The wizard's moment-1 commit. Overridden (succeeding) because the
+    /// onboarding view model now branches on whether it landed; the throwing default
+    /// would read as a failed write in every test that merely confirms an identity.</summary>
+    public override string ConfirmIdentity(string secretHex, bool appendMode)
+    {
+        if (ThrowOnConfirmIdentity)
+        {
+            throw new InvalidOperationException("keystore refused the write");
+        }
+        return "fake-actor";
+    }
+
     /// <summary>Accepts the write and echoes the record back, which is the
     /// store contract's "read it back" success answer.</summary>
     private sealed class InertPendingProvisionStore(FakeAccountRegistry owner) : PendingProvisionStore

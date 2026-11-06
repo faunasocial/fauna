@@ -157,6 +157,13 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     error_label.set_visible(false);
     root.append(&error_label);
 
+    // -- Joining is acceptance: the nest's rules directly above the terms
+    // notice, once the machine's verified read has landed (`nest-rules.md`
+    // § Acceptance at joining) --
+    let nest_rules = gtk::Box::new(Orientation::Vertical, 4);
+    nest_rules.set_visible(false);
+    root.append(&nest_rules);
+
     // -- By-continuing terms notice, above the bottom row --
     root.append(&super::widgets::terms_notice());
 
@@ -211,8 +218,13 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
         let supervised_notice = supervised_notice.clone();
         let continue_btn = continue_btn.clone();
         let error_label = error_label.clone();
+        let nest_rules = nest_rules.clone();
         move || {
             let snap = m.invite_request_snapshot();
+            crate::nest_rules::paint_joining(
+                &nest_rules,
+                m.joining_nest_rules(crate::nest_rules::UI_LANG).as_ref(),
+            );
 
             // Top row: localized message from the snapshot (per target-doc
             // rule 4: don't recompute message text on the client) + recheck

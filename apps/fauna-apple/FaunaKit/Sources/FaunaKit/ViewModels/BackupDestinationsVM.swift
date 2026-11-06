@@ -92,6 +92,21 @@ public final class BackupDestinationsVM {
     /// nest). No re-type: the restore deletes nothing, here or on the nest.
     public private(set) var reseedConfirming = false
 
+    /// The surviving nest the armed (or last-run) restore pulls back from —
+    /// `nil` for the custodian ceremony. Set at `armReseed` from the shared
+    /// `backupReseedRunsPullBack`, never from the row's kind: the confirm and a
+    /// re-enrollment failure both name it.
+    public private(set) var reseedPulledFrom: FfiBackupDestinationView?
+
+    /// The pull-back preflight's rendered body lines (one per reserved set,
+    /// one for the covered folders) the open confirm shows; empty for the
+    /// custodian ceremony, which has no preflight.
+    public private(set) var reseedPreflightLines: [String] = []
+
+    /// The acceptance the preflight returned, handed back verbatim to the run
+    /// so it refuses what the owner was not shown; `nil` for the custodian.
+    private var reseedAcceptance: String?
+
     /// A restore is running: every `backup-destination-reseed-button` is
     /// disarmed until it ends, so one tap cannot start two ceremonies.
     public private(set) var reseedRunning = false
@@ -172,7 +187,15 @@ public final class BackupDestinationsVM {
     }
     #endif
 
+    /// The first-listing refusal the destination-list load last met, `nil` once
+    /// a load answers — while set, the list is unread, not empty, so
+    /// `backup-destinations-empty` must not paint.
+    public private(set) var loadRefusal: String?
+
     public var isEmpty: Bool { destinations.isEmpty }
+
+    /// May the empty-state text paint? The list is empty AND its load was not refused.
+    public var showsEmptyState: Bool { isEmpty && loadRefusal == nil }
 
     /// `backup-sole-client-destination-warning` — standing warning while
     /// EVERY configured destination is a client device (devices get lost,
@@ -217,11 +240,20 @@ public final class BackupDestinationsVM {
         for _ in 0..<10 {
             do {
                 destinations = try await api.listBackupDestinations()
+                if loadRefusal != nil, errorMessage == loadRefusal { errorMessage = nil }
+                loadRefusal = nil
                 await refreshStatuses()
                 await runAudit()
                 await refreshOrphanedStore()
                 return
             } catch {
+                // A refused read (the first-listing gate) says what it waits
+                // for on `error-message` and paints no empty state; any other
+                // failure stays the quiet retry.
+                if let refusal = DisplayError.firstListingRefusal(error) {
+                    loadRefusal = refusal
+                    errorMessage = refusal
+                }
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
@@ -554,14 +586,28 @@ public final class BackupDestinationsVM {
     /// apply) over state this VM already caches — the list and the orphaned
     /// verdict — so reading it on a render path costs no round trip.
     public var reseedRows: [String?] {
-        guard custodianStore != nil else { return [] }
-        return backupReseedRows(
+        let rows = backupReseedRows(
             destinations: destinations, thisDeviceId: deviceId ?? "",
             orphanedStore: orphanedStoreBytes != nil,
-            // The nest-held pull-back is not wired on apple yet: no button on a
-            // nest-kind row until its confirm runs `backupPullBackFromDestination`.
-            hostsPullBack: false)
+            // apple hosts the nest-held pull-back: `confirmReseed` runs it
+            // in-process over `backupPullBackAccepted`.
+            hostsPullBack: true)
+        // The custodian leg needs this device's store seam; the pull-back
+        // needs none, so a shell without one still offers it on a nest row.
+        if custodianStore != nil { return rows }
+        return rows.filter { $0.map(reseedRunsPullBack) ?? false }
     }
+
+    /// Whether the restore armed on `destinationId`'s row pulls back from a
+    /// surviving nest — the shared `backupReseedRunsPullBack`, never the row's
+    /// kind re-read here.
+    public func reseedRunsPullBack(_ destinationId: String) -> Bool {
+        backupReseedRunsPullBack(destinations: destinations, destinationId: destinationId)
+    }
+
+    /// The pull-back source's human label, for the confirm and the
+    /// re-enrollment failure; `nil` for the custodian ceremony.
+    public var reseedPulledFromName: String? { reseedPulledFrom.map(label(for:)) }
 
     /// Does the orphaned-store row carry the restore button?
     public var reseedOnOrphanedStore: Bool { reseedRows.contains(nil) }
@@ -571,32 +617,81 @@ public final class BackupDestinationsVM {
         reseedRows.contains(dest.destinationId)
     }
 
-    /// Open the restore confirm. A no-op while a restore runs or when no row
-    /// offers the gesture — the keyboard/registry backstop behind the paint.
-    public func armReseed() {
-        guard !reseedRunning, !reseedRows.isEmpty else { return }
+    /// Open the restore confirm for the pressed row — `source` is `nil` for the
+    /// orphaned store's, a `destination_id` for a destination row's. A no-op
+    /// while a restore runs or when that row offers no gesture — the
+    /// keyboard/registry backstop behind the paint.
+    /// A nest row's press runs the shared preflight first and opens the confirm
+    /// only when it answers (its lines in the body); a failed preflight is a
+    /// failed gesture on `error-message` and no modal opens.
+    public func armReseed(source: String? = nil) async {
+        guard !reseedRunning, reseedRows.contains(source) else { return }
+        let pullFrom = source
+            .flatMap { id in reseedRunsPullBack(id) ? destinations.first { $0.destinationId == id } : nil }
+        reseedPreflightLines = []
+        reseedAcceptance = nil
+        if let pullFrom {
+            guard let api else { return }
+            let preflight: FfiPullBackPreflight
+            do {
+                preflight = try await api.backupPullBackPreflight(
+                    destinationId: pullFrom.destinationId,
+                    statePath: FaunaClient.backupAuditStatePath)
+            } catch {
+                errorMessage = L.backups.backupReseedFailed(reason: mapError(error) ?? "\(error)")
+                return
+            }
+            if let reason = preflight.stopped {
+                errorMessage = L.backups.backupReseedFailed(reason: reason)
+                return
+            }
+            reseedPreflightLines = preflight.lines.map(renderLocalizedTextNested)
+            reseedAcceptance = preflight.acceptance
+        }
+        reseedPulledFrom = pullFrom
         reclaiming = false
         reseedConfirming = true
     }
 
     public func cancelReseed() {
         reseedConfirming = false
+        reseedPreflightLines = []
+        reseedAcceptance = nil
     }
 
     /// The confirmed restore. Nothing about the ceremony's order is decided
-    /// here: the side that hosts the store runs the shared ceremony and its
-    /// post-ceremony re-enrollment (`CustodianStoreAccess.reseedCustodianStore`),
-    /// and this only paints how it ended, as linux's `render_reseed` does.
+    /// here: a surviving nest's row runs the shared nest-held pull-back
+    /// (`APIClient.backupPullBackAccepted`), every other the side that
+    /// hosts the store runs the shared ceremony and its post-ceremony
+    /// re-enrollment (`CustodianStoreAccess.reseedCustodianStore`); this only
+    /// paints how it ended, as linux's `render_reseed` does.
     public func confirmReseed() async {
-        guard let custodianStore, !reseedRunning else { return }
+        guard reseedConfirming, !reseedRunning else { return }
+        let pullFrom = reseedPulledFrom
+        let acceptance = reseedAcceptance
+        let custodianStore = self.custodianStore
+        if pullFrom == nil, custodianStore == nil { return }
         reseedConfirming = false
+        reseedAcceptance = nil
         reseedRunning = true
         errorMessage = nil
         reseedResultText = L.backups.backupReseedRunning
         defer { reseedRunning = false }
         let result: FfiReseedResult
         do {
-            result = try await custodianStore.reseedCustodianStore()
+            if let pullFrom {
+                guard let api, let deviceId, !deviceId.isEmpty else {
+                    throw APIError.ffiError("no device id")
+                }
+                guard let acceptance else { throw APIError.ffiError("no preflight acceptance") }
+                result = try await api.backupPullBackAccepted(
+                    destinationId: pullFrom.destinationId, deviceIdHex: deviceId,
+                    statePath: FaunaClient.backupAuditStatePath, acceptance: acceptance)
+            } else if let custodianStore {
+                result = try await custodianStore.reseedCustodianStore()
+            } else {
+                return
+            }
         } catch {
             reseedResultText = nil
             errorMessage = L.backups.backupReseedFailed(reason: mapError(error) ?? "\(error)")
@@ -620,8 +715,13 @@ public final class BackupDestinationsVM {
             return
         }
         reseedResultText = result.resultLines.map(renderLocalizedTextNested).joined(separator: "\n")
-        // The data IS back; say so on the result, and say what did not happen.
-        errorMessage = result.reenrollError.map { L.backups.backupReseedReenrollFailed(reason: $0) }
+        // The data IS back; say so on the result, and say what did not happen —
+        // a pull-back's re-enrollment failure names the nest it pulled from.
+        errorMessage = result.reenrollError.map { reason in
+            reseedPulledFromName.map {
+                L.backups.backupReseedPullBackReenrollFailed(name: $0, reason: reason)
+            } ?? L.backups.backupReseedReenrollFailed(reason: reason)
+        }
     }
 
     /// Re-derive the orphaned-store verdict — on mount and after every mutation,

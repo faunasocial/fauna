@@ -34,7 +34,11 @@ BUILD_TIMEOUT = 1800
 #: How long a build waits for its `build` slot before giving up — a saturated box
 #: queues builds for a while, and the wait is not the build's own time.
 SLOT_WAIT_TIMEOUT = 3600
-HEALTH_TIMEOUT = 60
+from helpers.budgets import CONTAINER_HEALTH_S, ROUTER_CHANNEL_S  # noqa: E402
+
+#: Kept under its old name for the modules importing it; the budget is named in
+#: ``helpers/budgets.py``.
+HEALTH_TIMEOUT = CONTAINER_HEALTH_S
 #: The fleet's build-slot script, relative to the repository root; a checkout
 #: without it builds unslotted.
 SLOT_SCRIPT = ("scripts", "build-slot.py")
@@ -182,12 +186,39 @@ _override_announced = False
 
 
 def _image_created(image: str) -> str | None:
-    """The image's creation stamp, or `None` when it is not present here."""
-    created = subprocess.run(
-        ["docker", "image", "inspect", "--format", "{{.Created}}", image],
-        capture_output=True, text=True, timeout=30,
-    )
-    return created.stdout.strip() if created.returncode == 0 else None
+    """The image's creation stamp, or `None` when it is not present here.
+
+    Only the daemon's own "no such image" answer means absent. Any other failure —
+    an inspect that times out or errors on a loaded box — is asked again until the
+    daemon answers either way, and a daemon that never does raises with what it
+    said: read as "absent", it would fail every test of a module at once with a
+    false "the image is not present" (convention 14)."""
+    seen: list[str] = []
+
+    def answer():
+        try:
+            created = subprocess.run(
+                ["docker", "image", "inspect", "--format", "{{.Created}}", image],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            seen.append("docker image inspect timed out after 30 s")
+            return None
+        if created.returncode == 0:
+            return ("present", created.stdout.strip())
+        if "no such image" in created.stderr.lower():
+            return ("absent", None)
+        seen.append(f"exit {created.returncode}: {created.stderr.strip()[:300]}")
+        return None
+
+    from helpers.waiting import wait_until  # noqa: PLC0415 — the shared poll
+    return wait_until(answer, IMAGE_INSPECT_S, interval=2.0, diagnose=lambda: (
+        f"the docker daemon never said whether {image} is present; it answered "
+        f"{seen[-3:]!r}"))[1]
+
+
+#: How long `_image_created` waits for the daemon to answer an image inspect.
+IMAGE_INSPECT_S = 120.0
 
 
 def docker_build(repo_root: Path) -> str:
@@ -249,6 +280,10 @@ def docker_build(repo_root: Path) -> str:
         return tag
 
     if os.environ.get("FAUNA_ALLOW_NEST_IMAGE_BUILD") != "1":
+        # The background tester reads this refusal as "not run", never a red, by
+        # the phrase "which is not present on this machine, and this helper builds
+        # only on an explicit opt-in" (its picker's IMAGE_ABSENT_MARK, pinned by
+        # its tests): reword that phrase only together with the constant.
         raise RuntimeError(
             f"the tier_4 docker suite needs {tag!r} — the nest image built from "
             f"this tree's sources, keyed on them — which is not present on this "
@@ -331,6 +366,73 @@ def remove_container(name: str):
     )
 
 
+def foreign_owned_entries(data_dir: str) -> list[str]:
+    """The paths under ``data_dir`` the invoking user does not own (or cannot
+    descend into to look). Empty when the host side is wholly the user's."""
+    uid = os.getuid()
+    foreign: list[str] = []
+    for root, dirs, files in os.walk(data_dir, onerror=lambda e: foreign.append(e.filename)):
+        for entry in [root, *(os.path.join(root, f) for f in files)]:
+            try:
+                if os.lstat(entry).st_uid != uid:
+                    foreign.append(entry)
+            except OSError:
+                foreign.append(entry)
+    return foreign
+
+
+def reclaim_data_dir(data_dir: str, image: str) -> None:
+    """Give a container's bind-mounted ``/data`` back to the invoking user.
+
+    The image runs privilege-separated: the nest is ``fauna`` (uid 1000, the dev
+    VMs' user too), but ``/data/keys`` is root's and ``/data/atproto`` belongs to
+    ``fauna-atproto`` (uid 1005; `Dockerfile` § the service users). So a removed
+    container leaves entries the host user can neither read nor delete, and the
+    next run's ``--basetemp`` wipe fails partway: every test of that run then
+    errors with ``FileExistsError`` on the basetemp. Reclaiming at teardown keeps
+    the contents (the nest log and data stay for attribution) and changes only
+    the owner, through a throwaway container of the SAME image as root, with no
+    network. A no-op when nothing under ``data_dir`` is foreign-owned.
+    """
+    if not os.path.isdir(data_dir) or not foreign_owned_entries(data_dir):
+        return
+    subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "-u", "0",
+         "--entrypoint", "chown",
+         "-v", f"{os.path.abspath(data_dir)}:/data",
+         image, "-R", f"{os.getuid()}:{os.getgid()}", "/data"],
+        capture_output=True, timeout=120,
+    )
+
+
+def copy_data_dir_as_root(src: str, dest: str, image: str, *, replace: bool = False) -> None:
+    """Copy a stopped container's ``/data`` tree owner-preserving, through a
+    throwaway root container of the SAME image (no network).
+
+    The image's privilege-separated services own parts of ``/data`` (``keys`` is
+    root's, ``atproto`` is uid 1005's), which the host user can neither read nor
+    recreate, so a host-side ``copytree`` raises ``shutil.Error`` and a copy made
+    by the host user would hand the restored nest directories its own services
+    cannot open. ``cp -a`` as root reads everything and keeps the owners, so a
+    copy restored over the data dir starts. ``replace`` empties ``dest`` first
+    (the restore leg); otherwise ``dest`` is created if absent. The copy's own
+    foreign-owned entries are handed back by ``reclaim_data_dir`` at teardown.
+    """
+    os.makedirs(dest, exist_ok=True)
+    script = "find /dst -mindepth 1 -delete; " if replace else ""
+    script += "cp -a /src/. /dst/"
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "-u", "0",
+         "--entrypoint", "sh",
+         "-v", f"{os.path.abspath(src)}:/src:ro",
+         "-v", f"{os.path.abspath(dest)}:/dst",
+         image, "-c", script],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"owner-preserving data-dir copy failed:\n{result.stderr}")
+
+
 def start_container(name: str, port: int, env: dict | None = None) -> str:
     """Start a fauna-nest container. Returns container ID."""
     remove_container(name)
@@ -370,6 +472,7 @@ def wait_for_health(port: int, container_name: str,
     dual-scheme HEALTHCHECK."""
     _unverified = ssl._create_unverified_context()
     deadline = time.monotonic() + timeout
+    last_answer = "no answer yet"
     while time.monotonic() < deadline:
         for url, ctx in (
             (f"https://127.0.0.1:{port}/api/v1/health", _unverified),
@@ -377,12 +480,15 @@ def wait_for_health(port: int, container_name: str,
         ):
             try:
                 resp = urllib.request.urlopen(url, timeout=5, context=ctx)
+                last_answer = f"{url} -> HTTP {resp.status}"
                 if resp.status == 200:
                     _note_booted_artifact(container_name, resp)
-                    _wait_for_router_channel(container_name, deadline)
+                    # Its own budget, started now: a late health answer must not
+                    # leave the router wait the remainder of a shared deadline.
+                    _wait_for_router_channel(container_name, last_answer)
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                last_answer = f"{url} -> {type(e).__name__}: {str(e)[:120]}"
         time.sleep(1.0)
     logs = subprocess.run(
         ["docker", "logs", container_name],
@@ -407,7 +513,8 @@ def wait_for_health(port: int, container_name: str,
 ROUTER_CHANNEL_UP = "router channel to nest established"
 
 
-def _wait_for_router_channel(container_name: str, deadline: float) -> None:
+def _wait_for_router_channel(container_name: str, last_health: str,
+                             budget_s: float = ROUTER_CHANNEL_S) -> None:
     """Wait until the SNI router's sidecar channel to the nest is up.
 
     Every fixture reaches the nest through the router's :443. On a fresh
@@ -416,17 +523,27 @@ def _wait_for_router_channel(container_name: str, deadline: float) -> None:
     the credential rule): health answered through :443 in that window is
     followed by a dropped connection, so a first WS-RPC call lands on a router
     that is about to restart. The channel-up line is the router's own word that
-    the restart is behind it. An image whose router never logs it (an older
-    build) falls through at the caller's deadline rather than failing here.
+    the restart is behind it. It has its own budget (``ROUTER_CHANNEL_S``), and
+    an image that never logs the line raises, naming the last health answer and
+    the log tail: falling through silently let a first call land on a router about
+    to restart (conventions 14 and 6).
     """
+    deadline = time.monotonic() + budget_s
+    tail = ""
     while time.monotonic() < deadline:
         logs = subprocess.run(
             ["docker", "logs", container_name],
             capture_output=True, text=True, timeout=30,
         )
-        if ROUTER_CHANNEL_UP in logs.stdout + logs.stderr:
+        out = logs.stdout + logs.stderr
+        if ROUTER_CHANNEL_UP in out:
             return
-        time.sleep(1.0)  # sleep-ok: the poll interval of a deadline-bounded wait on the router's own log line
+        tail = out[-800:]
+        time.sleep(1.0)  # sleep-ok: the poll interval of a budget-bounded wait on the router's own log line
+    raise TimeoutError(
+        f"{container_name}: health answered ({last_health}) but the SNI router never "
+        f"logged {ROUTER_CHANNEL_UP!r} within {budget_s:.0f} s.\n"
+        f"── container log tail ──\n{tail}")
 
 
 def _note_booted_artifact(container_name: str, resp) -> None:
@@ -470,6 +587,41 @@ def authed_ws(port: int, actor_id_hex: str, token: str) -> "websocket.WebSocket"
         sslopt={"cert_reqs": ssl.CERT_NONE},
         timeout=10,
     )
+
+
+def await_registered(ws: "websocket.WebSocket", budget_s: float = 30.0) -> None:
+    """Return once the nest is serving this socket: a Ping answered by its Pong.
+
+    The nest registers an authenticated connection in its registry before its
+    connection loop reads the first frame (`register_upgraded_connection`, then
+    `run_connection`), so the Pong to our Ping is proof the shutdown drain counts
+    this connection — the state the 1001 assertions depend on, waited for instead
+    of a fixed sleep (convention 14)."""
+    import websocket  # from websocket-client
+
+    payload = secrets.token_bytes(8)
+    ws.ping(payload)
+    seen: list[str] = []
+    deadline = time.monotonic() + budget_s
+    ws.settimeout(1.0)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                frame = ws.recv_frame()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if frame is None:
+                continue
+            if frame.opcode == websocket.ABNF.OPCODE_PONG and frame.data == payload:
+                return
+            seen.append(f"opcode {frame.opcode} ({len(frame.data)} bytes)")
+            if frame.opcode == websocket.ABNF.OPCODE_CLOSE:
+                break
+    finally:
+        ws.settimeout(10)
+    raise AssertionError(
+        f"the nest never answered our Ping within {budget_s:.0f} s, so this socket is "
+        f"not known to be registered; frames seen instead: {seen[-5:]!r}")
 
 
 def read_close_code(ws: "websocket.WebSocket", timeout: float = 20.0) -> int | None:
@@ -528,8 +680,19 @@ def browser_session(ignore_https_errors: bool = True):
 
     `ignore_https_errors=True` is the default because tier_4 nests serve a
     self-signed bootstrap cert (the deploy image's TLS bootstrap).
+
+    This is a web-app door: the page it yields runs the SPA the image bundles, so
+    the test is an observation of the web column, exactly as the catalog scan
+    reads a playwright-importing module. The ledger is told so here, as the
+    driver doors tell it (`helpers/feature_ledger.note_app`); without the note a
+    browser witness was attributed to no app and its record landed in
+    `nest.json`, where the web cell never reads an `[app]` outcome.
     """
     from playwright.sync_api import sync_playwright
+
+    from helpers import feature_ledger
+
+    feature_ledger.note_app("web")
 
     with sync_playwright() as p:
         browser = launch_browser(p)
@@ -1605,6 +1768,7 @@ def start_fake_scanner_sidecars(
     rspamd_name: str,
     clamd_port: int = 3310,
     rspamd_port: int = 11333,
+    labels: dict | None = None,
 ) -> dict[str, str]:
     """Run the proven `fakes/{fake_clamd,fake_rspamd}` as sidecar containers on
     `network`, each binding a fixed port the nest dials by container name. The
@@ -1613,14 +1777,21 @@ def start_fake_scanner_sidecars(
     docker-compose-equivalent the milestone plan anticipated, via plain
     `docker run` + a mounted python image. Returns the operator-hatch values
     (`clamd_addr` / `rspamd_url`) to wire into the nest container's env.
+
+    ``labels`` mirror ``start_container_with_ports``' — the nest-mode axis stamps
+    its run labels on the sidecars too, so its dead-run sweep reclaims them with
+    their nest and its pre-label pass never mistakes a live sibling run's
+    scanners for a leftover.
     """
     ensure_image(SCANNER_SIDECAR_IMAGE)
+    label_args = [arg for k, v in (labels or {}).items()
+                  for arg in ("--label", f"{k}={v}")]
 
     def _run(cname: str, snippet: str) -> None:
         remove_container(cname)
         r = subprocess.run(
             ["docker", "run", "-d", *fence_cpuset_args(), "--name", cname, "--network", network,
-             "-v", f"{fakes_dir}:/fakes:ro", SCANNER_SIDECAR_IMAGE,
+             *label_args, "-v", f"{fakes_dir}:/fakes:ro", SCANNER_SIDECAR_IMAGE,
              "python", "-c", snippet],
             capture_output=True, text=True, timeout=60,
         )
@@ -1729,6 +1900,7 @@ def start_fake_dns_sidecar(
     port: int = 53,
     log_queries: bool = False,
     publish_port: int | None = None,
+    labels: dict | None = None,
 ) -> str:
     """Run `fakes/fake_dns` as a sidecar container on `network`, serving the given
     TXT/A records on `port`, UDP and TCP. Returns the sidecar's container IP — pass it to
@@ -1756,8 +1928,14 @@ def start_fake_dns_sidecar(
     ACME stack's name server, which every app reaches at the dev VM's loopback
     and an android venue run through its TCP-only reverse
     (`e2e-automation-surface-gating.md` § The ACME directory seed → *The name
-    server's reach*)."""
+    server's reach*).
+
+    ``labels`` mirror ``start_fake_scanner_sidecars``' — the nest-mode axis
+    stamps its run labels on its run resolver, so the dead-run sweep reclaims a
+    crashed run's resolver with its nests."""
     ensure_image(SCANNER_SIDECAR_IMAGE)
+    label_args = [arg for k, v in (labels or {}).items()
+                  for arg in ("--label", f"{k}={v}")]
     remove_container(name)
     records_kw = ", records_path='/dns/records.json'" if records_dir else ""
     if log_queries:
@@ -1777,7 +1955,7 @@ def start_fake_dns_sidecar(
                    "-p", f"127.0.0.1:{publish_port}:{port}/udp"]
     r = subprocess.run(
         ["docker", "run", "-d", *fence_cpuset_args(), "--name", name, "--network", network,
-         *mounts, *publish, SCANNER_SIDECAR_IMAGE,
+         *label_args, *mounts, *publish, SCANNER_SIDECAR_IMAGE,
          "python", "-c", snippet],
         capture_output=True, text=True, timeout=60,
     )
@@ -2233,6 +2411,69 @@ def imap_wait_for_subject(host: str, port: int, server_name: str,
         f"no message with Subject containing {subject!r} reached {mailbox} for "
         f"{username} on {host}:{port} within {timeout}s (subjects seen: {seen}; "
         f"last error: {last_err})")
+
+
+def imap_wait_for_message_containing(host: str, port: int, server_name: str,
+                                     username: str, password: str, needle: str, *,
+                                     mailbox: str = "INBOX",
+                                     timeout: float = 120.0) -> list[bytes]:
+    """Wait until some message in ``mailbox`` carries ``needle`` anywhere in its
+    bytes, and return EVERY message the mailbox holds at that moment, whole
+    (``BODY.PEEK[]``, in sequence order). For a mailbox whose messages share a
+    Subject — bounces, whose Subject is the nest's own, not the bounced
+    message's — where :func:`imap_wait_for_subject` cannot tell them apart; the
+    caller asserts on the whole list (e.g. that no OTHER run token's bounce is
+    there). One held connection, re-SELECT each second, like that function.
+    Raises TimeoutError naming how many messages it did see."""
+    from helpers.mail_wire import (
+        _imap_auth_plain, _imap_fetch_body_cmd, _imap_read_tagged, _imaps_connect_addr,
+    )
+
+    deadline = time.monotonic() + timeout
+    count = 0
+    last_err: Exception | None = None
+    sock = buf = None
+    seq = 0
+    want = needle.encode()
+    try:
+        while time.monotonic() < deadline:
+            try:
+                if sock is None:
+                    sock, buf = _imaps_connect_addr(host, port, server_name, deadline)
+                    status = _imap_auth_plain(sock, buf, "a0", username, password, deadline)
+                    assert status == "OK", f"AUTH PLAIN must succeed for {username}; got {status}"
+                seq += 1
+                sock.sendall(f"s{seq} SELECT {mailbox}\r\n".encode())
+                status, untagged = _imap_read_tagged(sock, buf, f"s{seq}", deadline)
+                assert status == "OK", f"SELECT {mailbox} failed: {status}: {untagged!r}"
+                exists = [ln for ln in untagged if ln.upper().endswith("EXISTS")]
+                count = int(exists[0].split()[1]) if exists else 0
+                bodies = []
+                for n in range(1, count + 1):
+                    seq += 1
+                    _st, body = _imap_fetch_body_cmd(
+                        sock, buf, f"f{seq}", f"FETCH {n} BODY.PEEK[]", deadline)
+                    bodies.append(body or b"")
+                if any(want in b for b in bodies):
+                    return bodies
+            except (ssl.SSLError, OSError, AssertionError) as e:
+                last_err = e
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    sock = buf = None
+            time.sleep(1.0)  # sleep-ok: poll interval of a deadline-bounded re-SELECT on one held connection (each re-AUTH costs a rate-limited nest RPC)
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    raise TimeoutError(
+        f"no message carrying {needle!r} reached {mailbox} for {username} on "
+        f"{host}:{port} within {timeout}s ({count} message(s) seen; last error: {last_err})")
 
 
 # ── Outbound submission round-trip wire (the send half) ─────────────────────
@@ -2762,7 +3003,9 @@ def sni_https_request(host_port: int, sni: str, method: str, path: str,
     return status, headers, body
 
 
-def make_ca_issued_leaf_pem(names: list[str], *, expired: bool = False) -> tuple[bytes, bytes]:
+def make_ca_issued_leaf_pem(
+    names: list[str], *, expired: bool = False, days_left: int | None = None
+) -> tuple[bytes, bytes]:
     """A leaf signed by a throwaway CA (issuer DN ≠ subject DN → ``is_floor``
     false) covering ``names``. Returns ``(fullchain_pem [leaf+CA], leaf_key_pem)``.
     The nest only inspects issuer-vs-subject to decide floor-ness — no real trust
@@ -2775,7 +3018,11 @@ def make_ca_issued_leaf_pem(names: list[str], *, expired: bool = False) -> tuple
 
     ``expired=True`` dates the leaf's whole validity window in the past (the CA
     stays valid): a trusted cert that has lapsed, which the nest must stop
-    serving in favour of its floor (``tls-certificates.md`` § The two-layer model)."""
+    serving in favour of its floor (``tls-certificates.md`` § The two-layer model).
+
+    ``days_left`` ends the leaf that many days from now instead of a year: under
+    the nest's 30-day renewal lead it makes a trusted cert that is still served
+    but due for renewal (the ``Expiring`` badge state)."""
     import datetime
 
     from cryptography import x509
@@ -2785,7 +3032,7 @@ def make_ca_issued_leaf_pem(names: list[str], *, expired: bool = False) -> tuple
 
     now = datetime.datetime.now(datetime.timezone.utc)
     not_before = now - datetime.timedelta(days=1)
-    not_after = now + datetime.timedelta(days=365)
+    not_after = now + datetime.timedelta(days=365 if days_left is None else days_left)
 
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Fauna Test Root CA")])

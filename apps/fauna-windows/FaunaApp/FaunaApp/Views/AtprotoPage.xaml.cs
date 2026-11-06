@@ -266,6 +266,8 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
                 CardLines.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
             }
             HistoryBackfill.Visibility = Vis(_vm.ShowHistoryBackfill);
+            // The card's composed label, naming the count a backfill would publish.
+            HistoryBackfill.Content = _vm.HistoryBackfillLabel;
             HistoryBackfill.IsChecked = _vm.HistoryBackfill;
             ConfirmBtn.IsEnabled = _vm.CardActionsEnabled;
             CancelBtn.IsEnabled = _vm.CardActionsEnabled;
@@ -283,6 +285,9 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
             DidMethodBox.Visibility = Vis(_vm.ShowDidMethodRadio);
             DidPlc.IsChecked = _vm.DidMethodPlc;
             DidWeb.IsChecked = _vm.DidMethodWeb;
+            // The wire spelling in the slot the driver's get_attr(id, "state") reads.
+            AutomationProperties.SetHelpText(DidPlc, _vm.DidMethodPlcState);
+            AutomationProperties.SetHelpText(DidWeb, _vm.DidMethodWebState);
             HandlePreviewText.Text = _vm.HandlePreview;
             HandlePreviewText.Visibility = Vis(_vm.ShowHandlePreview);
             HostedHandleText.Text = _vm.HostedHandle;
@@ -311,14 +316,16 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
             // Every gesture re-renders through here, so this is the one place that sees a
             // reveal land. Idempotent: N re-renders with a secret showing take one hold.
             _captureHold.Sync(_vm.Credentials.Any(c => c.RevealedSecret is not null));
-            ExternalAppsToggle.IsOn = _vm.ExternalAppsEnabled;
-            AutomationProperties.SetHelpText(ExternalAppsToggle, _vm.ExternalAppsState);
 
             // ── The D10 authoring-delegation row. ──
             // Two shapes, one always-present control: `-authorize` renders either way
             // (re-authorizing IS renewal — hiding it once authorized would force the
             // revoke-then-re-mint flow the ruling forbids), `-revoke` only alongside a
             // live row, and the four leaves are WITHHELD with no verified delegation.
+            // The group is gated on the delegation, not the level (ui/atproto.md
+            // § Layout & flow): the held row shows wherever a verified delegation
+            // exists; the empty state and first-grant button only at full PDS.
+            DelegationPanel.Visibility = Vis(_vm.ShowDelegationPanel);
             DelegationRow.Visibility = Vis(_vm.ShowDelegationRow);
             DelegationEmptyText.Visibility = Vis(!_vm.ShowDelegationRow);
             DelegationRevokeBtn.Visibility = Vis(_vm.ShowDelegationRow);
@@ -386,10 +393,17 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
             () => panel.StartBringIntoView());
     }
 
+    /// <summary>Open or close the page's <c>error-message</c>. An open bar is the last
+    /// thing a render scrolls to: it sits at the top of the ScrollViewer and the panel
+    /// reveals in <see cref="ApplyVm"/> run first, so at a panel-bearing level an error
+    /// would otherwise open above the viewport, where nobody reads it and the driver's
+    /// <c>!IsOffscreen</c> reads no error at all. Every render, not only a new message:
+    /// each one repeats the panel reveal, which would take the bar off screen again.</summary>
     private void ShowError(string? message)
     {
         ErrorBar.Message = message ?? string.Empty;
         ErrorBar.IsOpen = !string.IsNullOrEmpty(message);
+        if (ErrorBar.IsOpen) BringIntoViewAfterLayout(ErrorBar);
     }
 
     // ── Gestures. Each forwards to the machine, then re-projects. ────────────
@@ -435,6 +449,33 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
     {
         if (_applying || _linkedVm is null) return;
         await _linkedVm.AskSourceAsync(e.Triple, e.Label);
+    }
+
+    /// <summary>The Linked panel's card answered a follow request (bridges.md § Follow
+    /// requests) — the same view model method the Bridges page calls. AT Protocol
+    /// declares no follow requests today, so the card paints none here; the handler
+    /// keeps every event the shared card raises dispatched on both of its hosts.</summary>
+    private async void LinkedBridgeFollowRequest_Answer(object? sender, FollowRequestAnswerEventArgs e)
+    {
+        if (_applying || _linkedVm is null) return;
+        await _linkedVm.AnswerFollowRequestAsync(e.BridgeId, e.Id, e.Approve);
+        ApplyVm();
+    }
+
+    /// <summary>The Linked panel's card follows (bridges.md § Follows): the same view
+    /// model methods the Bridges page calls, then the panel re-projects.</summary>
+    private async void LinkedBridgeFollow_Add(object? sender, FollowAddEventArgs e)
+    {
+        if (_applying || _linkedVm is null) return;
+        await _linkedVm.AddFollowAsync(e.BridgeId, e.Id, e.Petname);
+        ApplyVm();
+    }
+
+    private async void LinkedBridgeFollow_Remove(object? sender, FollowRemoveEventArgs e)
+    {
+        if (_applying || _linkedVm is null) return;
+        await _linkedVm.RemoveFollowAsync(e.BridgeId, e.FollowId);
+        ApplyVm();
     }
 
     /// <summary>Open the contest confirm card (`atproto-contest`) — a sync,
@@ -525,13 +566,6 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
     {
         if (_applying || _vm is null) return;
         _vm.SetHistoryBackfill(HistoryBackfill.IsChecked == true);
-        ApplyVm();
-    }
-
-    private async void ExternalApps_Toggled(object sender, RoutedEventArgs e)
-    {
-        if (_applying || _vm is null) return;
-        await _vm.SetExternalAppsEnabledAsync(ExternalAppsToggle.IsOn);
         ApplyVm();
     }
 

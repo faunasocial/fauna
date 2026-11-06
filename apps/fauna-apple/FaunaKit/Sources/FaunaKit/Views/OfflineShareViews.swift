@@ -21,9 +21,9 @@ import SwiftUI
 /// paints, appended into the SAME indexed list
 /// (`FoldersContent.pendingSharesSection`) so a user sees ONE list of things
 /// awaiting an answer. **A landed scope lists as an ordinary `folder-row`**
-/// (`GroupScopeRow` below) — no local seat config, no name (v1 sets are
-/// nameless), no leave button (severance is the authority's mint, not a
-/// self-scoped drop — `account-data-plane.md` § The recipient-set scheme).
+/// (`GroupScopeRow` below) — no rename, no leave button (severance is the
+/// authority's mint, not a self-scoped drop — `account-data-plane.md` § The
+/// recipient-set scheme).
 struct OfflineShareSectionView: View {
     let vm: DevicesMachineVM
 
@@ -192,19 +192,27 @@ struct GroupInvitationRow: View {
     }
 }
 
-/// One thin, read-only `folder-row` for a shared set this device holds the
-/// machinery for (the co-present ceremony's own listing —
-/// `p2p.md` § Offline share initiation). Not expandable: no local seat
-/// config, no rename, no leave (severance is the authority's mint, not a
-/// self-scoped roster drop — `account-data-plane.md` § The recipient-set
-/// scheme). The set's identity is its short scope id (nameless in v1), and
-/// its `folder-shared-badge` reads "Shared by ‹them›" on someone else's
-/// scope, "Shared · N" on your own — the same two readings the M2 rows use.
-/// Mirrors linux's `build_group_scope_row`.
-struct GroupScopeRow: View {
+/// One `folder-row` for a shared set this device holds the machinery for (the
+/// co-present ceremony's own listing — `p2p.md` § Offline share initiation).
+/// Its body is the device-local folder binding and nothing else: no rename,
+/// no leave — severance is the authority's mint, not a self-scoped roster drop
+/// (`account-data-plane.md` § The recipient-set scheme). A folder bound here
+/// runs an engine with no nest leg, its content moving over the group plane
+/// (`group-set.md` § Build design — the group set). The row reads as the
+/// set's recorded name, else its short scope id, and its
+/// `folder-shared-badge` reads "Shared by ‹them›" on someone else's scope,
+/// "Shared · N" on your own — the same two readings the M2 rows use. Mirrors
+/// linux's `build_group_scope_row`.
+///
+/// `onToggle` is nil on a client with no binding to host (iOS): the row then
+/// stays a label, with nothing to expand.
+struct GroupScopeRow<BindingContent: View>: View {
     let scope: FfiGroupScope
+    let isExpanded: Bool
+    let onToggle: (() -> Void)?
+    @ViewBuilder let binding: () -> BindingContent
 
-    private var title: String { L.folders.offlineShareSet(code: scope.shortId) }
+    private var title: String { scope.pageLabel }
 
     private var badgeText: String {
         if let who = scope.sharedBy {
@@ -214,21 +222,58 @@ struct GroupScopeRow: View {
     }
 
     var body: some View {
-        HStack {
-            Text(title)
-                .font(.body)
-            Spacer()
-            automationText(Ids.folderSharedBadge, badgeText)
-                .font(.caption2)
-                .foregroundStyle(.tint)
+        // Presence + name read for the indexed `folder-row`; the activate is
+        // the click toggle, as on the owner row.
+        if let onToggle {
+            row(onToggle).automationActivate(Ids.folderRow, text: { title }, perform: onToggle)
+        } else {
+            row(nil).automationValue(Ids.folderRow, text: { title })
+        }
+    }
+
+    private func row(_ onToggle: (() -> Void)?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                if let onToggle {
+                    Button(action: onToggle) {
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(title)
+                                .font(.body)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(title)
+                        .font(.body)
+                }
+                Spacer()
+                automationText(Ids.folderSharedBadge, badgeText)
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
+            }
+            if isExpanded {
+                binding()
+            }
         }
         .padding(.vertical, 2)
+        // `.contain` keeps the child ids (badge, the expander body's binding
+        // controls) queryable alongside this container id.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.folderRow)
-        // Presence + name read for the indexed `folder-row`. Unlike the
-        // owner row there is no activate — nothing to expand.
-        .automationValue(Ids.folderRow, text: { title })
     }
 }
 
 #endif  // !FAUNA_EXCISE_P2P_SHARE
+
+#if !FAUNA_EXCISE_P2P_SHARE
+extension FfiGroupScope {
+    /// A group set's label on the page: its recorded name, else its short id.
+    var pageLabel: String {
+        name ?? L.folders.offlineShareSet(code: shortId)
+    }
+}
+#endif

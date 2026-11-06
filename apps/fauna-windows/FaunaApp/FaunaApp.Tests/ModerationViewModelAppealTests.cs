@@ -158,4 +158,71 @@ public class ModerationViewModelAppealTests
         Assert.Null(rpc.LastAppeal);
         Assert.True(vm.AppealOpen);
     }
+
+    // ── The withheld-message badge's hand-off (takedown-and-block.md § Legal takedown →
+    //    App render, the fourth surface): a `dm-message-withheld-badge` tap lands here with
+    //    the queue row's content id, and the queue's OWN appeal opens on that row after the
+    //    queue read — one appeal flow, never a second form.
+
+    private static ModerationViewModel WithQueue(params FfiObligationAction[] rows) =>
+        new(new MockNestRpcClient { NextModerationActions = new List<FfiObligationAction>(rows) });
+
+    [Fact]
+    public async Task ABadgesRequest_OpensTheMatchedRowsOwnAppeal_AfterTheQueueRead()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextModerationActions = new List<FfiObligationAction> { ServerRow("aa", 200), ServerRow("bb", 100) },
+        };
+        var vm = new ModerationViewModel(rpc);
+        vm.RequestAppeal("bb");
+
+        Assert.False(vm.AppealOpen);               // nothing opens before the queue is read
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.AppealOpen);
+        vm.AppealReason = "I wrote it and it breaks no rule.";
+        await vm.SubmitAppealAsync();
+        Assert.Equal(("bb", "I wrote it and it breaks no rule."), rpc.LastAppeal);
+    }
+
+    [Fact]
+    public async Task ABadgesRequest_ForARowTheQueueNoLongerCarries_OpensNothing()
+    {
+        var vm = WithQueue(ServerRow("aa", 200));
+        vm.RequestAppeal("gone");
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.AppealOpen);
+    }
+
+    [Fact]
+    public async Task ABadgesRequest_ForARowThatIsNotAppealable_OpensNothing()
+    {
+        // The same RowIsAppealable gate as the row's own appeal-button: a client-side
+        // local detection carries no nest decision to appeal.
+        var vm = new ModerationViewModel(
+            new MockNestRpcClient { NextModerationActions = new List<FfiObligationAction>() },
+            new FakeLocal(LocalRow("cc", 100)));
+        vm.RequestAppeal("cc");
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.Actions[0].IsAppealable);
+        Assert.False(vm.AppealOpen);
+    }
+
+    [Fact]
+    public async Task ABadgesRequest_IsOneShot_ALaterQueueReadReopensNothing()
+    {
+        var vm = WithQueue(ServerRow("aa", 200));
+        vm.RequestAppeal("aa");
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.CancelAppeal();
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.AppealOpen);
+    }
 }

@@ -221,6 +221,13 @@ KNOWN_SEAMS: list[dict[str, str]] = [
         "for one channel as JSON (the read-state relaunch witness's barrier)",
     },
     {
+        "name": "escrow_wrap_coordinates_json",
+        "kind": "method",
+        "why": "a real plane-content read: where the account store's "
+        "escrow-wrap rows sit on the fleet feed, as JSON (the recovery-kit "
+        "let-go journey's staging read)",
+    },
+    {
         "name": "custody_owner_resend_now",
         "kind": "method",
         "why": "re-posts every granted custody ceremony's newest sent step "

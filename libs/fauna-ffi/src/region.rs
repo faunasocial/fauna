@@ -705,13 +705,13 @@ mod tests {
         let plane = FfiRegionPlane::open_with(None, fixtures::registry(), dir.clone());
         let render = plane.render(
             nsfw(),
-            Some(FfiContentPolicy {
-                nsfw: "collapse".into(),
-                spam: "inherit".into(),
-                phishing: "inherit".into(),
-                commercial: "inherit".into(),
-                document: None,
-            }),
+            Some(
+                fauna_core::obligation::ContentPolicy::category_rules(&[(
+                    "nsfw",
+                    fauna_core::content_policy::ContentVerdict::Collapse,
+                )])
+                .into(),
+            ),
             None,
             None,
             None,

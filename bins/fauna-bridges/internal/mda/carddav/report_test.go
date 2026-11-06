@@ -152,7 +152,7 @@ func newReportFixture(t *testing.T) reportFixture {
 // MDA can re-open them via `OpenMailRecord`.
 func (f *reportFixture) sealCard(t *testing.T, body []byte) []byte {
 	t.Helper()
-	out, err := mailfauna.EncryptToRecipient(body, f.leaf.Pubkey)
+	out, err := sealCardRecord(body, fixtureCardPubkey())
 	if err != nil {
 		t.Fatalf("EncryptToRecipient: %v", err)
 	}
@@ -164,7 +164,7 @@ func (f *reportFixture) sealCard(t *testing.T, body []byte) []byte {
 // decrypt it in-session.
 func (f *reportFixture) sealedAddressbook(t *testing.T, id []byte, displayname string) wsrpc.AddressbookEntry {
 	t.Helper()
-	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: displayname}, f.leaf.Pubkey, nil)
+	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: displayname}, fixtureCardPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -214,7 +214,7 @@ func openSealedMetadata(t *testing.T, sealed []byte, fx reportFixture) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	opener, err := mailfauna.NewMailRecordOpener(snapshotPlaintext)
+	opener, err := mailfauna.NewRecordOpener(cap, snapshotPlaintext)
 	if err != nil {
 		return nil, err
 	}

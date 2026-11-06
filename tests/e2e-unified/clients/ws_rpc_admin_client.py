@@ -59,6 +59,7 @@ across threads.
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
 from typing import Optional
 
@@ -84,6 +85,45 @@ class _BearerToken:
     #: The nest's short session id for this mint (`VerifyReply.token_id`), so a
     #: test reading `fauna.sessions.list` can subtract the harness's own row.
     token_id: str = ""
+
+
+#: Every bearer this process holds, by (nest base URL, actor hex) — shared across
+#: client instances, the way one app holds one sign-in per account rather than one
+#: per screen. A bearer mint spends one `fauna.auth.challenge` from the anonymous
+#: per-source budget (60 a minute, `pre_identity_allowlist.rs::
+#: is_throttled_anonymous_kind`), and under `--nest docker` every harness dial
+#: reaches the nest from the one gateway address, so a mint per client instance
+#: was a budget per RUN that the suite's helpers (a fresh client per call) spent
+#: in seconds (`testing.md` § Default app and nest mode, the shipped-limit fit
+#: rule). A cached bearer the nest no longer knows — a restart, a revoke, a reused
+#: port — is refused `401` at the upgrade and re-minted once by `_connect`.
+_BEARERS: dict[tuple[str, str], _BearerToken] = {}
+_BEARERS_LOCK = threading.Lock()
+#: One lock per (nest, actor), held across a mint so concurrent clients needing
+#: that sign-in make one between them (`WsRpcAdminClient._acquire_bearer`).
+#: Separate from `_BEARERS_LOCK` so a mint's round trip never blocks another
+#: actor's lookup.
+_MINT_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+
+
+def _mint_lock(key: tuple[str, str]) -> threading.Lock:
+    with _BEARERS_LOCK:
+        return _MINT_LOCKS.setdefault(key, threading.Lock())
+
+
+def remember_bearer(
+    nest_base_url: str, actor_id_hex: str, token: str, token_id: str, expires_in: float
+) -> None:
+    """Hold a bearer the harness minted elsewhere — a registration helper's
+    ``fauna.auth.handshake`` — as the (nest, actor)'s process-wide sign-in, so
+    the actor's first client does not sign in again over the throttled
+    ``fauna.nest.info`` + ``fauna.auth.challenge`` (see `_BEARERS`; the
+    handshake kind is not in the anonymous throttle). ``expires_in`` is anchored
+    on this clock at the call, the rule `_mint_bearer` applies."""
+    with _BEARERS_LOCK:
+        _BEARERS[(nest_base_url.rstrip("/"), actor_id_hex)] = _BearerToken(
+            token=token, expires_at=time.time() + float(expires_in), token_id=token_id
+        )
 
 
 class WsRpcAdminClient(_WsRpcClientBase):
@@ -246,13 +286,13 @@ class WsRpcAdminClient(_WsRpcClientBase):
         because a new bearer for the same actor cannot fix a ``403`` binding
         refusal.
         """
+        presented = self._acquire_bearer()
         try:
-            self._ws = self._dial(self._acquire_bearer())
+            self._ws = self._dial(presented)
         except websocket.WebSocketBadStatusException as refused:
             if refused.status_code != 401:
                 raise
-            self._bearer = None
-            self._ws = self._dial(self._acquire_bearer())
+            self._ws = self._dial(self._replace_refused_bearer(presented))
 
     def _dial(self, token: _BearerToken):
         """Open ``/api/v1/ws/<actor_hex>`` presenting ``token``."""
@@ -261,11 +301,10 @@ class WsRpcAdminClient(_WsRpcClientBase):
         # forms. websocket-client emits one header value per subprotocol,
         # which lands in the second branch (matched by the regression
         # comment "websocket-client/Python" on line 736 of routes.rs).
-        return websocket.create_connection(
+        return self._create_ws(
             self._build_ws_url(),
             subprotocols=["fauna.v1", f"bearer.{token.token}"],
             timeout=self._http_timeout,
-            sslopt=self._ssl_opt(),
         )
 
     def _build_ws_url(self) -> str:
@@ -273,19 +312,69 @@ class WsRpcAdminClient(_WsRpcClientBase):
         return f"{self._ws_base()}/api/v1/ws/{self._actor_id_hex}"
 
     def _acquire_bearer(self) -> _BearerToken:
-        """The cached bearer while it has more than 30 s left to live, else a
-        fresh one from :meth:`_mint_bearer`.
+        """The cached bearer — this client's, else the process-wide one for the
+        same (nest, actor), see `_BEARERS` — while it has more than 30 s left to
+        live, else a fresh one from :meth:`_mint_bearer`.
 
         The TTL is only half of a bearer's life. The nest's token store is in
         memory, so a nest restart forgets every bearer long before it expires,
         and `tests/api/ws_api.py` keeps one client per actor for the whole
         pytest process — across tests that restart the nest on purpose.
         :meth:`_connect` is where a forgotten bearer is recovered.
+
+        ⚠ **The process-wide entry is read FIRST, never this client's own copy.**
+        The copy used to win, so after a nest restart every live instance — the
+        `_authed_call` cache, the `tests/api` per-actor caches, a fixture's own
+        client — presented its own dead bearer once, though a sibling had
+        already re-minted: one refused upgrade per INSTANCE where the sign-in
+        was lost once. Those refusals all spend one failed-credential bucket per
+        actor on loopback (`transport-connection.md` § Abuse posture → *The
+        failed-credential throttle*, 10 a minute); a whole-module macos
+        `test_family.py` run spent about ten for the admin in the 1.5 s after a
+        `restart_nest`, and the next stale dial was answered `429`, which no
+        re-mint follows (`tests/test_ws_rpc_bearer_cache.py`). The mint runs
+        under the (nest, actor)'s own lock for the same reason: two clients
+        finding no live bearer at once make one sign-in, not two.
         """
-        if self._bearer is not None and self._bearer.expires_at > time.time() + 30:
+        key = self._bearer_key()
+        with _mint_lock(key):
+            with _BEARERS_LOCK:
+                shared = _BEARERS.get(key)
+            if shared is not None and shared.expires_at > time.time() + 30:
+                self._bearer = shared
+                return shared
+            self._bearer = self._mint_bearer()
+            with _BEARERS_LOCK:
+                _BEARERS[key] = self._bearer
             return self._bearer
-        self._bearer = self._mint_bearer()
-        return self._bearer
+
+    def _replace_refused_bearer(self, refused: _BearerToken) -> _BearerToken:
+        """The bearer to re-dial with after ``refused`` was answered ``401``.
+
+        Re-mint only if the process-wide entry still holds the refused bearer
+        (or none). A client that dialled with its copy while a sibling was
+        re-minting is refused for a bearer that is already replaced: dropping
+        the entry then, as this used to, threw the sibling's fresh sign-in away
+        and minted another. Compare under the mint lock, so concurrent
+        recoveries of one lost sign-in make one mint between them.
+        """
+        key = self._bearer_key()
+        with _mint_lock(key):
+            with _BEARERS_LOCK:
+                shared = _BEARERS.get(key)
+                if shared is not None and shared.token == refused.token:
+                    del _BEARERS[key]
+                    shared = None
+            if shared is not None and shared.expires_at > time.time() + 30:
+                self._bearer = shared
+                return shared
+            self._bearer = self._mint_bearer()
+            with _BEARERS_LOCK:
+                _BEARERS[key] = self._bearer
+            return self._bearer
+
+    def _bearer_key(self) -> tuple[str, str]:
+        return (self._base_url, self._actor_id_hex)
 
     def _mint_bearer(self) -> _BearerToken:
         """Silent-challenge → sign → verify → bearer, over the pre-identity

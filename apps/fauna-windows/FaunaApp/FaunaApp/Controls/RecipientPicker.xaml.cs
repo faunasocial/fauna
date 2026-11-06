@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -7,17 +8,55 @@ using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Controls;
 
+/// <summary>A suggestion row; exposes the public <c>Display</c> the template binds.</summary>
+public sealed class SuggestionItem
+{
+    public SuggestionItem(string display, int index) { Display = display; Index = index; }
+    public string Display { get; }
+    public int Index { get; }
+}
+
+/// <summary>A committed chip: its address and the × that removes it
+/// (<c>recipient-picker-chip[i]</c>); <c>Index</c> is what the × removes.</summary>
+public sealed class ChipRow
+{
+    public ChipRow(string address, int index) { Display = $"{address} ×"; Index = index; }
+    public string Display { get; }
+    public int Index { get; }
+}
+
 public sealed partial class RecipientPicker : UserControl
 {
     public event EventHandler<string>? RawInputChanged;
     public event EventHandler<string>? AcceptRequested;
     public event EventHandler<int>? SuggestionPicked;
+    /// <summary>A chip's × was pressed — the chip's index, for the shared
+    /// <c>remove_recipient_chip(i)</c> (conversations.md § User actions).</summary>
+    public event EventHandler<int>? ChipRemoved;
 
     public RecipientPicker() { InitializeComponent(); }
 
+    private bool _paintingInput;
+
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
+        if (_paintingInput) return;
         RawInputChanged?.Invoke(this, InputBox.Text);
+    }
+
+    /// <summary>
+    /// Paint the shared picker state's <c>raw_input</c> into the box — the path a
+    /// RESTORED draft's typed address reaches the screen (conversation-drafts.md §
+    /// Persistence). It is a repaint, not a keystroke: it raises no
+    /// <see cref="RawInputChanged"/> (the restore already issued the probe), and an
+    /// unchanged text is left alone so a snapshot tick never moves the caret.
+    /// </summary>
+    public void SetInputText(string text)
+    {
+        if (InputBox.Text == text) return;
+        _paintingInput = true;
+        try { InputBox.Text = text; }
+        finally { _paintingInput = false; }
     }
 
     private void OnInputKeyDown(object sender, KeyRoutedEventArgs e)
@@ -29,13 +68,16 @@ public sealed partial class RecipientPicker : UserControl
         }
     }
 
-    private void OnSuggestionPicked(object sender, SelectionChangedEventArgs e)
+    private void OnSuggestionClicked(object sender, RoutedEventArgs e)
     {
-        if (SuggestionsList.SelectedIndex >= 0)
-        {
-            SuggestionPicked?.Invoke(this, SuggestionsList.SelectedIndex);
-            SuggestionsList.SelectedItem = null;
-        }
+        if (sender is Button { Tag: int index })
+            SuggestionPicked?.Invoke(this, index);
+    }
+
+    private void OnChipClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: int index })
+            ChipRemoved?.Invoke(this, index);
     }
 
     /// <summary><paramref name="state"/> is the shared <c>RecipientResolveStatus</c>
@@ -142,12 +184,46 @@ public sealed partial class RecipientPicker : UserControl
     }
 
     /// <summary>
-    /// Replace the chips collection. Items must expose a public
-    /// <c>Display</c> string property so the indexed
-    /// <c>recipient-picker-chip</c> template can bind to it.
+    /// <c>recipient-picker-chip[i]</c>: paint the committed chips, each reading
+    /// <c>"{address} ×"</c> — a chip activates to its ×, the one gesture a committed
+    /// chip has (tui's and linux's chip). <paramref name="addresses"/> are the chips'
+    /// display spellings, in order.
     /// </summary>
-    public void SetChips<T>(System.Collections.Generic.IList<T> items)
+    public void SetChips(System.Collections.Generic.IReadOnlyList<string> addresses)
     {
-        ChipsList.ItemsSource = items;
+        ChipsList.ItemsSource = addresses.Select((a, i) => new ChipRow(a, i)).ToList();
+    }
+
+    private string _suggestionsPainted = "";
+
+    /// <summary>
+    /// <c>recipient-picker-suggestion[i]</c>: paint each suggestion as the finished
+    /// label the manager derived (<c>suggestion_displays[i]</c>), with the address
+    /// beside it when the two differ (<c>conversations.md</c> § Where logic lives →
+    /// <i>Recipient suggestions</i>) — the shape tui, linux and android paint.
+    /// <paramref name="addresses"/> are the suggestions' display spellings,
+    /// index-parallel with <paramref name="labels"/>. Empty collapses the list. An
+    /// unchanged list is left alone so a snapshot tick neither rebuilds the rows nor
+    /// re-raises selection.
+    /// </summary>
+    public void SetSuggestions(
+        System.Collections.Generic.IReadOnlyList<string> addresses,
+        System.Collections.Generic.IReadOnlyList<string> labels)
+    {
+        var texts = addresses.Select((address, i) =>
+        {
+            var label = i < labels.Count ? labels[i] : "";
+            return !string.IsNullOrEmpty(label) && label != address
+                ? $"{label} · {address}"
+                : address;
+        }).ToList();
+        var key = string.Join("\u001f", texts);
+        if (key == _suggestionsPainted) return;
+        _suggestionsPainted = key;
+        SuggestionsList.ItemsSource = texts
+            .Select((t, i) => new SuggestionItem(t, i)).ToList();
+        SuggestionsList.Visibility = texts.Count == 0
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 }

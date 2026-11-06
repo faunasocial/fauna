@@ -42,7 +42,7 @@ from common.nest import start_nest_in_place, stop_nest
 from conftest import _apply_mail_import_source_trust_env, _seeded_environment
 from drivers import create_driver
 from helpers import budgets
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.connection import wait_until_online
 from helpers.mail_dedicated_nest import (
     alias_admin_to_address,
@@ -97,6 +97,10 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    # android renders the same wizard (`MailImportScreen.kt`, the `mail-import`
+    # page of ui-actual-android), including the full-mailbox notice, the
+    # review-skipped log and the failed record.
+    pytest.mark.android,
     # Seeds FAUNA_E2E_IMAP_EXTRA_CA_PEM into every app launch in the session, so
     # the app can verify the certificate `imap_source` serves. Without it the
     # Source step fails at the handshake and every test below reports a TLS
@@ -683,13 +687,7 @@ def _import_into_a_mailbox_with_room_for_one(app, handle, request, source) -> Ma
     """The admin leaves room for exactly one more message, then the user
     imports a three-message INBOX: the first lands, the second is turned away
     and the import pauses on its full-mailbox notice."""
-    if not (app.driver.is_tui() or app.driver.is_linux() or app.driver.is_android()):
-        skip_unbuilt(
-            app.driver,
-            surface="mail-import full-mailbox notice (Skip the rest)",
-            detail="witnessed on tui, linux and android first; web never reaches a running import",
-            tracked="mailbox-migration.md § Implementation status today",
-        )
+    require_surface(app.driver, "mail-import-full-mailbox-notice")
     login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
     enable_mail_so_the_nest_can_seal(app, handle)
     set_message_allowance(app, handle.nest, stored_message_count(handle.nest) + 1)
@@ -796,6 +794,18 @@ def test_a_full_mailbox_pauses_and_resume_after_the_admin_makes_room_brings_the_
             diagnose=lambda: f"the paused import's Progress step did not come back; "
             f"error {wizard.error_text()!r}",
         )
+        # Leaving the page drops the apple apps' and windows' in-memory import
+        # (the page owns it: windows rebuilds its machine per panel), so the page
+        # adopts the paused session cold and asks for the password again
+        # (§ Resume protocol step 2); the other apps keep it.
+        if app.driver.is_macos() or app.driver.is_ios() or app.driver.is_windows():
+            assert wait_until(
+                lambda: wizard.offers("mail-import-source-password") or None,
+                budgets.UI_SETTLE_S,
+                diagnose=lambda: "the adopted paused import did not ask for the password",
+            )
+            type_until_it_takes(wizard.set_port, wizard.port_value, str(source.port))
+            wizard.set_password(source.password)
         wizard.resume()
 
         done = wait_until(
@@ -972,6 +982,11 @@ def test_a_mailbox_that_vanishes_part_way_through_is_noted_and_the_next_one_cont
         assert source.fetched_uids == [("INBOX", 1), ("Later", 1)]
 
 
+# android renders the log too, so it is marked; web is marked so its gap is
+# declared rather than hidden — the registry entry names why web skips.
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.requires_surface("mail-import-review-skipped-log")
 @pytest.mark.feature("mailbox-import")
 def test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailbox(
     app, dedicated_mail_nest, request
@@ -985,13 +1000,6 @@ def test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailb
     The card keeps the log out of sight until the button is pressed, so a
     clean import's Done card stays a summary; the test reads it hidden first.
     """
-    if not (app.driver.is_tui() or app.driver.is_linux() or app.driver.is_android()):
-        skip_unbuilt(
-            app.driver,
-            surface="mail-import-review-skipped-button (the skip log on the Done screen)",
-            detail="witnessed on tui, linux and android; the rest follow",
-            tracked="mailbox-migration.md § Implementation status today; ",
-        )
     large = sample_message("a large message", body="x" * (1536 * 1024))
     mailboxes = [
         SourceMailbox(
@@ -1038,6 +1046,62 @@ def test_review_skipped_on_the_done_screen_lists_every_skipped_message_and_mailb
         assert "INBOX uid 2: too large" in log, f"the too-large message is not listed: {log!r}"
         assert "Archive" in log, f"the vanished mailbox is not listed: {log!r}"
         assert wizard.done_summary() == done, "Review skipped left the Done screen"
+
+        wizard.review_skipped()
+        wait_until(
+            lambda: wizard.error_log() == "" or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"a second Review skipped press left the skip log shown: {wizard.error_log()!r}",
+        )
+
+
+@pytest.mark.requires_surface("mail-import-review-skipped-log")
+@pytest.mark.feature("mailbox-import")
+def test_a_finished_import_survives_leaving_the_page_and_coming_back(
+    app, dedicated_mail_nest, request
+):
+    """§ Wizard steps step 6 ("leaving the page and coming back keeps it"): after an
+    import reaches Done, navigating away and back shows the same Done summary (the
+    skip log hidden again, a fresh visit), and Review skipped still lists the skips —
+    the wizard's machine outlives the page."""
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message("an inbox message")]),
+        SourceMailbox(name="Archive", messages=[sample_message("deleted mid-run")]),
+    ]
+    with FakeImapSource(
+        mailboxes,
+        cert=session_cert(),
+        password=SOURCE_PASSWORD,
+        vanish_on_fetch=("Archive",),
+    ) as source:
+        wizard = _walk_to_a_started_import(app, dedicated_mail_nest, request, source)
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"no Done; progress {wizard.progress_summary()!r}, "
+            f"error {wizard.error_text()!r}",
+        )
+
+        wizard.leave_and_return()
+        back = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: "returning to the page lost the finished import's Done screen; "
+            f"error {wizard.error_text()!r}",
+        )
+        assert back == done, f"Done summary changed across the visit: {done!r} -> {back!r}"
+        assert wizard.error_log() == "", (
+            f"the skip log shows on a fresh visit before Review skipped: {wizard.error_log()!r}"
+        )
+
+        wizard.review_skipped()
+        log = wait_until(
+            lambda: wizard.error_log() or None,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: "Review skipped after returning showed no skip log; "
+            f"done {wizard.done_summary()!r}, error {wizard.error_text()!r}",
+        )
+        assert "Archive" in log, f"the vanished mailbox is not listed: {log!r}"
 
 
 @pytest.mark.feature("mailbox-import")
@@ -1120,13 +1184,7 @@ def test_a_failed_import_shows_as_failed_after_a_restart_and_dismiss_clears_it(
     (`test_mail_export.py::_relaunch_onto_the_export`).
     """
     d = app.driver
-    if not (d.is_tui() or d.is_linux() or d.is_android()):
-        skip_unbuilt(
-            app.driver,
-            surface="a failed import's record and its Dismiss",
-            detail="witnessed on tui, linux and android; web adopts but cannot run",
-            tracked="mailbox-migration.md § Implementation status today",
-        )
+    require_surface(app.driver, "mail-import-failed-record")
     require_relaunchable(app.driver)
     total = 100
     mailboxes = [
@@ -1205,7 +1263,7 @@ def test_a_source_that_drops_and_stays_down_pauses_the_import_and_resume_carries
     show. The three retries are counted outside the app: the fake records
     each reconnect it refused while down.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     mailboxes = [
         SourceMailbox(name="INBOX", messages=[sample_message("before the outage")]),
         SourceMailbox(
@@ -1259,21 +1317,31 @@ def test_a_source_that_drops_and_stays_down_pauses_the_import_and_resume_carries
 # on it; the test acts, then releases it.
 
 
-def _tui_first(app, *, also_android: bool = False) -> None:
+def _tui_first(
+    app,
+    *,
+    also_android: bool = False,
+    also_apple: bool = False,
+    also_windows: bool = False,
+) -> None:
     """The run journeys witness the progress step's behaviour on tui, the lead
     app, and linux (mailbox-migration.md § Implementation status today); the
     others follow in the trickle-down. `also_android` admits android to one
-    journey whose app work has landed there ahead of the rest."""
-    admitted = app.driver.is_tui() or app.driver.is_linux()
+    journey whose app work has landed there ahead of the rest; `also_apple`
+    does the same for macos and ios, `also_windows` for windows. The two
+    combinations the journeys name are the registry's
+    `mail-import-run-journeys-apple-windows` (linux, the Apple apps and
+    windows) and `-android-apple-windows` (android too) — widening one is an
+    edit of its `built` list, not of this function."""
+    assert also_apple and also_windows, (
+        "the run journeys name one of two app sets; add its registry entry "
+        "before a third combination"
+    )
     if also_android:
-        admitted = admitted or app.driver.is_android()
-    if not admitted:
-        skip_unbuilt(
-            app.driver,
-            surface="mail-import run journeys (since date, pause/resume/cancel, app-password help)",
-            detail="witnessed on tui first",
-            tracked="mailbox-migration.md § Implementation status today",
-        )
+        key = "mail-import-run-journeys-android-apple-windows"
+    else:
+        key = "mail-import-run-journeys-apple-windows"
+    require_surface(app.driver, key)
 
 
 def _dated(day: str) -> str:
@@ -1331,7 +1399,7 @@ def test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date(
       longer estimates, each mailbox's row counts its own messages, and the
       over-limit message is listed with its reason.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     large = sample_message("a new but large message", body="x" * (1536 * 1024))
     mailboxes = [
         SourceMailbox(
@@ -1469,7 +1537,7 @@ def test_a_mailbox_the_provider_rebuilt_is_warned_about_and_restarted_without_im
     dedup (§ Dedup vs. existing mail) skips every message that already
     arrived — nothing is imported twice.
     """
-    _tui_first(app, also_android=True)
+    _tui_first(app, also_android=True, also_apple=True, also_windows=True)
     mailboxes = [
         SourceMailbox(
             name="INBOX",
@@ -1526,9 +1594,14 @@ def test_a_mailbox_the_provider_rebuilt_is_warned_about_and_restarted_without_im
         assert warning in wizard.error_log(), (
             f"the log does not warn about the rebuilt mailbox: {wizard.error_log()!r}"
         )
-        assert wizard.error_text() == S.mail_import.paused_mailbox_rebuilt, (
-            f"the paused import does not say why: {wizard.error_text()!r}"
-        )
+        # The restart offer (the machine's `rebuilt_mailboxes`) lands mid-loop;
+        # the pause reason's sentence is set when the loop ends, so wait for it
+        # rather than read it the instant the offer shows.
+        assert wait_until(
+            lambda: wizard.error_text() == S.mail_import.paused_mailbox_rebuilt,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"the paused import does not say why: {wizard.error_text()!r}",
+        ), f"the paused import does not say why: {wizard.error_text()!r}"
         assert wizard.done_summary() == "", "the import finished past a rebuilt mailbox"
         resumed = source.fetched_uids[fetched_before_resume:]
         assert resumed and all(f[0] == "Archive" for f in resumed), (
@@ -1579,7 +1652,7 @@ def test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carri
     - **The since date still holds** (outcome 26): the mailbox imported after
       the reopen leaves its older message out.
     """
-    _tui_first(app, also_android=True)
+    _tui_first(app, also_android=True, also_apple=True, also_windows=True)
     require_relaunchable(app.driver)
     mailboxes = [
         SourceMailbox(
@@ -1708,7 +1781,7 @@ def test_the_old_providers_server_is_remembered_for_next_time_until_it_is_forgot
     """
     from helpers.trust_seed_witness import await_a_tip_sealed_row
 
-    _tui_first(app, also_android=True)
+    _tui_first(app, also_android=True, also_apple=True, also_windows=True)
     require_relaunchable(app.driver)
     handle = dedicated_mail_nest
     login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
@@ -1787,7 +1860,7 @@ def test_cancel_asks_first_and_keeps_what_already_arrived(
       was handing over at that moment is never imported, and the count of
       what arrived before stays as it was.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     mailboxes = [
         SourceMailbox(
             name="INBOX",
@@ -1873,7 +1946,7 @@ def test_losing_the_nest_connection_mid_import_loses_nothing(
     state is the same: Done, nothing failed, and the nest holds exactly the
     five source messages — none lost, none twice.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     handle = dedicated_mail_nest
     mailboxes = [
         SourceMailbox(
@@ -1941,20 +2014,6 @@ def test_losing_the_nest_connection_mid_import_loses_nothing(
 _ALREADY_HELD = "a message the nest already holds"
 
 
-def _import_duplicates_apps(app) -> None:
-    """The "Import duplicates anyway" journeys run a real import, so they run
-    where the run journeys do — tui (the lead), linux and android; web paints
-    the toggle but never starts a run, and the rest follow in the trickle-down."""
-    d = app.driver
-    if not (d.is_tui() or d.is_linux() or d.is_android()):
-        skip_unbuilt(
-            app.driver,
-            surface="mail-import-scope-import-duplicates-toggle",
-            detail="witnessed on tui, linux and android",
-            tracked="mailbox-migration.md § Implementation status today",
-        )
-
-
 def _import_a_message_held_twice(app, handle, request, *, import_duplicates: bool):
     """The same message twice over — once in INBOX, once in Archive, the shape
     a Gmail label or a copied folder gives it — imported with "Import
@@ -2015,7 +2074,6 @@ def test_mail_already_in_the_mailbox_is_skipped_while_import_duplicates_is_off(
     default, off (outcome 41's other half): the second copy of a message the
     nest already holds is skipped and counted, never stored again — the nest
     holds it once, in the mailbox it arrived in first."""
-    _import_duplicates_apps(app)
     done, copies = _import_a_message_held_twice(
         app, dedicated_mail_nest, request, import_duplicates=False
     )
@@ -2037,7 +2095,6 @@ def test_import_duplicates_anyway_stores_mail_already_in_the_mailbox_a_second_ti
     mail app finds it in both mailboxes. The choice is recorded on the
     session row at Start (§ Resume protocol step 3), which is what a resume
     after a restart sends it from."""
-    _import_duplicates_apps(app)
     done, copies = _import_a_message_held_twice(
         app, dedicated_mail_nest, request, import_duplicates=True
     )
@@ -2057,7 +2114,7 @@ def test_a_provider_that_needs_an_app_password_says_so_and_where_to_make_one(
     password, and choosing either explains that it needs one — with two-step
     sign-in on — and names the provider's page where it is made. Generic IMAP
     takes the server's own password and shows no app-password field."""
-    _tui_first(logged_in_app)
+    _tui_first(logged_in_app, also_apple=True, also_windows=True)
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
@@ -2143,7 +2200,7 @@ def test_imported_mail_keeps_its_shape_and_an_unmatched_mailbox_arrives_under_it
     the nest kept, and it is where a mailbox, a date and all three marks are
     observable as one answer.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     handle = dedicated_mail_nest
     mailboxes = _shaped_source()
     with FakeImapSource(mailboxes, cert=session_cert()) as source:
@@ -2251,7 +2308,7 @@ def test_a_second_import_of_the_same_account_on_another_device_is_refused(
     sentence on `error-message`. The nest still holds exactly the one, paused
     session, and the source is read no further.
     """
-    _tui_first(app)
+    _tui_first(app, also_apple=True, also_windows=True)
     handle = dedicated_mail_nest
     mailboxes = [
         SourceMailbox(
@@ -2351,17 +2408,11 @@ OUTLOOK_ADDRESS = "person@outlook.example"
 
 
 def _outlook_sign_in_witnessed(app) -> None:
-    """tui, linux and android render the Microsoft sign-in and the `admin-mail`
-    registration section the walk first saves through; the other apps have
-    neither (`mailbox-migration.md` § Implementation status today)."""
+    """tui, linux, android, macos and ios render the Microsoft sign-in and the
+    `admin-mail` registration section the walk first saves through; the other
+    apps have neither (`mailbox-migration.md` § Implementation status today)."""
     d = app.driver
-    if not (d.is_tui() or d.is_linux() or d.is_android()):
-        skip_unbuilt(
-            d,
-            surface="the admin-mail Microsoft registration section (the walk's precondition)",
-            detail="rendered on tui, linux and android; the other apps render neither it nor the sign-in",
-            tracked="mailbox-migration.md § Implementation status today",
-        )
+    require_surface(d, "admin-mail-microsoft-registration")
 
 
 def _outlook_source() -> FakeImapSource:

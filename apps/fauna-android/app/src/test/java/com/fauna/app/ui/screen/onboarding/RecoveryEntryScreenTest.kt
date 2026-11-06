@@ -109,8 +109,9 @@ class RecoveryEntryScreenTest {
         whenever(throwing.confirmIdentity(SECRET, false))
             .thenThrow(com.fauna.ffi.FfiException.General("keystore unavailable"))
         RecoveryEntryVM(host, throwing).settle(RecoveryEntryOutcome.Restored, context)
+        // The screen shows the fixed text; the raw error goes to the log only.
         verify(machine).identityCommitFailed(
-            org.mockito.ArgumentMatchers.contains("keystore unavailable"),
+            context.getString(R.string.onboarding_session_error_persist_identity),
         )
         verify(machine, never()).setErrorMessage(anyString())
     }

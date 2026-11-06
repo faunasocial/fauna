@@ -120,3 +120,32 @@ def test_a_drivers_first_launch_is_a_fresh_install_and_its_relaunches_are_not():
     assert driver._session_body(driver._launch_config)["fresh_install"] is False
     driver.preserve_state_across_relaunch()
     assert driver._session_body(driver._launch_config)["fresh_install"] is False
+
+
+def test_quit_app_stops_only_the_app_so_hard_reload_can_reopen_it():
+    # The phone seat's quit-then-reopen (`sync_seats.DeviceSeatDriver`'s
+    # `stop_keeping_state` -> `restart`): `quit_app` is the user quitting the
+    # app, never the teardown half — the bridge, its forward and every nest
+    # reverse stay, so `hard_reload()` -> `recover()` still has a bridge to ask
+    # and the relaunched app still reaches the nest.
+    driver, calls = _recovering({"environment": {}, "seed_credentials": dict(_SEED)})
+    driver._url = "http://127.0.0.1:1"
+    bridge = object()
+    driver._bridge_proc = bridge
+    driver._local_port = 1
+    driver._reverse_ports = [4242]
+    driver.preserve_state_across_relaunch()
+    driver.quit_app()
+    assert calls == [("DELETE", "/session")]
+    assert driver._bridge_proc is bridge
+    assert driver._local_port == 1
+    assert driver._reverse_ports == [4242]
+    assert driver.recover() is True
+    assert calls[-1][:2] == ("POST", "/session")
+    assert "seed_credentials" not in calls[-1][2]
+
+
+def test_quit_app_before_any_launch_is_a_no_op():
+    driver = AndroidBridgeDriver()
+    driver._delete = lambda path: pytest.fail("no bridge to ask before a launch")
+    driver.quit_app()

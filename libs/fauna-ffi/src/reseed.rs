@@ -243,10 +243,152 @@ pub async fn backup_pull_back_from_destination(
             destination,
             store: store.as_ref(),
             folder_keys: crate::account_runtime::folder_key_store(),
+            audit: None,
+            accepted: None,
         },
     )
     .await;
     Ok(pull_back_result(ran))
+}
+
+/// The pull-back's preflight, for the confirm (`ui/backups.md` § Restore after
+/// losing the nest; what it states `client-device-custodian.md` § *What the
+/// pull-back trusts the holder for*).
+#[derive(uniffi::Record)]
+pub struct FfiPullBackPreflight {
+    /// Set when the preflight failed — the holder unreachable, a ledger that
+    /// does not open: a failed gesture, rendered in `error-message`, and no
+    /// confirm opens. When set, every other field is empty.
+    pub stopped: Option<String>,
+    /// `backup-destination-reseed-confirm-modal`'s body lines
+    /// (`fauna_client_backup::reseed::preflight_lines`); resolve each
+    /// **nested** (the set name is itself a key).
+    pub lines: Vec<LocalizedText>,
+    /// The acceptance the confirm hands back verbatim to
+    /// [`backup_pull_back_accepted`] — the preflight the owner was shown.
+    pub acceptance: String,
+}
+
+/// Run the pull-back's preflight on the press of a nest-kind row's
+/// `backup-destination-reseed-button` — a thin face over
+/// `fauna_sync_engine::reseed_pull::pull_back_preflight`. `state_path` is this
+/// account's audit state file, as [`crate::backup_destinations`]'s recovery
+/// takes it (actor-scoped).
+///
+/// # Errors
+///
+/// `FfiError::General` only for a secret of the wrong length.
+#[cfg(feature = "sync-engine-host")]
+#[fauna_uniffi_async::export]
+pub async fn backup_pull_back_preflight(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    destination_id: String,
+    state_path: String,
+) -> Result<FfiPullBackPreflight, crate::FfiError> {
+    let secret = crate::crypto::secret32(&owner_secret)?;
+    let stopped = |reason: String| FfiPullBackPreflight {
+        stopped: Some(reason),
+        lines: Vec::new(),
+        acceptance: String::new(),
+    };
+    let destination = match own_destination(&nest, &destination_id).await {
+        Ok(d) => d,
+        Err(e) => return Ok(stopped(e)),
+    };
+    let audit = fauna_client_backup::native_store::FileAuditStateStore::at(
+        std::path::PathBuf::from(state_path),
+    );
+    Ok(
+        match fauna_sync_engine::reseed_pull::pull_back_preflight(
+            fauna_sync_engine::reseed_pull::NativePullBackPreflight {
+                owner_secret: secret,
+                destination: &destination,
+                audit: &audit,
+            },
+        )
+        .await
+        {
+            Err(e) => stopped(e),
+            Ok(preflight) => FfiPullBackPreflight {
+                stopped: None,
+                lines: fauna_client_backup::reseed::preflight_lines(&preflight),
+                acceptance: preflight.to_json(),
+            },
+        },
+    )
+}
+
+/// The pull-back the owner confirmed over the preflight's lines: as
+/// [`backup_pull_back_from_destination`], with this account's audit store and
+/// the `acceptance` [`backup_pull_back_preflight`] returned, so the run
+/// refuses any reserved set the owner was not shown or whose ledger moved since.
+///
+/// # Errors
+///
+/// `FfiError::General` only for inputs that never reach the host: a secret or
+/// device id of the wrong length.
+#[cfg(feature = "sync-engine-host")]
+#[fauna_uniffi_async::export]
+pub async fn backup_pull_back_accepted(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id: Vec<u8>,
+    destination_id: String,
+    state_path: String,
+    acceptance: String,
+) -> Result<FfiReseedResult, crate::FfiError> {
+    let secret = crate::crypto::secret32(&owner_secret)?;
+    let device_id = crate::crypto::device32(&device_id)?;
+    let accepted = match fauna_client_backup::reseed::PullBackPreflight::from_json(&acceptance) {
+        Ok(a) => a,
+        Err(e) => return Ok(FfiReseedResult::stopped(e)),
+    };
+    let destination = match own_destination(&nest, &destination_id).await {
+        Ok(d) => d,
+        Err(e) => return Ok(FfiReseedResult::stopped(e)),
+    };
+    let audit = fauna_client_backup::native_store::FileAuditStateStore::at(
+        std::path::PathBuf::from(state_path),
+    );
+    let store = crate::backup_seam();
+    let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
+        fauna_sync_engine::reseed_pull::NativePullBack {
+            target: nest.nest_arc(),
+            owner_secret: secret,
+            device_id,
+            destination: &destination,
+            store: store.as_ref(),
+            folder_keys: crate::account_runtime::folder_key_store(),
+            audit: Some(&audit),
+            accepted: Some(accepted),
+        },
+    )
+    .await;
+    Ok(pull_back_result(ran))
+}
+
+/// `destination_id` resolved against this client's **own pinned** list, never
+/// a URL the shell hands over.
+#[cfg(feature = "sync-engine-host")]
+async fn own_destination(
+    nest: &Arc<FfiNestClient>,
+    destination_id: &str,
+) -> Result<BackupDestination, String> {
+    let source_nest = crate::deployment_seed::bound_nest_id(nest)
+        .await
+        .map_err(|e| e.to_string())?
+        .0;
+    let store = crate::backup_seam();
+    let state = load_backup_state(store.as_ref(), source_nest)
+        .await
+        .map_err(|e| e.to_string())?;
+    state
+        .backup
+        .destinations
+        .into_iter()
+        .find(|d| d.destination_id == destination_id)
+        .ok_or_else(|| format!("no backup destination {destination_id}"))
 }
 
 /// Project the pull-back host's answer to the re-seed's FFI face. Split out so

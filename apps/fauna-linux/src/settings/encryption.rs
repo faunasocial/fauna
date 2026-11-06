@@ -18,6 +18,9 @@ pub fn build_encryption_page() -> gtk::Box {
         .subtitle(enc::LOW_KEY_WARNING_SUBTITLE)
         .build();
     warning_row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+    // The warning names the count it read (`update_key_count` sets its
+    // subtitle), so `get_text` on it reads the same number the count row states.
+    crate::testid::set_test_id(&warning_row, ids::ENCRYPTION_KEYPACKAGE_LOW_WARNING);
     warning_row.set_visible(false);
     warning_group.add(&warning_row);
     page.add(&warning_group);
@@ -32,6 +35,9 @@ pub fn build_encryption_page() -> gtk::Box {
         .title(enc::AVAILABLE_KEY_PACKAGES)
         .subtitle(common::LOADING)
         .build();
+    // A caption/value row: `get_text` reads the subtitle — the bare count, or
+    // the loading copy before the first read lands.
+    crate::testid::set_test_id(&key_count_row, ids::ENCRYPTION_KEYPACKAGE_COUNT);
     keys_group.add(&key_count_row);
 
     let refresh_row = adw::ActionRow::builder()
@@ -47,34 +53,36 @@ pub fn build_encryption_page() -> gtk::Box {
         .build();
     // Replenishing the one-time pool MINTS then PUBLISHES key packages — the
     // upload is the leg that needs the nest, and the count re-fetch behind it
-    // is a Read that gates nothing (tui's `Action::RefreshKeyPackages`). No
-    // `set_test_id` beside it: the Encryption page's refresh control carries no
-    // ui.yaml id on any app, and the gate does not need one.
+    // is a Read that gates nothing (tui's `Action::RefreshKeyPackages`).
+    crate::testid::set_test_id(&refresh_btn, ids::ENCRYPTION_KEYPACKAGE_REFRESH_BUTTON);
     crate::offline_gate::declare_wire_kind(&refresh_btn, "fauna.conversations.keypackage.upload");
 
     let key_count_row_ref = key_count_row.clone();
     let warning_row_ref = warning_row.clone();
 
     refresh_btn.connect_clicked(move |_| {
-        if let Some(client) = crate::settings::get_client() {
-            // Replenish the one-time pool through the durable manager surface
-            // (mint on the session engine + notify→autosave), the SAME path login
-            // and web drive — never a raw engine mint whose fresh private init
-            // keys a later provider swap would wipe (`devices.md` § Cross-device
-            // MLS group-state sync).
-            crate::conversations::conv_backend::replenish_key_packages();
-
-            // Re-fetch count after publishing so the row updates.
-            let count_row = key_count_row_ref.clone();
-            let warn_row = warning_row_ref.clone();
-            // Trigger a re-fetch — the result will come back via UiMessage.
-            // We optimistically update the subtitle while we wait.
-            count_row.set_subtitle(common::REFRESHING);
-            warn_row.set_visible(false);
-            client.fetch_key_package_count();
-        } else {
+        if crate::settings::get_client().is_none() {
             tracing::error!("[settings/encryption] refresh: no client available");
+            return;
         }
+        // Replenish the one-time pool through the durable manager surface
+        // (mint on the session engine + notify→autosave), the SAME path login
+        // and web drive — never a raw engine mint whose fresh private init
+        // keys a later provider swap would wipe (`devices.md` § Cross-device
+        // MLS group-state sync).
+        let replenished = crate::conversations::conv_backend::replenish_key_packages();
+        key_count_row_ref.set_subtitle(common::REFRESHING);
+        warning_row_ref.set_visible(false);
+        // Re-read the count only once the publish has landed — the result
+        // comes back via `UiMessage` to `update_key_count`.
+        gtk::glib::spawn_future_local(async move {
+            if let Some(replenished) = replenished {
+                let _ = replenished.recv().await;
+            }
+            if let Some(client) = crate::settings::get_client() {
+                client.fetch_key_package_count();
+            }
+        });
     });
 
     refresh_row.add_suffix(&refresh_btn);
@@ -83,7 +91,8 @@ pub fn build_encryption_page() -> gtk::Box {
     page.add(&keys_group);
 
     // Fetch the current key package count on page construction so the row
-    // is populated as soon as the window opens.
+    // is populated as soon as the window opens; `refresh_on_visit` re-reads it
+    // on every later visit.
     if let Some(client) = crate::settings::get_client() {
         client.fetch_key_package_count();
     }
@@ -128,7 +137,30 @@ pub fn update_key_count(count: u32) {
     });
     WARNING_ROW.with(|cell| {
         if let Some(row) = cell.borrow().as_ref() {
+            row.set_subtitle(&enc::low_key_warning_body(&count.to_string()));
             row.set_visible(fauna_conversations::keypackages_low(u64::from(count)));
         }
     });
+}
+
+/// The settings shell's nav edge onto this page (`settings_shell.rs`): every
+/// visit reads the nest's count afresh — a read only, never a mint
+/// (`direct-messages.md` § Key Package Management). The row drops back to the
+/// loading copy and the warning hides until the read lands, so neither can
+/// state the previous visit's number as this one's (tui hydrates the page on
+/// the same edge).
+pub fn refresh_on_visit() {
+    KEY_COUNT_ROW.with(|cell| {
+        if let Some(row) = cell.borrow().as_ref() {
+            row.set_subtitle(common::LOADING);
+        }
+    });
+    WARNING_ROW.with(|cell| {
+        if let Some(row) = cell.borrow().as_ref() {
+            row.set_visible(false);
+        }
+    });
+    if let Some(client) = crate::settings::get_client() {
+        client.fetch_key_package_count();
+    }
 }

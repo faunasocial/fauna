@@ -53,6 +53,10 @@ GRANT_TYPE_DEVICE_CODE = "urn:ietf:params:oauth:grant-type:device_code"
 GRANT_TYPE_CIBA = "urn:openid:params:grant-type:ciba"
 GRANT_TYPE_HANDOFF = "urn:fauna:params:grant-type:handoff"
 
+# The polled grants' interval: the nest's `BACKCHANNEL_POLL_INTERVAL_SECS`, the
+# `interval` its device and quiet-push starts hand the client.
+POLLED_GRANT_INTERVAL_S = 5.0
+
 # Lowercase, and read out of a lowercased header map — HTTP field names are
 # case-insensitive and Go canonicalizes this one to `Dpop-Nonce`, so a client
 # matching the spec's `DPoP-Nonce` spelling exactly finds nothing and can never
@@ -389,6 +393,41 @@ class OAuthClient:
         if headers.get(NONCE_HEADER):
             self.nonce = headers[NONCE_HEADER]
         return status, parsed
+
+    def poll_until_answered(
+        self,
+        grant_type: str,
+        handle_param: str,
+        handle: str,
+        extra: dict | None = None,
+        *,
+        timeout: float,
+        interval: float = POLLED_GRANT_INTERVAL_S,
+    ) -> tuple[int, dict]:
+        """Poll a polled start until the user's answer reaches it — ``(status, body)``
+        of the first poll that is neither ``authorization_pending`` nor ``slow_down``,
+        or of the last poll once ``timeout`` has passed.
+
+        For a test that has just answered the request in an app: the click returns
+        when the app has *dispatched* its answer, not when the nest has recorded it
+        (the Apple pair resolve in a detached ``Task``), so one poll straight after
+        the click reads a state that may not have settled (convention 14). This
+        polls the way a real device app does — at the server's interval, five
+        seconds longer after each ``slow_down`` (RFC 8628 § 3.5) — so the waits
+        here are the protocol's pacing, never a settle: a poll inside the interval
+        would turn this client's own ``pending`` into ``slow_down``.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            status, body = self.poll_token(grant_type, handle_param, handle, extra)
+            error = body.get("error") if status != 200 else None
+            if error not in ("authorization_pending", "slow_down"):
+                return status, body
+            if error == "slow_down":
+                interval += 5.0
+            if time.monotonic() >= deadline:
+                return status, body
+            time.sleep(interval)
 
     # ── The token exchange (F4 slice 7) ─────────────────────────────────
     def exchange_code(self, redirect: str) -> dict:

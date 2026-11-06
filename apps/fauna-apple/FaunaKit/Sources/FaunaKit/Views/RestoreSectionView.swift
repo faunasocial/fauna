@@ -10,9 +10,9 @@ import SwiftUI
 /// Like both references the wired action is the **local single-snapshot restore**
 /// (pick a snapshot, re-type its id, dispatch `restore_message_kind` once). The
 /// `restore-source-select` is a decorative disabled-at-zero-destinations affordance
-/// and the two `restore-kind-checkbox`es are decorative parity (the dispatch
-/// ignores them) — the cross-location pair-restore they'd drive is blocked on
-/// backup-Plan 4. The restore endpoint requires the bridge not be serving the
+/// (the cross-location restore is blocked on backup-Plan 4); the five
+/// `restore-kind-checkbox`es gate the confirm button on the picked snapshot's
+/// kind. The restore endpoint requires the bridge not be serving the
 /// actor; the user arranges that via the existing `mail-settings-enabled-toggle`
 /// (progress ends "Done — restart the bridge.") — not client-driven sequencing.
 ///
@@ -27,8 +27,15 @@ import SwiftUI
 public struct RestoreSectionView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = RestoreVM()
+    /// The page's `BackupsMachineVM.snapshotsChanged` tick: each change re-reads
+    /// `restore-snapshot-select`, so a snapshot the page just took (or removed)
+    /// is offered (or dropped) without a page re-entry (`backups.md` § Snapshot-
+    /// list shape → *Kind entries*).
+    private let snapshotsChanged: UInt64
 
-    public init() {}
+    public init(snapshotsChanged: UInt64 = 0) {
+        self.snapshotsChanged = snapshotsChanged
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -42,6 +49,9 @@ public struct RestoreSectionView: View {
             guard let client else { return }
             vm.configure(api: client.api)
             await vm.hydrate()
+        }
+        .onChange(of: snapshotsChanged) {
+            Task { await vm.reloadSnapshots() }
         }
     }
 
@@ -140,7 +150,7 @@ public struct RestoreSectionView: View {
 // MARK: - Local restore action card
 
 /// The local-restore action (`restore-source-select`, `restore-snapshot-select`,
-/// `restore-kinds-checkboxes` + the two `restore-kind-checkbox`es,
+/// `restore-kinds-checkboxes` + the five `restore-kind-checkbox`es,
 /// `restore-confirm-input`, `restore-confirm-button`, `restore-progress`). A
 /// separate struct so the two-way bindings (`confirmText`, the checkboxes, the
 /// snapshot selection) can `@Bindable`-bind the VM.
@@ -230,6 +240,8 @@ private struct LocalRestoreAction: View {
         .accessibilityIdentifier(Ids.restoreSnapshotSelect)
         .automationSelect(Ids.restoreSnapshotSelect,
                           value: { vm.selectedSnapshotLabel },
+                          options: { vm.snapshots.map(vm.snapshotLabel) },
+                          optionKeys: { vm.snapshots.map { String($0.id) } },
                           isEnabled: { !vm.snapshots.isEmpty }) { wire in
             if let s = vm.snapshots.first(where: {
                 String($0.id) == wire || vm.snapshotLabel($0) == wire
@@ -239,14 +251,18 @@ private struct LocalRestoreAction: View {
         }
     }
 
-    /// `restore-kinds-checkboxes` container + the two `restore-kind-checkbox`es
-    /// (mail, calendar), both checked by default. Decorative parity (the local
-    /// dispatch ignores them). Custom checkbox buttons (uniform on both platforms;
-    /// the automation value reads "on"/"off").
+    /// `restore-kinds-checkboxes` container + the five `restore-kind-checkbox`es
+    /// (`RestoreKind.all`, the shared `KIND_ENTRIES` order), all checked by
+    /// default; a picked snapshot of an unticked kind does not arm
+    /// `restore-confirm-button` (`RestoreVM.confirmEnabled`). Custom checkbox
+    /// buttons (uniform on both platforms); the automation text reads the label,
+    /// the value "on"/"off". Stacked, so five fit an iPhone width; one eager
+    /// `ForEach` so each box registers exactly once, in order.
     private var kindsCheckboxes: some View {
-        HStack(spacing: 16) {
-            kindCheckbox(label: L.backups.restoreKindsMail, isOn: $vm.mailChecked)
-            kindCheckbox(label: L.backups.restoreKindsCalendar, isOn: $vm.calendarChecked)
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(RestoreKind.all.enumerated()), id: \.offset) { i, kind in
+                kindCheckbox(label: kind.label, isOn: $vm.kindTicked[i])
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.restoreKindsCheckboxes)
@@ -265,6 +281,7 @@ private struct LocalRestoreAction: View {
         .buttonStyle(.plain)
         .accessibilityIdentifier(Ids.restoreKindCheckbox)
         .automationActivate(Ids.restoreKindCheckbox,
+                            text: { label },
                             value: { isOn.wrappedValue ? "on" : "off" }) {
             isOn.wrappedValue.toggle()
         }

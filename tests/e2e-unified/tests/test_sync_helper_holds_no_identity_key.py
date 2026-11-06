@@ -4,9 +4,10 @@ Owner: ``docs/goal/architecture/apps/sync-agent-credentials.md`` § Credential
 model — the agent is a bearer-only + minted-capability host (never the identity
 seed, ``key-material-hierarchy.md`` rules #6/#7).
 
-One tui seat, no operator (convention 16). Under the e2e file backend the app
-and the helper it spawns share one credential namespace file in the launch's
-credential dir (``FAUNA_KEYRING_APP`` is inherited), told apart by account key:
+One app seat, no operator (convention 16). Under the e2e file backend the app
+and the helper it spawns share the launch's credential dir, told apart by account
+key in one namespace file (tui, ``FAUNA_KEYRING_APP`` inherited) or by file
+(macOS, the app's ``keychain.json`` beside the helper's namespace file):
 the helper persists its capability under ``capability/v1``
 (``fauna_ipc::sync::CAPABILITY_KEY``), the app keeps the identity secret under
 its own account keys. The witness reads what the helper PERSISTED — the
@@ -42,11 +43,20 @@ from tests.test_device_to_device_file_transfer import (
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
+    pytest.mark.macos,
+    pytest.mark.linux,
 ]
+
+# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: tui,
+# macOS and linux run it; the windows native leg below lands with its app's
+# trickle-down, and landing deletes its entry.
+OWED_SEATS: dict = {
+    "win32": {"native": "the windows leg of `local-folder-sync` has not landed"},
+}
 
 _SEAT_PAIRS = [
     pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
-    for pair in sync_seats.seat_sets_for_platform(sys.platform, (("tui", "tui"),))
+    for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=OWED_SEATS)
 ]
 
 #: ``fauna_ipc::sync::CAPABILITY_KEY`` — the helper's persisted record.
@@ -94,7 +104,10 @@ def test_the_sync_helper_never_holds_the_identity_key(nest_instance, request, se
         with contextlib.ExitStack() as stack:
             a = stack.enter_context(seat("a"))
             a.await_ready(STARTUP_WINDOW)
-            cred_dir = Path(a.app.driver._resolved_credential_dir)
+            driver = a.app.driver
+            cred_dir = Path(
+                getattr(driver, "_resolved_credential_dir", None) or driver._cred_dir
+            )
 
             def rows() -> dict:
                 found: dict = {}

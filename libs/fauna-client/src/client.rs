@@ -152,6 +152,36 @@ fn record_supervisor_stop(
     connection_state_tx.send_replace(ConnectionState::Disconnected);
 }
 
+/// The reconnect signal, derived from `connection_state`: bump `reconnect_tx`
+/// on every `Connected` that follows a gap, so clients re-pull their snapshot
+/// surfaces uniformly (`NestClient::subscribe_reconnects`). A gap is an earlier
+/// connection, or a failed dial before the first one (`Disconnected` /
+/// `Unreachable` after the supervisor started): a session whose first connect
+/// came late loaded its surfaces into that failure, and its account pump ran
+/// its first pass into it, so the late first `Connected` owes them the same
+/// re-pull a reconnect does. A first connect that met no failure is not one.
+async fn derive_reconnects(
+    mut cs_rx: watch::Receiver<ConnectionState>,
+    reconnect_tx: watch::Sender<u64>,
+) {
+    let mut ever_connected = matches!(*cs_rx.borrow_and_update(), ConnectionState::Connected);
+    let mut failed_before_first = false;
+    while cs_rx.changed().await.is_ok() {
+        match *cs_rx.borrow_and_update() {
+            ConnectionState::Connected => {
+                if ever_connected || failed_before_first {
+                    reconnect_tx.send_modify(|n| *n = n.wrapping_add(1));
+                }
+                ever_connected = true;
+            }
+            ConnectionState::Disconnected | ConnectionState::Unreachable => {
+                failed_before_first = true;
+            }
+            ConnectionState::Connecting => {}
+        }
+    }
+}
+
 pub struct NestClient {
     auth: Arc<AuthClient>,
     pushes: Arc<PushBroker>,
@@ -160,8 +190,8 @@ pub struct NestClient {
     dispatcher: Arc<RwLock<Option<Arc<RpcDispatcher>>>>,
     kind_registry: Arc<KindRegistry>,
     connection_state_tx: watch::Sender<ConnectionState>,
-    /// Reconnect counter, bumped on every reconnect (a `Connected` transition
-    /// AFTER the first connect). Clients watch this (`subscribe_reconnects`) to
+    /// Reconnect counter, bumped on every `Connected` that follows a gap
+    /// ([`derive_reconnects`]). Clients watch this (`subscribe_reconnects`) to
     /// re-pull their visible snapshot surfaces — the transport.md § Push events
     /// contract that observers re-pull on reconnect. Derived from
     /// `connection_state` by a task spawned in `connect`.
@@ -342,9 +372,10 @@ impl NestClient {
     }
 
     /// Watch reconnects. The returned receiver's value increments on every
-    /// reconnect — a `Connected` transition AFTER the first connect. The initial
-    /// connect does NOT bump it (the app loads its surfaces then anyway), so a
-    /// `changed()` here is always a genuine reconnect. Clients `await
+    /// reconnect — a `Connected` transition after an earlier connection, or
+    /// after failed dials before the first one ([`derive_reconnects`]). A first
+    /// connect that met no failure does NOT bump it (the app loads its surfaces
+    /// then anyway), so a `changed()` here always follows a gap. Clients `await
     /// rx.changed()` and re-pull their visible snapshot surfaces: the transport.md
     /// § Push events contract that "application observers re-pull through their
     /// snapshot-refresh path" on reconnect. Without this the feed — which has no
@@ -385,6 +416,13 @@ impl NestClient {
     /// [`Self::supervisor_stop`], never here.
     pub fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
         self.auth.subscribe_self_identity()
+    }
+
+    /// Follow who this session is signed in as through the one shared
+    /// judgement ([`AuthClient::follow_self_identity`]) — what every app's
+    /// account cache reads. `None` when the bearer source cannot say.
+    pub fn follow_self_identity(&self) -> Option<crate::SelfIdentityFollower> {
+        self.auth.follow_self_identity()
     }
 
     /// Test-only: the dispatcher slot and connection-state sender this
@@ -531,19 +569,14 @@ impl NestClient {
     /// identity, a superseded identity, a subprotocol mismatch) or a failed
     /// bearer refresh after 4401. A stop is recorded, and every request then
     /// fails at once with it ([`Self::supervisor_stop`]). An `Err` here is
-    /// therefore only ever the authentication step; what the supervisor meets
-    /// later arrives on requests.
+    /// therefore only ever the authentication step's terminal refusal — a
+    /// first mint that merely found no nest still starts the supervisor,
+    /// which retries it; what the supervisor meets later arrives on requests.
     ///
     /// On a successful return, the WS handshake has been initiated but
     /// not necessarily completed; observe `connection_state()` to wait
     /// for `ConnectionState::Connected`.
     pub async fn connect(self: &Arc<Self>) -> Result<(), NestClientError> {
-        self.auth.authenticate().await?;
-        // A client may be connected again after a `disconnect()`; from here on
-        // a request waits for the supervisor spawned below, as it should.
-        self.torn_down
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-
         // The client's half of the shared reconnect supervisor: bearer-subprotocol
         // connect + push bridge + bearer refresh (see `reconnect::ClientChannel`).
         let channel = Arc::new(crate::reconnect::ClientChannel {
@@ -554,6 +587,23 @@ impl NestClient {
             dial_demand: Arc::clone(&self.dial_demand),
             push_presence: Arc::clone(&self.push_presence),
         });
+        // The eager first mint. Only a refusal no retry clears is the caller's
+        // error; any other failure (no nest answered — a fresh box whose name
+        // does not resolve yet) is the supervisor's to retry, since its every
+        // dial mints again (`connect_with_subprotocol_bearer`). Returning it
+        // here instead left a session with no reconnect loop at all
+        // (`transport-connection.md` § Connection lifecycle).
+        if let Err(e) = self.auth.authenticate().await {
+            use fauna_ws_substrate::SupervisedChannel as _;
+            if channel.connect_error_is_terminal(&e) {
+                return Err(e);
+            }
+            tracing::warn!("first bearer mint failed ({e}); the reconnect supervisor retries it");
+        }
+        // A client may be connected again after a `disconnect()`; from here on
+        // a request waits for the supervisor spawned below, as it should.
+        self.torn_down
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let cfg = fauna_ws_substrate::Supervisor::new(
             channel,
             Arc::clone(&self.dispatcher),
@@ -592,26 +642,14 @@ impl NestClient {
             ended
         }));
 
-        // Derive the reconnect signal from `connection_state`: bump `reconnect_tx`
-        // on every `Connected` after the first, so clients re-pull their snapshot
-        // surfaces uniformly (see `subscribe_reconnects`). Kept here rather than in
-        // the shared supervisor so the federation channel — which has no UI to
-        // re-hydrate — is unaffected (#2, divergence-minimal).
-        let mut cs_rx = self.connection_state_tx.subscribe();
-        let reconnect_tx = self.reconnect_tx.clone();
-        let derive = tokio::spawn(async move {
-            let mut ever_connected =
-                matches!(*cs_rx.borrow_and_update(), ConnectionState::Connected);
-            while cs_rx.changed().await.is_ok() {
-                if matches!(*cs_rx.borrow_and_update(), ConnectionState::Connected) {
-                    if ever_connected {
-                        reconnect_tx.send_modify(|n| *n = n.wrapping_add(1));
-                    } else {
-                        ever_connected = true;
-                    }
-                }
-            }
-        });
+        // Derive the reconnect signal from `connection_state` (see
+        // `derive_reconnects`). Kept here rather than in the shared supervisor
+        // so the federation channel — which has no UI to re-hydrate — is
+        // unaffected (#2, divergence-minimal).
+        let derive = tokio::spawn(derive_reconnects(
+            self.connection_state_tx.subscribe(),
+            self.reconnect_tx.clone(),
+        ));
         // Same retirement as the supervisor above — this slot was assigned over
         // too, stranding one reconnect-derive task per extra `connect()`. Each
         // survivor keeps bumping `reconnect_tx` off the same `connection_state`
@@ -626,12 +664,53 @@ impl NestClient {
         Ok(())
     }
 
+    /// [`Self::connect`], then wait until the connection reaches `Connected`
+    /// within `within` — for a caller that must know the nest answered before
+    /// it acts (the succession sweep writes nothing for an unreachable nest;
+    /// the UniFFI `connect`'s contract). `connect` alone returns `Ok` over a
+    /// first mint that found no nest, its supervisor retrying it. `Err` is the
+    /// terminal refusal, the supervisor's stop if it stopped first, or the
+    /// timeout; the supervisor keeps running after a timeout, as after any
+    /// `connect` (drop or [`Self::disconnect`] the client to stop it).
+    pub async fn connect_and_wait(
+        self: &Arc<Self>,
+        within: std::time::Duration,
+    ) -> Result<(), NestClientError> {
+        self.connect().await?;
+        let mut state = self.connection_state();
+        let wait = async {
+            loop {
+                if *state.borrow_and_update() == ConnectionState::Connected {
+                    return Ok(());
+                }
+                // Recorded before the supervisor announces its stop.
+                if let Some(stop) = self.supervisor_stop() {
+                    return Err(stop);
+                }
+                if state.changed().await.is_err() {
+                    return Err(NestClientError::RpcDisconnected {
+                        was_in_flight: false,
+                    });
+                }
+            }
+        };
+        match tokio::time::timeout(within, wait).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(NestClientError::WebSocket(format!(
+                "the connection did not come up within {}s",
+                within.as_secs()
+            ))),
+        }
+    }
+
     /// [`Self::connect`] unless a supervisor is already running — the idempotent
     /// form, for a component that needs the connection up but does not own it
     /// (an engine whose builder already connected its control plane). A running
     /// supervisor re-dials on its own, so a second `connect` would only tear a
     /// live connection down and re-authenticate. One that stopped for good, or
-    /// was never started, is started.
+    /// was never started, is started — except one that stopped on the identity
+    /// verdict while the pin it refused against is still the one held
+    /// ([`Self::identity_park`]): that returns the verdict and dials nothing.
     pub async fn ensure_connected(self: &Arc<Self>) -> Result<(), NestClientError> {
         if self
             .supervisor_handle
@@ -642,7 +721,33 @@ impl NestClient {
         {
             return Ok(());
         }
+        if let Some(verdict) = self.identity_park() {
+            return Err(verdict);
+        }
         self.connect().await
+    }
+
+    /// The identity verdict this client is **parked** on, if any: its
+    /// supervisor stopped with [`NestClientError::NestIdentityChanged`] and the
+    /// install's pin for that host still names the identity the verdict
+    /// refused against. Redialling then can only meet the same refusal — a
+    /// retry loop on a possible MITM (`transport-trust.md` § Post-auth
+    /// surfacing; § Pin custody across processes, *it parks*) — so a caller
+    /// that brings its connection back on its own (the sync agent's relay
+    /// seat, its control-plane rebuild, an engine's `ensure_connected`) holds
+    /// instead. The park lifts by itself when the pin moves: the user
+    /// re-trusted the nest in the app, or forgot it. An explicit
+    /// [`Self::connect`] is never parked.
+    pub fn identity_park(&self) -> Option<NestClientError> {
+        let stop = self.supervisor_stop()?;
+        let NestClientError::NestIdentityChanged {
+            host, pinned_hex, ..
+        } = &stop
+        else {
+            return None;
+        };
+        let held = fauna_anon_client::pinned_identity(host).map(hex::encode);
+        (held.as_deref() == Some(pinned_hex.as_str())).then_some(stop)
     }
 
     /// Stop the reconnect supervisor. Pending RPCs see `RpcDisconnected`
@@ -976,6 +1081,26 @@ impl fauna_protocol::RpcRequester for NestClient {
         NestClient::live_connection(self)
     }
 
+    /// The in-gap wait every request makes ([`Self::wait_for_connected`]),
+    /// bounded as the read it tickets is — `fauna.nest.info`'s own deadline,
+    /// the one wait both of its callers (the memo read and the identity
+    /// proof) would make anyway — then the live number: a memo read issued
+    /// while a sign-in's socket is still dialling is ticketed on the
+    /// connection it then rides. Never longer than that read: with the nest
+    /// down, a settings landing's readers each pay this wait before failing,
+    /// and a 30 s bound held tui's settings sub-page nav past its
+    /// acknowledgement.
+    async fn ready_connection_id(&self) -> Option<u64> {
+        if NestClient::live_connection(self).is_none() {
+            let within = self
+                .kind_registry
+                .meta("fauna.nest.info")
+                .map_or(std::time::Duration::from_secs(5), |m| m.default_deadline);
+            let _ = tokio::time::timeout(within, self.wait_for_connected()).await;
+        }
+        NestClient::live_connection(self)
+    }
+
     fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
         Some(&self.nest_info)
     }
@@ -1007,6 +1132,11 @@ impl fauna_protocol::RpcRequester for SelfConnecting {
 
     fn live_connection_id(&self) -> Option<u64> {
         self.0.live_connection()
+    }
+
+    async fn ready_connection_id(&self) -> Option<u64> {
+        self.0.ensure_connected().await.ok()?;
+        fauna_protocol::RpcRequester::ready_connection_id(&*self.0).await
     }
 
     fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
@@ -1527,6 +1657,145 @@ mod tests {
             Arc::strong_count(&client.pushes),
             idle,
             "disconnect() must leave no supervisor holding the PushBroker"
+        );
+    }
+
+    /// A bearer source whose first `fail_first` mints fail with `fail_with`,
+    /// and every later one succeeds — counting every mint it is asked for.
+    struct FlakyBearer {
+        mints: std::sync::atomic::AtomicUsize,
+        fail_first: usize,
+        fail_with: fn() -> fauna_nest_http::ApiError,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for FlakyBearer {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            let n = self.mints.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                Err((self.fail_with)())
+            } else {
+                Ok("tok".into())
+            }
+        }
+    }
+
+    fn flaky_client(bearer: Arc<FlakyBearer>) -> Arc<NestClient> {
+        let auth = Arc::new(AuthClient::bearer_only(
+            "http://127.0.0.1:1".into(),
+            [0x5au8; 32],
+            bearer as Arc<dyn fauna_nest_http::BearerSource>,
+            reqwest::Client::new(),
+        ));
+        NestClient::with_auth(auth)
+    }
+
+    /// **A first mint that fails transiently still starts the supervisor.**
+    /// `connect()` used to return the eager mint's error before spawning
+    /// anything, so a session whose nest did not answer at that one instant —
+    /// a freshly provisioned box whose name does not resolve yet — had no
+    /// reconnect loop for the rest of its life, and every request failed
+    /// "connection lost" although the nest came up a minute later. Measured
+    /// on a fauna.build re-creation 2026-10-23:
+    /// the claimed box's admin session never connected, so its machine's
+    /// renewal grant was never registered. The supervisor's own dial mints
+    /// (`ws_adapter::connect_with_subprotocol_bearer` → `ensure_auth`), so it
+    /// owns the retry from the first failure on.
+    #[tokio::test]
+    async fn a_transient_first_mint_failure_still_starts_the_supervisor() {
+        let bearer = Arc::new(FlakyBearer {
+            mints: Default::default(),
+            fail_first: 1,
+            fail_with: || fauna_nest_http::ApiError::Transport("dns: no such host".into()),
+        });
+        let client = flaky_client(Arc::clone(&bearer));
+        let idle = Arc::strong_count(&client.pushes);
+
+        client
+            .connect()
+            .await
+            .expect("a transient mint failure is the supervisor's to retry, not the caller's");
+        assert!(
+            Arc::strong_count(&client.pushes) > idle,
+            "no supervisor was spawned after a transient first-mint failure — nothing will \
+             ever retry this session's connection"
+        );
+        yield_until(|| bearer.mints.load(std::sync::atomic::Ordering::SeqCst) >= 2).await;
+        assert!(
+            bearer.mints.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the supervisor never minted again after the failed first mint"
+        );
+        client.disconnect().await;
+    }
+
+    /// Drive [`derive_reconnects`] through `states` (each observed: the
+    /// task runs between sends) and answer the reconnect count.
+    async fn reconnects_after(states: &[ConnectionState]) -> u64 {
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
+        let (reconnect_tx, reconnect_rx) = watch::channel(0u64);
+        let derive = tokio::spawn(derive_reconnects(state_rx, reconnect_tx));
+        for state in states {
+            state_tx.send_replace(*state);
+            // Single-threaded test runtime: yielding hands the derive task the
+            // turn it needs to observe this state before the next send.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+        drop(state_tx);
+        derive
+            .await
+            .expect("the derive task ends when its state watch closes");
+        *reconnect_rx.borrow()
+    }
+
+    /// A first connect that met no failure is not a reconnect.
+    #[tokio::test]
+    async fn a_clean_first_connect_is_no_reconnect() {
+        use ConnectionState::*;
+        assert_eq!(reconnects_after(&[Connecting, Connected]).await, 0);
+    }
+
+    /// A first connect that came only after failed dials IS one: the session's
+    /// surfaces and its account pump's first pass ran into the failure, and
+    /// the late `Connected` is their only cue to run again. Measured on the
+    /// fauna.build re-creation of 2026-10-23: the admin session's first
+    /// connect came minutes after its sign-in, and nothing re-ran.
+    #[tokio::test]
+    async fn a_first_connect_after_failed_dials_is_a_reconnect() {
+        use ConnectionState::*;
+        assert_eq!(
+            reconnects_after(&[Connecting, Disconnected, Connecting, Unreachable, Connected]).await,
+            1
+        );
+        assert_eq!(
+            reconnects_after(&[Connecting, Connected, Connecting, Disconnected, Connected]).await,
+            1,
+            "an ordinary reconnect still counts once"
+        );
+    }
+
+    /// The other half: a first mint the nest REFUSED (it no longer signs this
+    /// identity in) stays the caller's error, and no supervisor dials a
+    /// refusal no retry clears.
+    #[tokio::test]
+    async fn a_refused_first_mint_starts_no_supervisor() {
+        let bearer = Arc::new(FlakyBearer {
+            mints: Default::default(),
+            fail_first: usize::MAX,
+            fail_with: || fauna_nest_http::ApiError::SignInRefused,
+        });
+        let client = flaky_client(bearer);
+        let idle = Arc::strong_count(&client.pushes);
+
+        assert!(
+            client.connect().await.is_err(),
+            "a refused mint must stay the caller's error"
+        );
+        assert_eq!(
+            Arc::strong_count(&client.pushes),
+            idle,
+            "a refused first mint must not spawn a supervisor"
         );
     }
 

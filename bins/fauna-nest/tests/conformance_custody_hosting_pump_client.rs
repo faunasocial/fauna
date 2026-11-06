@@ -33,7 +33,7 @@ use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
 use fauna_core::custody_grant::{
     CUSTODY_GRANT_ID_LEN, CustodyGrant, CustodyScopeSet, sign_custody_grant,
 };
-use fauna_core::data::{ModerationConfig, Timestamp};
+use fauna_core::data::{SyncPrefsConfig, Timestamp};
 use fauna_core::identity::ActorKeypair;
 use fauna_mls::wrapped_blob::GrantWindow;
 use fauna_nest::backup::service::BackupService;
@@ -44,7 +44,7 @@ use fauna_nest::routes::{AppState, RegistrationConfig};
 use fauna_nest::state::AuthState;
 use fauna_nest::token_store::TokenStore;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
-use fauna_protocol::merge_policy::{KIND_MODERATION, MODERATION_KEY};
+use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, PREFERENCE_KEY};
 use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
 use fauna_sync_engine::generation_tip::GenerationTrust;
 
@@ -261,12 +261,11 @@ async fn the_custodian_nest_pulls_with_no_host_device_and_revoke_severs() {
     .unwrap()
     .put(
         &ItemId {
-            kind: KIND_MODERATION.into(),
-            key: MODERATION_KEY.into(),
+            kind: KIND_SYNC_PREFS.into(),
+            key: PREFERENCE_KEY.into(),
         },
-        fauna_core::encoding::canonical_encode(&ModerationConfig {
-            muted_keywords: vec!["pulled-by-the-nest-pump".into()],
-            ..Default::default()
+        fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+            default_conflict_policy: Some("pulled-by-the-nest-pump".into()),
         })
         .unwrap()
         .to_vec(),

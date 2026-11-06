@@ -81,10 +81,12 @@ async fn start() -> (String, Arc<AppState>) {
 
 /// The refusal a sign-in as `keypair` meets, or `None` when it signs in. Every
 /// app bearer mints through challenge/verify (`devices.md` § Implementation
-/// status today, gap 3), so this is the `fauna.auth.verify` answer.
+/// status today, gap 3), so this is the `fauna.auth.verify` answer — read off
+/// the mint itself: `connect()` returns `Ok` over a non-terminal first-mint
+/// refusal such as `account_locked`, its supervisor retrying it.
 async fn sign_in_refusal(base: &str, keypair: ActorKeypair) -> Option<String> {
     let client = NestClient::new(base.to_string(), keypair);
-    match client.connect().await {
+    match client.authenticate().await {
         Ok(()) => None,
         Err(e) => Some(
             client

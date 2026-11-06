@@ -74,6 +74,9 @@ public sealed partial class AdminUsersPage : Page
         SyncAgeVerificationToggle();
         PopulateTierCombo(AdmitTierSelect, string.IsNullOrEmpty(_vm.AdmitTierDraft) ? DefaultTier() : _vm.AdmitTierDraft);
         _vm.AdmitTierDraft = SelectedTier(AdmitTierSelect);
+        PopulateGuardianCombo(AdmitGuardianSelect, _vm.AdmitGuardianActor);
+        PopulateAgeBandCombo(AdmitAgeBandSelect, _vm.AdmitAgeBand);
+        AdmitAgeBandSelect.IsEnabled = _vm.AdmitAgeBandEnabled;
         UpdateUserCount();
         UpdatePagination();
         UpdateRequestsEmpty();
@@ -116,6 +119,15 @@ public sealed partial class AdminUsersPage : Page
             case nameof(AdminUsersViewModel.NewCodeAgeBandEnabled):
                 CreateFormAgeBandSelect.IsEnabled = _vm.NewCodeAgeBandEnabled;
                 break;
+            case nameof(AdminUsersViewModel.AdmitGuardianActor):
+                SelectGuardianInCombo(AdmitGuardianSelect, _vm.AdmitGuardianActor);
+                break;
+            case nameof(AdminUsersViewModel.AdmitAgeBand):
+                SelectAgeBandInCombo(AdmitAgeBandSelect, _vm.AdmitAgeBand);
+                break;
+            case nameof(AdminUsersViewModel.AdmitAgeBandEnabled):
+                AdmitAgeBandSelect.IsEnabled = _vm.AdmitAgeBandEnabled;
+                break;
             case nameof(AdminUsersViewModel.AgeVerificationDraft):
                 SyncAgeVerificationToggle();
                 break;
@@ -155,7 +167,7 @@ public sealed partial class AdminUsersPage : Page
     }
 
     /// <summary>x:Bind helper for the mutually-exclusive evict/cancel row controls
-    /// (mirrors FeedPage.BoolToVisibility — a single call is x:Bind-legal).</summary>
+    /// (mirrors PostCardBind.BoolToVisibility — a single call is x:Bind-legal).</summary>
     public static Visibility BoolToVisibility(bool value)
         => value ? Visibility.Visible : Visibility.Collapsed;
 
@@ -549,6 +561,20 @@ public sealed partial class AdminUsersPage : Page
     {
         if (_initializingTierCombo || _vm is null) return;
         if (sender is ComboBox combo) _vm.AdmitTierDraft = SelectedTier(combo);
+    }
+
+    /// <summary><c>admin-users-admit-guardian-select</c>: the VM resets and disables the
+    /// band when the pick goes back to none.</summary>
+    private void AdmitGuardianSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializingGuardianCombo || _vm is null) return;
+        if (sender is ComboBox combo) _vm.AdmitGuardianActor = SelectedGuardian(combo);
+    }
+
+    private void AdmitAgeBandSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializingAgeBandCombo || _vm is null) return;
+        if (sender is ComboBox combo) _vm.AdmitAgeBand = SelectedAgeBand(combo);
     }
 
     private async void AdmitUser_Click(object sender, RoutedEventArgs e)

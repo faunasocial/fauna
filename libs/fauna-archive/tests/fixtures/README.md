@@ -15,5 +15,12 @@ never decodes images.
 - `facebook-html/` — the HTML-format export skeleton; detected, then refused.
 - `facebook-minimal/` — profile + one post only; every other category is
   "zero", never a refusal.
+- `instagram-json/` — the JSON-format Instagram export: profile, feed posts
+  (a one-photo post, a multi-photo post, one naming a photo the export left
+  out, one broken record with no timestamp), an archived post, the owner's
+  comments and likes (two in the same second), followers and following, one
+  direct-message thread, and two files the parser must ignore (stories, ads).
+  Instagram escapes text byte-wise like Facebook does.
+- `instagram-html/` — the HTML-format export skeleton; detected, then refused.
 
 Tests zip a tree in memory with `tests/common/mod.rs::fixture_zip`.

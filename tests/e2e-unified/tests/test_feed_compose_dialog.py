@@ -1,12 +1,12 @@
-"""Feed rich compose dialog — ``feed-compose-dialog``, web/linux/windows/macos/ios.
+"""Feed rich compose dialog — ``feed-compose-dialog``, all 7 apps.
 
 ``tests/e2e-unified/ui.yaml`` ``feed-compose-dialog`` (feed page ``elements``,
 required on all 7 apps). ``compose-dialog-button`` (part of the shared
 ``feed-compose-bar`` component) opens it.
 
-android excluded: no `feed-compose-dialog`/`compose-dialog-button` wiring
-found in `apps/fauna-android/` — a real product gap for whichever session
-next picks up android feed parity, not attempted here.
+android: the feed's TopAppBar ``compose-dialog-button`` opens the full compose
+screen, whose Scaffold carries ``feed-compose-dialog``. Not yet run on a device
+(android e2e venue).
 
 tier_3: real nest binary + real client driver, no mocks.
 """
@@ -20,6 +20,7 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
     pytest.mark.tui,
 ]
 

@@ -41,11 +41,16 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.mail_client_ui import claim_enable_and_ready, deliver_inbound
 from helpers.mail_wire import build_reply_message
 
-pytestmark = pytest.mark.tier_3
+# `real_conversations`: windows (and macOS/iOS) start the REAL shared-Rust receive
+# loop only under the session-wide flag this marker sets, and the auto-reply below
+# can surface only through it (`helpers.mail_client_ui.claim_enable_and_ready`
+# fails naming the cause otherwise). Run the module in its own invocation, as the
+# sibling `test_mail_html_roundtrip.py` does.
+pytestmark = [pytest.mark.tier_3, pytest.mark.real_conversations]
 
 # The external recipient/correspondent domain — routed to the stub MX by the
 # bridge's mta_mx_override; the stub's auto-reply comes back as genuine external
@@ -55,14 +60,7 @@ EXTERNAL_DOMAIN = "external.test"
 
 @pytest.mark.feature("email-in-conversations")
 def test_client_send_then_stub_autoreply_renders_decrypted(app, unclaimed_mail_nest_ui):
-    if not (app.driver.is_linux() or app.driver.is_macos() or app.driver.is_ios()):
-        skip_unbuilt(
-            app.driver,
-            surface="the client-UI mail reply round-trip",
-            detail="wired on linux first; web/windows/android/tui are "
-            "the cross-app follow-on",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "mail-reply-roundtrip")
 
     nest = unclaimed_mail_nest_ui
 

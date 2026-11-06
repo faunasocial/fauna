@@ -23,18 +23,14 @@ by the ``plugin-fixture-gen`` helper and served — document and module — by
 through the app (convention 8); the nest's own list is read alongside to say
 which side failed (convention 5).
 
-**Install-and-uninstall test:** tui (the lead), linux, web and android; the
-other three apps follow in the batched trickle-down (third-party.md §
-Implementation status today). The bind test below stays tui only.
+**Install-and-uninstall test and bind test:** all seven apps (tui the lead).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -59,34 +55,12 @@ _NAME = "Hello Plugin"
 
 
 def _hello_component(out: Path) -> bytes:
-    """Build (cargo no-ops when fresh) and run the ``plugin-fixture-gen``
-    e2e helper: the hello plugin's component, written to ``out``."""
-    from common.nest import _build_slot_cmd, _cargo_cmd, get_repo_root
+    """Run the ``plugin-fixture-gen`` e2e helper (prebuilt at collection time
+    from the helper-binary registry, never here): the hello plugin's
+    component, written to ``out``."""
+    from helpers.helper_bins import helper_bin
 
-    repo_root = get_repo_root()
-    subprocess.run(
-        _build_slot_cmd(repo_root)
-        + _cargo_cmd(repo_root)
-        + [
-            "build",
-            "-p",
-            "fauna-plugin-host",
-            "--features",
-            "test-helpers",
-            "--bin",
-            "plugin-fixture-gen",
-        ],
-        cwd=repo_root,
-        check=True,
-    )
-    exe = ".exe" if sys.platform == "win32" else ""
-    name = f"plugin-fixture-gen{exe}"
-    candidates = []
-    if os.environ.get("CARGO_TARGET_DIR"):
-        candidates.append(Path(os.environ["CARGO_TARGET_DIR"]) / "debug" / name)
-    candidates.append(repo_root / "target" / "debug" / name)
-    binary = next((p for p in candidates if p.exists()), None)
-    assert binary is not None, f"{name} not found after build (looked in {candidates})"
+    binary = helper_bin("plugin-fixture-gen")
     subprocess.run([str(binary), str(out)], check=True)
     return out.read_bytes()
 
@@ -217,6 +191,9 @@ def _install_from_the_app(app, publisher) -> None:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.standalone_only
 @pytest.mark.feature("bridges")
 def test_an_admin_installs_a_plugin_from_its_card_and_uninstalls_it(
@@ -281,8 +258,11 @@ def _available(nest) -> list[dict]:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.standalone_only
-@pytest.mark.feature("bridges")
+@pytest.mark.feature("bridges", "connected-apps")
 def test_a_user_connects_a_plugin_from_its_settings_card_and_disconnects_it(
     plugin_admin_app, plugin_nest, plugin_publisher
 ):

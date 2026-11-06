@@ -97,6 +97,7 @@ public final class MailSettingsVM: MachineBackedVM {
     public func hydrate() async {
         await hydrateFromMachine()
         await loadForwarding()
+        await loadAccount()
     }
 
     /// The aftermath's settle hook (`FaunaClient.mailSettledGeneration`): re-hydrate
@@ -183,6 +184,135 @@ public final class MailSettingsVM: MachineBackedVM {
         renderLocalizedText(forwardPerHourHint(ceiling: forwardPerHourCeiling))
     }
 
+    // MARK: - Receive / send, automatic reply, quota (mail-policy-config.md § Tier 3)
+
+    /// The receive / send switches as the nest last returned them; `nil` until
+    /// the first read, so neither toggle renders before it. Non-optimistic: only
+    /// a nest re-read ever writes it, never the tap.
+    public internal(set) var switches: MailSwitches?
+    /// The automatic reply as the nest last returned it; `nil` until read.
+    public internal(set) var autorespond: FfiAutoRespond?
+    /// The `mail-settings-autorespond-message-input` draft; Enter commits it.
+    public var autorespondMessageDraft = ""
+    /// The mailbox figures behind the quota readout and the over-quota notice.
+    public internal(set) var quotas: MailQuotas?
+
+    /// Read the switches, the reply and the quotas (tui's `MailAccountRead`).
+    /// Shown only while mail is enabled, so nothing is fetched otherwise; a
+    /// failed part keeps what it had.
+    private func loadAccount() async {
+        guard enabled, let api = configuredApi else { return }
+        if let s = try? await api.mailSwitchesGet() { switches = s }
+        if let r = try? await api.autorespondGet() { publishAutorespond(r) }
+        if let q = try? await api.mailQuotasGet() { quotas = q }
+    }
+
+    /// An off reply carries no body: keep the user's draft rather than blanking
+    /// it, so turning the reply back on sends the last words.
+    private func publishAutorespond(_ reply: FfiAutoRespond) {
+        autorespond = reply
+        if reply.enabled { autorespondMessageDraft = reply.message }
+    }
+
+    /// Flip one switch; the toggles repaint from the nest's re-read.
+    public func toggleReceive() async {
+        guard let current = switches else { return }
+        await setSwitches(receive: !current.receiveEnabled, send: nil)
+    }
+
+    public func toggleSend() async {
+        guard let current = switches else { return }
+        await setSwitches(receive: nil, send: !current.sendEnabled)
+    }
+
+    /// Flip the scan-result-row switch; hiding is shared Rust, the app only
+    /// writes the flipped value and repaints from the re-read.
+    public func toggleScanResultVisible() async {
+        guard let current = switches else { return }
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        do {
+            switches = try await api.mailScanResultVisibleSet(!current.scanResultVisible)
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    private func setSwitches(receive: Bool?, send: Bool?) async {
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        do {
+            switches = try await api.mailSwitchesSet(receive: receive, send: send)
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// The reply's toggle: on clears it; off commits the draft, which turns it on.
+    public func toggleAutorespond() async {
+        guard autorespond?.enabled == true else {
+            await commitAutorespondMessage()
+            return
+        }
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        do {
+            try await api.autorespondClear()
+            publishAutorespond(try await api.autorespondGet())
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// Enter on the reply's message: the shared parser refuses a blank draft on
+    /// the page's `error-message` and sends nothing; otherwise the reply is set
+    /// (and so turned on) and re-read.
+    public func commitAutorespondMessage() async {
+        guard let api = configuredApi else {
+            errorMessage = L.errors.notConnectedToNest
+            return
+        }
+        let text: String
+        switch autorespondMessageDraftOutcome(draft: autorespondMessageDraft) {
+        case .set(let t): text = t
+        case .refused(let message):
+            errorMessage = renderLocalizedText(message)
+            return
+        }
+        do {
+            try await api.autorespondSet(text)
+            publishAutorespond(try await api.autorespondGet())
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    /// The `mail-settings-mailbox-quota` readout; `nil` until the first read.
+    public var mailboxQuotaText: String? {
+        quotas.map { ValueFormat.mailQuotaText(mailQuotaDisplayOf(quotas: $0)) }
+    }
+
+    /// The `mail-settings-submission-quota` readout (recipients used today of the
+    /// daily sending allowance), from the same read; `nil` until it arrives.
+    public var submissionQuotaText: String? {
+        quotas.map { renderLocalizedText(mailSubmissionQuotaDisplayOf(quotas: $0)) }
+    }
+
+    /// The `mail-settings-over-quota-notice`; `nil` unless a limit has run out.
+    public var overQuotaNoticeText: String? {
+        quotas.flatMap { mailOverQuotaNoticeOf(quotas: $0) }.map(renderLocalizedText)
+    }
+
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
     public func dispatch(_ action: MailSettingsAction) async {
@@ -222,6 +352,7 @@ public final class MailSettingsVM: MachineBackedVM {
         errorMessage = snap.error ?? thrown.map { "\($0)" }
         // Enabling mail from this page reveals the Forwarding section mid-visit.
         if enabled && forwardPerHourCeiling == 0 { await loadForwarding() }
+        if enabled && switches == nil { await loadAccount() }
     }
 
     // The credentials list's row reads (the secret reveal, the substituted MUA

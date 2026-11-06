@@ -72,7 +72,7 @@ import time
 import pytest
 
 from actions import ActionLayer
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from conftest import MAIL_PRIMARY_DOMAIN, _serve_spa_proxy
 from common.accounts import single_account_seed
 from drivers import create_driver
@@ -200,8 +200,9 @@ def test_web_same_actor_nest_switch_rebuilds_feed_manager(
     # own config), and the shared nest is started handle-less.
     port = handled_nest["port"]
     spa = handled_spa_url
-    actor = register_handled_actor(
-        port, handle="nestswitch" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor = admit_adult(
+        handled_nest, "nestswitch" + secrets.token_hex(3),
+        domain=MAIL_PRIMARY_DOMAIN, token=True,
     )
     secret = bytes(actor["signing_key"]).hex()
 

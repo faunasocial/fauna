@@ -66,28 +66,38 @@ impl UpdateChannel {
     }
 
     /// The i18n key of this channel's row description at the running product
-    /// version: [`Self::description_key_for_major`] with this build's major
-    /// (`CARGO_PKG_VERSION_MAJOR`, inherited from the one fleet-wide
-    /// `[workspace.package]` version — `architecture/product-version.md`).
+    /// version: [`Self::description_key_for_version`] with this build's version
+    /// (the one fleet-wide `[workspace.package]` version —
+    /// `architecture/product-version.md`).
     pub fn description_key(self) -> &'static str {
-        // Cargo guarantees the major is a decimal integer.
-        let major = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap_or(u64::MAX);
-        self.description_key_for_major(major)
+        self.description_key_for_version(&availability::product_version())
     }
 
-    /// The description key for a product `major`. While the major is 0 no
-    /// app↔nest compat is owed (`architecture/version-compatibility.md`
-    /// § Dimension 2), so a Test or Dev nest works only with apps of exactly
-    /// its version and those two channels use their `_same_version` wording;
-    /// Stable, and every channel from major 1, use the plain description
-    /// (`behavior/onboarding-provisioning.md` § 5 → *The compat line*).
-    pub fn description_key_for_major(self, major: u64) -> &'static str {
-        match (self, major) {
-            (Self::Stable, _) => "onboarding.vps_config.update_channel_stable_desc",
-            (Self::Test, 0) => "onboarding.vps_config.update_channel_test_desc_same_version",
-            (Self::Test, _) => "onboarding.vps_config.update_channel_test_desc",
-            (Self::Dev, 0) => "onboarding.vps_config.update_channel_dev_desc_same_version",
-            (Self::Dev, _) => "onboarding.vps_config.update_channel_dev_desc",
+    /// Whether the same-version compat line applies at product `version`:
+    /// below 0.2.0 no app↔nest compat is owed
+    /// (`architecture/version-compatibility.md` § Dimension 2), so a Test or
+    /// Dev nest works only with apps of exactly its version
+    /// (`behavior/onboarding-provisioning.md` § 5 → *The compat line*). From
+    /// 0.2.0 on the line is gone.
+    pub fn same_version_line_applies(version: &Version) -> bool {
+        version.major == 0 && version.minor < 2
+    }
+
+    /// The description key for a product `version`: Test and Dev use their
+    /// `_same_version` wording while [`Self::same_version_line_applies`]; Stable,
+    /// and every channel from 0.2.0, use the plain description.
+    pub fn description_key_for_version(self, version: &Version) -> &'static str {
+        let same_version = Self::same_version_line_applies(version);
+        match self {
+            Self::Stable => "onboarding.vps_config.update_channel_stable_desc",
+            Self::Test if same_version => {
+                "onboarding.vps_config.update_channel_test_desc_same_version"
+            }
+            Self::Test => "onboarding.vps_config.update_channel_test_desc",
+            Self::Dev if same_version => {
+                "onboarding.vps_config.update_channel_dev_desc_same_version"
+            }
+            Self::Dev => "onboarding.vps_config.update_channel_dev_desc",
         }
     }
 
@@ -387,29 +397,41 @@ mod tests {
         }
     }
 
-    /// The channel → tag mapping is the contract between the wizard's choice
-    /// and the pipelines that move the tags; `stable` must stay `latest`, the
-    /// tag every box provisioned before the choice existed already follows.
     #[test]
-    fn update_channel_description_key_follows_the_product_major() {
+    fn update_channel_description_key_follows_the_product_version() {
         use UpdateChannel::*;
         let p = "onboarding.vps_config.update_channel_";
-        for major in [0, 1, 7] {
+        let v = |s: &str| Version::parse(s).unwrap();
+        for version in ["0.1.0", "0.1.9", "0.2.0", "1.0.0", "7.3.1"] {
             assert_eq!(
-                Stable.description_key_for_major(major),
+                Stable.description_key_for_version(&v(version)),
                 format!("{p}stable_desc")
             );
         }
-        assert_eq!(
-            Test.description_key_for_major(0),
-            format!("{p}test_desc_same_version")
-        );
-        assert_eq!(
-            Dev.description_key_for_major(0),
-            format!("{p}dev_desc_same_version")
-        );
-        assert_eq!(Test.description_key_for_major(1), format!("{p}test_desc"));
-        assert_eq!(Dev.description_key_for_major(1), format!("{p}dev_desc"));
+        for version in ["0.1.0", "0.1.9"] {
+            assert_eq!(
+                Test.description_key_for_version(&v(version)),
+                format!("{p}test_desc_same_version"),
+                "{version}"
+            );
+            assert_eq!(
+                Dev.description_key_for_version(&v(version)),
+                format!("{p}dev_desc_same_version"),
+                "{version}"
+            );
+        }
+        for version in ["0.2.0", "0.3.1", "1.0.0"] {
+            assert_eq!(
+                Test.description_key_for_version(&v(version)),
+                format!("{p}test_desc"),
+                "{version}"
+            );
+            assert_eq!(
+                Dev.description_key_for_version(&v(version)),
+                format!("{p}dev_desc"),
+                "{version}"
+            );
+        }
         assert_eq!(Dev.label_key(), format!("{p}dev_label"));
     }
 
@@ -433,6 +455,9 @@ mod tests {
         assert!(UpdateChannel::Test.registry_check_interval() <= Duration::from_secs(120));
     }
 
+    /// The channel → tag mapping is the contract between the wizard's choice
+    /// and the pipelines that move the tags; `stable` must stay `latest`, the
+    /// tag every box provisioned before the choice existed already follows.
     #[test]
     fn update_channel_ids_and_tags() {
         let table: Vec<_> = UpdateChannel::ALL

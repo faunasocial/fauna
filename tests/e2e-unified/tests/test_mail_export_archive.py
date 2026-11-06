@@ -23,11 +23,14 @@ back. Both wizards are driven through the app UI (convention 8); the archive
 read is the bytes the app saved into its download dir, never a nest API
 standing in for the download.
 
-**Every app that drives both wizards carries the marker** — the same five
-`test_mail_import.py` runs on (its module docstring and
-`mailbox-migration.md` § Implementation status today say why web and android
-are not among them). The assertions are the shared machine's, so they hold or fail alike
-everywhere.
+**Every app that drives both wizards carries the marker** — the apps
+`test_mail_import.py` runs on, android included (it renders both wizards,
+`MailImportScreen.kt` and `MailExportScreen.kt`; its run waits on the emulator
+host, so its witness is recorded not run). **Web carries it too, by a helper seat:** web cannot start
+a fresh import, so a linux seat of the same account (`mail_export_import_seat`)
+moves the mail in through its own import wizard and web drives the export —
+the archive read is still the bytes web saved. The assertions are the shared
+machine's, so they hold or fail alike everywhere.
 
 Test taxonomy:
 - `tier_3` (mocking depth): real app, real shared-Rust IMAP client over real
@@ -48,6 +51,7 @@ from pathlib import Path
 
 import pytest
 
+from actions import ActionLayer
 from actions.mail_export import MailExportActions
 from actions.mail_import import MailImportActions
 from helpers import budgets
@@ -67,6 +71,8 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.web,
+    pytest.mark.android,
     # Seeds the source-IMAP trust anchor into every app launch, so the import
     # wizard can verify the certificate the fake source serves.
     pytest.mark.mail_import_source,
@@ -140,7 +146,50 @@ def imap_source():
 # ── Driving the two wizards ──────────────────────────────────────────────────
 
 
-def _import_everything(app, handle, request, source) -> None:
+@pytest.fixture
+def mail_export_import_seat(request, dedicated_mail_nest):
+    """The user's other computer, which fills the mailbox on the web column.
+
+    Web cannot start a fresh import (its source transport is unbuilt,
+    `mailbox-migration.md` § Implementation status today), so a linux seat of
+    the same account does the moving-in through its own import wizard and web
+    drives the export, reading the archive it saved. Launched only on the web
+    column (`_CROSS_APP_FIXTURE_APPS`); every other column imports on its own app.
+    """
+    from conftest import _launch_fresh_share_driver
+
+    if not _on_web(request):
+        yield None
+        return
+    driver = _launch_fresh_share_driver("linux", dedicated_mail_nest.nest, request)
+    try:
+        yield ActionLayer(driver)
+    finally:
+        driver.teardown()
+
+
+def _on_web(request) -> bool:
+    callspec = getattr(request.node, "callspec", None)
+    return callspec is not None and "web" in callspec.params.values()
+
+
+def _import_everything(app, handle, request, source, seat=None) -> None:
+    """Fill the mailbox through the import wizard. On web, ``seat`` (the other
+    computer) imports and web then signs in as the same admin."""
+    if app.driver.is_web():
+        # Web's download dir lives for the whole session (a native seat gets a
+        # fresh one per launch), so an archive an earlier module saved is still
+        # there — and `_download` proves its file is new by an empty dir.
+        for stale in saved_archives(app.driver):
+            os.remove(stale)
+        assert seat is not None, "the web column needs the mail_export_import_seat"
+        _import_everything_on(seat, handle, request, source)
+        login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
+        return
+    _import_everything_on(app, handle, request, source)
+
+
+def _import_everything_on(app, handle, request, source) -> None:
     """Sign in as the dedicated nest's admin, enable mail, and move every
     source mailbox in through the import wizard — the user's own gestures."""
     login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
@@ -479,7 +528,7 @@ def _security_rows(app) -> list[str]:
 
 @pytest.mark.feature("mailbox-export")
 def test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates(
-    app, dedicated_mail_nest, imap_source, request, tmp_path
+    app, dedicated_mail_nest, imap_source, request, tmp_path, mail_export_import_seat
 ):
     """One mailbox, exported in all three formats, each archive opened as the
     user opens it:
@@ -498,7 +547,7 @@ def test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates(
       the address** it came from (outcome 36).
     """
     handle = dedicated_mail_nest
-    _import_everything(app, handle, request, imap_source)
+    _import_everything(app, handle, request, imap_source, mail_export_import_seat)
 
     for label, wire in _FORMATS:
         export = _export_to_done(app, label)
@@ -544,7 +593,7 @@ def test_every_format_keeps_each_mailbox_apart_with_its_marks_and_dates(
 
 @pytest.mark.feature("mailbox-export")
 def test_the_same_export_twice_is_the_same_archive(
-    app, dedicated_mail_nest, imap_source, request
+    app, dedicated_mail_nest, imap_source, request, mail_export_import_seat
 ):
     """Outcome 24 — the same mailbox, the same choices and the same format give
     the same archive, byte for byte (§ Goal; § Container shape's determinism
@@ -566,7 +615,7 @@ def test_the_same_export_twice_is_the_same_archive(
     mailboxes, their colliding names and every mark.
     """
     handle = dedicated_mail_nest
-    _import_everything(app, handle, request, imap_source)
+    _import_everything(app, handle, request, imap_source, mail_export_import_seat)
 
     archives = []
     for _ in range(2):
@@ -599,7 +648,7 @@ def _recipient_keys(nest) -> frozenset[bytes]:
 
 @pytest.mark.feature("mailbox-export")
 def test_an_export_made_before_a_key_rotation_still_opens_after_it(
-    app, dedicated_mail_nest, imap_source, request, tmp_path
+    app, dedicated_mail_nest, imap_source, request, tmp_path, mail_export_import_seat
 ):
     """Outcome 21 — § Key material (c): the export's session key is wrapped to
     the account's mail keys, and opens against the account's **complete
@@ -611,7 +660,7 @@ def test_an_export_made_before_a_key_rotation_still_opens_after_it(
     Non-vacuous: the rotation must change the key the nest seals mail to.
     """
     handle = dedicated_mail_nest
-    _import_everything(app, handle, request, imap_source)
+    _import_everything(app, handle, request, imap_source, mail_export_import_seat)
     _export_to_done(app, S.mail_export.format_mbox)
 
     keys_before = _recipient_keys(handle.nest)

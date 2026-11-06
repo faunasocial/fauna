@@ -420,6 +420,12 @@ mod manager {
     }
 
     impl WasmFeedManager {
+        /// The shared manager — what the comment fold's registration
+        /// (`crate::archive_import::register_comments`) is wired on.
+        pub(crate) fn shared_manager(&self) -> &FeedManager<WsRpcClient> {
+            &self.manager
+        }
+
         /// Build over the browser WS-RPC `client` + the local actor's 32-byte
         /// ed25519 `secret` (needed to build + sign posts on `submitPost`). Plain
         /// (non-`#[wasm_bindgen]`) constructor — `WsRpcClient` is the inner
@@ -671,6 +677,26 @@ mod manager {
         }
 
         /// Refresh the feed selector list (`fauna.feed.list`). Resolves `undefined`.
+        /// Re-read the folded archive comments
+        /// (`FeedManager::refresh_archive_comments`) — called once
+        /// `WsRpcClient::registerArchiveComments` has registered the source and
+        /// on every visit to the feed, so `post-archive-comments` folds under
+        /// the owner's imported posts (`archive-import.md` § What each category
+        /// becomes). The fold reaches the page through the snapshot's
+        /// `archive_comments`. Resolves `undefined`; a failed read keeps what
+        /// the last read folded and rejects with the reason; no source is a
+        /// no-op.
+        #[wasm_bindgen(js_name = refreshArchiveComments, unchecked_return_type = "Promise<void>")]
+        pub fn refresh_archive_comments(&self) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.refresh_archive_comments()
+                    .await
+                    .map_err(|e| JsValue::from_str(&e))?;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
         #[wasm_bindgen(js_name = refreshFeeds)]
         pub fn refresh_feeds(&self) -> js_sys::Promise {
             let m = self.manager.clone();
@@ -773,6 +799,30 @@ mod manager {
             let m = self.manager.clone();
             future_to_promise(async move {
                 m.select_trending_feed().await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Select the imported-posts selection for one archive platform
+        /// (`feed.md` § State & data shape → *The imported-posts selection*):
+        /// the own actor's posts whose origin platform is `token`. Sets
+        /// `snapshot().imported_selected`.
+        #[wasm_bindgen(js_name = selectImported)]
+        pub fn select_imported(&self, token: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.select_imported(token).await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Leave the imported-posts selection for the local feed
+        /// (`feed-imported-clear`).
+        #[wasm_bindgen(js_name = clearImported)]
+        pub fn clear_imported(&self) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.clear_imported().await;
                 Ok(JsValue::UNDEFINED)
             })
         }
@@ -1159,8 +1209,9 @@ mod manager {
         // `payments`-gated doc line — see `update_compose_sell` above.
         #[cfg_attr(
             feature = "payments",
-            doc = " Drives `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`."
+            doc = " Drives `gated-post-price` / `gated-post-payment-link` / `gated-post-buy-button`"
         )]
+        #[cfg_attr(feature = "payments", doc = " / `gated-post-purchase-pending`.")]
         #[wasm_bindgen(js_name = resolvePostUnlockOffer)]
         pub fn resolve_post_unlock_offer(&self, post_id: String) -> js_sys::Promise {
             let m = self.manager.clone();
@@ -1534,6 +1585,24 @@ mod manager {
             })
         }
 
+        /// React / un-react with `emoji` (`post-reaction-pill`) — one verb,
+        /// toggle semantics off the target row's group `viewer_react_id`
+        /// (`feed.md` § Layout & flow → *Reaction posts count and paint*,
+        /// ruling 4): absent → composes the caller's wordless `React` post;
+        /// present → deletes it; the tally is read back from the nest. A
+        /// bridged post is refused and nothing is composed. Resolves
+        /// `undefined`; rejects with the error string.
+        #[wasm_bindgen(js_name = react)]
+        pub fn react(&self, post_id: String, emoji: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.react(post_id, emoji)
+                    .await
+                    .map(|()| JsValue::UNDEFINED)
+                    .map_err(|e| JsValue::from_str(&e))
+            })
+        }
+
         /// Delete a post the local actor authored (`feed-post-delete-confirm-button`).
         /// Builds + signs a verifiable tombstone, submits it, and drops the post
         /// from the loaded window at once — no refetch needed. Resolves
@@ -1896,6 +1965,18 @@ mod manager {
             })
         }
 
+        /// The live engagement-cue engine's verdict for `content_id`, and whether
+        /// it has hydrated from the nest yet — `{hydrated, verdict}` (`verdict`
+        /// kebab-case or null), how a second seat witnesses that it starts from
+        /// the rollup the first collected. See
+        /// `fauna_feed::FeedManager::cue_verdict_for_test`.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = cueVerdictForTest)]
+        pub fn cue_verdict_for_test(&self, content_id: String) -> String {
+            let (hydrated, verdict) = self.manager.cue_verdict_for_test(&content_id);
+            serde_json::json!({ "hydrated": hydrated, "verdict": verdict }).to_string()
+        }
+
         /// Arm the one-shot hold on the NEXT reload (`feed_hold_next_reload`).
         /// See `fauna_feed::FeedManager::hold_next_reload_for_test`.
         #[cfg(feature = "test-helpers")]
@@ -2021,6 +2102,26 @@ mod manager {
             crate::rpc::to_js(&left)
         }
 
+        /// An inline player's progress reading on `postId`'s media — `position`
+        /// and `duration` in seconds; the tracker keeps the peak until the
+        /// post's exposure is emitted (`fauna_feed::CueTracker::note_played`).
+        #[wasm_bindgen(js_name = notePlayed)]
+        pub fn note_played(&self, post_id: &str, position: f64, duration: f64) {
+            self.inner
+                .borrow_mut()
+                .note_played(post_id, position, duration);
+        }
+
+        /// Whether `postId`'s inline player is engaged — `true` on activation
+        /// (the tap, loading included) and on play/resume, `false` on pause,
+        /// end, error or teardown; the shell relays its player's own
+        /// transitions. An engaged media row is attended whatever its visible
+        /// fraction (`fauna_feed::CueTracker::note_playing`).
+        #[wasm_bindgen(js_name = notePlaying)]
+        pub fn note_playing(&self, post_id: &str, playing: bool) {
+            self.inner.borrow_mut().note_playing(post_id, playing);
+        }
+
         // ── e2e test clock (convention 14) ───────────────────────────────────
         //
         // The browser faces of the shared tracker's frozen clock pair
@@ -2087,20 +2188,10 @@ mod manager {
     pub fn cue_sample_interval_ms() -> f64 {
         fauna_core::scoring::cues::CUE_SAMPLE_INTERVAL_MS as f64
     }
-
-    /// A player's position through its media as the per-mille a row's
-    /// `media_played_pm` carries — the wasm face of
-    /// [`fauna_core::scoring::cues::played_per_mille`], so the shell never
-    /// re-derives the clamp. `currentTime` and `duration` in seconds; returns
-    /// `undefined` while the duration is unknown (`NaN` before metadata).
-    #[wasm_bindgen(js_name = cuePlayedPerMille)]
-    pub fn cue_played_per_mille(position: f64, duration: f64) -> Option<u32> {
-        fauna_core::scoring::cues::played_per_mille(position, duration)
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use manager::{WasmCueTracker, WasmFeedManager, cue_played_per_mille, cue_sample_interval_ms};
+pub use manager::{WasmCueTracker, WasmFeedManager, cue_sample_interval_ms};
 
 #[cfg(test)]
 mod tests {

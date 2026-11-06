@@ -954,7 +954,7 @@
   // throws instead of warning.
   //
   // Per mail-bridge-lifecycle.md § Factory reset + onboarding.md §3a. Mirrors
-  // apps/fauna-linux/src/main.rs::register_factory_reset_handler.
+  // apps/fauna-linux/src/lib.rs::register_factory_reset_handler.
   async function doFactoryReset() {
     const id = $identity;
     if (!id?.secretHex) return;
@@ -1001,7 +1001,7 @@
       // `identity` (creds are kept for re-claim), so the actor-scoped reset
       // registry's identity-change subscription does NOT fire here — clear
       // explicitly (critical-alerts.md § Mechanism → Lifetime; mirrors
-      // apps/fauna-linux/src/main.rs's factory-reset handler).
+      // apps/fauna-linux/src/lib.rs's factory-reset handler).
       clearAllCriticalAlerts();
       // Drop the authed session but KEEP the local identity: clear this
       // actor's per-actor (nest_url, device_id) binding through the registry

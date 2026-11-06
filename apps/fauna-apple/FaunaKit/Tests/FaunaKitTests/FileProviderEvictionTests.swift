@@ -2,6 +2,28 @@ import Testing
 
 @testable import FaunaKit
 
+#if os(macOS)
+    import FileProvider
+
+    /// The keep of a body the holder-keeps gate holds
+    /// (`relay-serving.md` § Relay serving → *A holder keeps what it wrote*;
+    /// `on-demand-files-apple.md` § Apple File Provider binding): on macOS
+    /// such an item declares the keep-downloaded content policy, which takes it
+    /// out of the OS's own eviction while it still reads as synced; every other
+    /// item inherits the domain's policy and stays evictable.
+    @Suite struct FileProviderKeepTests {
+        @Test func aKeptItemIsKeptDownloaded() {
+            #expect(
+                FileProviderKeep.contentPolicy(kept: true)
+                    == .downloadEagerlyAndKeepDownloaded)
+        }
+
+        @Test func anyOtherItemInheritsTheDomainsPolicy() {
+            #expect(FileProviderKeep.contentPolicy(kept: false) == .inherited)
+        }
+    }
+#endif
+
 /// Headless pins for the eviction-observation diff
 /// (`FileProviderEviction.evictionCandidates`) — the pure half of the appex's
 /// materialized-set reconcile; the `enumeratorForMaterializedItems` query is the

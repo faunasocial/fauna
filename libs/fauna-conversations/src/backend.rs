@@ -138,11 +138,21 @@ pub(crate) fn bucket_inbound_common(
 /// model → *Discovery-failure semantics* rules out (ratified 2026-08-29). A rail
 /// that merely does not recognise the shape must answer `NotFound`, never
 /// `Error`.
+///
+/// **`NotReachable` — this rail's address, confirmed to exist, confirmed
+/// un-addable right now — is terminal exactly like `Error`:** the home nest
+/// found the handle as one of its own accounts but no key package is on hand,
+/// so no later rail may claim the string (a mail chip to a Fauna neighbour is
+/// the collapse the rule above forbids) and the picker lands in
+/// `not-reachable` with nothing to commit (`docs/goal/ui/conversations.md`
+/// § Errors & edge cases → *The picker tells the truth*, rule 2, ruled
+/// 2026-10-23).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ResolveResult {
     Resolved(TypedAddress),
     Pending,
     NotFound,
+    NotReachable,
     Error(String),
 }
 
@@ -1670,6 +1680,18 @@ pub trait FolderCustodySink: MaybeSendSync {
         true
     }
 
+    /// Tombstone this replica's cached `fauna.state.share-endpoints` rows of
+    /// the set it just LEFT — called by `leave_folder` once the group is
+    /// forgotten, same-nest and foreign alike: the positive local event of
+    /// `p2p.md` § Cross-user shared-set transfer → *A departed member's
+    /// cached endpoint*, ruling 2's last sentence (a left set is outside
+    /// every share pass's read, so no sweep reaches its rows). Best-effort
+    /// like the record drop; default no-op.
+    async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        let _ = channel_id;
+        true
+    }
+
     /// The recorded home-nest URL for a **foreign** set, if this member holds a
     /// record for `channel_id` — the durable twin of the backend's RAM
     /// `channel_home` map (which only covers channels joined *this* session),
@@ -3188,6 +3210,95 @@ pub trait ShareEndpointsSink: MaybeSendSync {
         sender: fauna_core::identity::ActorId,
         bytes: &[u8],
     ) -> bool;
+}
+
+/// Ingest seam for **archive-link signals**
+/// (`docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
+/// → *Phase two — the rulings*, ruling 2): the receive loop hands every
+/// [`fauna_mls::types::ChannelMessageBody::Archive`] record's verbatim bytes
+/// here as a thread *effect* — never a chat bubble — and moves on.
+///
+/// The [`CustodyCeremonySink`] pattern verbatim, and for its reason:
+/// `fauna-conversations` gains no archive semantics and no dependency on the
+/// archive-import machine, whose `link` module implements this, decodes the
+/// signal, admits it only from a sender the roster lists as an accepted
+/// contact, and writes the archive folder's link state. A session that
+/// registers no sink skips the record, tallied.
+///
+/// **Must capture durably before returning `true`**: a consumed MLS
+/// application message cannot be re-decrypted, and the device that decrypts
+/// the record is the only one that ever sees it — every other device of the
+/// account reads the folder. A `false` is tallied but does NOT stall the
+/// channel walk; the residual is healed by the sender, whose pending sends
+/// are re-driven every session until answered. Best-effort by contract — the
+/// inbound poll calls this inline, so implementations bound their own I/O.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ArchiveSignalSink: MaybeSendSync {
+    /// Ingest one signal: `channel_hex` is the carrying pair channel,
+    /// `sender` the MLS-authenticated author, `bytes` the verbatim
+    /// `ArchiveSignal` encoding. Returns whether the signal is now durably
+    /// captured — `false` covers "refused" (a sender the roster does not
+    /// list) and "could not write" alike.
+    async fn archive_signal(
+        &self,
+        channel_hex: &str,
+        sender: fauna_core::identity::ActorId,
+        bytes: &[u8],
+    ) -> bool;
+}
+
+/// One message of an imported archive thread, as the projection reads it —
+/// plain fields only, so this crate learns nothing of the archive model
+/// (`docs/goal/behavior/archive-import.md` § What each category becomes, the
+/// message-threads row).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveMessageRecord {
+    /// The archive's own external id of the message (stable across re-imports).
+    pub external_id: String,
+    /// The sender's display name as the archive recorded it.
+    pub sender_name: String,
+    /// Whether the archive's owner sent it (the bubble's own side).
+    pub is_owner: bool,
+    pub created_at_ms: i64,
+    /// The message text; empty for a media-only message.
+    pub text: String,
+}
+
+/// One imported archive thread with its messages, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveThreadRecord {
+    /// The archive's own external id of the thread — the projection keys the
+    /// thread on it, so a re-import's second folder repeats rather than adds.
+    pub external_id: String,
+    /// The platform token (`facebook`, `instagram`; `fauna_core::source`).
+    pub platform: String,
+    /// The thread's own title in the archive, when it had one.
+    pub title: Option<String>,
+    /// Every participant other than the owner, by display name.
+    pub participants: Vec<String>,
+    pub messages: Vec<ArchiveMessageRecord>,
+}
+
+/// Read seam for the **`Archive` rail** (`docs/goal/behavior/archive-import.md`
+/// § What each category becomes): the message threads of every imported
+/// archive, read from the sealed archive folders' model files, which the
+/// manager projects into the conversations list as read-only threads on
+/// [`crate::address::Rail::Archive`] — never into the thread store, so never
+/// into `__conv`, and never sent anywhere.
+///
+/// The [`ArchiveSignalSink`] discipline: the archive-import machine
+/// implements it, this crate stays free of the archive model and the folder
+/// reads. Registered with
+/// [`crate::manager::ConversationsManager::set_archive_thread_source`] and
+/// read by [`crate::manager::ConversationsManager::refresh_archive_threads`].
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ArchiveThreadSource: MaybeSendSync {
+    /// Every imported thread, each external id once across the account's
+    /// archive folders. `Err` is a read that failed (the projection keeps
+    /// what it last read).
+    async fn archive_threads(&self) -> Result<Vec<ArchiveThreadRecord>, String>;
 }
 
 /// Launch seam for the **cross-device MLS group-state sync plane** — the async,

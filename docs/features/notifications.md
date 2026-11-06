@@ -54,6 +54,7 @@ Stamped 2026-09-24 at 89bb22083d.
    - `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
    - `tests/e2e-unified/tests/test_push_settings.py::test_android_push_turned_off_stays_off_across_a_relaunch`
    - `tests/e2e-unified/tests/test_push_settings.py::test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
+   - `tests/e2e-unified/tests/test_push_settings.py::test_apple_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting`
    - `tests/e2e-unified/tests/test_push_settings.py::test_android_sign_out_drops_the_row_and_the_next_sign_in_rearms`
 10. [nest] Your nest only sends a push to a real push service on the public internet, never to an address inside its own network — `docs/goal/architecture/apps/common.md` § Push Notifications
    - `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_refuses_an_endpoint_the_nest_must_never_dial`
@@ -68,31 +69,31 @@ Stamped 2026-09-24 at 89bb22083d.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.5-dev+88622a93 standalone |
+| linux | ✅ full | 0.1.5-dev+5a9a5fa8 standalone |
+| windows | ⚠ partial | 0.1.5-dev+acde58f9 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+acde58f9 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_notifications.py::test_navigate_to_notifications` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_notifications.py::test_mark_notifications_read` | web (linux): failed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_notifications.py::test_mark_notifications_read` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_notifications_type_icon.py::test_notification_row_shows_type_icon` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_push_live_refresh.py::test_push_live_refreshes_mounted_notifications_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sp_linux_ws_rpc_push.py::test_linux_ws_rpc_push_pump` | — |
+| 3 | app | `tests/e2e-unified/tests/test_sp_linux_ws_rpc_push.py::test_linux_ws_rpc_push_pump` | linux (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_notification_tap_through.py::test_tapping_a_like_notification_opens_the_liked_post` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_vapid_key_self_generated_by_default` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_unsubscribe` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_apns` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_vapid_key_self_generated_by_default` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_unsubscribe` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_apns` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_notifications_security_notice.py::test_security_notice_shows_in_the_list_with_its_full_detail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_notifications_security_notice.py::test_pending_action_notice_shows_in_the_list_with_its_full_detail` | tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_resilience` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_reaches_an_offline_device_for_a_knock_a_message_and_an_invite` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_is_decided_per_device` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_a_stand_in_announce_delivers_and_never_suppresses` | nest (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_reaches_an_offline_device_for_a_knock_a_message_and_an_invite` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_push_is_decided_per_device` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_push_dispatch.py::test_a_stand_in_announce_delivers_and_never_suppresses` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/platform/windows/test_agent_push_arm_end_to_end.py::test_a_frame_is_withheld_while_the_app_is_open_and_toasted_once_it_closes` | nest (windows): passed |
 | 8 | nest | `tests/e2e-unified/tests/platform/linux/test_agent_push_arm_end_to_end.py::test_a_frame_is_withheld_while_the_app_is_open_and_posted_once_it_closes` | nest (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_push_turned_off_stays_off_across_a_relaunch` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
@@ -107,9 +108,10 @@ Stamped 2026-09-24 at 89bb22083d.
 | 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | web (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_android_push_turned_off_stays_off_across_a_relaunch` | — |
 | 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | — |
+| 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_apple_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting` | macos (macos): passed, ios (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_push_settings.py::test_android_sign_out_drops_the_row_and_the_next_sign_in_rearms` | — |
-| 10 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_refuses_an_endpoint_the_nest_must_never_dial` | nest (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_notifications_localized_body.py::test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismissing_a_knock_takes_its_doorbell_row_with_it` | tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_push_api.py::test_push_subscribe_refuses_an_endpoint_the_nest_must_never_dial` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_notifications_localized_body.py::test_a_row_paints_its_localized_body_and_an_unknown_key_paints_the_summary` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismiss_deletes_one_row_and_clear_all_deletes_the_rest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_notifications_dismiss_and_clear.py::test_dismissing_a_knock_takes_its_doorbell_row_with_it` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -949,8 +949,12 @@ pub(super) async fn handle_create(
             &string_array(activity.get("cc")),
         )
     {
-        super::dm_leg::ingest_non_public_note(state, activity, &note).await?;
-        return Ok(StatusCode::ACCEPTED);
+        let ingest = super::dm_leg::ingest_non_public_note(state, activity, &note).await?;
+        return Ok(if ingest.rate_limited {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::ACCEPTED
+        });
     }
 
     // The audience + relationship gates that bound what/whose Note may enter the
@@ -1517,6 +1521,10 @@ async fn mint_synthetic_reaction(
         Some("activitypub"),
     )
     .await?;
+    // The funnel every local reference post runs (`feed.md` § Layout & flow →
+    // *Reaction posts count and paint*, ruling 5): a remote favourite is a like
+    // and an `Announce` a repost on the ingested note. Idempotent + non-fatal.
+    record_inbound_reference_engagements(state, &content_id, &synthetic_actor.0, &payload).await;
 
     let post_id_hex = hex::encode(content_id);
     let conn = state.db.conn().await;
@@ -1545,11 +1553,11 @@ async fn mint_synthetic_reaction(
 /// deliberately not a duplicate (un-react → re-react mints again), tombstoning
 /// only the map row would orphan the synthetic `content`/`content_meta`/segment
 /// rows one-per-cycle. Minting creates a map row + a content projection + a
-/// segment record, so retraction tears down all three — mirroring
-/// `delete_post_core`'s projection + segment teardown, minus the counter
-/// reversal (the AP mint never calls `record_reference_engagements`) and the
-/// propagation legs (a synthetic reaction post is never itself pushed or
-/// replicated). Best-effort + non-fatal like every retraction leg: the map-row
+/// segment record + the counter the funnel moved, so retraction tears down all
+/// four — mirroring `delete_post_core`'s projection + segment teardown and its
+/// counter reversal (`reverse_reference_engagements`, on the body read BEFORE
+/// the projection purge), minus the propagation legs (a synthetic reaction post
+/// is never itself pushed or replicated). Best-effort + non-fatal like every retraction leg: the map-row
 /// tombstone already hides the reaction, so a projection hiccup must not fail
 /// the Undo.
 async fn retract_reaction(
@@ -1565,6 +1573,22 @@ async fn retract_reaction(
     };
     db_helpers::tombstone_post_map(&conn, &post_id)?;
     drop(conn);
+
+    // Read the stored body before the withdrawal purges it, then reverse the
+    // counter the mint moved (`feed.md` § Layout & flow → *Reaction posts
+    // count and paint*, ruling 5). Non-fatal like every retraction leg.
+    if let Ok(digest) = fauna_core::hex32::decode(&post_id) {
+        match crate::segments::post::load_post_body(&state.post_segments, &state.db, &digest).await
+        {
+            Ok(Some(body)) => {
+                if let Err(e) = state.db.reverse_reference_engagements(&digest, &body).await {
+                    tracing::warn!("ap Undo: reverse_reference_engagements: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("ap Undo: load synthetic reaction body: {e}"),
+        }
+    }
 
     withdraw_translated_post(state, &post_id, object_url, verb.name()).await;
     tracing::debug!(object_url, remote = %actor_uri, verb = verb.name(), "ap Undo: retracted synthetic reaction");
@@ -5094,6 +5118,73 @@ mod tests {
             !state.db.post_exists(&id1).await.unwrap()
                 && !state.db.post_exists(&id2).await.unwrap(),
             "no synthetic reaction content survives a full react→unreact cycle"
+        );
+    }
+
+    /// The two reaction writers join the funnel (`docs/goal/ui/feed.md`
+    /// § Layout & flow → *Reaction posts count and paint*, ruling 5): a
+    /// remote `Like` of a local post is a like on it and an `Announce` a
+    /// repost, and each `Undo` reverses its own count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn like_and_announce_count_on_the_note_and_undo_reverses_them() {
+        let state = state().await;
+        // A real indexed local post (a `content_meta` row the counters live
+        // on), mapped as the account's own federated note.
+        let note_url = seed_local_account_post(&state).await;
+        let author = fauna_core::identity::ActorKeypair::from_secret([4u8; 32]);
+        let post = fauna_core::data::Post {
+            author: author.actor_id(),
+            created_at: fauna_core::data::Timestamp(1),
+            body: fauna_core::data::PostBody::Text {
+                content: "federated".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let wire = fauna_core::encoding::sign_and_pack(&author, &post).unwrap();
+        let target = *blake3::hash(&wire).as_bytes();
+        state.db.put_post_index_only(&target, &wire).await.unwrap();
+        {
+            let conn = state.db.conn().await;
+            conn.execute(
+                "UPDATE ap_post_map SET fauna_post_id = ?1 WHERE ap_url = ?2",
+                rusqlite::params![hex::encode(target), note_url],
+            )
+            .unwrap();
+        }
+        let counts = || {
+            let state = state.clone();
+            async move { state.db.get_engagement_counts(&target).await.unwrap() }
+        };
+        let reactor = "https://remote.example/users/somefan";
+
+        handle_like(&state, &like_activity(reactor, &note_url), None)
+            .await
+            .unwrap();
+        assert_eq!(counts().await.like_count, 1, "a remote Like is a like");
+        let a = announce_activity(reactor, &note_url, "https://remote.example/act/9");
+        handle_announce(&state, &a, None).await.unwrap();
+        assert_eq!(counts().await.repost_count, 1, "an Announce is a repost");
+
+        handle_undo(&state, &undo_activity(reactor, "Like", &note_url))
+            .await
+            .unwrap();
+        assert_eq!(
+            counts().await.like_count,
+            0,
+            "Undo{{Like}} reverses the like"
+        );
+        handle_undo(&state, &undo_activity(reactor, "Announce", &note_url))
+            .await
+            .unwrap();
+        assert_eq!(
+            counts().await.repost_count,
+            0,
+            "Undo{{Announce}} reverses the repost"
         );
     }
 

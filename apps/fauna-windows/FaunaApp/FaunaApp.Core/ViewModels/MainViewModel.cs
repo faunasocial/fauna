@@ -69,16 +69,16 @@ public partial class MainViewModel : ObservableObject
         // indicator). Subscribe BEFORE starting the idempotent pump so the first
         // raise — which carries the current state — isn't missed. The pump marshals
         // ConnectionStateChanged onto the UI thread, so the bound-state mutation is
-        // thread-safe. This is the app-lifetime shell VM (constructed once per login
-        // in MainPage.OnNavigatedTo), so no unsubscribe is needed.
+        // thread-safe. This VM is per-LOGIN, like the MainPage that builds it, so this
+        // subscription and the two below are released by Detach (MainPage.OnNavigatedFrom).
         _rpc.ConnectionStateChanged += OnConnectionStateChanged;
         _rpc.StartConnectionStatePump();
 
         // Global critical-alerts banner. CriticalAlertsHost.Instance is a
         // process-wide singleton built once and reused across every login/
-        // account-switch (never re-subscribed per MainViewModel construction),
-        // so this only adds a listener for THIS shell VM's lifetime — same
-        // no-unsubscribe posture as ConnectionStateChanged above. Read the
+        // account-switch, so this adds a listener for THIS shell VM's lifetime —
+        // which is exactly why Detach must remove it: the host outlives every login,
+        // and a listener left on it pins every MainViewModel ever built. Read the
         // CURRENT state immediately: an alert may already be active (e.g. the
         // session-start sweep posted before this VM was built).
         // Latch the UI context FIRST. The host may already have been built on a
@@ -95,9 +95,34 @@ public partial class MainViewModel : ObservableObject
         // Re-read the unread-notification count on every reconnect AND on every
         // `fauna.notification` / `ResyncRequired` push: windows funnels both onto
         // this one `Reconnected` fan-out (`NestRpcClient.DispatchPush`), so this is
-        // the single arm that keeps the count live between page visits. Same
-        // app-lifetime, no-unsubscribe posture as ConnectionStateChanged above.
+        // the single arm that keeps the count live between page visits. Released by
+        // Detach, like ConnectionStateChanged above.
         _rpc.Reconnected += OnReconnectedRefreshUnread;
+    }
+
+    private bool _detached;
+
+    /// <summary>
+    /// Release every subscription this VM holds — the shell's half of
+    /// <c>apps/windows.md</c> § Client lifetime's third rule (a page is per-login, so
+    /// everything page-scoped is released in <c>OnNavigatedFrom</c>). Called by
+    /// <c>MainPage.OnNavigatedFrom</c> on every sign-out, account switch and e2e reset.
+    /// Idempotent.
+    ///
+    /// <para>The connection-state handler matters most: it is the ONE writer of the
+    /// process-wide <see cref="OfflineGate.Shared"/>, so an outgoing VM that kept it
+    /// could let the old client's last <c>Disconnected</c> grey the next session's
+    /// controls. The disposed client already drops that event
+    /// (<c>NestRpcClient.DeliverOnUi</c>); <see cref="_detached"/> keeps this side
+    /// honest too, for a raise already in flight when the detach lands.</para>
+    /// </summary>
+    public void Detach()
+    {
+        if (_detached) return;
+        _detached = true;
+        _rpc.ConnectionStateChanged -= OnConnectionStateChanged;
+        _rpc.Reconnected -= OnReconnectedRefreshUnread;
+        CriticalAlertsHost.Instance.Changed -= OnCriticalAlertsChanged;
     }
 
     private void OnReconnectedRefreshUnread() => _ = RefreshUnreadNotificationCountAsync();
@@ -134,7 +159,11 @@ public partial class MainViewModel : ObservableObject
             CriticalAlertsHost.Instance.Active()
                 .Select(row => string.Join(" ", row.lines.Select(Strings.Resolve))));
 
-    private void OnCriticalAlertsChanged() => RefreshCriticalAlerts();
+    private void OnCriticalAlertsChanged()
+    {
+        if (_detached) return;
+        RefreshCriticalAlerts();
+    }
 
     /// <summary>
     /// Render the tri-state sync-agent-status indicator (Running / Restart pending /
@@ -204,6 +233,7 @@ public partial class MainViewModel : ObservableObject
     /// <c>ConnectionStateWord</c> export, never a C# switch over the enum.</para>
     private void OnConnectionStateChanged(FfiConnectionState state)
     {
+        if (_detached) return;
         // Every value the indicator takes, repeats included — the
         // `connection_reports` stickiness counter (a no-op outside e2e builds).
         E2eLoudSurfaces.ObserveConnectionReport(state);

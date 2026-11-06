@@ -26,25 +26,26 @@ use fauna_protocol::{
         FetchMlsSnapshotBlobRequest, FetchTlsCertBlobReply, FetchTlsCertBlobRequest,
         FetchWebdavKeysBlobReply, FetchWebdavKeysBlobRequest, FetchWrappedMlsBlobReply,
         FetchWrappedMlsBlobRequest, FetchWrappedSubmissionTokenReply,
-        FetchWrappedSubmissionTokenRequest, GetCaldavPortReply, GetCaldavPortRequest,
-        GetMailServingEnabledReply, GetMailServingEnabledRequest, ListDkimSelectorsReply,
-        ListDkimSelectorsRequest, ListPendingBridgesReply, ListPendingBridgesRequest,
-        ListServiceUsersReply, ListServiceUsersRequest, MintBulkByteTokenReply,
-        MintBulkByteTokenRequest, ProvisionMlsSnapshotBlobRequest, ProvisionReply,
-        ProvisionTlsCertBlobRequest, ProvisionWebdavKeysBlobRequest,
-        ProvisionWrappedMlsBlobRequest, ProvisionWrappedSubmissionTokenRequest,
-        RegisterServiceUserReply, RegisterServiceUserRequest, RejectPendingBridgeReply,
-        RejectPendingBridgeRequest, ReportAuthEventReply, ReportAuthEventRequest,
-        RequestEnrollmentReply, RequestEnrollmentRequest, RevokeDkimBlobRequest, RevokeReply,
-        RevokeServiceUserReply, RevokeServiceUserRequest, RevokeWrappedMlsBlobRequest,
-        RevokeWrappedSubmissionTokenRequest, ServiceUserInfo, SetAutoEnableMailForNewUsersReply,
-        SetAutoEnableMailForNewUsersRequest, SetCalDavEnabledReply, SetCalDavEnabledRequest,
-        SetCaldavPortReply, SetCaldavPortRequest, SetCardDavEnabledReply, SetCardDavEnabledRequest,
-        SetMailEnabledReply, SetMailEnabledRequest, SetMailServingEnabledReply,
-        SetMailServingEnabledRequest, SetWebDavEnabledReply, SetWebDavEnabledRequest, WebdavFile,
-        WebdavListFilesReply, WebdavListFilesRequest, WebdavListFoldersReply,
-        WebdavListFoldersRequest, WebdavQuotaReply, WebdavQuotaRequest, WebdavRecordChangeReply,
-        WebdavRecordChangeRequest, WebdavServedSet,
+        FetchWrappedSubmissionTokenRequest, GetActorMailEnabledReply, GetActorMailEnabledRequest,
+        GetCaldavPortReply, GetCaldavPortRequest, GetMailServingEnabledReply,
+        GetMailServingEnabledRequest, ListDkimSelectorsReply, ListDkimSelectorsRequest,
+        ListPendingBridgesReply, ListPendingBridgesRequest, ListServiceUsersReply,
+        ListServiceUsersRequest, MintBulkByteTokenReply, MintBulkByteTokenRequest,
+        ProvisionMlsSnapshotBlobRequest, ProvisionReply, ProvisionTlsCertBlobRequest,
+        ProvisionWebdavKeysBlobRequest, ProvisionWrappedMlsBlobRequest,
+        ProvisionWrappedSubmissionTokenRequest, RegisterServiceUserReply,
+        RegisterServiceUserRequest, RejectPendingBridgeReply, RejectPendingBridgeRequest,
+        ReportAuthEventReply, ReportAuthEventRequest, RequestEnrollmentReply,
+        RequestEnrollmentRequest, RevokeDkimBlobRequest, RevokeReply, RevokeServiceUserReply,
+        RevokeServiceUserRequest, RevokeWrappedMlsBlobRequest, RevokeWrappedSubmissionTokenRequest,
+        ServiceUserInfo, SetActorMailEnabledReply, SetActorMailEnabledRequest,
+        SetAutoEnableMailForNewUsersReply, SetAutoEnableMailForNewUsersRequest,
+        SetCalDavEnabledReply, SetCalDavEnabledRequest, SetCaldavPortReply, SetCaldavPortRequest,
+        SetCardDavEnabledReply, SetCardDavEnabledRequest, SetMailEnabledReply,
+        SetMailEnabledRequest, SetMailServingEnabledReply, SetMailServingEnabledRequest,
+        SetWebDavEnabledReply, SetWebDavEnabledRequest, WebdavFile, WebdavListFilesReply,
+        WebdavListFilesRequest, WebdavListFoldersReply, WebdavListFoldersRequest, WebdavQuotaReply,
+        WebdavQuotaRequest, WebdavRecordChangeReply, WebdavRecordChangeRequest, WebdavServedSet,
     },
 };
 
@@ -460,10 +461,15 @@ fn revoke_dkim_blob_handler() -> RpcHandler {
 // (`mda`/`content-processor`) + NOT in-process — which is exactly what the
 // Nests-page trust facet needs to enumerate seal targets (nests.md § Where
 // logic lives), with no enrollment history / pending topology exposed and
-// no second wire kind minted. The in-process exclusion extends the
-// spam-baseline holder ruling: a user-facing trust mint must never be
-// offered the nest's own disk-resident key as a seal target (sealed to a
-// key beside the ciphertext is not sealed). Public metadata only — the
+// no second wire kind minted. An in-process holder is listed only in the
+// `content-processor` role (ruled 2026-10-23, nests.md § Mint → *Who may
+// let the nest serve their paid posts*): the spam-baseline holder ruling
+// keeps the nest's own disk-resident key out of every seal target for a
+// class that must rest nest-opaque (the mail family — sealed to a key
+// beside the ciphertext is not sealed), while the web-serve holder's own
+// class, the web paywall, is nest-readable by design, so every member may
+// mint it their paid tiers, as they already can their paid files. Public
+// metadata only — the
 // `x25519_pubkey` is reduced to a `has_x25519` flag, no secrets.
 fn list_service_users_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
@@ -503,7 +509,11 @@ fn list_service_users_handler() -> RpcHandler {
                     u.status == BridgeStatus::Approved
                         && u.x25519_pubkey.is_some()
                         && matches!(u.role, BridgeRole::Mda | BridgeRole::ContentProcessor)
-                        && !u.in_process
+                        // In-process only in the `content-processor` role (the
+                        // web-serve holder; its class is nest-readable by design).
+                        // An in-process mail-family holder is never a user-facing
+                        // seal target: mail rests nest-opaque.
+                        && (!u.in_process || u.role == BridgeRole::ContentProcessor)
                 })
                 .map(|u| to_service_user_info(u, holder_view))
                 .collect();
@@ -1680,6 +1690,11 @@ fn set_mail_serving_enabled_handler() -> RpcHandler {
                 .set_actor_mail_serving_enabled(&actor_id, req.enabled)
                 .await
                 .map_err(|e| internal(format!("persist actor_mail_serving toggle: {e:#}")))?;
+            // The same gate guards a push subscription only at subscribe:
+            // serving off here cuts the streams already open.
+            if !req.enabled {
+                state.bridge_push_registry.remove_served_user(&actor_id);
+            }
             encode_reply(&SetMailServingEnabledReply {
                 ok: true,
                 extra: Default::default(),
@@ -1716,6 +1731,60 @@ fn get_mail_serving_enabled_handler() -> RpcHandler {
                 .map_err(internal)?
                 .unwrap_or(true);
             encode_reply(&GetMailServingEnabledReply {
+                enabled,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+// Set the caller's own per-actor mail-off flag — the nest-side half of the
+// user's "Disable mail" (`docs/goal/behavior/mail-credentials.md` § Trigger
+// taxonomy, the Disable-mail row). The exact sibling of
+// `set_mail_serving_enabled` above: User-class, caller-scoped (keyed on the
+// authenticated actor; the request carries only `enabled`), no flag file, no
+// supervisor reconcile, no `config_changed` push — `require_local_mail_serving`
+// reads the row per request, so the actor's next IMAP operation sees it, and a
+// flip to off drops the actor's open mailbox-state push subscriptions. The
+// CalDAV, CardDAV and WebDAV handlers never read it.
+fn set_actor_mail_enabled_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, "fauna.bridges.set_actor_mail_enabled").await?;
+            let req: SetActorMailEnabledRequest = decode(&payload).map_err(malformed)?;
+            state
+                .db
+                .set_actor_mail_enabled(&actor_id, req.enabled)
+                .await
+                .map_err(|e| internal(format!("persist actor_mail_enabled flag: {e:#}")))?;
+            // A push subscription was gated once, at subscribe; turning mail
+            // off cuts every stream already open for this actor, so an IDLE /
+            // NOTIFY session from before the flip receives nothing more.
+            if !req.enabled {
+                state.bridge_push_registry.remove_served_user(&actor_id);
+            }
+            encode_reply(&SetActorMailEnabledReply {
+                ok: true,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+// Read the caller's own per-actor mail-off flag (default ON / absent ⇒ ON).
+// Caller-scoped: there is no target field to name another actor.
+fn get_actor_mail_enabled_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, "fauna.bridges.get_actor_mail_enabled").await?;
+            let _req: GetActorMailEnabledRequest = decode(&payload).map_err(malformed)?;
+            let enabled = state
+                .db
+                .get_actor_mail_enabled(&actor_id)
+                .await
+                .map_err(internal)?
+                .unwrap_or(true);
+            encode_reply(&GetActorMailEnabledReply {
                 enabled,
                 extra: Default::default(),
             })
@@ -2390,6 +2459,46 @@ fn webdav_record_change_handler() -> RpcHandler {
             if label_generation.is_none() {
                 return Err(malformed(
                     "path_sealed must be a sealed label naming its content-key generation",
+                ));
+            }
+            // A row no change-log page could serve would end every reader's
+            // walk of the set at its seq: refused at this door as at the
+            // record door (`sync_handlers::unservable_change_len`).
+            if let Some(len) =
+                crate::sync_handlers::unservable_change_len(crate::db::SyncChangeRow {
+                    seq: 0,
+                    path_hash: path_hash.to_vec(),
+                    manifest_hash: manifest_hash.map(|m| m.to_vec()),
+                    size_bytes: req.size_bytes,
+                    change_type: req.change_type.clone(),
+                    created_at: 0,
+                    path: None,
+                    device_id: Some(device_id.to_vec()),
+                    content_key_version: req.content_key_version.map(|v| v as i64),
+                    thumbnail_hash: None,
+                    actor_id: target_actor.to_vec(),
+                    path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
+                    derived_through: None,
+                    is_resolution: None,
+                    is_retention: None,
+                    item_class: None,
+                    origin_writer: None,
+                    origin_seq: None,
+                    entry_sealed: None,
+                    // The owner's `served_rows.adopt` fills a 64-byte signature
+                    // and a 32-byte key into this row in place and measures
+                    // nothing, so the row is measured at that signed size: a
+                    // row servable only unsigned would outgrow the cap once
+                    // adopted (the same widest measure `conflicts.report` takes).
+                    signature: Some(vec![0u8; 64]),
+                    signer_key: Some(vec![0u8; 32]),
+                    deposited_by: None,
+                })
+            {
+                return Err(crate::rpc_errors::coded_ns(
+                    "bridges",
+                    "change_too_large",
+                    crate::sync_handlers::change_too_large_detail(len),
                 ));
             }
 
@@ -3415,13 +3524,16 @@ pub(crate) fn principal_fetch_grants_handler() -> crate::principal_handlers::Pri
             // The form gate's fetch door (TP4): a `remote` caller is served
             // no blob carrying a reserved tuple — the mint gate cannot see a
             // grant deposited before the principal's row existed. A blob that
-            // does not decode is served as before; it opens nothing.
+            // does not decode is withheld too: a remote principal runs its own
+            // decoder, so a blob this build refuses (a wrapped key outside the
+            // declared scope among them) is never handed over on the chance
+            // that decoder is laxer.
             // window-ok(filter: the decode only withholds a blob, it authorizes
             // nothing; the fetch above already reads only open windows).
             if caller.execution_form == crate::db::third_party_principals::ExecutionForm::Remote {
                 grants.retain(|bytes| {
                     fauna_mls::wrapped_blob::format::GrantBlob::from_canonical_bytes(bytes)
-                        .map_or(true, |blob| !grant_scope_is_reserved(&blob.scope))
+                        .is_ok_and(|blob| !grant_scope_is_reserved(&blob.scope))
                 });
             }
             encode_reply(&FetchGrantsReply {
@@ -3493,11 +3605,46 @@ fn renew_grant_handler() -> RpcHandler {
                 }
                 blob.window.0 = new_start;
             }
-            for wk_bytes in &req.appended_keys {
-                let wk = fauna_mls::wrapped_blob::format::WrappedScopeKey::from_canonical_bytes(
-                    wk_bytes.as_ref(),
-                )
-                .map_err(|e| malformed(format!("appended wrapped key: {e}")))?;
+            let appended = req
+                .appended_keys
+                .iter()
+                .map(|wk_bytes| {
+                    fauna_mls::wrapped_blob::format::WrappedScopeKey::from_canonical_bytes(
+                        wk_bytes.as_ref(),
+                    )
+                    .map(|wk| (wk_bytes, wk))
+                    .map_err(|e| malformed(format!("appended wrapped key: {e}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // A renew appends keys only for scopes the grant already declares,
+            // so the label every gate reads keeps speaking for every key the
+            // holder can open.
+            if appended
+                .iter()
+                .any(|(_, wk)| !blob.scope.contains(&wk.scope))
+            {
+                return Err(malformed(
+                    "renew appends a wrapped key for a scope the grant does not declare",
+                ));
+            }
+            // The form gate's renew door (TP4, the mint's twin): no key a
+            // `remote`-form row attests is handed a reserved tuple's key by a
+            // renewal either.
+            if appended
+                .iter()
+                .any(|(_, wk)| wk.scope.reserved_for_device_or_hosted())
+                && state
+                    .db
+                    .principal_form_for_holder(&actor_id, blob.holder.as_ref())
+                    .await
+                    .map_err(internal)?
+                    == Some(crate::db::third_party_principals::ExecutionForm::Remote)
+            {
+                return Err(permission_denied(
+                    "a remote principal is grantable only over the kinds it created",
+                ));
+            }
+            for (wk_bytes, wk) in appended {
                 // A grant carries at most one key per (scope, epoch). Same
                 // bytes as the stored entry ⇒ a harmless idempotent retry
                 // (no-op). Different bytes ⇒ REPLACE it — after an MSEK
@@ -4509,6 +4656,22 @@ pub fn register_bridge_blob_handlers(b: &mut RpcRouterBuilder) {
         },
     );
     b.add(
+        "fauna.bridges.set_actor_mail_enabled",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: set_actor_mail_enabled_handler(),
+        },
+    );
+    b.add(
+        "fauna.bridges.get_actor_mail_enabled",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: get_actor_mail_enabled_handler(),
+        },
+    );
+    b.add(
         "fauna.bridges.revoke_service_user",
         RpcKindMeta {
             forbid_replay: false,
@@ -4930,12 +5093,17 @@ mod tests {
 
     /// The class-scoped reply (2026-07-17): a plain registered user sees ONLY
     /// the mint-relevant holder view — approved + x25519-attested +
-    /// content-processor-family role + not in-process — never the pending/
-    /// revoked roster, the MTA topology, or the nest's own in-process holder
-    /// (a user-facing trust mint must not be offered the nest's disk-resident
-    /// key as a seal target). Requested filters apply WITHIN that subset.
+    /// content-processor-family role, in-process only in the `content-processor`
+    /// role — never the pending/revoked roster, the MTA topology, or an
+    /// in-process holder of the mail family (a user-facing trust mint must
+    /// not be offered the nest's disk-resident key for a class that rests
+    /// nest-opaque). The nest's own web-serve holder IS listed (ruled
+    /// 2026-10-23, nests.md § Mint → *Who may let the nest serve their paid
+    /// posts*): the web-paywall class is nest-readable by design, so every
+    /// member can let the box serve their paid posts. Requested filters apply
+    /// WITHIN that subset.
     #[tokio::test]
-    async fn a_plain_user_lists_only_the_approved_offbox_holder_view() {
+    async fn a_plain_user_lists_the_approved_holder_view_web_serve_included() {
         use crate::db::bridge_service_users::BridgeRole;
         let state = fixture_state().await;
         let user = [8u8; 32];
@@ -5004,7 +5172,8 @@ mod tests {
             .approve_bridge_service_user(&bare, None)
             .await
             .unwrap();
-        // …and the nest's own IN-PROCESS content-processor (web-serve).
+        // …the nest's own IN-PROCESS content-processor (web-serve) — LISTED,
+        // its class being the one the nest serves by design…
         let inproc = [46u8; 32];
         state
             .db
@@ -5026,6 +5195,29 @@ mod tests {
             .mark_bridge_service_user_in_process(&inproc)
             .await
             .unwrap();
+        // …and an IN-PROCESS holder of the mail family (hidden: mail rests
+        // nest-opaque, so the box's own key is never its seal target).
+        let inproc_mda = [47u8; 32];
+        state
+            .db
+            .create_pending_bridge_service_user(&inproc_mda, BridgeRole::Mda, "mda-inproc")
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_bridge_x25519(&inproc_mda, &[9u8; 32])
+            .await
+            .unwrap();
+        state
+            .db
+            .approve_bridge_service_user(&inproc_mda, None)
+            .await
+            .unwrap();
+        state
+            .db
+            .mark_bridge_service_user_in_process(&inproc_mda)
+            .await
+            .unwrap();
 
         let req = ListServiceUsersRequest {
             role: None,
@@ -5045,8 +5237,14 @@ mod tests {
         ids.sort();
         assert_eq!(
             ids,
-            vec!["cp-1".to_string(), "mda-1".to_string()],
-            "user view = approved, x25519-attested, cp-family, off-box only"
+            vec![
+                "cp-1".to_string(),
+                "mda-1".to_string(),
+                "web-serve".to_string()
+            ],
+            "user view = approved, x25519-attested, cp-family; in-process only in \
+             the content-processor role (the web-serve holder), never an \
+             in-process mail-family holder"
         );
 
         // A user probing the pending roster sees nothing — the requested
@@ -6339,6 +6537,106 @@ mod tests {
     /// (an admin may read any actor's flag for audit but a User read is forced to
     /// its own).
     #[tokio::test]
+    async fn actor_mail_enabled_round_trips_caller_scoped() {
+        let state = fixture_state().await;
+        let user_a = [0xA3u8; 32];
+        let user_b = [0xB3u8; 32];
+        state.db.create_user(&user_a, "free", "test").await.unwrap();
+        let get = |actor: [u8; 32]| {
+            let state = state.clone();
+            async move {
+                let payload = Bytes::from(
+                    encode_canonical(&GetActorMailEnabledRequest::default())
+                        .unwrap()
+                        .to_vec(),
+                );
+                let reply: GetActorMailEnabledReply = decode(
+                    &get_actor_mail_enabled_handler()(state, actor, payload)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                reply.enabled
+            }
+        };
+        let set = |enabled: bool| {
+            let state = state.clone();
+            async move {
+                let payload = Bytes::from(
+                    encode_canonical(&SetActorMailEnabledRequest {
+                        enabled,
+                        extra: Default::default(),
+                    })
+                    .unwrap()
+                    .to_vec(),
+                );
+                let reply: SetActorMailEnabledReply = decode(
+                    &set_actor_mail_enabled_handler()(state, user_a, payload)
+                        .await
+                        .expect("a user may set its own flag"),
+                )
+                .unwrap();
+                assert!(reply.ok);
+            }
+        };
+
+        assert!(get(user_a).await, "absent flag defaults to ON");
+        // An IDLE / NOTIFY subscription opened while mail was on survives a
+        // flip to on and is dropped by the flip to off; another actor's is
+        // untouched (`mail-credentials.md` § Trigger taxonomy, Disable-mail).
+        let mda_sub = [0xEDu8; 32];
+        state
+            .bridge_push_registry
+            .register(&user_a, "INBOX", mda_sub);
+        state
+            .bridge_push_registry
+            .register(&user_b, "INBOX", mda_sub);
+        set(true).await;
+        assert_eq!(state.bridge_push_registry.subscription_count(), 2);
+        set(false).await;
+        assert!(!get(user_a).await);
+        assert!(
+            state
+                .bridge_push_registry
+                .matching(&user_a, "INBOX")
+                .is_empty(),
+            "mail off drops the actor's open push subscriptions"
+        );
+        assert_eq!(
+            state.bridge_push_registry.matching(&user_b, "INBOX").len(),
+            1
+        );
+        assert_eq!(
+            state.db.get_actor_mail_enabled(&user_b).await.unwrap(),
+            None
+        );
+        set(true).await;
+        assert!(get(user_a).await);
+
+        // A bridge may NOT set it (User-only allowlist).
+        let mda = [0xECu8; 32];
+        approve_bridge(
+            &state.db,
+            &mda,
+            crate::db::bridge_service_users::BridgeRole::Mda,
+        )
+        .await;
+        let payload = Bytes::from(
+            encode_canonical(&SetActorMailEnabledRequest {
+                enabled: false,
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        );
+        assert!(
+            set_actor_mail_enabled_handler()(state.clone(), mda, payload)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn mail_serving_enabled_user_scoped_set_admin_read_only() {
         let state = fixture_state().await;
         let user_a = [0xA1u8; 32]; // User class (no bridge/admin row)
@@ -6453,6 +6751,56 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "fauna.bridges.permission_denied");
+    }
+
+    /// The serving gate guards a push subscription only at subscribe, so a
+    /// flip of serving to off cuts the IDLE / NOTIFY streams already open for
+    /// the actor; a flip to on leaves them, and another actor's are untouched.
+    /// Mutation pinned: dropping the `remove_served_user` call from
+    /// `set_mail_serving_enabled_handler`.
+    #[tokio::test]
+    async fn serving_off_drops_the_actors_open_push_subscriptions() {
+        let state = fixture_state().await;
+        let user_a = [0xA5u8; 32];
+        let user_b = [0xB5u8; 32];
+        state.db.create_user(&user_a, "free", "test").await.unwrap();
+        let set = |enabled: bool| {
+            let state = state.clone();
+            async move {
+                let payload = Bytes::from(
+                    encode_canonical(&SetMailServingEnabledRequest {
+                        enabled,
+                        extra: Default::default(),
+                    })
+                    .unwrap()
+                    .to_vec(),
+                );
+                set_mail_serving_enabled_handler()(state, user_a, payload)
+                    .await
+                    .expect("a user may set its own flag");
+            }
+        };
+        let mda_sub = [0xEFu8; 32];
+        state
+            .bridge_push_registry
+            .register(&user_a, "INBOX", mda_sub);
+        state
+            .bridge_push_registry
+            .register(&user_b, "INBOX", mda_sub);
+        set(true).await;
+        assert_eq!(state.bridge_push_registry.subscription_count(), 2);
+        set(false).await;
+        assert!(
+            state
+                .bridge_push_registry
+                .matching(&user_a, "INBOX")
+                .is_empty(),
+            "serving off drops the actor's open push subscriptions"
+        );
+        assert_eq!(
+            state.bridge_push_registry.matching(&user_b, "INBOX").len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -7243,7 +7591,15 @@ mod tests {
             index: GrantIndex(owner.to_vec(), grant_id.to_vec()),
             holder: ByteBuf::from(holder_pubkey.to_vec()),
             window: GrantWindow(0, epoch_end),
-            scope: Vec::new(),
+            // Every wrapped key's scope declared, once — the blob's label
+            // agrees with its keys, as `GrantBlob::from_canonical_bytes`
+            // requires.
+            scope: wrapped_keys.iter().fold(Vec::new(), |mut scope, wk| {
+                if !scope.contains(&wk.scope) {
+                    scope.push(wk.scope.clone());
+                }
+                scope
+            }),
             wrapped_keys,
         }
         .to_canonical_bytes()
@@ -7682,6 +8038,151 @@ mod tests {
         }
     }
 
+    /// The form gate reads the keys, not only the label: a mint to a `remote` row's holder whose declared scope is
+    /// `ext.*` only but which carries a mail wrap is refused and stores
+    /// nothing.
+    #[tokio::test]
+    async fn the_mint_refuses_a_mail_wrap_behind_an_ext_only_label() {
+        use crate::db::third_party_principals::ExecutionForm;
+        use fauna_mls::wrapped_blob::{
+            GrantBlob, GrantIndex, GrantWindow, ScopeTuple, generate_x25519_keypair,
+            seal_capability,
+        };
+        let state = fixture_state().await;
+        let owner = [7u8; 32];
+        state.db.create_user(&owner, "free", "test").await.unwrap();
+        let (_, remote) = generate_x25519_keypair();
+        consent_principal(
+            &state.db,
+            &owner,
+            "https://remote.example/c.json",
+            remote,
+            ExecutionForm::Remote,
+        )
+        .await;
+        let mail_wrap =
+            seal_capability(&[0xABu8; 32], &owner, &ScopeTuple::mail(), None, &remote).unwrap();
+        let blob = GrantBlob {
+            version: 1,
+            kind: GrantBlob::KIND.to_string(),
+            index: GrantIndex(owner.to_vec(), vec![1; 16]),
+            holder: ByteBuf::from(remote.to_vec()),
+            window: GrantWindow(0, u64::MAX),
+            scope: vec![ScopeTuple::ext_kind_read("ext.remote.example.notes")],
+            wrapped_keys: vec![mail_wrap],
+        }
+        .to_canonical_bytes()
+        .unwrap();
+        let req = MintGrantRequest {
+            grant_blob: ByteBuf::from(blob),
+            extra: Default::default(),
+        };
+        let err = mint_grant_handler()(
+            state.clone(),
+            owner,
+            Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "fauna.protocol.malformed");
+        assert!(
+            state
+                .db
+                .get_capability_grant(&owner, &[1; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The form gate's renew door: a renew appending
+    /// a mail wrap to a `remote` row's holder's `ext.*` grant is refused —
+    /// for the scope it does not declare, and, the mail tuple declared, for
+    /// the remote form — and the stored blob is unchanged; a `device` row's
+    /// holder takes the same declared append.
+    #[tokio::test]
+    async fn the_renew_refuses_a_reserved_wrap_to_a_remote_principals_holder() {
+        use crate::db::third_party_principals::ExecutionForm;
+        use fauna_mls::wrapped_blob::{ScopeTuple, generate_x25519_keypair, seal_capability};
+        let state = fixture_state().await;
+        let owner = [7u8; 32];
+        state.db.create_user(&owner, "free", "test").await.unwrap();
+        let (_, remote) = generate_x25519_keypair();
+        let (_, device) = generate_x25519_keypair();
+        consent_principal(
+            &state.db,
+            &owner,
+            "https://remote.example/c.json",
+            remote,
+            ExecutionForm::Remote,
+        )
+        .await;
+        consent_principal(
+            &state.db,
+            &owner,
+            "https://device.example/c.json",
+            device,
+            ExecutionForm::Device,
+        )
+        .await;
+        let ext = ScopeTuple::ext_kind_read("ext.remote.example.notes");
+        let deposit = |grant_id: u8, holder: [u8; 32], scope: Vec<ScopeTuple>| {
+            let db = state.db.clone();
+            let bytes = build_grant_blob_with_scope(&owner, &[grant_id; 16], &holder, scope);
+            async move {
+                // Stored directly: the mint gate would refuse grant 2's
+                // declared mail tuple to the remote holder, and the renew door
+                // must hold for a grant deposited before the row existed.
+                db.put_capability_grant(&owner, &[grant_id; 16], &holder, i64::MAX, &bytes)
+                    .await
+                    .unwrap();
+                bytes
+            }
+        };
+        let renew = |grant_id: u8, holder: [u8; 32]| {
+            let wk =
+                seal_capability(&[0xABu8; 32], &owner, &ScopeTuple::mail(), None, &holder).unwrap();
+            let req = RenewGrantRequest {
+                grant_id: ByteBuf::from(vec![grant_id; 16]),
+                new_epoch_start: None,
+                new_epoch_end: u64::MAX,
+                appended_keys: vec![ByteBuf::from(wk.to_canonical_bytes().unwrap())],
+                extra: Default::default(),
+            };
+            renew_grant_handler()(
+                state.clone(),
+                owner,
+                Bytes::from(encode_canonical(&req).unwrap().to_vec()),
+            )
+        };
+        let stored = |grant_id: u8| {
+            let db = state.db.clone();
+            async move {
+                db.get_capability_grant(&owner, &[grant_id; 16])
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+
+        // Undeclared: the ext-only grant cannot gain a mail key.
+        let before = deposit(1, remote, vec![ext.clone()]).await;
+        let err = renew(1, remote).await.unwrap_err();
+        assert_eq!(err.code, "fauna.protocol.malformed");
+        assert_eq!(stored(1).await, before);
+
+        // Declared, but the holder is a remote row's: the form refuses it.
+        let before = deposit(2, remote, vec![ext.clone(), ScopeTuple::mail()]).await;
+        let err = renew(2, remote).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+        assert_eq!(stored(2).await, before);
+
+        // The same declared append to a device row's holder lands.
+        let before = deposit(3, device, vec![ext.clone(), ScopeTuple::mail()]).await;
+        renew(3, device).await.expect("device renew ok");
+        assert_ne!(stored(3).await, before);
+    }
+
     #[tokio::test]
     async fn capability_fetch_is_scoped_to_callers_own_holder_pubkey() {
         use fauna_mls::wrapped_blob::generate_x25519_keypair;
@@ -7735,9 +8236,29 @@ mod tests {
         let cp_actor = [0x5Au8; 32];
         approve_content_processor_with_x25519(&state.db, &cp_actor, &cp_public, "cp-1").await;
 
+        let scope = ScopeTuple {
+            class: "content.read".into(),
+            kind: Some("mail".into()),
+            tier: None,
+            set: None,
+            factor: None,
+        };
         // Mint an ALREADY-EXPIRED grant (epoch_end = 1 ≪ now), so a plain fetch
-        // omits it.
-        let blob = build_grant_blob(&owner, &grant_id, &cp_public, 1, Vec::new());
+        // omits it. It declares the mail tuple the renew appends a key for.
+        let blob = {
+            use fauna_mls::wrapped_blob::{GrantBlob, GrantIndex, GrantWindow};
+            GrantBlob {
+                version: 1,
+                kind: GrantBlob::KIND.to_string(),
+                index: GrantIndex(owner.to_vec(), grant_id.to_vec()),
+                holder: ByteBuf::from(cp_public.to_vec()),
+                window: GrantWindow(0, 1),
+                scope: vec![scope.clone()],
+                wrapped_keys: Vec::new(),
+            }
+            .to_canonical_bytes()
+            .unwrap()
+        };
         let mp = Bytes::from(
             encode_canonical(&MintGrantRequest {
                 grant_blob: ByteBuf::from(blob),
@@ -7758,13 +8279,6 @@ mod tests {
         assert!(before.grants.is_empty(), "expired grant omitted from fetch");
 
         // Renew: bump the window far into the future + append one real wrapped key.
-        let scope = ScopeTuple {
-            class: "content.read".into(),
-            kind: Some("mail".into()),
-            tier: None,
-            set: None,
-            factor: None,
-        };
         let wk = seal_capability(&[0u8; 32], &owner, &scope, None, &cp_public).unwrap();
         let wk_bytes = wk.to_canonical_bytes().unwrap();
         let renew_of = |keys: Vec<ByteBuf>| {

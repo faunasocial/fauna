@@ -226,6 +226,12 @@ def test_onboarding_seals_captured_dns_credential_windows(windows_fresh_app, win
     driver.click("create-identity-button")
     driver.wait_for("identity-continue-button", timeout=15)
     driver.click("identity-continue-button")
+    # Continue lands on the recovery-kit offer, never straight on handle_entry
+    # (`onboarding.md` § 1 Identity; windows renders it since 2026-09-26).
+    # Skip is one click onward and keeps no minted root, which this journey
+    # does not need. Both waits name the page the app is on if they time out.
+    app.onboarding.wait_for_page("recovery_kit", timeout=15)
+    app.onboarding.skip_recovery_kit()
 
     # Pillar C (uniform https): `test@127.0.0.1:{port}` resolves to
     # `https://127.0.0.1:{port}` and the nest serves real self-signed HTTPS there
@@ -234,7 +240,6 @@ def test_onboarding_seals_captured_dns_credential_windows(windows_fresh_app, win
     # directly and trust the self-signed floor via the graduated SPKI pin.
 
     # ── Handle check → claim-code (unclaimed nest) ──────────────────────
-    driver.wait_for("handle-input", timeout=20)
     driver.clear_and_type("handle-input", handle)
     driver.click("handle-check-button")
     deadline = time.monotonic() + 30

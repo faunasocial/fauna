@@ -281,11 +281,14 @@ enum SeatStep {
     /// A plain registration — an ordinary enroll.
     Register,
     /// The restore ceremony's re-enrollment of the destination it pulled the
-    /// corpus back from: read the seat's holder off the destination and, when
-    /// it is not the restored nest, take the seat over from it
-    /// (`segment-backup-protocol.md` § Cross-location backup protocol →
-    /// *The writer seat* → *How the seat moves*, situation (2)).
-    SucceedHolder,
+    /// corpus back from: read the seat's holder off the destination and take
+    /// the seat over from it **only when it is `replaced`**, the box this
+    /// ceremony replaced (`segment-backup-protocol.md` § Cross-location backup
+    /// protocol → *The writer seat* → *How the seat moves*, situation (2)).
+    SucceedHolder {
+        /// The box the ceremony made the restored nest the continuation of.
+        replaced: [u8; 32],
+    },
 }
 
 /// Enroll steps (1)–(5) for one peer-nest row (module docs § Ordering).
@@ -320,17 +323,35 @@ where
     let destination = BackupClient::new(destination);
     let holder = match seat {
         SeatStep::Register => None,
-        // The holder comes off the seat itself — never a guess, and never
-        // the box the device remembers losing: a seat already carried
-        // elsewhere names that box, which is then refused, not overwritten.
-        SeatStep::SucceedHolder => destination
-            .writer_grant_list()
-            .await
-            .map_err(EnrollError::WriterGrant)?
-            .grants
-            .into_iter()
-            .map(|g| g.writer_nest_id)
-            .find(|holder| !holder.eq_ignore_ascii_case(&writer)),
+        // The holder comes off the seat itself, and only the box this
+        // ceremony replaced is succeeded. A seat the owner has since moved to
+        // another box is that box's: it is refused by name here, before
+        // anything is written at the destination, never overwritten.
+        SeatStep::SucceedHolder { replaced } => {
+            let grants = destination
+                .writer_grant_list()
+                .await
+                .map_err(EnrollError::WriterGrant)?
+                .grants;
+            let replaced = hex::encode(replaced);
+            if grants
+                .iter()
+                .any(|g| g.writer_nest_id.eq_ignore_ascii_case(&writer))
+            {
+                // Already the restored nest's: a plain refresh.
+                None
+            } else {
+                match grants.into_iter().next().map(|g| g.writer_nest_id) {
+                    None => None,
+                    Some(holder) if holder.eq_ignore_ascii_case(&replaced) => Some(holder),
+                    Some(holder) => {
+                        return Err(EnrollError::WriterSeatHeld {
+                            holder_nest_id: Some(holder),
+                        });
+                    }
+                }
+            }
+        }
     };
     match holder {
         Some(holder) => destination.writer_grant_succeed(writer, holder).await,
@@ -1134,18 +1155,24 @@ where
 /// moves*, situation (2)): a destination keeps one nest-writer per owner, and
 /// after a rebuild onto a fresh identity its seat still names the lost box, so
 /// a plain registration would be refused `writer_seat_held`. Step (3)
-/// therefore reads the seat's holder off the destination and names it as
-/// `succeeds` — for this one destination, inside this one completed ceremony.
+/// therefore reads the seat's holder off the destination and, when it is
+/// `replaced_nest_id` — the box this ceremony replaced, the lost source whose
+/// corpus it restored — names it as `succeeds`, for this one destination,
+/// inside this one completed ceremony. A seat held by any other box (the owner
+/// moved it to a live box since) is refused by name,
+/// [`EnrollError::WriterSeatHeld`], and nothing is written at the destination.
 /// A same-identity rebuild finds the seat already its own and refreshes it.
 ///
 /// `None` when the outcome is not whole (nothing to do; the owner re-runs the
 /// restore).
+#[allow(clippy::too_many_arguments)]
 pub async fn reenroll_nest_destination_after_reseed<R: RpcRequester, D: RpcRequester>(
     nest: R,
     destination: D,
     store: &dyn BackupStateStore,
     owner_secret: [u8; 32],
     restored_nest_id: [u8; 32],
+    replaced_nest_id: [u8; 32],
     row: &BackupDestination,
     outcome: &fauna_client_backup::reseed::ReseedOutcome,
 ) -> Option<Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>>
@@ -1174,7 +1201,9 @@ where
             owner_secret,
             dest,
             restored_nest_id,
-            SeatStep::SucceedHolder,
+            SeatStep::SucceedHolder {
+                replaced: replaced_nest_id,
+            },
         )
         .await,
     )
@@ -1535,7 +1564,7 @@ mod tests {
                     *self.registered_writer_nest_id.lock().unwrap() = Some(req.writer_nest_id);
                     fauna_protocol::encode_canonical(&WriterGrantRegisterReply {
                         ok: true,
-                        extra: Default::default(),
+                        ..Default::default()
                     })
                 }
                 KIND_WRITER_GRANT_LIST => fauna_protocol::encode_canonical(
@@ -2844,6 +2873,10 @@ mod tests {
         }
     }
 
+    /// The box the restore replaced, in the tests that rebuild onto a fresh
+    /// identity.
+    const LOST_BOX: [u8; 32] = [0xee; 32];
+
     fn reenroll_nest(
         nest: &Arc<FakeSourceNest>,
         destination: &Arc<FakeDestinationNest>,
@@ -2855,6 +2888,7 @@ mod tests {
             &nest.store,
             OWNER_SEED,
             SOURCE_BOUND_ID,
+            LOST_BOX,
             &pulled_from(),
             &reseed_outcome(whole),
         ))
@@ -2868,7 +2902,7 @@ mod tests {
     #[test]
     fn a_whole_pull_back_onto_a_fresh_identity_takes_the_seat_from_the_lost_box() {
         let nest = Arc::new(FakeSourceNest::default());
-        let lost = "ee".repeat(32);
+        let lost = hex::encode(LOST_BOX);
         let destination = Arc::new(FakeDestinationNest {
             seat: Mutex::new(Some(lost.clone())),
             ..Default::default()
@@ -2897,6 +2931,51 @@ mod tests {
         assert_eq!(list[0].destination_id, "dest-1");
         assert_eq!(list[0].folder_name, DEFAULT_BACKUP_FOLDER);
         assert_eq!(list[0].display_name.as_deref(), Some("Off-site"));
+    }
+
+    /// **A seat the owner moved to a third box is refused, not taken over**
+    /// (`segment-backup-protocol.md` § *The writer seat*, situation (2):
+    /// everything but the box the ceremony replaced is a second box). The
+    /// owner moved the seat from the lost box to a live box C, then pulled the
+    /// lost box back onto a rebuild: the re-enrollment names C as the holder
+    /// it refuses, sends no register at all, and records no row — C keeps
+    /// writing.
+    #[test]
+    fn a_seat_held_by_a_third_box_is_refused_by_name_and_nothing_is_overwritten() {
+        let nest = Arc::new(FakeSourceNest::default());
+        let third = "cc".repeat(32);
+        let destination = Arc::new(FakeDestinationNest {
+            seat: Mutex::new(Some(third.clone())),
+            ..Default::default()
+        });
+        let err = reenroll_nest(&nest, &destination, true)
+            .expect("a whole outcome re-enrolls")
+            .expect_err("a third box's seat is refused");
+
+        match err {
+            EnrollError::WriterSeatHeld { holder_nest_id } => {
+                assert_eq!(holder_nest_id.as_deref(), Some(third.as_str()));
+            }
+            other => panic!("expected WriterSeatHeld, got {other:?}"),
+        }
+        assert!(
+            destination.succeeds.lock().unwrap().is_empty(),
+            "no register reached the destination"
+        );
+        assert_eq!(
+            destination.seat.lock().unwrap().as_deref(),
+            Some(third.as_str()),
+            "the seat still names the third box"
+        );
+        assert!(nest.registered_destination.lock().unwrap().is_none());
+        assert!(
+            block_on(nest.store.backup_state(SOURCE_BOUND_ID))
+                .expect("read")
+                .backup
+                .destinations
+                .is_empty(),
+            "no row lands in the restored nest's list"
+        );
     }
 
     /// A rebuild under the lost box's own identity finds the seat already its
@@ -3382,5 +3461,84 @@ mod tests {
         )));
         assert!(nest.kinds().contains(&ROTATION_CHAIN_KIND));
         assert_eq!(nest.store.writes(), 0);
+    }
+
+    // ── The read gate of a replica just bound ──────────────────────────────
+
+    /// Enroll over the per-call resolver every host builds its Backups page
+    /// on, with `nest`'s store as the resolved handle.
+    async fn enroll_through_the_resolver(
+        nest: &Arc<FakeSourceNest>,
+    ) -> Result<Vec<BackupDestination>, EnrollError<FakeError, FakeError>> {
+        let handle = nest.store.clone();
+        let resolver = crate::ResolvingLedgerStore::new(move || Some(handle.clone()));
+        enroll_backup_destination(
+            nest.clone(),
+            Arc::new(FakeDestinationNest::default()),
+            &resolver,
+            OWNER_SEED,
+            resolved("Gated"),
+            SOURCE_BOUND_ID,
+        )
+        .await
+    }
+
+    /// An add made while the replica's first listing (or its escrowed keys)
+    /// is still landing waits the gate out and records the row: the gate is
+    /// a transient not-ready, and a writer never degrades. Before the write
+    /// door waited, the add answered "the account store is not ready yet"
+    /// AFTER step (4) had registered the destination, leaving a registration
+    /// the page never listed (measured on macOS: a sign-in right after a
+    /// sibling device had minted generations).
+    #[tokio::test(start_paused = true)]
+    async fn an_enroll_waits_out_a_read_gate_that_lifts() {
+        let nest = Arc::new(FakeSourceNest::default());
+        nest.store.gate_next_reads(3, crate::LEDGER_NOT_READY);
+
+        let list = enroll_through_the_resolver(&nest)
+            .await
+            .expect("the add waits the gate out");
+
+        assert_eq!(ids(&list), vec!["dest-1"]);
+        assert_eq!(nest.store.state(SOURCE_BOUND_ID).backup.destinations, list);
+    }
+
+    /// The wait is the write door's alone: a reader still answers the gate's
+    /// refusal at once, so a page renders its degraded view and refreshes on
+    /// the store-change notice rather than hanging on a nest that is away.
+    #[test]
+    fn a_plain_read_still_answers_the_gate_at_once() {
+        let nest = Arc::new(FakeSourceNest::default());
+        nest.store.gate_next_reads(1, crate::LEDGER_NOT_READY);
+        let handle = nest.store.clone();
+        let resolver = crate::ResolvingLedgerStore::new(move || Some(handle.clone()));
+
+        let err = block_on(resolver.backup_state(SOURCE_BOUND_ID)).expect_err("the gate refuses");
+        assert!(err.is_not_ready());
+    }
+
+    /// A hold only another of the account's devices can end is not waited:
+    /// opening the app there is a person's act, not seconds of assembly, so
+    /// the add answers the hold's own refusal after one read.
+    #[tokio::test(start_paused = true)]
+    async fn an_enroll_does_not_wait_on_a_sibling_hold() {
+        let nest = Arc::new(FakeSourceNest::default());
+        nest.store
+            .gate_next_reads(2, crate::LEDGER_AWAITING_SIBLING);
+
+        let err = enroll_through_the_resolver(&nest)
+            .await
+            .expect_err("the sibling hold refuses");
+
+        assert!(
+            matches!(&err, EnrollError::Record(BackupWriteError::Store(e)) if e.is_not_ready()),
+            "{err:?}"
+        );
+        let reads = nest
+            .kinds()
+            .iter()
+            .filter(|k| **k == BACKUP_STATE_READ)
+            .count();
+        assert_eq!(reads, 1, "the hold was read once, not waited on");
     }
 }

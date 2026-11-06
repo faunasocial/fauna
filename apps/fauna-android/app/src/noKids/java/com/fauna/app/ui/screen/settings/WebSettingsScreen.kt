@@ -150,7 +150,10 @@ fun WebSettingsContent(
                 Switch(
                     checked = view.enabled,
                     onCheckedChange = onSetEnabled,
-                    enabled = subdomainGate.enabled,
+                    // Painted disabled until the nest-confirmed view is in: an
+                    // early flip would be dropped without a word (parity with
+                    // tui `.enabled(view.is_some())` and Apple).
+                    enabled = subdomainGate.enabled && hydrated,
                     modifier = Modifier.testTag(Ids.WEB_SETTINGS_SUBDOMAIN_TOGGLE),
                 )
             }

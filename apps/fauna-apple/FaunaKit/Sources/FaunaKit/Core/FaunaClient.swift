@@ -28,6 +28,12 @@ public class FaunaClient {
     /// host's `fileStates`.
     public let syncStates = SyncStatesStore()
 
+    /// The account's archive links (`archive-import.md` § Linking and merging,
+    /// ruling 8) — driven from the conversations login seam
+    /// (`ConversationsVM.rebuild`), painted on the Contacts rows. A fresh one
+    /// per sign-in by construction; stopped at ``shutdown()``.
+    public let archiveLinks = ArchiveLinksStore()
+
     /// The unattested-member review roster cache
     /// (`succession-aftermath.md` § Propagation) — read by the thread-header
     /// chip marks AND the contacts badge, so both surfaces answer off the
@@ -40,7 +46,7 @@ public class FaunaClient {
 
     /// Re-read the roster. Best-effort: a failed read keeps the PREVIOUS
     /// roster rather than blanking live marks (a page repaint must not
-    /// un-flag a real review — mirrors `refreshMailEpochSchedule`'s contract).
+    /// un-flag a real review — same best-effort contract as `publishSubscriberEncapsKey`).
     public func reloadMemberReviewRoster() async {
         if let fresh = try? await api.memberReviewList(), fresh != memberReviewRoster {
             memberReviewRoster = fresh
@@ -127,7 +133,9 @@ public class FaunaClient {
     }
 
     #if os(iOS)
+    #if !FAUNA_KIDS
     public let photoBackup: PhotoBackupEngine
+    #endif
     public let backgroundScheduler: BackgroundScheduler
     public let custodianBackup: CustodianBackupEngine
     #endif
@@ -153,6 +161,10 @@ public class FaunaClient {
     /// Long-lived loop that broadcasts `.faunaReconnected` on every WS-RPC
     /// reconnect (Track-2 feed/surface re-hydrate). See `startReconnectObserver`.
     private var reconnectObserverTask: Task<Void, Never>?
+    #if !FAUNA_KIDS
+    /// The shared mail refresh is spawned once per client.
+    private var mailEpochRefreshStarted = false
+    #endif
 
     /// Long-lived loop that dispatches every inbound push (`fauna.notification`,
     /// `resync_required`, …) to the surface it touches. See `startPushObserver`.
@@ -208,6 +220,10 @@ public class FaunaClient {
     /// Long-lived loop that publishes the live `ConnectionState` to
     /// `connectionState`. See `startConnectionStateObserver`.
     private var connectionStateObserverTask: Task<Void, Never>?
+
+    /// Long-lived loop writing the session mint's confirmed identity into the
+    /// account cache. See `startSelfIdentityFollow`.
+    private var selfIdentityFollowTask: Task<Void, Never>?
 
     /// The active session's actor id (lowercase hex). Written once per session
     /// construction — the account model is a serialized switcher (one active
@@ -346,21 +362,25 @@ public class FaunaClient {
         self.deviceId = deviceId
 
         #if os(iOS)
-        self.photoBackup = PhotoBackupEngine()
         self.backgroundScheduler = BackgroundScheduler()
         self.custodianBackup = CustodianBackupEngine()
+        custodianBackup.configure(api: api, deviceId: deviceId)
+        backgroundScheduler.configure(custodianEngine: custodianBackup)
+        // Photo backup — not in the kids build (account-age-band.md § The account
+        // age band, the kids-app bullet, item (4): not *Kept*).
+        #if !FAUNA_KIDS
+        self.photoBackup = PhotoBackupEngine()
         photoBackup.configure(
             api: api,
             networkMonitor: networkMonitor,
             modelContext: modelContext,
             deviceId: deviceId
         )
-        custodianBackup.configure(api: api, deviceId: deviceId)
         // The `social.fauna.sync.upload` BGProcessingTask now carries the photo
         // leg alone — its mail-segment leg went at the slice-5 flip. The task id
         // itself stays (it is shared with photo backup).
         backgroundScheduler.configure(photoBackupEngine: photoBackup)
-        backgroundScheduler.configure(custodianEngine: custodianBackup)
+        #endif
         #endif
     }
 
@@ -415,7 +435,7 @@ public class FaunaClient {
     /// The label this device registers under in the nest's device list — the
     /// platform constant, matching linux's `fauna-linux`
     /// (`apps/fauna-linux/src/sync.rs`), never a hostname.
-    static var deviceLabel: String {
+    public static var deviceLabel: String {
         #if os(macOS)
         "fauna-macos"
         #else
@@ -435,7 +455,11 @@ public class FaunaClient {
     /// skips `start()`, and without a host the Media page's per-file badges
     /// (`SyncStatesStore`) have nothing to read — every item would render
     /// `RemoteOnly` whatever the agent's `fsid-<ref>.db` holds.
-    public func startSyncHost() async {
+    ///
+    /// `catchUp: false` leaves the iOS photo-backup catch-up pass to the caller:
+    /// `start()` runs it only once the account runtime has been asked to start
+    /// ([`catchUpPhotoBackup`] owns why).
+    public func startSyncHost(catchUp: Bool = true) async {
         guard syncHost == nil else { return }
 
         guard let host = await logTryAsync(.warn, "fauna.sync", "syncEngineHost", {
@@ -453,7 +477,7 @@ public class FaunaClient {
         syncStates.attach(host: host, containerScopedDir: Self.containerStewardDir)
         #else
         syncStates.attach(host: host)
-        #if os(iOS)
+        #if os(iOS) && !FAUNA_KIDS
         photoBackup.host = host
         // Re-register the PhotoKit change observer, and catch up, when this
         // launch starts with backup ALREADY enabled.
@@ -472,11 +496,36 @@ public class FaunaClient {
         // over one shared engine, resolved toward the platform that had it right
         // (priorities #1/#4). The catch-up pass mirrors that block too: it is what
         // uploads whatever arrived while the app was closed.
-        if UserDefaults.standard.bool(forKey: PhotoBackupControlsView.enabledKey) {
+        if AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey) {
             photoBackup.startObserving()
-            _ = try? await photoBackup.syncNewPhotos()
+        }
+        if catchUp {
+            await catchUpPhotoBackup()
         }
         #endif
+        #endif
+    }
+
+    /// The launch catch-up pass of iOS photo backup — uploads whatever arrived
+    /// while the app was closed, when this launch starts with backup ALREADY
+    /// enabled (the macOS shell runs the same pass after `start()`).
+    ///
+    /// ⚠ **It must run after the account runtime has been asked to start, never
+    /// before.** Every ingest reads the account's folder-key custody through
+    /// that runtime (the Photo Library set's sealed name is opened from it), so a
+    /// pass run before `startAccountRuntime()` refuses every photo with "its
+    /// sealed name cannot be opened from this host's custody yet" — and, awaited
+    /// inline in `start()`, it also held the runtime's start back behind itself,
+    /// for as long as the whole backlog took to fail: no custody, no preference
+    /// surfaces, and the Sync-now button disabled for minutes on every cold
+    /// launch with backup on. Started after it, the ingest's own custody retry
+    /// covers the assembly's few hundred milliseconds.
+    private func catchUpPhotoBackup() async {
+        #if os(iOS) && !FAUNA_KIDS
+        guard syncHost != nil,
+              AppDefaults.store.bool(forKey: PhotoBackupControlsView.enabledKey)
+        else { return }
+        _ = try? await photoBackup.syncNewPhotos()
         #endif
     }
 
@@ -485,8 +534,8 @@ public class FaunaClient {
     /// already owns — `deviceId`, the sync device label, the retired owner keys
     /// off the account registry (empty for an identity that never succeeded —
     /// `sync-agent.md` § Credential model → *Retired owner keys after an
-    /// identity succession*), and the live-bearer source off `api` — so the
-    /// macOS app passes only the genuinely platform-specific piece: how to
+    /// identity succession*); the bearer is the session client's own cache,
+    /// read in Rust — so the macOS app passes only the genuinely platform-specific piece: how to
     /// spawn/install the LaunchAgent. The caller owns the returned object's
     /// lifecycle (`start()` post-auth, `unprovision()` on every teardown path).
     public func makeSyncAgentProvisioner(
@@ -499,7 +548,6 @@ public class FaunaClient {
             predecessorBackupKeys: self.resolvedPredecessorBackupKeys(),
             predecessorActorIds: self.resolvedAttestedPredecessorActorIds(),
             spawner: spawner,
-            bearerSource: APIClientProvisioningBearerSource(api: api),
             reachabilityObserver: reachabilityObserver
         )
         // Register it as the remote-change nudge's target. Here rather than in the
@@ -637,122 +685,153 @@ public class FaunaClient {
         try await api.authenticate(secret: ownSecretHex)
     }
 
+    /// `authenticateOwnSeat()` as `start()` and `resume()` take it: a failed
+    /// mint is logged and the startup goes on. The mint here is only the
+    /// residual native-HTTP bearer (`APIClient.authenticate`, refreshed lazily
+    /// by `ensureAuthenticated` on the next HTTP call); the session itself is
+    /// the shared `FfiNestClient`, whose supervisor mints on every dial and
+    /// reports a refusal no retry clears through `sessionEndingVerdict`, which
+    /// `startConnectionStateObserver` escalates. So a first mint that found no
+    /// nest is the supervisor's to retry, exactly as `NestClient::connect`
+    /// treats its own eager mint (`transport-connection.md` § Connection
+    /// lifecycle, *A first mint that finds no nest still starts the
+    /// supervisor*). Throwing out of `start()` here used to skip every observer
+    /// below it: an iOS launch whose optimistic shell started the session
+    /// before the launch machine installed the reach hint
+    /// (`onboarding-provisioning.md` § Reach hint → *The session connector's
+    /// half*) minted against an empty reach table, never subscribed to the
+    /// connection state, and its indicator read `connecting` for good while
+    /// the supervisor sat connected over the hint. Returns whether the mint
+    /// succeeded.
+    @discardableResult
+    func mintOwnSeatBearerOrLeaveItToTheSupervisor(_ phase: String) async -> Bool {
+        do {
+            try await authenticateOwnSeat()
+            return true
+        } catch {
+            logMessage(level: .warn, target: "fauna.client", message:
+                "\(phase): first bearer mint failed (\(error)); the session's reconnect supervisor retries it and the startup goes on")
+            return false
+        }
+    }
+
     /// Full startup: authenticate, then start the long-lived observer loops
     /// (reconnect re-hydrate, connection-status, push dispatch) and the in-process
     /// byte-sync engine host. The real WS-RPC socket is opened lazily by the shared
     /// `FfiNestClient` (the observers `ensureNestConnected()` at subscribe time).
     public func start() async {
-        do {
-            try await authenticateOwnSeat()
+        await mintOwnSeatBearerOrLeaveItToTheSupervisor("start")
 
-            #if os(iOS)
-            backgroundScheduler.registerTasks()
-            backgroundScheduler.scheduleCustodianPull()
-            backgroundScheduler.scheduleWidgetRefresh()
-            #endif
+        #if os(iOS)
+        backgroundScheduler.registerTasks()
+        backgroundScheduler.scheduleCustodianPull()
+        backgroundScheduler.scheduleWidgetRefresh()
+        #endif
 
-            // Drive the reconnect re-hydrate loop (re-pull visible surfaces on
-            // every WS-RPC reconnect — the feed has no poll backstop).
-            startReconnectObserver()
+        // Drive the reconnect re-hydrate loop (re-pull visible surfaces on
+        // every WS-RPC reconnect — the feed has no poll backstop).
+        startReconnectObserver()
 
-            // Publish the live connection state to the global `connection-status`
-            // indicator (top of the shell). One observer for the app lifetime,
-            // like the reconnect observer (the single FfiNestClient supervisor
-            // drives both watches across reconnects).
-            startConnectionStateObserver()
+        // Publish the live connection state to the global `connection-status`
+        // indicator (top of the shell). One observer for the app lifetime,
+        // like the reconnect observer (the single FfiNestClient supervisor
+        // drives both watches across reconnects).
+        startConnectionStateObserver()
 
-            // Central push dispatch: re-fetch the surface each inbound push
-            // touches (`fauna.notification` → notifications, `resync_required` →
-            // the reconnect sweep). One observer for the app lifetime, off the
-            // same long-lived FfiNestClient broker.
-            startPushObserver()
+        // Central push dispatch: re-fetch the surface each inbound push
+        // touches (`fauna.notification` → notifications, `resync_required` →
+        // the reconnect sweep). One observer for the app lifetime, off the
+        // same long-lived FfiNestClient broker.
+        startPushObserver()
 
-            // Dedicated knock seam: `fauna.knock` is its own broker kind, not a
-            // push-event variant, so the generic push observer above can't carry
-            // it — a knock reaches a mounted contacts screen only through this loop
-            // (mirrors windows `StartKnockPump` / android `startKnockPump`).
-            startKnockObserver()
+        // Dedicated knock seam: `fauna.knock` is its own broker kind, not a
+        // push-event variant, so the generic push observer above can't carry
+        // it — a knock reaches a mounted contacts screen only through this loop
+        // (mirrors windows `StartKnockPump` / android `startKnockPump`).
+        startKnockObserver()
 
-            // Nests auto-renew: desktop ticks at start and on the shared cadence;
-            // iOS ticks once here (cold launch is a foreground) and again on each
-            // `resume()` — the phones rule, no timer.
-            #if os(iOS)
-            Task { await nestsAutoRenewTick() }
-            #else
-            startNestsAutoRenewLoop()
-            #endif
+        // Nests auto-renew: desktop ticks at start and on the shared cadence;
+        // iOS ticks once here (cold launch is a foreground) and again on each
+        // `resume()` — the phones rule, no timer.
+        #if os(iOS)
+        Task { await nestsAutoRenewTick() }
+        #else
+        startNestsAutoRenewLoop()
+        #endif
 
-            // Mail content-sealing epoch schedule: refresh once per successful
-            // connect (best-effort, log-only) so the publish paths use the
-            // current epoch. A no-op when mail isn't enabled — see
-            // `refreshMailEpochSchedule`. The reconnect leg lives in
-            // `startReconnectObserver` (the "(re)" half of once-per-(re)connect).
-            #if !FAUNA_KIDS
-            Self.refreshMailEpochSchedule(api: api)
-            #endif
+        // Mail content-sealing epoch schedule: the shared UniFFI trigger
+        // refreshes it now and after every reconnect, for the client's life
+        // (best-effort, log-only; a no-op when mail isn't enabled). The
+        // encaps-key publish stays a Swift leg here and in
+        // `startReconnectObserver`.
+        #if !FAUNA_KIDS
+        startMailEpochRefreshOnEveryConnect()
+        Self.publishSubscriberEncapsKey(api: api)
+        #endif
 
-            // The post-succession aftermath (`succession-aftermath.md` § Re-key
-            // scope's `BackupKey` corpus row: "started at first successor
-            // sign-in, surfaced with progress, resumed until complete"). Every
-            // authenticated start, not only one that just ran a ceremony: the
-            // pass is resumable and no-ops for an identity that never
-            // succeeded, and a re-seal cut short by a lost connection is
-            // finished by the NEXT sign-in — which has no ceremony to notice.
-            // Fire-and-forget, best-effort, like the two passes below it.
-            // The ceremony's raise context is parked in the account registry by
-            // shared Rust and drained by the pass itself — nothing is carried
-            // here.
-            SuccessionAftermath.run(
-                api: api,
-                onConfigStageSettled: { [weak self] in
-                    Task {
-                        await self?.reloadMemberReviewRoster()
-                        await self?.reloadInheritedFilterMarks()
-                        await self?.noteMailSettled()
-                    }
-                },
-                onProgress: { [weak self] leg, line in
-                    Task { await self?.recordAftermathProgress(leg: leg, line: line) }
-                })
+        // The post-succession aftermath (`succession-aftermath.md` § Re-key
+        // scope's `BackupKey` corpus row: "started at first successor
+        // sign-in, surfaced with progress, resumed until complete"). Every
+        // authenticated start, not only one that just ran a ceremony: the
+        // pass is resumable and no-ops for an identity that never
+        // succeeded, and a re-seal cut short by a lost connection is
+        // finished by the NEXT sign-in — which has no ceremony to notice.
+        // Fire-and-forget, best-effort, like the two passes below it.
+        // The ceremony's raise context is parked in the account registry by
+        // shared Rust and drained by the pass itself — nothing is carried
+        // here.
+        SuccessionAftermath.run(
+            api: api,
+            onConfigStageSettled: { [weak self] in
+                Task {
+                    await self?.reloadMemberReviewRoster()
+                    await self?.reloadInheritedFilterMarks()
+                    await self?.noteMailSettled()
+                }
+            },
+            onProgress: { [weak self] leg, line in
+                Task { await self?.recordAftermathProgress(leg: leg, line: line) }
+            })
 
-            // S8 D1 + D3 — the client-driven seal backfill: stamp any owned set
-            // whose sealed siblings are still missing, then the snapshot
-            // tag-seal stamps per owned set (D3 — snapshots are immutable, so
-            // the stamp kind is that plane's only catch-up path). Once per
-            // session start, best-effort (the shared `seal_backfill`
-            // module every UniFFI app calls).
-            Self.runSealBackfill(api: api)
+        // S8 D1 + D3 — the client-driven seal backfill: stamp any owned set
+        // whose sealed siblings are still missing, then the snapshot
+        // tag-seal stamps per owned set (D3 — snapshots are immutable, so
+        // the stamp kind is that plane's only catch-up path). Once per
+        // session start, best-effort (the shared `seal_backfill`
+        // module every UniFFI app calls).
+        Self.runSealBackfill(api: api)
 
-            // Byte sync: build the in-process engine host, which starts a resident
-            // engine per persisted folder binding and converges each one (the old
-            // hardcoded `pullChanges("documents"/"photos")` pair is gone with the
-            // Swift engine — set names come from the user's bindings now).
-            await startSyncHost()
+        // Byte sync: build the in-process engine host, which starts a resident
+        // engine per persisted folder binding and converges each one (the old
+        // hardcoded `pullChanges("documents"/"photos")` pair is gone with the
+        // Swift engine — set names come from the user's bindings now).
+        await startSyncHost(catchUp: false)
 
-            // Custodian foreground push-kick, started unconditionally here for the
-            // same reason `startSyncHost()` is above: `scenePhase`'s `.onChange`
-            // does not fire for the phase already active at cold launch, so a
-            // launch straight into the foreground would otherwise never start it
-            // until the FIRST background/foreground round trip. `suspend()`
-            // correctly tears it down if this launch turns out to be a
-            // background-only BGProcessingTask wake.
-            #if os(iOS)
-            await custodianBackup.startForegroundPushKick()
-            #endif
-        } catch {
-            logMessage(level: .error, target: "fauna.client", message: "start error: \(error)")
-        }
+        // Custodian foreground push-kick, started unconditionally here for the
+        // same reason `startSyncHost()` is above: `scenePhase`'s `.onChange`
+        // does not fire for the phase already active at cold launch, so a
+        // launch straight into the foreground would otherwise never start it
+        // until the FIRST background/foreground round trip. `suspend()`
+        // correctly tears it down if this launch turns out to be a
+        // background-only BGProcessingTask wake.
+        #if os(iOS)
+        await custodianBackup.startForegroundPushKick()
+        #endif
 
-        // Host the W3 (account-data-plane.md § Workstreams) account-store runtime (see the method). **Outside the
-        // do/catch on purpose**, and it is the same independence the plane is
-        // built on: the account runtime shares nothing with the observers, the
-        // sync host or the mail-epoch refresh above — `memberships: None` is a
-        // supported wiring, and it needs no conversations rail at all — so a
-        // throw from any of them (the `authenticate` at the top most of all)
-        // must not silently take the account plane down with it. Inside the
-        // block, one failed bearer mint left every preference surface on the
-        // blob rail with nothing on screen saying so.
+        // Host the W3 (account-data-plane.md § Workstreams) account-store runtime (see the method). It is the
+        // same independence the plane is built on: the account runtime shares
+        // nothing with the observers, the sync host or the mail-epoch refresh
+        // above — `memberships: None` is a supported wiring, and it needs no
+        // conversations rail at all — so nothing above may take the account
+        // plane down with it. When the steps above sat in one do/catch behind
+        // the bearer mint, one failed mint left every preference surface on the
+        // blob rail with nothing on screen saying so (and, since the same
+        // catch skipped the observers, the connection indicator on
+        // `connecting` for good).
         await startAccountRuntime()
+
+        // After the runtime, never before it — see the method.
+        await catchUpPhotoBackup()
     }
 
     /// Host the **W3 account-store runtime** in this process
@@ -861,6 +940,10 @@ public class FaunaClient {
                 appDataDir: AccountStateDir.base.path,
                 storeContainer: storeContainer,
                 ownDeviceId: ownDeviceId,
+                // The app default the engine hosts register under too: the
+                // ceremony names this machine's row with it, never the `fauna`
+                // placeholder (`devices.md` § Device names).
+                deviceLabel: FaunaClient.deviceLabel,
                 // The registry itself: shared Rust resolves this session's
                 // attested predecessors off it — the ids and the schedules
                 // their preference rows are carried under.
@@ -928,11 +1011,13 @@ public class FaunaClient {
             while !Task.isCancelled {
                 if await sub.next() == nil { break }  // nil ⇒ client torn down
                 NotificationCenter.default.post(name: .faunaReconnected, object: nil)
-                // Refresh the mail epoch schedule on each reconnect too
-                // (best-effort, log-only) — the "(re)" half of
-                // once-per-(re)connect; the initial-connect leg fires in `start()`.
+                if staleSurfacesOnReconnect().devices {
+                    NotificationCenter.default.post(name: .faunaDevicesStale, object: nil)
+                }
+                // Re-publish the encaps key on each reconnect (best-effort,
+                // log-only); the mail epoch refresh rides the shared trigger.
                 #if !FAUNA_KIDS
-                Self.refreshMailEpochSchedule(api: api)
+                Self.publishSubscriberEncapsKey(api: api)
                 #endif
             }
         }
@@ -962,23 +1047,34 @@ public class FaunaClient {
     }
 
 #if !FAUNA_KIDS
-    /// Best-effort, log-only refresh of the mail content-sealing **epoch
-    /// schedule**, fired once per successful (re)connect — the macOS/iOS leg of
-    /// `encryption-at-rest.md` § Capability tiering → Content-sealing epochs
-    /// (spec `2026-07-18-mail-content-sealing-epochs-design.md` § 3). The shared,
-    /// idempotent `MailSettingsMachine.refreshEpochSchedule()` is a no-op when
-    /// mail isn't enabled, so it is always safe to call unconditionally —
-    /// fire-and-forget (linux
-    /// `FaunaClient::refresh_mail_epoch_schedule`, wired in the `AuthSuccess` arm;
-    /// android (`KidsExcisedApi.startMailEpochRefresh`, the shared UniFFI trigger on every connect);
-    /// web's one-shot-per-session
-    /// `$effect`). Static + `api`-only so the reconnect observer (which captures
-    /// `api`, never `self`) can call it without retaining `FaunaClient`.
-    static func refreshMailEpochSchedule(api: APIClient) {
+    /// Start the shared mail connect-time refresh (`mail-credentials.md` § Hard
+    /// revoke → *Published before the nest moves*, rule (4)): the UniFFI export
+    /// `startMailEpochRefreshOnEveryConnect` refreshes the content-sealing epoch
+    /// schedule now and after every reconnect, for the client's life — the same
+    /// shared trigger tui, linux and android spawn. Spawned ONCE per signed-in
+    /// client (idempotent here); called from `start()` and from the macOS e2e
+    /// agent, which skips `start()`. Best-effort and log-only.
+    public func startMailEpochRefreshOnEveryConnect() {
+        guard !mailEpochRefreshStarted else { return }
+        mailEpochRefreshStarted = true
+        let api = self.api
         Task {
-            guard let machine = try? await api.mailSettingsMachine() else { return }
-            _ = await logTryAsync(.warn, "fauna.client", "refreshEpochSchedule") {
-                try await machine.refreshEpochSchedule()
+            _ = await logTryAsync(.warn, "fauna.client", "startMailEpochRefresh") {
+                try await api.startMailEpochRefreshOnEveryConnect()
+            }
+        }
+    }
+
+    /// Best-effort, log-only publish of the subscriber encapsulation-key
+    /// registry entry (`post-quantum.md` § surface B), fired at the same
+    /// post-auth edge as the mail epoch refresh — once per successful
+    /// (re)connect. Idempotent in the shared `SubscriptionsClient`; without the
+    /// entry the nest refuses `fauna:follow:write` with `pq_key_unpublished`.
+    /// The macOS/iOS leg of tui's `spawn_publish_subscriber_encaps_key`.
+    static func publishSubscriberEncapsKey(api: APIClient) {
+        Task {
+            _ = await logTryAsync(.warn, "fauna.client", "publishSubscriberEncapsKey") {
+                try await api.subscriptionsPublishEncapsKey()
             }
         }
     }
@@ -986,7 +1082,7 @@ public class FaunaClient {
 
     /// The S8 D1 + D3 client-driven seal backfill (file-sync.md § Sealed names
     /// & paths → Implementation status today). Fire-and-forget, best-effort —
-    /// mirrors `refreshMailEpochSchedule`'s shape. The D1-then-D3-skip-member
+    /// mirrors `publishSubscriberEncapsKey`'s shape. The D1-then-D3-skip-member
     /// sequencing lives once in the shared `seal_backfill` sweep
     /// (`APIClient.runSealBackfillSweep`), which every UniFFI app now calls
     /// instead of hand-rolling the loop; this glue only logs — never throws,
@@ -1015,21 +1111,37 @@ public class FaunaClient {
     /// `isAdmin` — `MacAppState` and FaunaKit's shared `AppState` are distinct
     /// types, so the assignment itself stays per-caller). Fail-closed: any
     /// error ⇒ not admin, so a failed probe hides the admin entry rather than
-    /// leaking it (the web bug the gating tests guard against).
-    public static func refreshAdminStatus(client: FaunaClient?) async -> Bool {
+    /// leaking it (the web bug the gating tests guard against) — **at login**.
+    /// On a reconnect re-read the caller passes the gate's `lastAnswer`, and a
+    /// failed read then moves nothing (`transport.md` § Which surfaces a push
+    /// invalidates, the `admin_gate` flag): a confirmed admin keeps `admin-tab`
+    /// through a nest that is briefly unreachable. The once-per-session admin
+    /// effects fire on the false→true transition only.
+    public static func refreshAdminStatus(client: FaunaClient?, lastAnswer: Bool = false) async -> Bool {
         guard let client else {
             logMessage(level: .info, target: "fauna.app", message: "[admin-gate] no client → isAdmin=false")
             return false
         }
-        let isAdmin = (try? await client.api.amIAdmin()) ?? false
-        logMessage(level: .info, target: "fauna.app", message: "[admin-gate] am_i_admin=\(isAdmin)")
-        if isAdmin {
+        let read = try? await client.api.amIAdmin()
+        let outcome = resolveAdminGate(read: read, lastAnswer: lastAnswer)
+        logMessage(
+            level: .info, target: "fauna.app",
+            message: "[admin-gate] am_i_admin=\(read.map(String.init(describing:)) ?? "unreachable") → isAdmin=\(outcome.isAdmin)")
+        if outcome.becameAdmin {
             // The admin auto-default (long-term-store.md § Multi-account evolution):
             // an admin identity gets require-confirm-to-activate ON unless the user
             // ever touched its toggle.
             FaunaAccounts.autoEnableRequireConfirmForActiveAdmin()
         }
-        return isAdmin
+        return outcome.isAdmin
+    }
+
+    /// The pure decision behind `refreshAdminStatus`: `read == nil` is a failed
+    /// read (keeps `lastAnswer`); `becameAdmin` is the false→true transition the
+    /// once-per-session admin effects key on.
+    static func resolveAdminGate(read: Bool?, lastAnswer: Bool) -> (isAdmin: Bool, becameAdmin: Bool) {
+        let isAdmin = read ?? lastAnswer
+        return (isAdmin, isAdmin && !lastAnswer)
     }
 
     /// Read the app-global unread notification count (`notifications.md`
@@ -1108,6 +1220,19 @@ public class FaunaClient {
                     // events; mirrors android's `addressBookChangedTick`).
                     NotificationCenter.default.post(name: .faunaAddressBookChanged, object: nil)
                 }
+                if stale.devices {
+                    // A `ResyncRequired` gap may have swallowed any of the Devices
+                    // & Folders reads' pushes; a reconnect takes the arm in
+                    // `startReconnectObserver`.
+                    NotificationCenter.default.post(name: .faunaDevicesStale, object: nil)
+                }
+                if stale.nestInfo {
+                    // The nest's self-description changed (`fauna.nest.info_changed`):
+                    // `NestRulesStore` re-reads it, folds the signed rules and
+                    // raises the one-line changed notice (`nest-rules.md` §
+                    // Acceptance at joining, and a change of rules).
+                    NotificationCenter.default.post(name: .faunaNestInfoChanged, object: nil)
+                }
                 if case .syncChanged(let folder, let folderHash) = event {
                     // A record landed in a folder this actor participates in
                     // (file-sync.md § Remote-change nudge). It has TWO possible
@@ -1174,6 +1299,26 @@ public class FaunaClient {
                     // (mail-spam.md § Implementation status, item 5; the twin of
                     // tui's `settings::mail_spam_resync_op`).
                     NotificationCenter.default.post(name: .faunaMailSpamChanged, object: nil)
+                }
+                if stale.mailExport {
+                    // Another device started, advanced or ended an export of
+                    // this account. The open Export page dispatches a `Refresh`
+                    // to the shared machine (`onMailExportChanged`) and never
+                    // reads the payload — what to adopt is the machine's rule
+                    // (mail-export.md § A failed export is a record the wizard
+                    // shows until the user moves on; the twin of tui's
+                    // `mail_export_resync_op`).
+                    NotificationCenter.default.post(name: .faunaMailExportChanged, object: nil)
+                }
+                if stale.mailImport {
+                    // Another device started, advanced or ended an import of
+                    // this account. The open Import page re-reads the session
+                    // through the shared machine (`onMailImportChanged`) and
+                    // never reads the payload — what to adopt is the machine's
+                    // rule (mailbox-migration.md § A failed import is a record
+                    // the wizard shows until the user moves on; the twin of
+                    // tui's `Op::ResyncMailImport`).
+                    NotificationCenter.default.post(name: .faunaMailImportChanged, object: nil)
                 }
                 if stale.media {
                     // The Media page's cross-set all-media aggregate, while Media
@@ -1307,6 +1452,42 @@ public class FaunaClient {
         }
     }
 
+    /// Keep the account's server-data cache (handle / domain / tier) and
+    /// `session.handle` current from the session client's own bearer mint —
+    /// `FfiNestClient.subscribeSelfIdentity()`, tui's
+    /// `spawn_self_identity_follow` and linux's `follow_self_identity`
+    /// (`transport-connection.md` § The dial budget). The current identity is
+    /// applied at once and every later one too, so a server-side rename lands
+    /// at the next hourly re-mint. No challenge of its own: an authenticated
+    /// launch used to dial a second one here, a second full mint for the actor
+    /// at the same instant. The identity re-check that dial doubled as
+    /// (`transport-trust.md` § Post-auth surfacing, channel 3) is the same
+    /// mint's own verdict, which `startConnectionStateObserver` escalates.
+    ///
+    /// Run by every sign-in path, the launch and the e2e session patch alike;
+    /// idempotent (cancels any prior loop), cancelled by ``shutdown()``, and it
+    /// writes only THIS instance's own account row (`ownActorIdHex`).
+    @MainActor
+    public func startSelfIdentityFollow(session: SessionState) {
+        selfIdentityFollowTask?.cancel()
+        guard let actorId = ownActorIdHex else { return }
+        let api = self.api
+        selfIdentityFollowTask = Task { @MainActor [weak session] in
+            let subscribed = await logTryAsync(.warn, "fauna.client", "subscribeSelfIdentity") {
+                try await api.subscribeSelfIdentity()
+            }
+            guard let sub = subscribed ?? nil else {
+                logMessage(level: .warn, target: "fauna.client",
+                           message: "[self-identity] the session client cannot say who it is signed in as")
+                return
+            }
+            let registry = FaunaAccounts.registry()
+            await followSelfIdentity(next: { await sub.next() }) { identity in
+                applySelfIdentity(identity, actorId: actorId, registry: registry, session: session)
+            }
+        }
+    }
+
     /// Tear this session down for good — the counterpart to ``start()``.
     ///
     /// **This is not ``suspend()``.** `suspend()` is iOS-only and deliberately *keeps*
@@ -1347,6 +1528,8 @@ public class FaunaClient {
         reconnectObserverTask = nil
         connectionStateObserverTask?.cancel()
         connectionStateObserverTask = nil
+        selfIdentityFollowTask?.cancel()
+        selfIdentityFollowTask = nil
         pushObserverTask?.cancel()
         pushObserverTask = nil
         knockObserverTask?.cancel()
@@ -1355,6 +1538,7 @@ public class FaunaClient {
         storeChangeWatch = nil
         nestsAutoRenewTask?.cancel()
         nestsAutoRenewTask = nil
+        archiveLinks.stop()
 
         // 2. Sync: drop the host. It holds no resident engine (construct-run-drop
         //    only — `startSyncHost()`), so there is nothing to stop first.
@@ -1370,7 +1554,9 @@ public class FaunaClient {
         //    just left.
         #if os(iOS)
         custodianBackup.stopForegroundPushKick()
+        #if !FAUNA_KIDS
         photoBackup.host = nil
+        #endif
         #endif
 
         // 4. The W3 account runtime — a PROCESS-global this client installed, so
@@ -1387,12 +1573,29 @@ public class FaunaClient {
         //    the pump role over). iOS's background path is `suspend()`, which
         //    deliberately keeps this running.
         await api.stopAccountRuntime()
+
+        // 5. The WS-RPC connection, LAST — the steps above may still speak over it.
+        //    Its reconnect supervisor holds its own references, so dropping this
+        //    client stops none of it: every teardown used to leave the outgoing
+        //    actor's connection redialling with that actor's secret for the life
+        //    of the process. A nest restart then made each leaked supervisor
+        //    present a dead bearer at once — 13 for one admin across an e2e
+        //    module's resets, past the nest's failed-credential bucket of 10 a
+        //    minute (`transport-connection.md` § Abuse posture → *The
+        //    failed-credential throttle*), so the next stale dial of that actor
+        //    from the same address, the harness's, was answered `429`. `retire()`
+        //    also refuses later connects from the session's in-flight work.
+        //    Unprovisioning the sync agent, which some callers run after this,
+        //    speaks to the local agent, not over this connection.
+        await api.retire()
     }
 
     /// Pause when app goes to background (iOS only — macOS never backgrounds).
     public func suspend() {
         #if os(iOS)
+        #if !FAUNA_KIDS
         backgroundScheduler.scheduleUpload()
+        #endif
         backgroundScheduler.scheduleCustodianPull()
         backgroundScheduler.scheduleWidgetRefresh()
         // The custodian's foreground push-debounce loop has no periodic tick —
@@ -1407,24 +1610,20 @@ public class FaunaClient {
     /// Resume when app comes to foreground (iOS only).
     public func resume() async {
         #if os(iOS)
-        do {
-            try await authenticateOwnSeat()
-            // The real WS-RPC socket reconnects through the shared `FfiNestClient`
-            // supervisor (which the reconnect/push/connection-state observers ride
-            // across foreground-after-background); no per-resume socket re-open here.
-            // A host that failed to build at `start()` gets its retry here
-            // (`startSyncHost()` early-returns once one exists).
-            await startSyncHost()
-            // Low-latency foreground wake for the custodian, the sibling of the
-            // periodic BGProcessingTask (mirrors android's
-            // `CustodianPushKick.onStart`). Idempotent — a redundant call while
-            // already holding a handle is a no-op.
-            await custodianBackup.startForegroundPushKick()
-            // The auto-renew tick at foreground (phones: no timer).
-            await nestsAutoRenewTick()
-        } catch {
-            logMessage(level: .error, target: "fauna.client", message: "resume error: \(error)")
-        }
+        await mintOwnSeatBearerOrLeaveItToTheSupervisor("resume")
+        // The real WS-RPC socket reconnects through the shared `FfiNestClient`
+        // supervisor (which the reconnect/push/connection-state observers ride
+        // across foreground-after-background); no per-resume socket re-open here.
+        // A host that failed to build at `start()` gets its retry here
+        // (`startSyncHost()` early-returns once one exists).
+        await startSyncHost()
+        // Low-latency foreground wake for the custodian, the sibling of the
+        // periodic BGProcessingTask (mirrors android's
+        // `CustodianPushKick.onStart`). Idempotent — a redundant call while
+        // already holding a handle is a no-op.
+        await custodianBackup.startForegroundPushKick()
+        // The auto-renew tick at foreground (phones: no timer).
+        await nestsAutoRenewTick()
         #endif
     }
 
@@ -1457,6 +1656,10 @@ public extension Notification.Name {
     /// WS-RPC client reconnected (after the first connect). Live surfaces observe
     /// this via the `onReconnect` modifier and re-pull their snapshot.
     static let faunaReconnected = Notification.Name("faunaReconnected")
+    /// `FfiStaleSurfaces.devices`: the Devices & Folders lists and each open
+    /// folder row's rosters are stale (`transport.md` § Which surfaces a push
+    /// invalidates).
+    static let faunaDevicesStale = Notification.Name("faunaDevicesStale")
     /// The WS-RPC supervisor stopped on a session-ending verdict (posted once by
     /// `FaunaClient`'s connection-state observer, `object` the client, the
     /// verdict under ``FaunaSessionEnding/verdictKey``). The app root observes it
@@ -1513,6 +1716,12 @@ public extension Notification.Name {
     /// `FfiStaleSurfaces.mail_spam`: another device changed this account's spam
     /// training history. The open Spam page observes it via `onMailSpamChanged`.
     static let faunaMailSpamChanged = Notification.Name("faunaMailSpamChanged")
+    /// `FfiStaleSurfaces.mail_export`: an export of this account changed on
+    /// another device. The open Export page observes it via `onMailExportChanged`.
+    static let faunaMailExportChanged = Notification.Name("faunaMailExportChanged")
+    /// `FfiStaleSurfaces.mail_import`: an import of this account changed on
+    /// another device. The open Import page observes it via `onMailImportChanged`.
+    static let faunaMailImportChanged = Notification.Name("faunaMailImportChanged")
     /// The account registry was mutated by something OTHER than the switcher's own
     /// view model — today the admin auto-default
     /// (`FaunaAccounts.autoEnableRequireConfirmForActiveAdmin`), which writes

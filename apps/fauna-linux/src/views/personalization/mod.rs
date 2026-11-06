@@ -48,17 +48,12 @@ pub struct PersonalizationHandles {
     pub trained_topics_refresh: Rc<dyn Fn()>,
 }
 
-/// Bridges `LabelerCatalogMachine` notifications to the GTK main loop. Mirrors
-/// `GtkDevicesObserver` / `GtkMediaObserver`.
-struct GtkLabelerCatalogObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl LabelerCatalogObserver for GtkLabelerCatalogObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges `LabelerCatalogMachine` notifications to the GTK main loop. Mirrors
+    /// `GtkDevicesObserver` / `GtkMediaObserver`.
+    GtkLabelerCatalogObserver,
+    LabelerCatalogObserver
+);
 
 /// Build the shared machine **with its grant seams**: subscribing a `wasm`
 /// mail labeler mints the per-labeler grant to this nest's mail service and

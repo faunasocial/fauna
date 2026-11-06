@@ -47,6 +47,41 @@ use crate::routes::AppState;
 /// Items one drain pass takes — the family's page ceiling.
 const DRAIN_PAGE: u32 = fauna_protocol::bridged_conversations::BRIDGED_PAGE_MAX;
 
+/// Direct Notes one local account accepts a minute, whatever actors and
+/// sources send them — the gift-wrap inbox's per-recipient rate
+/// (`crate::nostr::relay_endpoint::GIFT_WRAP_INBOX_PER_RECIPIENT_PER_MINUTE`)
+/// on this leg, so rotating actors and sources cannot fill an account's
+/// bridged plane at the inbox's per-source rate (`activitypub.md` § Security
+/// posture → *Inbound*). A hard constant, never a configuration surface.
+pub const DM_INBOUND_PER_RECIPIENT_PER_MINUTE: u32 = 30;
+
+/// The per-recipient limiter, keyed by the local account.
+pub type DmRecipientLimiter = governor::RateLimiter<
+    [u8; 32],
+    governor::state::keyed::DashMapStateStore<[u8; 32]>,
+    governor::clock::DefaultClock,
+>;
+
+/// Build the per-recipient limiter with the hard-coded quota.
+#[must_use]
+pub fn new_dm_recipient_limiter() -> Arc<DmRecipientLimiter> {
+    let quota = governor::Quota::per_minute(
+        std::num::NonZeroU32::new(DM_INBOUND_PER_RECIPIENT_PER_MINUTE).expect("non-zero rate"),
+    );
+    Arc::new(governor::RateLimiter::dashmap(quota))
+}
+
+/// What [`ingest_non_public_note`] did with one Note.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DmIngest {
+    /// Rows stored.
+    pub stored: u64,
+    /// A recipient's per-minute rate refused the Note: the inbox answers
+    /// `429`, so an honest sender retries it rather than losing it (a
+    /// redelivery is a duplicate for every recipient that already took it).
+    pub rate_limited: bool,
+}
+
 /// Does the leg serve `account` — an enabled ActivityPub actor?
 ///
 /// # Errors
@@ -191,9 +226,11 @@ fn published_ms(published: &str) -> i64 {
 }
 
 /// Deliver one non-public `Create{Note}` to the local actors it directly
-/// addresses, or drop it. Returns how many rows this call stored. The caller
-/// answers `202 Accepted` either way — no retry, and no oracle distinguishing
-/// "no such user" from "not delivered".
+/// addresses, or drop it. Returns how many rows this call stored, and whether
+/// a recipient's rate refused it. The caller answers `202 Accepted` otherwise
+/// — no retry, and no oracle distinguishing "no such user" from "not
+/// delivered"; a rate refusal is `429`, the answer the inbox's per-source
+/// limit already gives, and only after a recipient's minute is spent.
 ///
 /// # Errors
 /// A database or seal fault.
@@ -201,7 +238,7 @@ pub async fn ingest_non_public_note(
     state: &Arc<AppState>,
     activity: &Value,
     note: &ApNote,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<DmIngest> {
     let mut to = note.to.clone();
     to.extend(string_array(activity.get("to")));
     let mut cc = note.cc.clone();
@@ -211,7 +248,7 @@ pub async fn ingest_non_public_note(
             ap_url = %note.id,
             "ap Create: dropping non-public Note (followers-only); no projection"
         );
-        return Ok(0);
+        return Ok(DmIngest::default());
     }
 
     // The peer is the signer. A `Create` claims authorship, so the Note must
@@ -222,7 +259,7 @@ pub async fn ingest_non_public_note(
     let signed_actor = activity.get("actor").and_then(Value::as_str).unwrap_or("");
     let Some(peer) = canonical_actor(signed_actor) else {
         tracing::warn!(ap_url = %note.id, "ap Create: direct Note with no usable signer");
-        return Ok(0);
+        return Ok(DmIngest::default());
     };
     if !same_actor_identity(signed_actor, &note.attributed_to)
         || !same_origin(signed_actor, &note.id)
@@ -233,7 +270,7 @@ pub async fn ingest_non_public_note(
             ap_url = %note.id,
             "ap Create: dropping direct Note not authored by its signer (spoof attempt)"
         );
-        return Ok(0);
+        return Ok(DmIngest::default());
     }
 
     // Every enabled local actor the Note names in `to`. `cc` alone is not
@@ -259,15 +296,25 @@ pub async fn ingest_non_public_note(
             ap_url = %note.id,
             "ap Create: dropping direct Note addressed to no enabled local account"
         );
-        return Ok(0);
+        return Ok(DmIngest::default());
     }
 
     let text = direct_note_text(note);
-    let mut stored = 0u64;
+    let mut out = DmIngest::default();
     for recipient in recipients {
         let Ok(account) = fauna_core::hex32::decode(&recipient.actor_id) else {
             continue;
         };
+        if let Some(ref limiter) = state.activitypub.dm_recipient_limiter
+            && limiter.check_key(&account).is_err()
+        {
+            tracing::warn!(
+                ap_url = %note.id,
+                "ap Create: recipient's direct-Note rate is spent — answered 429"
+            );
+            out.rate_limited = true;
+            continue;
+        }
         let inbound = InboundDm {
             peer: &peer,
             sender: &peer,
@@ -278,7 +325,7 @@ pub async fn ingest_non_public_note(
         };
         match bridge_legs::deposit_gated(&state.db, &ACTIVITYPUB, &account, &inbound).await? {
             Inbound::Stored => {
-                stored += 1;
+                out.stored += 1;
                 bridge_legs::notify_changed(state, &ACTIVITYPUB, &account, &peer);
             }
             Inbound::Duplicate => {}
@@ -296,7 +343,7 @@ pub async fn ingest_non_public_note(
             ),
         }
     }
-    Ok(stored)
+    Ok(out)
 }
 
 /// Drain the leg's outbox: every queued item is opened, built into a
@@ -430,7 +477,56 @@ mod tests {
                 .unwrap();
         }
         crate::test_support::seed_recipient_seal_key(&state.db, &ALICE, &SEED).await;
+        // The production limiter, as `lib.rs` builds it.
+        let mut state = state;
+        state.activitypub.dm_recipient_limiter = Some(new_dm_recipient_limiter());
         Arc::new(state)
+    }
+
+    /// [`create`] signed by `actor`, its Note at `ap_url`.
+    fn create_by(actor: &str, ap_url: &str, content: &str) -> Value {
+        let mut activity = create(ap_url, content, json!([ALICE_URL]), json!([]));
+        activity["actor"] = json!(actor);
+        activity["object"]["attributedTo"] = json!(actor);
+        activity
+    }
+
+    /// ALICE's room with `peer`, if one exists.
+    async fn room_of(state: &Arc<AppState>, peer: &str) -> Option<Vec<u8>> {
+        family::rooms(state, ALICE)
+            .await
+            .into_iter()
+            .find(|r| r.far_room_id == peer)
+            .map(|r| r.room_id.to_vec())
+    }
+
+    /// Inbound rows in `room`, counted at the store (the fetch is paged).
+    async fn inbound_rows(state: &Arc<AppState>, room: &[u8]) -> i64 {
+        let conn = state.db.conn().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM bridge_conversation_messages
+              WHERE room_id = ?1 AND direction = 'in'",
+            rusqlite::params![room],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Fill `room` with inbound rows up to `n`, in one statement — the state a
+    /// flood leaves, without paying for the flood.
+    async fn fill_room(state: &Arc<AppState>, room: &[u8], n: i64) {
+        let have = inbound_rows(state, room).await;
+        let conn = state.db.conn().await;
+        conn.execute(
+            "WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < ?3)
+             INSERT INTO bridge_conversation_messages
+                 (room_id, actor_id, direction, far_message_id, sender, sealed_content,
+                  created_at, received_at)
+             SELECT ?1, ?2, 'in', 'https://remote.example/notes/flood-' || i, 'flood', x'00', 0, 0
+               FROM k",
+            rusqlite::params![room, &ALICE[..], n - have],
+        )
+        .unwrap();
     }
 
     fn create(ap_url: &str, content: &str, to: Value, cc: Value) -> Value {
@@ -567,6 +663,110 @@ mod tests {
                 .unwrap();
         }
         assert!(family::rooms(&state, ALICE).await.is_empty());
+    }
+
+    /// One peer's flood stops at its room's cap, and a second
+    /// peer's direct Note to the same account is still stored — one stranger
+    /// fills only their own room, never the account's plane.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_peers_flood_stops_at_its_room_cap_and_a_second_peer_still_lands() {
+        use crate::db::bridged_conversations::{
+            MAX_BRIDGED_INBOUND_PER_PRINCIPAL, MAX_BRIDGED_INBOUND_PER_ROOM,
+        };
+        const { assert!(MAX_BRIDGED_INBOUND_PER_ROOM * 4 <= MAX_BRIDGED_INBOUND_PER_PRINCIPAL) };
+        let state = state(None).await;
+        handle_create(
+            &state,
+            &create_by(MALLORY, "https://remote.example/notes/first", "hi"),
+            None,
+        )
+        .await
+        .unwrap();
+        let room = room_of(&state, MALLORY).await.expect("mallory's room");
+        fill_room(&state, &room, MAX_BRIDGED_INBOUND_PER_ROOM).await;
+
+        handle_create(
+            &state,
+            &create_by(MALLORY, "https://remote.example/notes/one-more", "more"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            inbound_rows(&state, &room).await,
+            MAX_BRIDGED_INBOUND_PER_ROOM,
+            "the flooding peer's room must stop at its cap"
+        );
+
+        let friend = "https://friend.example/users/bob";
+        let code = handle_create(
+            &state,
+            &create_by(friend, "https://friend.example/notes/hello", "hello alice"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::ACCEPTED);
+        let friends = room_of(&state, friend).await.expect("the friend's room");
+        assert_eq!(inbound_rows(&state, &friends).await, 1);
+    }
+
+    /// The per-recipient rate refuses past its minute, whatever
+    /// actors send — and answers `429`, so an honest sender retries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_recipient_rate_refuses_beyond_its_minute() {
+        let state = state(None).await;
+        let n = DM_INBOUND_PER_RECIPIENT_PER_MINUTE;
+        for i in 0..n {
+            // A fresh actor and host each time: rotation buys nothing.
+            let actor = format!("https://h{i}.example/users/u{i}");
+            let code = handle_create(
+                &state,
+                &create_by(&actor, &format!("https://h{i}.example/notes/{i}"), "hi"),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(code, StatusCode::ACCEPTED, "Note {i} is inside the minute");
+        }
+        let late = "https://late.example/users/x";
+        let code = handle_create(
+            &state,
+            &create_by(late, "https://late.example/notes/x", "one too many"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            room_of(&state, late).await.is_none(),
+            "nothing stored past the rate"
+        );
+        assert_eq!(family::rooms(&state, ALICE).await.len(), n as usize);
+    }
+
+    /// The duplicate test is the room's. A same-host sender
+    /// who mints a Note id under another actor's path first does not shadow
+    /// that actor's own Note with the id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_same_id_note_in_another_room_is_not_a_duplicate() {
+        let state = state(None).await;
+        let squatter = "https://remote.example/users/eve";
+        let id = "https://remote.example/users/mallory/statuses/1";
+        handle_create(&state, &create_by(squatter, id, "squatted"), None)
+            .await
+            .unwrap();
+        assert!(room_of(&state, squatter).await.is_some());
+
+        handle_create(&state, &create_by(MALLORY, id, "the real one"), None)
+            .await
+            .unwrap();
+        let room = room_of(&state, MALLORY)
+            .await
+            .expect("mallory's Note must be stored in mallory's room");
+        let rows = family::inbox(&state, ALICE, &room).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(opened(&rows[0].sealed_content), b"the real one");
     }
 
     /// The gate keys on the signer: a Note whose `attributedTo` names someone

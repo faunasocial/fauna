@@ -160,6 +160,7 @@ def test_muted_words_empty_state_marks_a_loaded_page_not_a_loading_one(logged_in
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.android  # ConversationDetailScreen paints dm-message-muted + its reveal button; the show-less test below already drives the same inject helpers on android
 @pytest.mark.feature("muted-words")
 def test_muted_message_collapses_behind_reveal(logged_in_app):
     """A decrypted DM whose body matches a muted term is collapsed behind
@@ -227,6 +228,9 @@ HARD_BODY = "Claim your JACKPOTSCAM prize today"
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("muted-words")
 def test_muted_word_level_show_less_does_not_collapse_a_message(logged_in_app):
     """The per-row level picker (``docs/goal/ui/settings.md`` § Muted words —
@@ -236,9 +240,8 @@ def test_muted_word_level_show_less_does_not_collapse_a_message(logged_in_app):
     message matching a Show-less term is NOT collapsed while one matching a
     Hide term still is; picking Hide again brings the collapse back.
 
-    tui leads; web, linux and android followed in the trickle-down; windows,
-    macos and ios add their marker when their picker lands (the follow-up rows
-    on their own machines).
+    tui leads; web, linux, android, macos, ios and windows followed in the
+    trickle-down.
     """
     app = logged_in_app
     mw = app.muted_words

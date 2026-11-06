@@ -1,6 +1,6 @@
 # Installing the Fauna app
 
-> **The honest version first:** Fauna is in closed alpha. There is **no public release yet** — outside Google Play's invitation-only testing, and apart from the web app (which needs no install at all), running a Fauna app today means **building it from source**. Every app below builds and runs; that is what "available" means on this page.
+> **The honest version first:** Fauna is in closed alpha. There is **no public release yet** — outside Google Play's invitation-only testing of the Android app and the pre-release downloads of the Windows, Linux and terminal apps, and apart from the web app (which needs no install at all), running a Fauna app today means **building it from source**. Every app below builds and runs; that is what "available" means on this page.
 
 ## The no-install option: the web app
 
@@ -88,11 +88,7 @@ crossterm), runs on Linux, macOS and Windows alike — full-screen, keyboard
 and mouse driven, no display server needed. Handy over SSH or on a headless
 box.
 
-**Installing a release.** Each release publishes one archive per operating
-system and processor (`fauna-tui-<arch>-linux.tar.gz`,
-`fauna-tui-<arch>-darwin.tar.gz`, `fauna-tui-<arch>-windows.zip`), each
-carrying the terminal app together with the sync agent it drives. Verify the download the way the release page describes (see *Checking you have the official app* below), unpack it, and on Linux or macOS run the `install.sh` inside it — it copies the programs into `~/.local/bin` (or `/usr/local/bin` when run with `sudo`), and `./install.sh --uninstall` removes them again. On macOS, an install from the archive alone does not yet keep the sync agent running in the background. On
-Windows, unpack the zip into a folder on your `PATH`. The macOS package and the Windows installer also install the terminal app alongside the desktop app (the "Fauna Terminal App" choice, on by default), so with either of those you have it already.
+**Installing a release.** Each pre-release and release publishes one archive per processor for Linux and for Windows (`fauna-tui-<arch>-linux.tar.gz`, `fauna-tui-<arch>-windows.zip`), each carrying the terminal app together with the sync agent it drives and `fauna-cli`, the program an AI assistant runs to work in Fauna. There are no macOS archives yet; on a Mac, build the terminal app, its sync agent and `fauna-cli` from source. Verify the download the way the release page describes (see *Checking you have the official app* below), unpack it, and on Linux run the `install.sh` inside it — it copies the programs into `~/.local/bin` (or `/usr/local/bin` when run with `sudo`), and `./install.sh --uninstall` removes them again. On Windows, unpack the zip into a folder on your `PATH`. The Windows installer also installs the terminal app, with `fauna-cli`, alongside the desktop app (the "Fauna Terminal App" choice, on by default), so with it you have both already; the macOS package, once published, does the same.
 
 **Building from source** instead:
 
@@ -111,37 +107,22 @@ installed for you.
 
 ## Checking you have the official app
 
-Fauna is free software, so anyone may build it and share it. That is welcome
-and it also means the name alone does not tell you who published what you
-are about to install. One page does:
+Fauna is free software, so anyone may build it and share it. Official app
+downloads are published on the project's [releases
+page](https://github.com/faunasocial/fauna/releases). To check a download,
+compare its SHA-256 hash with the one the releases page lists; the page at
+`https://fauna.social/apps` gives the command for Windows, macOS and Linux.
 
-```
-https://fauna.social/official-apps
-```
-
-It lists, for every platform, the package or bundle identifier the official
-app carries, the publisher name and identity a store shows for it, the
-address of the official listing, and the signing identities behind the
-downloads and updates. Every row is generated from the project's own source,
-so the page cannot promise one thing while a release does another. A row
-marked "not yet" is an identity that does not exist yet, with the reason;
-the page never shows a placeholder.
-
-To check an app, compare what you can see with the page:
-
-- **On a phone**, open the app's details in the system settings, or look at
-  the store address bar: the package name must be exactly the one listed
-  (`social.fauna.fauna`), and the store's publisher line must be the one
-  listed too.
-- **On a computer**, the installer or app bundle names its publisher and
-  identifier; the page tells you which command shows them on each system and
-  what they must read.
-- **On the web**, the app comes from the address you opened it at. From your
-  own nest that is your nest's address; from the project it will be the
-  address the page lists, once that is live.
-
-Today, during the closed alpha, there is no public release yet: no installer has been released, and the only official app on any store is the Android app in Google Play's invitation-only testing, which you can reach only from an invitation the project sent you. So right now the rule is short: **any other store entry, and any app download, calling itself Fauna is not the project's.** If you find one,
-write to `hello@fauna.social` with where you saw it; we ask the store to take it down. The server is published too, as the project's container image `ghcr.io/faunasocial/nest`: the **Dev** update channel's development builds are published, a numbered release is published on the **Test** channel, and until the first Stable release is out there is nothing on the **Stable** channel.
+Today, during the closed alpha, there is no public release yet: the only
+official app on any store is the Android app in Google Play's invitation-only
+testing, which you can reach only from an invitation the project sent you, and
+the only official app downloads are the pre-releases on the project's [releases
+page](https://github.com/faunasocial/fauna/releases), each with the steps to
+verify its files in its notes. So right now the rule is short: **any other store entry, and any app download from anywhere else, presenting itself as Fauna Social's app is not ours.** If you find one, write to `hello@fauna.social` with where you saw it. The server is published too, as the
+project's container image `ghcr.io/faunasocial/nest`: the **Dev** update
+channel's development builds are published, a numbered release is published on
+the **Test** channel, and until the first Stable release is out there is nothing
+on the **Stable** channel.
 
 ## The server
 
@@ -153,5 +134,5 @@ For development, `just docker-run` builds and runs a local nest container with t
 
 - Expect rough edges, and expect to update often (the apps and server evolve together; during the 0.1 versions an update may need a fresh install of the app or the nest, and from 0.2.0 on, apps and servers within a major version stay compatible in both directions).
 - During the 0.1 versions an update may need a fresh start, so export anything you want to keep first; from 0.2.0 on, updates never require wiping the nest. Your data stays exportable from your own app: **Settings → Account → Export My Data** downloads what your nest holds for you, your mail included, and **Export mailbox**, among the mail pages in Settings, takes your mailbox out in standard formats to move it to another mail service.
-- Packaged releases (app stores, installers, distro packages) arrive as the
-  project approaches its first public release.
+- Public releases arrive once a version passes acceptance; the downloads
+  published before that are pre-releases.

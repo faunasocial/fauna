@@ -22,6 +22,14 @@ public func renderLocalizedText(_ lt: LocalizedText) -> String {
     return fillPlaceholders(template: template, args: lt.args)
 }
 
+/// A shared-Rust `ComposedText` (a template plus `nested` texts the template
+/// holds as arguments): each nested text resolves first, then the template
+/// with them substituted. Mirrors `ComposedText::resolve`.
+public func resolveComposedText(_ text: ComposedText) -> String {
+    let args = text.text.args.merging(text.nested.mapValues(renderLocalizedText)) { _, nested in nested }
+    return renderLocalizedText(LocalizedText(key: text.text.key, args: args))
+}
+
 /// `renderLocalizedText`, but each **argument** is first put through `L.lookup`
 /// as well — for templates whose substitution is itself a translatable term
 /// rather than data. Some machines deliberately pass a *key* as an argument

@@ -161,7 +161,7 @@ async fn enable_over_an_enabled_custody_refreshes_the_stale_snapshot_before_refu
 }
 
 #[tokio::test]
-async fn enable_caldav_mailbox_mints_read_only_material_without_submission_or_toggle() {
+async fn enable_dav_mailbox_mints_read_only_material_without_submission_or_toggle() {
     // CalDAV-only enablement (`caldav-server.md` § Independent enablement): a user
     // enabling calendar without email gets the *shared* mailbox key material so
     // their `bridge_caldav_*` store seals — but with TWO deliberate differences
@@ -173,7 +173,7 @@ async fn enable_caldav_mailbox_mints_read_only_material_without_submission_or_to
     let (machine, nest, mail) = build_machine();
 
     let pw = machine
-        .enable_caldav_mailbox_with_generated_password("Default".into())
+        .enable_dav_mailbox_with_generated_password("Default".into())
         .await
         .expect("enable caldav mailbox");
 
@@ -217,7 +217,7 @@ async fn enable_caldav_mailbox_mints_read_only_material_without_submission_or_to
 }
 
 #[tokio::test]
-async fn enable_caldav_mailbox_is_idempotent_when_mailbox_already_provisioned() {
+async fn enable_dav_mailbox_is_idempotent_when_mailbox_already_provisioned() {
     // The MSEK is shared across email + CalDAV. If a mailbox already exists (here,
     // email was enabled first), enabling CalDAV must NOT re-mint a fresh MSEK —
     // that would silently break the existing mail + calendar store. It is a no-op.
@@ -234,7 +234,7 @@ async fn enable_caldav_mailbox_is_idempotent_when_mailbox_already_provisioned() 
     let snapshots_after_mail = nest.state().provision_mls_snapshot.len();
 
     machine
-        .enable_caldav_mailbox_with_generated_password("Calendar".into())
+        .enable_dav_mailbox_with_generated_password("Calendar".into())
         .await
         .expect("enable caldav (idempotent on an existing mailbox)");
 
@@ -253,11 +253,9 @@ async fn enable_caldav_mailbox_is_idempotent_when_mailbox_already_provisioned() 
         1,
         "no extra credential added"
     );
-    // The CalDAV flag IS recorded on the existing (email) mailbox — so a later
-    // "Disable mail" preserves the shared MSEK the calendar now needs — while
-    // email stays enabled.
+    // Email stays enabled — the DAV mint records no per-account flag
+    // (retired 2026-10-26; the deployment's toggles say what is served).
     let stored = mail.current();
-    assert!(stored.caldav_enabled, "CalDAV flag recorded");
     assert!(stored.is_mail_enabled(), "email stays enabled");
     assert!(
         machine.snapshot().enabled,
@@ -274,7 +272,7 @@ async fn caldav_only_mailbox_renders_mail_disabled_in_snapshot() {
     // clear the MSEK their calendar depends on.
     let (machine, _nest, mail) = build_machine();
     machine
-        .enable_caldav_mailbox_with_generated_password("Default".into())
+        .enable_dav_mailbox_with_generated_password("Default".into())
         .await
         .expect("enable caldav mailbox");
 
@@ -284,7 +282,6 @@ async fn caldav_only_mailbox_renders_mail_disabled_in_snapshot() {
     );
     let stored = mail.current();
     assert!(stored.msek.is_some(), "the shared MSEK is present");
-    assert!(stored.caldav_enabled, "CalDAV is enabled");
     assert!(!stored.is_mail_enabled(), "email is not enabled");
     // The default read credential is still surfaced (a CalDAV/IMAP MUA AUTHs with
     // it) — disabled-mail ≠ no-credential.
@@ -301,7 +298,7 @@ async fn enable_caldav_then_enable_mail_upgrades_additively_reusing_msek_and_cre
     // shared bridge password serves IMAP + SMTP + CalDAV).
     let (machine, nest, mail) = build_machine();
     let caldav_pw = machine
-        .enable_caldav_mailbox_with_generated_password("Default".into())
+        .enable_dav_mailbox_with_generated_password("Default".into())
         .await
         .expect("enable caldav mailbox");
     let msek_after_caldav = mail.current().msek;
@@ -333,7 +330,6 @@ async fn enable_caldav_then_enable_mail_upgrades_additively_reusing_msek_and_cre
         "the CalDAV credential is REUSED — no second credential added"
     );
     assert!(stored.is_mail_enabled(), "email now enabled");
-    assert!(stored.caldav_enabled, "CalDAV stays enabled");
     assert!(
         machine.snapshot().enabled,
         "snapshot now shows mail enabled"
@@ -368,10 +364,11 @@ async fn enable_caldav_then_enable_mail_upgrades_additively_reusing_msek_and_cre
 
 #[tokio::test]
 async fn disable_mail_preserves_msek_and_read_credential_when_caldav_enabled() {
-    // (b) Disabling email on an actor who ALSO has CalDAV must NOT clear the
-    // shared MSEK or revoke the read credential — that AEAD-unwrap blob also
-    // authenticates CalDAV and the calendar store seals under the MSEK. Only the
-    // outbound submission tokens are revoked; CalDAV keeps working.
+    // (b) Disabling email on an actor who ALSO has CalDAV — the same one
+    // behaviour as without it (`mail-credentials.md`, the Disable-mail row):
+    // the MSEK and the read credential stay (it AUTHs CalDAV, and the calendar
+    // store seals under the MSEK), only the outbound submission tokens are
+    // revoked and the nest's mail flag goes off; CalDAV keeps working.
     let (machine, nest, mail) = build_machine();
     machine
         .dispatch(MailSettingsAction::EnableMail {
@@ -382,9 +379,9 @@ async fn disable_mail_preserves_msek_and_read_credential_when_caldav_enabled() {
         .await
         .expect("enable mail");
     machine
-        .enable_caldav_mailbox_with_generated_password("Calendar".into())
+        .enable_dav_mailbox_with_generated_password("Calendar".into())
         .await
-        .expect("enable caldav (idempotent — records the flag)");
+        .expect("enable the DAV mailbox (idempotent — a no-op)");
     let msek_before_disable = mail.current().msek;
 
     machine
@@ -403,10 +400,14 @@ async fn disable_mail_preserves_msek_and_read_credential_when_caldav_enabled() {
         "the read credential is PRESERVED — it AUTHs CalDAV"
     );
     assert!(!stored.is_mail_enabled(), "email is now disabled");
-    assert!(stored.caldav_enabled, "CalDAV stays enabled");
     assert!(!machine.snapshot().enabled, "snapshot shows mail disabled");
 
     let s = nest.state();
+    assert_eq!(
+        s.actor_mail_enabled,
+        Some(false),
+        "the nest's per-actor mail flag is off — IMAP refuses, CalDAV serves"
+    );
     assert_eq!(
         s.revoke_submission_token.len(),
         1,
@@ -431,7 +432,7 @@ async fn disable_mail_on_caldav_only_user_returns_invalid_state() {
     // the snapshot reports mail disabled.)
     let (machine, _nest, _mail) = build_machine();
     machine
-        .enable_caldav_mailbox_with_generated_password("Default".into())
+        .enable_dav_mailbox_with_generated_password("Default".into())
         .await
         .expect("enable caldav mailbox");
     let err = machine
@@ -439,162 +440,6 @@ async fn disable_mail_on_caldav_only_user_returns_invalid_state() {
         .await
         .expect_err("a CalDAV-only actor has no mail to disable");
     assert!(format!("{err}").contains("not enabled"), "got: {err}");
-}
-
-#[tokio::test]
-async fn enable_carddav_mailbox_mints_read_only_material_without_submission_or_toggle() {
-    // CardDAV-only enablement (`carddav-server.md` § Independent enablement): the
-    // contacts twin of the CalDAV-only test above — same shared MSEK (the
-    // `bridge_carddav_*` store seals to the MSEK-derived recipient keypair), same
-    // read-only recipe (no submission token), no deployment-toggle flip (that
-    // Admin toggle is `BridgeApprovalMachine::SetCardDavEnabled`, fired
-    // separately by the onboarding launch glue).
-    let (machine, nest, mail) = build_machine();
-
-    let pw = machine
-        .enable_carddav_mailbox_with_generated_password("Default".into())
-        .await
-        .expect("enable carddav mailbox");
-
-    {
-        let s = nest.state();
-        assert_eq!(s.provision_mls_snapshot.len(), 1, "snapshot blob");
-        assert_eq!(s.provision_wrapped_mls.len(), 1, "wrapped-MSEK blob");
-        assert_eq!(
-            s.provision_recipient_pubkey.len(),
-            1,
-            "recipient pubkey registered"
-        );
-        assert_eq!(
-            s.provision_submission_token.len(),
-            0,
-            "NO submission token — CardDAV needs no outbound mail (read-only recipe)"
-        );
-        assert!(
-            s.set_mail_enabled.is_empty(),
-            "NO deployment mail-toggle flip (owned by BridgeApprovalMachine::SetCardDavEnabled)"
-        );
-    }
-
-    // CardDAV-only ⇒ snapshot reports mail DISABLED despite the shared MSEK,
-    // and the per-actor carddav flag is recorded.
-    let stored = mail.current();
-    assert!(stored.msek.is_some(), "shared MSEK populated");
-    assert!(stored.carddav_enabled, "CardDAV flag recorded");
-    assert!(!stored.caldav_enabled, "CalDAV untouched");
-    assert!(!stored.is_mail_enabled(), "email is not enabled");
-    assert!(
-        !machine.snapshot().enabled,
-        "CardDAV-only ⇒ snapshot reports mail DISABLED despite the shared MSEK"
-    );
-    assert!(
-        machine.snapshot().carddav_enabled,
-        "snapshot surfaces carddav_enabled (the credential-section predicate reads it)"
-    );
-    let revealed = machine
-        .reveal_credential_secret("default".to_string())
-        .await
-        .expect("reveal default");
-    assert_eq!(
-        revealed.as_str(),
-        pw.as_str(),
-        "revealed credential equals the returned password"
-    );
-}
-
-#[tokio::test]
-async fn enable_carddav_mailbox_is_idempotent_when_mailbox_already_provisioned() {
-    // The MSEK is shared across email + CalDAV + CardDAV. If a mailbox already
-    // exists, enabling CardDAV must NOT re-mint — just record the per-actor flag
-    // (so a later "Disable mail" preserves the shared MSEK the address book
-    // still needs).
-    let (machine, nest, mail) = build_machine();
-    machine
-        .dispatch(MailSettingsAction::EnableMail {
-            display_name: "Default".into(),
-            kind: CredentialKind::Plain,
-            secret: SecretBytes::from(b"existing-mail-password-bytes".to_vec()),
-        })
-        .await
-        .expect("enable mail");
-    let msek_after_mail = mail.current().msek;
-    let snapshots_after_mail = nest.state().provision_mls_snapshot.len();
-
-    machine
-        .enable_carddav_mailbox_with_generated_password("Contacts".into())
-        .await
-        .expect("enable carddav (idempotent on an existing mailbox)");
-
-    assert_eq!(
-        mail.current().msek,
-        msek_after_mail,
-        "shared MSEK preserved — CardDAV-enable did not re-mint"
-    );
-    assert_eq!(
-        nest.state().provision_mls_snapshot.len(),
-        snapshots_after_mail,
-        "no new blob provisioning on the idempotent CardDAV-enable"
-    );
-    assert_eq!(
-        mail.current().credentials.len(),
-        1,
-        "no extra credential added"
-    );
-    let stored = mail.current();
-    assert!(stored.carddav_enabled, "CardDAV flag recorded");
-    assert!(stored.is_mail_enabled(), "email stays enabled");
-}
-
-#[tokio::test]
-async fn disable_mail_preserves_msek_and_read_credential_when_carddav_enabled() {
-    // Disabling email on an actor who ALSO has CardDAV must NOT clear the shared
-    // MSEK or revoke the read credential — the same preservation rule CalDAV
-    // gets: the AEAD-unwrap blob also authenticates CardDAV and the address-book
-    // store seals to the MSEK-derived recipient keypair. Only the outbound
-    // submission tokens are revoked.
-    let (machine, nest, mail) = build_machine();
-    machine
-        .dispatch(MailSettingsAction::EnableMail {
-            display_name: "Default".into(),
-            kind: CredentialKind::Plain,
-            secret: SecretBytes::from(b"shared-bridge-password-bytes".to_vec()),
-        })
-        .await
-        .expect("enable mail");
-    machine
-        .enable_carddav_mailbox_with_generated_password("Contacts".into())
-        .await
-        .expect("enable carddav (idempotent — records the flag)");
-    let msek_before_disable = mail.current().msek;
-
-    machine
-        .dispatch(MailSettingsAction::DisableMail)
-        .await
-        .expect("disable mail while CardDAV stays on");
-
-    let stored = mail.current();
-    assert_eq!(
-        stored.msek, msek_before_disable,
-        "the shared MSEK is PRESERVED — CardDAV still needs it"
-    );
-    assert_eq!(
-        stored.credentials.len(),
-        1,
-        "the read credential is PRESERVED — it AUTHs CardDAV"
-    );
-    assert!(!stored.is_mail_enabled(), "email is now disabled");
-    assert!(stored.carddav_enabled, "CardDAV stays enabled");
-
-    let s = nest.state();
-    assert_eq!(
-        s.revoke_submission_token.len(),
-        1,
-        "the outbound submission token was revoked (no more sending)"
-    );
-    assert!(
-        s.revoke_wrapped_mls.is_empty(),
-        "the read credential's wrapped-MSEK blob was NOT revoked (CardDAV AUTH)"
-    );
 }
 
 #[tokio::test]
@@ -1137,14 +982,17 @@ async fn revoke_unknown_credential_returns_error() {
     assert!(msg.contains("unknown credential_id"), "got: {msg}");
 }
 
-/// The email-only teardown revokes every credential and turns email off, and
-/// the MSEK outlives it — dormant, since the mail custody's state row keeps it
-/// present-wins and no write can clear it (`mail-credentials.md`, the
-/// Disable-mail row). A re-enable mints a fresh credential under the SAME key,
-/// under an id no revoked row has held, so mail sealed before the disable stays
-/// openable.
+/// Turning mail off stops mail, and only mail (`mail-credentials.md` § Trigger
+/// taxonomy, the Disable-mail row): the nest's per-actor mail flag goes off (no
+/// more reading), every live credential's submission token is revoked (no more
+/// sending), and the credentials and the MSEK are KEPT — so the calendar,
+/// contacts and file apps signing in with them keep working, with no per-account
+/// DAV flag set (no production setter exists). The kept credentials stay
+/// manageable on the page (§ Credential-management reachability's last arm).
+/// Turning mail back on restores sending and reading under the SAME
+/// credentials: the flag back on and a submission token under every one.
 #[tokio::test]
-async fn disable_mail_revokes_every_credential_and_a_re_enable_reuses_the_dormant_msek() {
+async fn disable_mail_keeps_every_credential_and_a_re_enable_restores_them() {
     let (machine, nest, mail) = build_machine();
     machine
         .dispatch(MailSettingsAction::EnableMail {
@@ -1163,6 +1011,12 @@ async fn disable_mail_revokes_every_credential_and_a_re_enable_reuses_the_dorman
         .await
         .expect("add");
     let msek_before = mail.current().msek.expect("MSEK minted");
+    let tokens_before = nest.state().provision_submission_token.len();
+    assert_eq!(
+        nest.state().actor_mail_enabled,
+        Some(true),
+        "enable sets the flag on"
+    );
 
     machine
         .dispatch(MailSettingsAction::DisableMail)
@@ -1171,10 +1025,16 @@ async fn disable_mail_revokes_every_credential_and_a_re_enable_reuses_the_dorman
 
     {
         let s = nest.state();
-        // One revoke (MLS blob + submission token) per credential — the
-        // goal-doc "one RevokeCredential per row" sequence.
-        assert_eq!(s.revoke_wrapped_mls.len(), 2, "two MLS-blob revokes");
-        assert_eq!(s.revoke_submission_token.len(), 2, "two token revokes");
+        assert_eq!(
+            s.actor_mail_enabled,
+            Some(false),
+            "the nest's per-actor mail flag is off — IMAP refuses"
+        );
+        assert_eq!(s.revoke_submission_token.len(), 2, "both tokens revoked");
+        assert!(
+            s.revoke_wrapped_mls.is_empty(),
+            "no read credential's wrapped-MSEK blob is revoked"
+        );
         // Disable must NOT touch the Admin-scoped deployment-wide subsystem
         // toggle: only the single `true` from enable should be recorded.
         assert_eq!(
@@ -1184,38 +1044,31 @@ async fn disable_mail_revokes_every_credential_and_a_re_enable_reuses_the_dorman
         );
     }
 
-    // Email is off, every credential is revoked (hidden by the fold, its id
-    // spent), and the MSEK stays — dormant.
     let stored = mail.current();
     assert!(!stored.is_mail_enabled(), "email off");
-    assert!(stored.credentials.is_empty(), "every credential revoked");
-    assert_eq!(
-        stored.msek,
-        Some(msek_before.clone()),
-        "the MSEK is dormant, not cleared"
-    );
-    let rows = mail.rows();
-    assert_eq!(rows.spent_credential_ids(), ["default", "iphone"]);
+    assert_eq!(stored.credentials.len(), 2, "every credential kept");
+    assert_eq!(stored.msek, Some(msek_before.clone()), "the MSEK stays");
     assert!(
-        rows.credentials
+        mail.rows()
+            .credentials
             .values()
-            .all(|c| c.revoked_at_unix.is_some()
-                && c.secret.is_empty()
-                && c.wrapped_under.is_none()),
-        "each revoked row carries the marker, no secret and no generation"
+            .all(|c| c.revoked_at_unix.is_none()),
+        "nothing revoked"
     );
 
-    // Snapshot reflects disabled.
     let snap = machine.snapshot();
     assert!(!snap.enabled, "snapshot disabled");
-    assert!(snap.credentials.is_empty());
+    assert_eq!(snap.credentials.len(), 2);
+    assert!(
+        snap.credential_management_reachable,
+        "a kept credential stays revocable and rotatable from the page"
+    );
     assert!(snap.error.is_none());
 
-    // Re-enable reuses the dormant MSEK and mints a fresh credential under an
-    // unspent id.
+    // Re-enable: the same credentials, a token under each, the flag back on.
     machine
         .dispatch(MailSettingsAction::EnableMail {
-            display_name: "default".into(),
+            display_name: "ignored".into(),
             kind: CredentialKind::OAuthBearer,
             secret: SecretBytes::from(vec![0xEF; 32]),
         })
@@ -1229,16 +1082,110 @@ async fn disable_mail_revokes_every_credential_and_a_re_enable_reuses_the_dorman
         .iter()
         .map(|c| c.credential_id.as_str())
         .collect();
-    assert_eq!(ids.len(), 1, "one live credential: {ids:?}");
-    assert_ne!(ids[0], "default", "a revoked id is spent, never re-minted");
+    assert_eq!(ids, ["default", "iphone"], "no new credential minted");
+    let s = nest.state();
+    assert_eq!(s.actor_mail_enabled, Some(true), "reading resumes");
+    let reprovisioned: Vec<&str> = s.provision_submission_token[tokens_before..]
+        .iter()
+        .map(|b| b.index.1.as_str())
+        .collect();
     assert_eq!(
-        stored.credentials[0].wrapped_under,
-        stored
-            .msek
-            .as_ref()
-            .map(fauna_core::data::MsekFingerprint::of),
-        "the fresh row names the generation it is wrapped under"
+        reprovisioned,
+        ["default", "iphone"],
+        "sending resumes under every kept credential"
     );
+}
+
+/// A credential added while mail is off gets its wrapped MSEK (calendar,
+/// contacts and file apps sign in with it) but NO submission token — mail off
+/// means no sending — and the re-enable's upgrade arm gives it one, so the
+/// mail app it was added for sends with no new set-up.
+#[tokio::test]
+async fn a_credential_added_while_mail_is_off_gets_no_submission_token_until_re_enable() {
+    let (machine, nest, mail) = build_machine();
+    machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "default".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xAB; 32]),
+        })
+        .await
+        .expect("enable");
+    machine
+        .dispatch(MailSettingsAction::DisableMail)
+        .await
+        .expect("disable");
+    let tokens_before = nest.state().provision_submission_token.len();
+    let blobs_before = nest.state().provision_wrapped_mls.len();
+
+    machine
+        .dispatch(MailSettingsAction::AddCredential {
+            display_name: "iPad".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xCD; 32]),
+        })
+        .await
+        .expect("add while off");
+    {
+        let s = nest.state();
+        assert_eq!(
+            s.provision_submission_token.len(),
+            tokens_before,
+            "no sending token is minted while mail is off"
+        );
+        assert_eq!(
+            s.provision_wrapped_mls.len(),
+            blobs_before + 1,
+            "the read half (the wrapped MSEK) is provisioned"
+        );
+    }
+    let row = mail
+        .current()
+        .credentials
+        .into_iter()
+        .find(|c| c.credential_id == "ipad")
+        .expect("credential stored");
+    assert!(row.token_minted_at.is_none(), "no token stamp while off");
+
+    machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "ignored".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xEF; 32]),
+        })
+        .await
+        .expect("re-enable");
+    let s = nest.state();
+    assert!(
+        s.provision_submission_token[tokens_before..]
+            .iter()
+            .any(|b| b.index.1 == "ipad"),
+        "re-enable gives the credential added while off its sending token"
+    );
+}
+
+/// A Disable mail stopped after the custody recorded "off" but with the nest's
+/// flag still (or again) on is repaired at hydrate: a kept credential must not
+/// go on reading mail.
+#[tokio::test]
+async fn hydrate_turns_the_nest_mail_flag_off_when_the_custody_says_off() {
+    let (machine, nest, _mail) = build_machine();
+    machine
+        .dispatch(MailSettingsAction::EnableMail {
+            display_name: "default".into(),
+            kind: CredentialKind::OAuthBearer,
+            secret: SecretBytes::from(vec![0xAB; 32]),
+        })
+        .await
+        .expect("enable");
+    machine
+        .dispatch(MailSettingsAction::DisableMail)
+        .await
+        .expect("disable");
+    nest.state().actor_mail_enabled = Some(true);
+
+    machine.hydrate().await.expect("hydrate");
+    assert_eq!(nest.state().actor_mail_enabled, Some(false));
 }
 
 #[tokio::test]
@@ -1790,6 +1737,7 @@ async fn auto_enable_mail_for_new_user_mints_when_policy_on_and_no_mailbox() {
     let pw = machine
         .auto_enable_mail_for_new_user(
             /* deployment_mail_enabled */ true,
+            /* deployment_dav_enabled */ false,
             /* policy */ true,
             "Default".into(),
         )
@@ -1819,6 +1767,7 @@ async fn auto_enable_mail_for_new_user_skips_when_deployment_mail_off() {
     let minted = machine
         .auto_enable_mail_for_new_user(
             /* deployment_mail_enabled */ false,
+            /* deployment_dav_enabled */ false,
             /* policy */ true,
             "Default".into(),
         )
@@ -1835,6 +1784,7 @@ async fn auto_enable_mail_for_new_user_skips_when_policy_off() {
     let minted = machine
         .auto_enable_mail_for_new_user(
             /* deployment_mail_enabled */ true,
+            /* deployment_dav_enabled */ false,
             /* policy */ false,
             "Default".into(),
         )
@@ -1852,15 +1802,207 @@ async fn auto_enable_mail_for_new_user_is_noop_when_mailbox_already_exists() {
     let (machine, _nest, _mail) = build_machine();
     // First call mints.
     machine
-        .auto_enable_mail_for_new_user(true, true, "Default".into())
+        .auto_enable_mail_for_new_user(true, false, true, "Default".into())
         .await
         .expect("auto-enable runs")
         .expect("first call mints");
     // Second call (e.g. a re-trigger) must NOT re-mint and must NOT error — it
     // returns Ok(None), distinguishing it from the bare helper's InvalidState.
     let again = machine
-        .auto_enable_mail_for_new_user(true, true, "Default".into())
+        .auto_enable_mail_for_new_user(true, false, true, "Default".into())
         .await
         .expect("second auto-enable is a graceful no-op, not an error");
     assert!(again.is_none(), "no second mailbox is minted");
+}
+
+// ─── The calendar-only credential (`mail-credentials.md` § Trigger taxonomy,
+// *The calendar-only credential*; § Auto-enable for new users → *The DAV-only
+// deployment*): on a deployment serving CalDAV or CardDAV with mail off, the
+// new-user mint and Add credential both mint the read recipe. ───
+
+/// A deployment that serves CalDAV with mail off — the social-only shape.
+fn serve_dav_without_mail(nest: &FakeNestClient) {
+    let mut s = nest.state();
+    s.deployment_mail_enabled = false;
+    s.deployment_caldav_enabled = true;
+}
+
+#[tokio::test]
+async fn auto_enable_for_new_user_mints_the_read_recipe_on_a_dav_only_deployment() {
+    let (machine, nest, mail) = build_machine();
+    let pw = machine
+        .auto_enable_mail_for_new_user(
+            /* deployment_mail_enabled */ false,
+            /* deployment_dav_enabled */ true,
+            /* policy */ true,
+            "Default".into(),
+        )
+        .await
+        .expect("auto-enable runs")
+        .expect("the read recipe is minted on a DAV-only deployment");
+    {
+        let s = nest.state();
+        assert_eq!(s.provision_wrapped_mls.len(), 1, "the read credential");
+        assert!(
+            s.provision_submission_token.is_empty(),
+            "no submission token"
+        );
+        assert!(s.set_mail_enabled.is_empty(), "no deployment flip");
+    }
+    assert!(mail.current().msek.is_some(), "the shared MSEK is minted");
+    assert!(!mail.current().is_mail_enabled(), "email stays off");
+    let revealed = machine
+        .reveal_credential_secret("default".to_string())
+        .await
+        .expect("reveal default");
+    assert_eq!(
+        revealed.as_str(),
+        pw.as_str(),
+        "the password is returned once"
+    );
+}
+
+#[tokio::test]
+async fn auto_enable_for_new_user_on_a_dav_only_deployment_follows_the_one_policy() {
+    let (machine, _nest, mail) = build_machine();
+    let minted = machine
+        .auto_enable_mail_for_new_user(false, true, /* policy */ false, "Default".into())
+        .await
+        .expect("auto-enable runs");
+    assert!(minted.is_none(), "the policy off mints nothing");
+    assert!(mail.current().msek.is_none());
+}
+
+#[tokio::test]
+async fn auto_enable_for_new_user_on_a_dav_only_deployment_is_a_noop_with_an_msek() {
+    let (machine, nest, _mail) = build_machine();
+    machine
+        .enable_dav_mailbox_with_password("Default".into(), "an-earlier-password".into())
+        .await
+        .expect("an earlier DAV mint");
+    let blobs = nest.state().provision_wrapped_mls.len();
+    let again = machine
+        .auto_enable_mail_for_new_user(false, true, true, "Default".into())
+        .await
+        .expect("a graceful no-op");
+    assert!(again.is_none(), "no second credential");
+    assert_eq!(nest.state().provision_wrapped_mls.len(), blobs);
+}
+
+#[tokio::test]
+async fn auto_enable_for_new_user_mints_nothing_when_nothing_is_served() {
+    let (machine, _nest, mail) = build_machine();
+    let minted = machine
+        .auto_enable_mail_for_new_user(false, false, true, "Default".into())
+        .await
+        .expect("auto-enable runs");
+    assert!(minted.is_none());
+    assert!(mail.current().msek.is_none());
+}
+
+#[tokio::test]
+async fn add_credential_is_the_first_credential_on_a_dav_only_deployment() {
+    let (machine, nest, mail) = build_machine();
+    serve_dav_without_mail(&nest);
+    machine.hydrate().await.expect("hydrate");
+    machine
+        .dispatch(MailSettingsAction::AddCredential {
+            display_name: "Calendar".into(),
+            kind: CredentialKind::Plain,
+            secret: SecretBytes::from(b"calendar-app-password".to_vec()),
+        })
+        .await
+        .expect("the first credential IS the enable here");
+    {
+        let s = nest.state();
+        assert_eq!(s.provision_mls_snapshot.len(), 1, "the read recipe");
+        assert!(
+            s.provision_submission_token.is_empty(),
+            "no submission token"
+        );
+        assert!(s.set_mail_enabled.is_empty(), "no deployment flip");
+    }
+    let stored = mail.current();
+    assert!(stored.msek.is_some());
+    assert!(!stored.is_mail_enabled());
+    let ids: Vec<&str> = stored
+        .credentials
+        .iter()
+        .map(|c| c.credential_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["calendar"]);
+    assert!(machine.snapshot().credential_management_reachable);
+}
+
+#[tokio::test]
+async fn add_credential_without_an_msek_is_refused_on_a_mail_serving_deployment() {
+    // There the enable toggle is the way in, CalDAV on or not.
+    let (machine, nest, mail) = build_machine();
+    {
+        let mut s = nest.state();
+        s.deployment_mail_enabled = true;
+        s.deployment_caldav_enabled = true;
+    }
+    machine.hydrate().await.expect("hydrate");
+    let err = machine
+        .dispatch(MailSettingsAction::AddCredential {
+            display_name: "x".into(),
+            kind: CredentialKind::Plain,
+            secret: SecretBytes::from(b"pw".to_vec()),
+        })
+        .await
+        .expect_err("must reject");
+    assert!(format!("{err}").contains("mail not enabled"), "got: {err}");
+    assert!(mail.current().msek.is_none());
+}
+
+#[tokio::test]
+async fn a_bare_account_reaches_credential_management_on_a_dav_only_deployment() {
+    let (machine, nest, _mail) = build_machine();
+    serve_dav_without_mail(&nest);
+    machine.hydrate().await.expect("hydrate");
+    let snap = machine.snapshot();
+    assert!(snap.caldav_enabled && !snap.carddav_enabled);
+    assert!(
+        snap.credential_management_reachable,
+        "Add credential is its way in"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_account_does_not_reach_credential_management_on_a_mail_serving_deployment() {
+    let (machine, nest, _mail) = build_machine();
+    {
+        let mut s = nest.state();
+        s.deployment_mail_enabled = true;
+        s.deployment_caldav_enabled = true;
+        s.deployment_carddav_enabled = true;
+    }
+    machine.hydrate().await.expect("hydrate");
+    assert!(!machine.snapshot().credential_management_reachable);
+}
+
+#[tokio::test]
+async fn the_snapshots_dav_flags_follow_the_deployment() {
+    // A mail user's page shows the CalDAV connection row whenever the
+    // deployment serves CalDAV — the retired per-account flag, which only a
+    // DAV mint ever set, hid it for every mail user.
+    let (machine, nest, _mail) = build_machine();
+    {
+        let mut s = nest.state();
+        s.deployment_mail_enabled = true;
+        s.deployment_caldav_enabled = true;
+    }
+    machine
+        .dispatch(enable_default())
+        .await
+        .expect("enable mail");
+    machine.hydrate().await.expect("hydrate");
+    let snap = machine.snapshot();
+    assert!(snap.enabled);
+    assert!(snap.caldav_enabled, "the deployment serves CalDAV");
+    assert!(!snap.carddav_enabled, "nor CardDAV");
+    // Unread ⇒ false: a fresh machine has read nothing.
+    let (fresh, _nest, _mail) = build_machine();
+    assert!(!fresh.snapshot().caldav_enabled);
 }

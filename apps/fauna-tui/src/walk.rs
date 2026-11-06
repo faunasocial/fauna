@@ -763,7 +763,7 @@ fn dump_folder_overlays(app: &mut App) {
         resolved_at: None,
         resolution: None,
         winning_manifest_hash: None,
-        has_other_version: true,
+        has_other_version: false,
         file_info: "1.0 KB, edited on two devices".into(),
     }];
     app.settings.inject_devices_snapshot_for_corpus(listed);
@@ -850,6 +850,8 @@ fn dump_media_detail(app: &mut App) {
         pruned: false,
         purge_after: None,
         folder_id: None,
+        thumbnail_hash: None,
+        deposited_by: None,
     };
     app.media.detail = Some(detail(Some(vec![version()])));
     dump_surface(app, "media item detail (one version)");

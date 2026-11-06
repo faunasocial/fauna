@@ -43,8 +43,10 @@ from helpers.app_surface import (  # noqa: E402
     app_name,
     declared_absence,
     skip_environment,
-    skip_unbuilt,
 )
+# The free-text form is private since the migration closed: `require_surface`
+# calls it, and these mechanism proofs reach it directly.
+from helpers.app_surface import _skip_unbuilt as skip_unbuilt  # noqa: E402
 
 
 # ── Stub drivers: one predicate answers True, exactly like the real ones ────
@@ -644,10 +646,22 @@ class _StubConfig:
     one-line decision about what the stub should say — not a silent pass.
     """
 
+    class _InertPluginManager:
+        """Inert: the app-deaths plugin registration (convention 6's close rider)
+        is not this pin's subject. It answers "already registered", so the hook
+        registers nothing into the real session this stub's call runs in."""
+
+        def has_plugin(self, name):
+            return True
+
+        def register(self, plugin, name=None):
+            raise AssertionError("the stub's plugin manager reports every plugin registered")
+
     def __init__(self, strict: bool):
         self._strict = strict
+        self.pluginmanager = self._InertPluginManager()
 
-    def getoption(self, name):
+    def getoption(self, name, default=None):
         if name == "strict_app":
             return self._strict
         if name == "strict_nest":
@@ -682,6 +696,18 @@ class _StubConfig:
             # Inert: the live-box declaration (`--live-box shared|disposable`) is
             # not the subject of any pin here. `None` is what `declare_box` reads
             # as "flag absent" — the same posture `nest` takes above.
+            return None
+        if name in ("--app", "--client"):
+            # Inert: the app-set selection is not this pin's subject; `None` is
+            # "flag absent" (the standalone default set).
+            return None
+        if name == "--no-feature-ledger":
+            # Inert: True is the opt-out, so the proof hook (`_install_proof_hook`)
+            # installs nothing into the real session this stub's hook call runs in.
+            return True
+        if name == "public_clone":
+            # Inert: the public-clone path (`--public-clone`) is not the subject
+            # of any pin here; `None` is its "flag absent" answer.
             return None
         raise AssertionError(
             f"_StubConfig was asked for an option it has no answer for: {name!r}. "
@@ -839,7 +865,11 @@ def test_unbuilt_section_is_independent_of_every_other_summary_axis(monkeypatch)
 # guard to key on — the app identity is implicit in which fixture ran) and
 # `--strict-app` cannot turn red — exactly the shape that let
 # `test_offline_share_two_seat.py` report "4 skipped" as a clean run when
-# `debug/fauna-tui` simply did not exist.
+# `debug/fauna-tui` simply did not exist. They routed through `skip_unbuilt`
+# until 2026-10-25, when the surface registry ruled a binary's presence a BOX
+# property (convention 7, *The surface registry*: a gate's answer is a function
+# of (surface, app) alone): they now declare `skip_environment`, which names the
+# class on the ledger, and a build that FAILS still raises before any of them.
 #
 # ⚠ Five of these six fixtures BUILD before they resolve (adopted 2026-08-27;
 # `tui_app_path`'s docstring carries the measured incident), so every proof that
@@ -856,103 +886,103 @@ def test_unbuilt_section_is_independent_of_every_other_summary_axis(monkeypatch)
 # reds for reasons no app change can fix is how a box learns to ignore an
 # unbuilt-surface red.
 #
-# The stub is the fix. `skip_environment` would be wrong (nothing about the
+# The stub is the fix. Declaring the PROOF `skip_environment` would be wrong (nothing about the
 # routing decision is a box property, so the declaration would leave this
 # convention's own proof unrun on macOS), and taking the build out of the
 # fixture would be worse still. `test_app_path_fixture_builds_before_it_resolves`
 # below is what keeps the stubbed-away build honest.
-def test_linux_app_path_routes_through_skip_unbuilt(monkeypatch):
+def test_linux_app_path_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_resolve_linux_binary", lambda: None)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.linux_app_path.__wrapped__()
-    assert "linux has not built the fauna-desktop binary" in str(excinfo.value)
+    assert "environment: linux: the fauna-desktop binary is not on this box" in str(excinfo.value)
     assert "just linux-debug" in str(excinfo.value)
 
 
-def test_tui_app_path_routes_through_skip_unbuilt(monkeypatch):
+def test_tui_app_path_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_resolve_cli_binary", lambda: None)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.tui_app_path.__wrapped__()
-    assert "tui has not built the fauna-tui binary" in str(excinfo.value)
+    assert "environment: tui: the fauna-tui binary is not on this box" in str(excinfo.value)
     assert "cargo build -p fauna-tui" in str(excinfo.value)
 
 
-def test_android_app_path_routes_through_skip_unbuilt(monkeypatch, tmp_path):
+def test_android_app_path_routes_through_skip_environment(monkeypatch, tmp_path):
     import conftest
 
     monkeypatch.setattr(conftest, "_repo_root", tmp_path)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.android_app_path.__wrapped__()
-    assert "android has not built the Android debug APK" in str(excinfo.value)
+    assert "environment: android: the Android debug APK is not on this box" in str(excinfo.value)
     assert "just android-debug" in str(excinfo.value)
 
 
-def test_macos_app_path_routes_through_skip_unbuilt(monkeypatch, tmp_path):
+def test_macos_app_path_routes_through_skip_environment(monkeypatch, tmp_path):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_repo_root", tmp_path)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.macos_app_path.__wrapped__()
-    assert "macos has not built the macOS app binary" in str(excinfo.value)
+    assert "environment: macos: the macOS app binary is not on this box" in str(excinfo.value)
     assert "just mac-debug" in str(excinfo.value)
 
 
-def test_windows_app_path_routes_through_skip_unbuilt(monkeypatch):
+def test_windows_app_path_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_resolve_windows_app", lambda: None)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.windows_app_path.__wrapped__()
-    assert "windows has not built the Windows app binary" in str(excinfo.value)
+    assert "environment: windows: the Windows app binary is not on this box" in str(excinfo.value)
     assert "just windows-debug" in str(excinfo.value)
 
 
-def test_ios_setup_routes_through_skip_unbuilt(monkeypatch):
+def test_ios_setup_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_get_ios_setup", lambda: None)
     with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.ios_setup.__wrapped__()
-    assert "ios has not built the iOS simulator/app" in str(excinfo.value)
+    assert "environment: ios: the iOS simulator/app is not on this box" in str(excinfo.value)
     assert "just apple-ffi-test-sim" in str(excinfo.value)
 
 
-def test_app_path_fixture_fails_under_strict_app(monkeypatch):
-    """The core of row 335: a missing binary must be able to go RED, not just
-    print a bigger number — mirrors `test_skip_unbuilt_fails_under_strict_app`
-    but through the real fixture rather than a direct `skip_unbuilt` call."""
+def test_app_path_fixture_skips_under_strict_app(monkeypatch):
+    """A binary the fixture's own build still leaves absent is a property of the
+    BOX — this machine cannot build that app — not a surface any app could build,
+    so `--strict-app` skips it rather than reds (convention 7, *The surface
+    registry*: a gate's answer is a function of (surface, app) alone, and a
+    binary's presence is `skip_environment`). A build that FAILS still raises
+    before this point; a gate run that must not skip adds `--fail-on-skip`."""
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_resolve_linux_binary", lambda: None)
     app_surface.set_strict_app(True)
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest.linux_app_path.__wrapped__()
-    assert "--strict-app" in str(excinfo.value)
-    assert "linux has not built the fauna-desktop binary" in str(excinfo.value)
+    assert "environment: linux: the fauna-desktop binary" in str(excinfo.value)
 
 
-def test_app_path_fixture_is_tallied_as_unbuilt(monkeypatch):
-    """The scan-blind-spot half of row 335: these six sites never reached
-    `_UNBUILT_HITS` before, so the terminal summary's tally under-counted."""
+def test_app_path_fixture_is_not_tallied_as_unbuilt(monkeypatch):
+    """The unbuilt tally counts what an app could close by building something; a
+    box without the binary is not that, so it stays out of the count."""
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app: None)
     monkeypatch.setattr(conftest, "_resolve_cli_binary", lambda: None)
     with pytest.raises(pytest.skip.Exception):
         conftest.tui_app_path.__wrapped__()
-    assert app_surface.unbuilt_hits() == [
-        ("tui", "the fauna-tui binary", "run 'cargo build -p fauna-tui' first")
-    ]
+    assert app_surface.unbuilt_hits() == []
 
 
 # The five direct-launch fixtures that BUILD before they resolve, and how to make
@@ -1035,23 +1065,23 @@ def test_android_app_path_does_not_build(monkeypatch, tmp_path):
 # landed. `_build_app_config` is the path the CACHED `app` fixture uses for
 # nearly every macos/ios e2e test — its own ios branch and its two macos
 # branches (bare binary + `--macos-artifact` bundle) had the same bare-skip
-# shape, fixed the same way, but the landed commit exercised them only
+# shape, fixed the same way (a box property, `skip_environment`, since
+# 2026-10-25), but the landed commit exercised them only
 # through the mechanism-level `skip_unbuilt` proofs, not through the real
 # function. These three close that gap.
-def test_build_app_config_ios_routes_through_skip_unbuilt(monkeypatch):
+def test_build_app_config_ios_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app_name: None)
     monkeypatch.setattr(conftest, "_get_ios_setup", lambda: None)
 
     app_surface.set_strict_app(True)
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest._build_app_config("ios", {"url": "http://unused"}, None)
-    assert "--strict-app" in str(excinfo.value)
-    assert "ios has not built the iOS simulator/app" in str(excinfo.value)
+    assert "environment: ios: the iOS simulator/app is not on this box" in str(excinfo.value)
 
 
-def test_build_app_config_macos_bare_binary_routes_through_skip_unbuilt(monkeypatch):
+def test_build_app_config_macos_bare_binary_routes_through_skip_environment(monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest, "_ensure_app_built", lambda app_name: None)
@@ -1059,13 +1089,12 @@ def test_build_app_config_macos_bare_binary_routes_through_skip_unbuilt(monkeypa
     monkeypatch.setitem(conftest.APP_PATHS, "macos", "nonexistent-test-macos-binary")
 
     app_surface.set_strict_app(True)
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest._build_app_config("macos", {"url": "http://unused"}, None)
-    assert "--strict-app" in str(excinfo.value)
-    assert "macos has not built the macOS app binary" in str(excinfo.value)
+    assert "environment: macos: the macOS app binary is not on this box" in str(excinfo.value)
 
 
-def test_build_app_config_macos_artifact_routes_through_skip_unbuilt(monkeypatch):
+def test_build_app_config_macos_artifact_routes_through_skip_environment(monkeypatch):
     import conftest
     import helpers.macos_artifact as macos_artifact
 
@@ -1076,10 +1105,9 @@ def test_build_app_config_macos_artifact_routes_through_skip_unbuilt(monkeypatch
     )
 
     app_surface.set_strict_app(True)
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with pytest.raises(pytest.skip.Exception) as excinfo:
         conftest._build_app_config("macos", {"url": "http://unused"}, None)
-    assert "--strict-app" in str(excinfo.value)
-    assert "macos has not built the macOS app bundle" in str(excinfo.value)
+    assert "environment: macos: the macOS app bundle" in str(excinfo.value)
 
 
 def test_declared_capability_returning_null_is_an_error_not_a_skip():
@@ -1184,3 +1212,344 @@ def test_a_builder_seat_runs_the_journey():
 
     for app in ("tui", "linux", "macos", "windows", "web"):
         skip_if_seat_builds_no_index(_driver_for(app), what="a draft")
+
+
+# ── The surface registry: require_surface, the marker, the seed, the ratchet ─
+# e2e-conventions.md convention 7, *The surface registry*. The gate's answer is a
+# function of (surface, app) alone, read from ONE file; these proofs pin each
+# reader of it and the seed's agreement with the sites it was generated from.
+REGISTRY_PATH = E2E_ROOT / "surfaces.toml"
+
+
+@pytest.fixture
+def fake_registry():
+    """A substituted registry with one entry built on tui only."""
+    from features_catalog import Surface
+
+    app_surface.set_surface_registry({
+        "events-day-cell": Surface(
+            key="events-day-cell", kind="product", built=frozenset({"tui"}),
+            detail="the day cell is built on tui first",
+            tracked="ui/events.md § Implementation status today"),
+    })
+    yield
+    app_surface.set_surface_registry(None)
+
+
+def test_require_surface_returns_where_the_app_has_built_it(fake_registry):
+    app_surface.require_surface(_driver_for("tui"), "events-day-cell")
+    assert app_surface.unbuilt_hits() == []
+
+
+def test_require_surface_skips_lenient_with_the_entrys_own_words(fake_registry):
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        app_surface.require_surface(_driver_for("web"), "events-day-cell")
+    message = str(excinfo.value)
+    assert "web has not built events-day-cell" in message
+    assert "the day cell is built on tui first" in message
+    assert "ui/events.md § Implementation status today" in message
+    assert app_surface.unbuilt_hits() == [
+        ("web", "events-day-cell", "the day cell is built on tui first")]
+
+
+def test_require_surface_fails_under_strict_app(fake_registry):
+    app_surface.set_strict_app(True)
+    with pytest.raises(pytest.fail.Exception, match="--strict-app"):
+        app_surface.require_surface(_driver_for("android"), "events-day-cell")
+
+
+def test_require_surface_takes_the_app_id_as_a_string(fake_registry):
+    """Like `app_name`'s string form: a gate before anything is launched."""
+    with pytest.raises(pytest.skip.Exception):
+        app_surface.require_surface("ios", "events-day-cell")
+
+
+def test_an_unknown_surface_key_is_an_error_at_the_call(fake_registry):
+    """A typo must not mint a surface nobody declared — the `feature` marker's
+    unknown-slug rule, at the call."""
+    with pytest.raises(ValueError, match="unknown surface key 'events-day-cel'"):
+        app_surface.require_surface(_driver_for("tui"), "events-day-cel")
+
+
+class _Marker:
+    def __init__(self, *args):
+        self.args = args
+
+
+class _MarkedItem:
+    """The slice of a pytest item the conftest marker hooks read."""
+
+    def __init__(self, keys, app=None, nodeid="tests/test_x.py::test_x[tui]"):
+        self._keys = keys
+        self.nodeid = nodeid
+        self.fixturenames = ()
+        self.callspec = type("CS", (), {"params": {"app": app} if app else {}})()
+
+    def iter_markers(self, name):
+        return [_Marker(k) for k in self._keys] if name == "requires_surface" else []
+
+
+def test_the_marker_skips_an_app_outside_built(fake_registry):
+    import conftest
+
+    with pytest.raises(pytest.skip.Exception, match="web has not built events-day-cell"):
+        conftest._apply_surface_markers(_MarkedItem(["events-day-cell"]), {"web"})
+    conftest._apply_surface_markers(_MarkedItem(["events-day-cell"]), {"tui"})
+
+
+def test_the_marker_is_applied_by_setup_before_any_fixture(fake_registry, monkeypatch):
+    """The marker's skip is raised from conftest's own `pytest_runtest_setup` —
+    a plain conftest hook implementation, which pluggy calls BEFORE the runner's
+    built-in one that sets up the item's fixtures (later-registered plugins run
+    first). So an item whose fixture would raise never reaches it: the skip comes
+    first, with the unbuilt class on the ledger slot."""
+    import conftest
+    from helpers import feature_ledger
+
+    app = conftest.get_available_apps()[0]
+    monkeypatch.setattr(
+        app_surface, "_REGISTRY",
+        {"events-day-cell": app_surface.surface_registry()["events-day-cell"].__class__(
+            key="events-day-cell", kind="product",
+            built=frozenset(conftest._KNOWN_APPS) - {app})})
+    item = _MarkedItem(["events-day-cell"], app=app)
+    item.config = type("Cfg", (), {"getoption": staticmethod(lambda name: None)})()
+    item.session = type("Sess", (), {"items": [item]})()
+    with pytest.raises(pytest.skip.Exception, match=f"{app} has not built events-day-cell"):
+        conftest.pytest_runtest_setup(item)
+    assert feature_ledger.skip_class_this_test() == feature_ledger.UNBUILT
+    assert feature_ledger.surface_this_test() == "events-day-cell"
+    assert inspect_is_plain_hook(conftest.pytest_runtest_setup)
+    feature_ledger.reset_test_state()
+
+
+def inspect_is_plain_hook(fn) -> bool:
+    """Not a hookwrapper and not `trylast` — the shape that runs before fixture setup."""
+    opts = getattr(fn, "pytest_impl", None) or {}
+    return not opts.get("hookwrapper") and not opts.get("wrapper") and not opts.get("trylast")
+
+
+def test_an_unknown_marker_key_is_a_collection_error(fake_registry):
+    import conftest
+
+    with pytest.raises(pytest.UsageError, match="requires_surface\\('nope'\\)"):
+        conftest._check_surface_markers([_MarkedItem(["nope"])])
+    conftest._check_surface_markers([_MarkedItem(["events-day-cell"])])
+
+
+def test_the_real_registry_reads():
+    from features_catalog import SURFACE_KINDS, load_surface_registry
+
+    registry = load_surface_registry(REGISTRY_PATH)
+    assert registry, "surfaces.toml is the seeded registry, never empty"
+    assert {e.kind for e in registry.values()} <= set(SURFACE_KINDS)
+
+
+def test_the_seed_agrees_with_every_static_site():
+    """No statically-readable `skip_unbuilt` site gates an app the registry
+    declares built for its surface's key — the seed and its sources cannot
+    drift apart while the call sites migrate (`surface_survey.py --check`)."""
+    import surface_survey
+    from features_catalog import load_surface_registry
+
+    assert surface_survey.drift(surface_survey.survey(),
+                                load_surface_registry(REGISTRY_PATH)) == []
+
+
+def test_every_static_surface_string_has_a_hand_named_key():
+    import surface_survey
+
+    _entries, unmapped = surface_survey.seed_entries(surface_survey.survey())
+    assert unmapped == [], [f"{s.rel}:{s.line} {s.surface!r}" for s in unmapped]
+
+
+def test_the_unclean_kill_entry_agrees_with_the_drivers_own_answers():
+    """`supports_unclean_kill` is a harness predicate that is real code: it keeps its
+    code, and its registry entry's `built` is pinned against what each leaf
+    driver answers once its OWN launch has set the child handle its module
+    assigns (convention 7's (surface, app) rule). A driver that gains an
+    unclean-kill primitive, or loses one, reds this until the entry follows."""
+    import importlib
+    import re
+
+    from check_app_gate_ratchet import _parse_driver_classes, leaf_app_drivers
+    from features_catalog import load_surface_registry
+
+    handles = ("_app_proc", "_pty", "_app_pid", "_session_body")
+    classes = _parse_driver_classes()
+    answers = {}
+    for cls_name, app in leaf_app_drivers(classes).items():
+        module = importlib.import_module(f"drivers.{classes[cls_name]['file'][:-3]}")
+        cls = getattr(module, cls_name)
+        driver = cls.__new__(cls)
+        launched = {
+            h for h in handles
+            if re.search(rf"self\.{h} = (?!None\b)", Path(module.__file__).read_text())
+        }
+        for h in handles:
+            setattr(driver, h, object() if h in launched else None)
+        answers[app] = bool(driver.supports_unclean_kill())
+    built = load_surface_registry(REGISTRY_PATH)["unclean-kill"].built
+    assert {a for a, yes in answers.items() if yes} == set(built), answers
+
+
+def _leaf_driver_classes():
+    """`{app: leaf driver class}` — the seven, found by their own `is_<app>()`
+    override, never by a hand list."""
+    import importlib
+
+    from check_app_gate_ratchet import _parse_driver_classes, leaf_app_drivers
+
+    classes = _parse_driver_classes()
+    return {
+        app: getattr(
+            importlib.import_module(f"drivers.{classes[cls_name]['file'][:-3]}"), cls_name
+        )
+        for cls_name, app in leaf_app_drivers(classes).items()
+    }
+
+
+def _registry_built(key):
+    from features_catalog import load_surface_registry
+
+    return set(load_surface_registry(REGISTRY_PATH)[key].built)
+
+
+# The other harness predicates that are real code keep it, and each one's entry
+# is pinned against what every leaf driver answers WITHOUT a launch — so a driver
+# that gains or loses the capability reds here until the entry follows
+# (convention 7, *The surface registry*).
+def test_the_app_log_reader_entry_agrees_with_the_drivers_own_answers():
+    """`app_log_section.has_reader` walks the driver's log attributes, and
+    `log_scope_across_relaunch() == "none"` is the other way a gate used to ask
+    the same question; both readings must give the entry's list."""
+    from helpers import app_log_section
+
+    readers, scoped = set(), set()
+    for app, cls in _leaf_driver_classes().items():
+        if any(getattr(cls, a, None) is not None for a in app_log_section._TEXT_ATTRS):
+            readers.add(app)
+        if cls.__new__(cls).log_scope_across_relaunch() != "none":
+            scoped.add(app)
+    assert readers == scoped == _registry_built("app-log-reader"), (readers, scoped)
+
+
+def test_the_relaunch_store_pin_entry_agrees_with_the_drivers_own_overrides():
+    """`preserve_state_across_relaunch` answers from launch state, so the static
+    answer is whether the leaf driver implements it at all: the base classes'
+    versions refuse."""
+    from drivers.base import PlatformDriver
+    from drivers.http_bridge import HttpBridgeDriver
+
+    pinning = set()
+    for app, cls in _leaf_driver_classes().items():
+        owner = next(k for k in cls.__mro__ if "preserve_state_across_relaunch" in k.__dict__)
+        if owner not in (HttpBridgeDriver, PlatformDriver):
+            pinning.add(app)
+    assert pinning == _registry_built("relaunch-store-pin"), pinning
+
+
+def test_the_relaunch_injected_identity_entry_agrees_with_the_drivers_own_answers():
+    answers = {
+        app: bool(cls.__new__(cls).relaunch_preserves_injected_identity())
+        for app, cls in _leaf_driver_classes().items()
+    }
+    assert {a for a, yes in answers.items() if yes} == _registry_built(
+        "relaunch-injected-identity"), answers
+
+
+def test_the_window_capture_entry_agrees_with_the_drivers_own_overrides():
+    from drivers.base import PlatformDriver
+
+    capturing = {
+        app for app, cls in _leaf_driver_classes().items()
+        if cls.capture_window is not PlatformDriver.capture_window
+    }
+    assert capturing == _registry_built("window-capture"), capturing
+
+
+def test_the_relaunch_environment_entry_agrees_with_the_drivers_own_overrides():
+    """`relaunch_environment()` is `launch_environment()` under a relaunch gate:
+    every leaf driver that overrides `recover()` relaunches, and web alone
+    launches with no process environment to re-read."""
+    from drivers.http_bridge import HttpBridgeDriver
+
+    relaunching = {
+        app for app, cls in _leaf_driver_classes().items()
+        if cls.recover is not HttpBridgeDriver.recover
+    }
+    assert relaunching - {"web"} == _registry_built("relaunch-environment"), relaunching
+
+
+def test_the_on_device_log_reader_entry_agrees_with_the_drivers_own_methods():
+    readers = {
+        app for app, cls in _leaf_driver_classes().items()
+        if getattr(cls, "on_device_log_text", None) is not None
+    }
+    assert readers == _registry_built("on-device-log-reader"), readers
+
+
+def test_the_handover_agent_seam_entry_agrees_with_the_drivers_own_properties():
+    """An app is listed when its driver publishes an agent control endpoint of
+    either transport (`helpers/sync_agent_endpoint.py`): linux and tui publish
+    the unix socket for every launch; macOS answers it only for a launch that
+    spawns a real agent, which the handover witness asks for
+    (`real_sync_agent`); windows (and tui running there) publishes the named
+    pipe its `isolated_sync_agent` posture pins."""
+    defining = {
+        app for app, cls in _leaf_driver_classes().items()
+        if getattr(cls, "sync_agent_socket", None) is not None
+        or getattr(cls, "sync_agent_pipe", None) is not None
+    }
+    assert defining == _registry_built("handover-agent-seam"), defining
+
+
+def test_the_discarded_machine_teardown_entry_lists_the_constant_true_drivers():
+    """android and web answer `_discards_machine_at_teardown` with a constant
+    True, so both must be listed; the rest answer from launch state and are
+    witnessed by the journey's own assertion."""
+    from drivers.http_bridge import HttpBridgeDriver
+
+    constant = {
+        app for app, cls in _leaf_driver_classes().items()
+        if cls._discards_machine_at_teardown is not HttpBridgeDriver._discards_machine_at_teardown
+    }
+    assert constant <= _registry_built("discarded-machine-teardown"), constant
+
+
+# The free-text counter (check_app_gate_ratchet.py's second, convention 7).
+def test_the_free_text_counter_counts_skip_unbuilt_and_not_require_surface(tmp_path):
+    from check_app_gate_ratchet import free_text_sites
+
+    path = tmp_path / "sample.py"
+    path.write_text(textwrap.dedent(
+        """
+        def test_a(app):
+            if app.driver.is_tui():
+                skip_unbuilt(app.driver, surface="x")
+            app_surface.skip_unbuilt(app.driver, surface="y")
+
+        def test_b(app):
+            require_surface(app.driver, "events-day-cell")
+        """
+    ))
+    assert [line for line, _ in free_text_sites(path)] == [4, 5]
+
+
+def test_the_free_text_counter_is_at_its_floor_and_any_call_fails(tmp_path):
+    from check_app_gate_ratchet import run_gate
+
+    scan_root = tmp_path / "e2e"
+    (scan_root / "tests").mkdir(parents=True)
+    target = scan_root / "tests" / "test_x.py"
+    (scan_root / "conftest.py").write_text("")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}")
+    target.write_text('def test_a(d):\n    require_surface(d, "x")\n')
+    assert run_gate(scan_root, baseline) == 0, "a routed gate is not counted"
+
+    target.write_text('def test_a(d):\n    skip_unbuilt(d, surface="x")\n')
+    assert run_gate(scan_root, baseline) == 1, "no baseline remains to grandfather a call"
+    target.write_text('def test_a(d):\n    require_surface(d, "x")\n')
+    (scan_root / "conftest.py").write_text('def f(d):\n    skip_unbuilt(d, surface="y")\n')
+    assert run_gate(scan_root, baseline) == 1, "the root conftest is in the walk"

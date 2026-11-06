@@ -4348,8 +4348,20 @@ mod tests {
             self.calls.lock().unwrap().push(kind);
             let out: Vec<u8> = match kind {
                 "fauna.sync.changes.list" => {
+                    // `seq > since`, as the nest serves it: the sweep walks
+                    // until an empty page.
+                    let req: fauna_protocol::sync::SyncChangesListRequest =
+                        fauna_protocol::decode_strict(&bytes).expect("decode list");
+                    let changes = self
+                        .served_rows
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|r| r.seq > req.since)
+                        .cloned()
+                        .collect();
                     fauna_protocol::encode_canonical(&fauna_protocol::sync::SyncChangesListReply {
-                        changes: self.served_rows.lock().unwrap().clone(),
+                        changes,
                         ..Default::default()
                     })
                     .unwrap()
@@ -5581,7 +5593,9 @@ mod tests {
             .iter()
             .filter(|k| **k == "fauna.sync.changes.list")
             .count();
-        assert_eq!(lists, 2, "one sweep per round");
+        // One sweep per round, each a page of rows and the empty page that
+        // ends its walk.
+        assert_eq!(lists, 2 * 2, "one sweep per round");
 
         let nest = Arc::new(FakeNest::default());
         let a = author(nest.clone(), FakeGroup::with_members(&[]));
@@ -5601,7 +5615,8 @@ mod tests {
             .iter()
             .filter(|k| **k == "fauna.sync.changes.list")
             .count();
-        assert_eq!(lists, SERVE_DISABLE_ADOPTION_ROUNDS as usize, "bounded");
+        // Each round's sweep: a page of rows, then the empty page.
+        assert_eq!(lists, 2 * SERVE_DISABLE_ADOPTION_ROUNDS as usize, "bounded");
         let keys = custody::content_keys(&load_cfg(&a), &serve_custody_channel_id("docs")).unwrap();
         assert_eq!(
             keys.current_version(),
@@ -7444,7 +7459,7 @@ mod tests {
         let poll_guard = block_on(lock.lock());
 
         let mut cx = Context::from_waker(Waker::noop());
-        let mut fut = Box::pin(a.remove_member("docs", CH, member(2)));
+        let mut fut = std::pin::pin!(a.remove_member("docs", CH, member(2)));
         assert!(
             fut.as_mut().poll(&mut cx).is_pending(),
             "the ungated section must wait for the channel lock"

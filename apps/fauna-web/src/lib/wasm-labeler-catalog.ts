@@ -1,5 +1,6 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_labeler_catalog.js';
 import { asset } from '$app/paths';
+import { joinChunk } from './chunk-join';
 import type { LabelerCatalogMachine } from '../../static/fauna_wasm_labeler_catalog.js';
 import { hexToBytes } from './hex';
 import { sharedAccountPort } from './account-runtime';
@@ -38,6 +39,8 @@ export function ensureLabelerCatalogWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_labeler_catalog.js');
       await mod.default(asset('fauna_wasm_labeler_catalog_bg.wasm'));
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;

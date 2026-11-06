@@ -7,12 +7,12 @@
 // news + RSS, contact — at docs/sites/fauna-social/archived/reference/. The
 // third of those, /privacy, was republished on 2026-09-05 for the Microsoft
 // Store submission, and is deliberately a page without a nav entry — reachable
-// by URL and from the sitemap, like the Norwegian bylaws. /official-apps,
+// by URL and from the sitemap, like the Norwegian bylaws. /apps (/official-apps until 2026-10-24),
 // added 2026-09-24, is the same kind of page: its nav entry went in and back
 // out on 2026-09-26 — user call: no nav link until the apps can actually be
 // downloaded. /code-signing-policy, added 2026-10-10 for the SignPath
 // Foundation application, is the same kind of page: reached from the footer
-// sentence, from /official-apps and from the sitemap. /terms, added
+// sentence, from /apps and from the sitemap. /terms, added
 // 2026-10-19, is the same kind of page: reached from /privacy and from the
 // sitemap.)
 //

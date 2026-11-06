@@ -24,22 +24,28 @@ seat's own item list, and the refusal's words.
 """
 
 import secrets
+from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
     # tui leads (`media.md` § (f)); web and linux follow in the Linux host
-    # trickle-down batch; macos/ios/windows/android add their marker and seat
-    # pair in theirs.
+    # trickle-down batch; macos and ios (one shared FaunaKit change) in the
+    # macOS one; windows in the Windows one; android adds its marker in its own.
     pytest.mark.tui,
     pytest.mark.web,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
 ]
+
+# A real >300×300 image, so the uploading device's producer renders a tile.
+FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"
 
 
 def _scoped_names(app, value: str) -> list[str]:
@@ -53,7 +59,21 @@ def _scoped_names(app, value: str) -> list[str]:
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    [("tui", "tui"), ("web", "web"), ("linux", "linux")],
+    [
+        ("tui", "tui"),
+        ("web", "web"),
+        ("linux", "linux"),
+        pytest.param("macos", "macos", marks=pytest.mark.macos),
+        pytest.param("ios", "ios", marks=pytest.mark.ios),
+        # A cross-app pair: a tui owner granting to an Apple member.
+        pytest.param("tui", "macos", marks=pytest.mark.macos),
+        pytest.param("tui", "ios", marks=pytest.mark.ios),
+        pytest.param("windows", "windows", marks=pytest.mark.windows),
+        # android is the MEMBER here (a tui owner granting to the phone): its
+        # filter and sort are `TokenSelect`s, so `set_filter(shared_value)` finds
+        # the option by token. Not run on a device yet (venue down).
+        pytest.param("tui", "android", marks=pytest.mark.android),
+    ],
     indirect=True,
 )
 @pytest.mark.real_conversations
@@ -162,17 +182,6 @@ def test_a_same_named_shared_set_is_its_own_option_and_upload_target(
         f"a same-named pair is exactly two options, never merged: {labels!r}"
     )
 
-    if app_name(member_app.driver) == "web":
-        # Steps 1–2 are web's pin of the identity-addressed options; the writer
-        # member's browser upload into the shared set fails at the chunk POST
-        # (`TypeError: Failed to fetch`), a gap this pin found.
-        skip_unbuilt(
-            member_app.driver,
-            surface="a writer member's upload into a shared set",
-            detail="the browser's chunk upload POST fails before any HTTP status",
-            tracked="",
-        )
-
     # ── 3. Upload into the shared set lands in the OWNER's set ─────────────
     into_shared = tmp_path / f"into-shared-{secrets.token_hex(3)}.txt"
     into_shared.write_text(f"for the owner's folder — {secrets.token_hex(8)}\n")
@@ -224,6 +233,44 @@ def test_a_same_named_shared_set_is_its_own_option_and_upload_target(
         ),
     )
 
+    # ── 3b. A picture uploaded into the shared set paints on BOTH seats ───
+    # A thumbnail rests as its file rests (`media.md` § Encryption at rest →
+    # *A thumbnail rests as its file rests*): the member's upload seals the
+    # tile under the shared set's content key, as its file, so the OWNER paints
+    # the picture the member's device produced — and the member paints it too.
+    # Until 2026-10-22 a shared set carried no tile at all.
+    image = FIXTURE_IMAGE.name
+    assert FIXTURE_IMAGE.exists(), f"missing image fixture: {FIXTURE_IMAGE}"
+    mm.reenter()
+    mm.ensure_loaded()
+    mm.set_filter(shared_value)
+    mm.upload_file(str(FIXTURE_IMAGE))
+
+    def _paints_the_picture(app, value: str) -> bool:
+        if image not in _scoped_names(app, value):
+            return False
+        return app.media.thumbnail_kind(app.media.index_of(image)) == "picture"
+
+    wait_until(
+        lambda: _paints_the_picture(owner_app, set_name),
+        120.0,
+        interval=3.0,
+        diagnose=lambda: (
+            f"[owner] the member's picture in the shared set should paint on the "
+            f"owner's Media page; owner lists {om.item_names()!r}; "
+            f"error={owner_app.error_text()!r}"
+        ),
+    )
+    wait_until(
+        lambda: _paints_the_picture(member_app, shared_value),
+        60.0,
+        interval=2.0,
+        diagnose=lambda: (
+            f"[member] the member's own picture should paint in the shared set; "
+            f"lists {mm.item_names()!r}; error={member_app.error_text()!r}"
+        ),
+    )
+
     # ── 4. Demoted to reader: the upload is refused with its reason ────────
     ob.navigate_folders()
     owner_row = ob.find_and_expand_folder(set_name)
@@ -264,7 +311,15 @@ def test_a_same_named_shared_set_is_its_own_option_and_upload_target(
 
 @pytest.mark.parametrize(
     "folder_share_owner_app,folder_share_recipient_app",
-    [("tui", "tui")],
+    [
+        ("tui", "tui"),
+        ("web", "web"),
+        ("linux", "linux"),
+        pytest.param("macos", "macos", marks=pytest.mark.macos),
+        pytest.param("ios", "ios", marks=pytest.mark.ios),
+        pytest.param("tui", "ios", marks=pytest.mark.ios),
+        pytest.param("windows", "windows", marks=pytest.mark.windows),
+    ],
     indirect=True,
 )
 @pytest.mark.real_conversations

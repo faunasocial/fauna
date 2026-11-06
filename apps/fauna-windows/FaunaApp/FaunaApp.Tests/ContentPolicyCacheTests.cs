@@ -18,7 +18,7 @@ namespace FaunaApp.Tests;
 /// is the point: **no rule assembly lives in C#** — if one ever crept in, these
 /// would keep passing while the shared engine drifted away underneath.</para>
 ///
-/// <para>Guardian floors trigger at a hard-coded 500‰
+/// <para>A guardian category rule at the editor's default level triggers at 500‰
 /// (<c>GUARDIAN_FLOOR_TRIGGER_PERMILLE</c>, <c>fauna-core/src/obligation.rs</c>);
 /// a viewer's own threshold triggers at the viewer's own slider value. The
 /// fixtures below use 900‰ "well above" and 100‰ "well below" labels so they
@@ -118,15 +118,15 @@ public class ContentPolicyCacheTests : IDisposable
         Assert.Equal("badge", inputs.VerdictFor(Labels(("spam", 900))));
     }
 
-    // ── The guardian floor ─────────────────────────────────────────────────
+    // ── The guardian's rules ───────────────────────────────────────────────
 
-    /// <summary>A guardian <c>block</c> floor on a category, with a label in it
+    /// <summary>A guardian <c>block</c> rule on a category, with a label in it
     /// above the 500‰ guardian trigger → <c>"block"</c>.</summary>
     [Fact]
-    public void VerdictFor_GuardianBlockFloor_Blocks()
+    public void VerdictFor_GuardianBlockRule_Blocks()
     {
         var inputs = new ContentPolicyInputs(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
         Assert.Equal("block", inputs.VerdictFor(Labels(("nsfw", 900))));
     }
@@ -140,20 +140,20 @@ public class ContentPolicyCacheTests : IDisposable
     public void VerdictFor_GuardianBlockBeatsOwnThresholdCollapse()
     {
         var inputs = new ContentPolicyInputs(
-            FfiContentPolicyFixture.Make(nsfw: "block"), 500, 500);
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block), 500, 500);
 
         Assert.Equal("block", inputs.VerdictFor(Labels(("nsfw", 900), ("spam", 900))));
     }
 
     /// <summary>
-    /// A guardian <c>inherit</c> floor adds no rule — the ward's OWN threshold
+    /// A guardian policy with no rule adds nothing — the ward's OWN threshold
     /// decides. Below with a threshold the label clears → <c>"collapse"</c>;
     /// with a threshold it does not clear → only <c>"badge"</c>, even though the
-    /// label is above the 500‰ guardian trigger (which is exactly what "inherit
+    /// label is above the 500‰ guardian trigger (which is exactly what "no rule
     /// contributes nothing" means).
     /// </summary>
     [Fact]
-    public void VerdictFor_GuardianInherit_DefersToWardOwnThreshold()
+    public void VerdictFor_GuardianWithoutRules_DefersToWardOwnThreshold()
     {
         var lenientGuardian = FfiContentPolicyFixture.Make();
 
@@ -165,16 +165,16 @@ public class ContentPolicyCacheTests : IDisposable
     }
 
     /// <summary>
-    /// Fail-closed (family-safety.md § Content policy): a floor value this
-    /// client build cannot name — e.g. a newer nest's <c>quarantine</c> —
-    /// renders <c>block</c>, never <c>inherit</c>. Decided in shared Rust, so
-    /// windows can never drift into failing open.
+    /// Fail-closed (family-safety.md § Content policy): a guardian document this
+    /// client build cannot read renders <c>block</c>, never "no rule". Decided in
+    /// shared Rust, so windows can never drift into failing open.
     /// </summary>
     [Fact]
-    public void VerdictFor_UnparseableGuardianFloor_FailsClosedToBlock()
+    public void VerdictFor_UnreadableGuardianDocument_FailsClosedToBlock()
     {
         var inputs = new ContentPolicyInputs(
-            FfiContentPolicyFixture.Make(nsfw: "quarantine"));
+            new FfiContentPolicy(document: new byte[] { 0xff, 0x00 }));
+
 
         Assert.Equal("block", inputs.VerdictFor(Labels(("nsfw", 900))));
     }
@@ -203,13 +203,13 @@ public class ContentPolicyCacheTests : IDisposable
     // arrived first, and the loser is decided by RPC latency (i.e. it would be
     // flaky, not reliably broken).
 
-    /// <summary>Own thresholds first, then the guardian floor: both survive.</summary>
+    /// <summary>Own thresholds first, then the guardian rules: both survive.</summary>
     [Fact]
     public void SetGuardianPolicy_AfterOwnThresholds_DoesNotClobberThem()
     {
         ContentPolicyCache.SetOwnThresholds((500, 500));
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
         // The guardian half is live...
         Assert.Equal("block", ContentPolicyCache.VerdictFor(Labels(("nsfw", 900))));
@@ -217,12 +217,12 @@ public class ContentPolicyCacheTests : IDisposable
         Assert.Equal("collapse", ContentPolicyCache.VerdictFor(Labels(("spam", 900))));
     }
 
-    /// <summary>Guardian floor first, then own thresholds: both survive.</summary>
+    /// <summary>Guardian rules first, then own thresholds: both survive.</summary>
     [Fact]
     public void SetOwnThresholds_AfterGuardianPolicy_DoesNotClobberIt()
     {
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
         ContentPolicyCache.SetOwnThresholds((500, 500));
 
         // The own half is live...
@@ -232,8 +232,8 @@ public class ContentPolicyCacheTests : IDisposable
     }
 
     /// <summary>
-    /// A null guardian policy is a REAL value ("unsupervised — no floor"), not a
-    /// skip: it clears a previously-set floor (the re-login-as-another-account
+    /// A null guardian policy is a REAL value ("unsupervised — no guardian rules"), not a
+    /// skip: it clears previously-set guardian rules (the re-login-as-another-account
     /// case) while leaving the viewer's own thresholds intact.
     /// </summary>
     [Fact]
@@ -241,7 +241,7 @@ public class ContentPolicyCacheTests : IDisposable
     {
         ContentPolicyCache.SetOwnThresholds((500, 500));
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
         ContentPolicyCache.SetGuardianPolicy(null);
 
@@ -250,18 +250,69 @@ public class ContentPolicyCacheTests : IDisposable
     }
 
     /// <summary>Symmetrically, clearing the own thresholds leaves the guardian
-    /// floor enforcing.</summary>
+    /// rules enforcing.</summary>
     [Fact]
     public void SetOwnThresholds_Null_ClearsOnlyTheOwnHalf()
     {
         ContentPolicyCache.SetOwnThresholds((500, 500));
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
         ContentPolicyCache.SetOwnThresholds(null);
 
         Assert.Equal("badge", ContentPolicyCache.VerdictFor(Labels(("spam", 900))));
         Assert.Equal("block", ContentPolicyCache.VerdictFor(Labels(("nsfw", 900))));
+    }
+
+    // ── The Settings save re-binds the own half ─────────────────────────────
+
+    /// <summary>
+    /// A save of the viewer's own thresholds binds the pair the nest echoes into the
+    /// cache AT ONCE, so the next conversation or feed paint composes it — the
+    /// windows twin of tui's <c>SpamPrefsSaved</c>, linux's privacy-page re-set and
+    /// apple's <c>saveSpamPreferences(rebinding:)</c> (family-client-enforcement.md
+    /// § Content policy: the viewer's own threshold composes strictest-wins with the
+    /// guardian's rule document; "stricter than the guardian, never looser").
+    ///
+    /// <para>The shape is the e2e journey
+    /// <c>test_family_ward_can_make_their_own_filter_stricter_than_the_guardians_never_looser</c>:
+    /// a guardian <c>spam → collapse</c> rule bites at 500‰, so a 300‰ message shows
+    /// under it and under the default own threshold (500). Before the fix the save
+    /// reached the nest but never the cache, so the own threshold stayed at its login
+    /// read and the 300‰ message kept painting after the ward moved to 200.</para>
+    /// </summary>
+    [Fact]
+    public async Task SavingOwnThresholds_RebindsTheRenderAtOnce_StricterThanTheGuardiansRule()
+    {
+        ContentPolicyCache.SetGuardianPolicy(
+            FfiContentPolicyFixture.Make(spam: uniffi.fauna_client_policy.RuleVerdict.Collapse));
+        ContentPolicyCache.SetOwnThresholds((500, 500));
+        Assert.NotEqual("collapse", ContentPolicyCache.VerdictFor(Labels(("spam", 300))));
+
+        var rpc = new MockNestRpcClient();
+        await new ContentPolicyPreloader(rpc).SaveOwnThresholdsAsync(200, 500);
+
+        Assert.Equal(((ushort?)200, (ushort?)500), rpc.LastSpamSet);
+        Assert.Equal((ushort?)200, ContentPolicyCache.Current.OwnSpamPermille);
+        Assert.Equal((ushort?)500, ContentPolicyCache.Current.OwnPhishingPermille);
+        Assert.Equal("collapse", ContentPolicyCache.VerdictFor(Labels(("spam", 300))));
+        Assert.Equal("collapse", ContentPolicyCache.VerdictFor(Labels(("spam", 900))));
+    }
+
+    /// <summary>A save the nest refused binds nothing: the thresholds the render
+    /// holds stay the ones the nest last confirmed, and the failure reaches the
+    /// caller (the page paints it in its error bar).</summary>
+    [Fact]
+    public async Task AFailedSave_KeepsTheBoundThresholds_AndThrows()
+    {
+        ContentPolicyCache.SetOwnThresholds((500, 500));
+        var rpc = new MockNestRpcClient { NextError = "offline" };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new ContentPolicyPreloader(rpc).SaveOwnThresholdsAsync(200, 200));
+
+        Assert.Equal((ushort?)500, ContentPolicyCache.Current.OwnSpamPermille);
+        Assert.Equal((ushort?)500, ContentPolicyCache.Current.OwnPhishingPermille);
     }
 
     /// <summary>The session-local reveal set: nothing revealed by default, one
@@ -289,7 +340,7 @@ public class ContentPolicyCacheTests : IDisposable
     {
         ContentPolicyCache.SetOwnThresholds((500, 500));
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
         ContentPolicyCache.Reset();
 

@@ -115,17 +115,21 @@ internal sealed class CriticalAlertsHost
     /// </summary>
     public void ClearAll() => _registry.ClearAll();
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Count of sweep passes started so far — convention 14's causal-barrier
     /// pair with <see cref="SweepPassesCompleted"/>
     /// (<c>fauna_e2e_agent::ALERT_SWEEP_PASSES_KEY</c> owns the cross-app
     /// contract; <c>CriticalAlerts::sweep_passes_started</c> the reasoning).
-    /// Monotonic and process-wide — never a windows-side counter.
+    /// Monotonic and process-wide — never a windows-side counter. Read only by
+    /// the e2e state protocol, so the pair compiles out of Release with it
+    /// (convention 15).
     /// </summary>
     public ulong SweepPassesStarted() => _registry.SweepPassesStarted();
 
     /// <summary>The barrier's other half — see <see cref="SweepPassesStarted"/>.</summary>
     public ulong SweepPassesCompleted() => _registry.SweepPassesCompleted();
+#endif
 
     private sealed class ObserverImpl : CriticalAlertsObserver
     {

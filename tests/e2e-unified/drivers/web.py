@@ -84,6 +84,21 @@ class WebBridgeDriver(HttpBridgeDriver):
     #: (`apps/fauna-web/src/lib/e2e-automation.ts`).
     _DNS_RECHECK_KEY = "FAUNA_DNS_RECHECK_SECS"
 
+    #: The draft-autosave window seam (`drafts_autosave_window_ms`) — the native
+    #: environment variable, and on web the `localStorage` key `fauna-wasm`'s
+    #: `e2eDraftsAutosaveWindowMs` reads live
+    #: (`fauna_client_drafts::sync::E2E_AUTOSAVE_DEBOUNCE_ENV`).
+    _DRAFTS_WINDOW_KEY = "FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS"
+
+    #: The e2e ACME directory seed's directory — the native environment
+    #: variable, and on web the `localStorage` key `fauna-wasm`'s credentialed
+    #: admin-dns constructor reads (`fauna_client_dns::e2e_acme_seam::
+    #: E2E_ACME_DIRECTORY_ENV`; `e2e-gated-seeds.md` § The ACME directory seed →
+    #: *The web order*). The seed's CA and name-server variables are not
+    #: written on web: the context trusts pebble, and the nest reads the name
+    #: server from its own environment.
+    _ACME_DIRECTORY_KEY = "FAUNA_E2E_ACME_DIRECTORY_URL"
+
     def declare_region_for_relaunch(self, region: str, registry_hex: str) -> bool:
         """Web's twin of the native environment seam: a page reads no
         environment, so the two keys go into the origin's ``localStorage``,
@@ -356,6 +371,12 @@ class WebBridgeDriver(HttpBridgeDriver):
                 "  return true;"
                 "})()"
             )
+        # The ACME directory seed (`_apply_acme_pebble_env`), the same twin: read
+        # when the admin-dns page builds its credentialed machine, so it must sit
+        # in this origin before that page opens. Kept for `serve_from`, whose
+        # page opens in a fresh context with an empty `localStorage`.
+        self._acme_directory = (config.get("environment") or {}).get(self._ACME_DIRECTORY_KEY)
+        self._write_acme_directory_seed()
         # The admin DNS page's compressed clocks (`FAUNA_DNS_RECHECK_SECS`), the
         # same twin: stored for every later install of the automation surface
         # (a reload loses the wasm flag) and applied to this page now.
@@ -368,6 +389,18 @@ class WebBridgeDriver(HttpBridgeDriver):
                 "  return true;"
                 "})()"
             )
+        # The draft-autosave window (`_apply_drafts_autosave_window_env`), the
+        # same twin: read live at every debounce, so no reload is needed, and
+        # it survives the sign-outs and resets the run puts this page through.
+        # Always written, empty ("not set") when the run asked for none, so a
+        # window an earlier launch left on this origin can never leak into it.
+        window = (config.get("environment") or {}).get(self._DRAFTS_WINDOW_KEY, "")
+        self._execute_js(
+            "(() => {"
+            f"  localStorage.setItem({json_mod.dumps(self._DRAFTS_WINDOW_KEY)}, {json_mod.dumps(window)});"
+            "  return true;"
+            "})()"
+        )
         # The account-store seed (`config["seed_credentials"]`), the twin of
         # every native driver's pre-boot credential file: the same logical-key
         # map (`fauna/index` + `fauna/{actor}/…`, built by
@@ -385,9 +418,41 @@ class WebBridgeDriver(HttpBridgeDriver):
             self._execute_js(seed_js(dict(seed_credentials)))
             self._fresh_boot()
 
+    def _read_crash_before_close(self, close: str) -> None:
+        """Convention 6's close rider: had the page's renderer already crashed?
+
+        Read BEFORE the close, never after: the close drops the page, and with
+        it the bridge's record (`/page/console`'s `crashed`, set by Playwright's
+        `crash` event). A crash is recorded with `helpers/app_deaths.py`, whose
+        phase wrapper fails the phase that found it; the close goes on either way.
+        Silent on a live page, on a page this driver itself killed
+        (`_app_killed`), on an unhandled JS error (the page lives on; convention
+        6's error element owns it) and on a bridge that cannot answer. Never
+        raises: it runs at the head of every close."""
+        if self._app_killed:
+            return
+        try:
+            body = self._get("/page/console", {"page": self._page_id})
+            if not body.get("crashed"):
+                return
+            tail = "\n".join(str(x) for x in (body.get("lines") or [])[-30:])
+            report = (
+                f"the app died before {close} closed it: the page's renderer crashed\n"
+                "The bridge's browser reported the page's `crash` event, so the renderer "
+                "died on its own before this close: during the last command the harness "
+                "sent it or after the test's last step. The page's console tail:\n"
+                f"{tail}"
+            )
+        except Exception:  # noqa: BLE001 - a diagnosis must never break the close
+            return
+        from helpers import app_deaths
+
+        app_deaths.record(report)
+
     def _stop_app(self) -> None:
         # A twin owns only its page: close it and leave the bridge, Chromium,
         # and the chromium flock to the primary driver it was opened from.
+        self._read_crash_before_close("_stop_app()")
         if self._twin_of is not None:
             try:
                 self._delete(f"/page?page={self._page_id}")
@@ -564,6 +629,26 @@ class WebBridgeDriver(HttpBridgeDriver):
         :meth:`console_log` returns, eviction warning included."""
         return "\n".join(self.console_log())
 
+    def app_log_mark(self) -> int:
+        """Lines ever logged, not a character offset: the ring stops growing at
+        500 lines, so an offset into its text stops naming a place."""
+        body = self._get("/page/console")
+        return int(body.get("dropped") or 0) + len(body.get("lines") or [])
+
+    def app_log_since(self, mark: int) -> str:
+        """The lines logged after ``mark``, led by the eviction warning when the
+        ring has already dropped some of them."""
+        body = self._get("/page/console")
+        dropped = int(body.get("dropped") or 0)
+        lines = list(body.get("lines") or [])[max(0, mark - dropped):]
+        if mark < dropped:
+            lines.insert(0, (
+                f"<⚠ {dropped - mark} line(s) since the mark EVICTED from the "
+                f"500-entry ring, so a line's absence here is NOT evidence it "
+                f"was never logged>"
+            ))
+        return "\n".join(lines)
+
     def preserve_state_across_relaunch(self) -> bool:
         """Always true on web, with nothing to do: a reload — or an unclean kill
         that keeps the BrowserContext — keeps the same Chromium profile and origin,
@@ -641,6 +726,7 @@ class WebBridgeDriver(HttpBridgeDriver):
         synchronously (no unload backup — `wasm.ts`), so the durable state at the
         kill instant is exactly what survives. After this the app is GONE; drive no
         element until a relaunch (`hard_reload()` / `recover()`)."""
+        self._read_crash_before_close("kill_uncleanly()")
         self._post("/page/kill", {})
         self._app_killed = True
 
@@ -658,6 +744,7 @@ class WebBridgeDriver(HttpBridgeDriver):
         relaunch. If the app was unclean-killed, reopen the page in its kept
         context; otherwise reload the live page. Then re-inject the agent and wait
         for the SPA to rehydrate."""
+        self._read_crash_before_close("the relaunch")
         if self._app_killed:
             self._post("/page/relaunch", {"url": self._spa_url or ""}, timeout=HEAVY_BOOT_TIMEOUT_S)
             self._app_killed = False
@@ -754,6 +841,9 @@ class WebBridgeDriver(HttpBridgeDriver):
         original = (self._page_id, self._spa_url)
         self._page_id, self._spa_url = str(resp["page_id"]), spa_url
         self._inject_agent()
+        # The page's fresh context starts with an empty `localStorage`: write
+        # the launch's ACME directory seed into its origin again.
+        self._write_acme_directory_seed()
 
         def restore() -> None:
             page = self._page_id
@@ -764,6 +854,19 @@ class WebBridgeDriver(HttpBridgeDriver):
                 pass
 
         return restore
+
+    def _write_acme_directory_seed(self) -> None:
+        """Write the launch's ACME directory seed into the current page's origin
+        (a no-op when the launch carried none)."""
+        directory = getattr(self, "_acme_directory", None)
+        if not directory:
+            return
+        self._execute_js(
+            "(() => {"
+            f"  localStorage.setItem({json_mod.dumps(self._ACME_DIRECTORY_KEY)}, {json_mod.dumps(directory)});"
+            "  return true;"
+            "})()"
+        )
 
     def recover(self) -> bool:
         """Relaunch the app as a fresh SPA boot (the crash-recovery journeys call
@@ -1169,17 +1272,25 @@ class WebBridgeDriver(HttpBridgeDriver):
 
     def get_state(self, path: str | None = None, *,
                   wait_for=None, timeout: float = 5.0) -> dict | None:
-        """Read state via JS agent (synchronous — no polling needed).
+        """Read state via JS agent.
 
-        Web state is read via synchronous JS eval, so there's no stale-data
-        window. The wait_for predicate is checked once; if it fails, the state
-        is returned as-is (caller decides what to do).
+        Web state is read via synchronous JS eval, so a read has no stale-data
+        window of its own, but a predicate may be waiting on something still to
+        happen: as on every driver, ``wait_for`` polls until it holds or
+        ``timeout`` passes, then the last state is returned as-is (caller
+        decides what to do).
         """
-        self._ensure_agent()
-        result = self._execute_js("JSON.stringify(window.__faunaTestAgent.getState())")
-        if not result:
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self._read_agent_state()
+            state = json_mod.loads(result) if result else None
+            if wait_for is None or (state and wait_for(state)):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)  # sleep-ok: poll cadence inside a deadline poll
+        if not state:
             return None
-        state = json_mod.loads(result)
         if path:
             for key in path.split("."):
                 if isinstance(state, dict):
@@ -1187,6 +1298,39 @@ class WebBridgeDriver(HttpBridgeDriver):
                 else:
                     return None
         return state
+
+    # Answered by `_read_agent_state`'s read on a document the agent is not on.
+    _NO_AGENT = "__fauna_no_agent__"
+
+    def _read_agent_state(self) -> str | None:
+        """The agent's state as JSON, read on whichever document the page holds
+        when the read lands.
+
+        An app-driven full reload (web's account switch, `location.href`) can
+        commit between `_ensure_agent`'s check and the read, and the injected
+        agent does not survive it: a plain evaluate then dies on
+        "Execution context was destroyed" or reads `undefined.getState`. The
+        state question means the same on the new document, so the read is a
+        probe carried across the navigation, and a document without the agent
+        gets it re-injected and is asked again — bounded by the same budget a
+        probe already has, so a page that never settles still fails loudly.
+        """
+        deadline = time.monotonic() + _PROBE_NAVIGATION_BUDGET_S
+        while True:
+            self._ensure_agent()
+            result = self._probe_js(
+                "typeof window.__faunaTestAgent === 'undefined' "
+                f"? {json_mod.dumps(self._NO_AGENT)} "
+                ": JSON.stringify(window.__faunaTestAgent.getState())"
+            )
+            if result != self._NO_AGENT:
+                return result
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "get_state: the test agent was absent from every document "
+                    f"the page held for {_PROBE_NAVIGATION_BUDGET_S}s"
+                )
+            time.sleep(0.3)  # sleep-ok: pacing between re-inject attempts
 
     def reset(self, timeout: float = 10.0) -> None:
         """Reset app to factory state."""

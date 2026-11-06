@@ -10,7 +10,7 @@ import SwiftUI
 /// `settings/member_review.rs`, android `MemberReviewScreen.kt`.
 ///
 /// ⚠ **There is no sweep gate here, and that is the entire point.** The
-/// (not-yet-built-on-apple) ephemeral kit-side pass gates on a live succession
+/// ephemeral kit-side pass (`RecoveryKitSection`) gates on a live succession
 /// sweep so it appears only inside the ceremony; this page has no such gate —
 /// a deferred backlog must stay reachable after the ceremony that raised it
 /// scrolls away. The only condition here is whether there is anything open.
@@ -53,7 +53,7 @@ public struct MemberReviewView: View {
 
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(vm.rows) { row in
-                            memberReviewRow(row)
+                            MemberReviewRowView(row: row, vm: vm)
                         }
                     }
                 }
@@ -71,19 +71,27 @@ public struct MemberReviewView: View {
         }
         .onStoreChange { await vm.resync() }
     }
+}
 
-    /// One `member-review-row` per still-open PERSON, with that person's
-    /// `member-review-keep-button`/`member-review-remove-button` pair scoped
-    /// **inside** it — the same row family the (not-yet-built) ephemeral pass
-    /// will share, one collapse per person off
-    /// `SuccessionLedger::open_member_reviews`, never one row per item.
-    ///
-    /// Neither button carries a `.faunaGate`: Keep rides `fauna.account.state.put`
-    /// (OfflineSafe) and Remove rides `fauna.conversations.channel.send`
-    /// (OfflineQueued) — neither kind is `OnlineOnly`, so a gate on either
-    /// could never desensitize anything (offline-gate-check ruling 1).
-    @ViewBuilder
-    private func memberReviewRow(_ row: MemberReviewRow) -> some View {
+/// One `member-review-row` per still-open PERSON, with that person's
+/// `member-review-keep-button`/`member-review-remove-button` pair scoped
+/// **inside** it — one collapse per person off
+/// `SuccessionLedger::open_member_reviews`, never one row per item.
+///
+/// ⚠ The ONE row builder both surfaces call: the permanent page above and the
+/// ephemeral pass in `RecoveryKitSection` are one id family on two surfaces
+/// (`docs/goal/ui/settings.md` § Recovery kit), so a second copy would be two
+/// places for a row's wording, scoping or gesture to drift.
+///
+/// Neither button carries a `.faunaGate`: Keep rides `fauna.account.state.put`
+/// (OfflineSafe) and Remove rides `fauna.conversations.channel.send`
+/// (OfflineQueued) — neither kind is `OnlineOnly`, so a gate on either
+/// could never desensitize anything (offline-gate-check ruling 1).
+struct MemberReviewRowView: View {
+    let row: MemberReviewRow
+    let vm: MemberReviewVM
+
+    var body: some View {
         let who = renderLocalizedText(row.text.who)
         let reasonText = row.text.reasons.map(renderLocalizedText).joined(separator: ", ")
         let rowText = L.settings.recoveryKit.reviewRow(who: who, reason: reasonText)

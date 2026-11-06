@@ -610,6 +610,20 @@ where
         }
     }
 
+    /// The left set's cached share-endpoints rows, tombstoned through the
+    /// custody store's account runtime ([`FolderKeyStore::drop_set_share_endpoints`]).
+    /// A failure is logged: the rows are the other members' last addresses,
+    /// retained until a later leave of the same set re-issues the drop.
+    async fn do_drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        match self.custody.drop_set_share_endpoints(channel_id).await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::debug!("left set's share-endpoints tombstone failed: {e:#}");
+                false
+            }
+        }
+    }
+
     /// Tri-state (see [`FolderCustodySink::foreign_home_url`]): an unreadable
     /// custody record is `Err`, never `Ok(None)`.
     async fn do_foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
@@ -677,6 +691,10 @@ impl FolderCustodySink for NestFolderCustodySink<Arc<fauna_client::NestClient>> 
         self.do_forget_foreign_set(channel_id).await
     }
 
+    async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        self.do_drop_share_endpoints(channel_id).await
+    }
+
     async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
         self.do_foreign_home_url(channel_id).await
     }
@@ -728,6 +746,10 @@ impl FolderCustodySink for NestFolderCustodySink<fauna_rpc_wasm::WsRpcClient> {
 
     async fn forget_foreign_set(&self, channel_id: &[u8; 32]) -> bool {
         self.do_forget_foreign_set(channel_id).await
+    }
+
+    async fn drop_share_endpoints(&self, channel_id: &[u8; 32]) -> bool {
+        self.do_drop_share_endpoints(channel_id).await
     }
 
     async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
@@ -903,6 +925,11 @@ pub(crate) fn resolve_custody_by_ref(
         FolderRef::Foreign(channel) => custody::find_foreign_set(cfg, channel)
             .map(|foreign| custody_of_foreign_set(foreign, cfg))
             .ok_or_else(|| anyhow::anyhow!("no live foreign set at that channel")),
+        // A group set's keys are its scope's generation ring
+        // (`fauna_account_plane::group_set_keys`), never an M2 custody entry.
+        FolderRef::Group(_) => Err(anyhow::anyhow!(
+            "a group set has no folder custody — its keys are the scope's generation ring"
+        )),
     }
 }
 
@@ -1024,12 +1051,40 @@ pub(crate) fn resolve_set_nonce_by_ref(
         }
         FolderRef::Foreign(channel) => custody::find_foreign_set(cfg, channel)
             .and_then(|f| custody::set_nonce_for_channel(cfg, &f.channel_id)),
+        // No set nonce on the group family: a group set's rows are plane
+        // entries bound to the scope by the plane's own writer signature.
+        FolderRef::Group(_) => None,
     }
 }
 
 // Same shared-logic-once / per-target-trait-impl split as
 // `NestFolderCustodySink` above (see that module doc for why).
 impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
+    /// The [`FolderKeyResolver::read_scope`] read: the roster and custody,
+    /// once, pinned into a [`PinnedFolderKeyResolver`] every per-set answer of
+    /// one page read comes from. Either read failing is `None` — the caller
+    /// keeps this resolver, whose per-call reads keep the must-succeed rule.
+    async fn do_read_scope(&self) -> Option<Arc<dyn FolderKeyResolver>> {
+        let reply = match self.folders.list_owned_and_shared_wire().await {
+            Ok(reply) => reply,
+            Err(e) => {
+                tracing::debug!("read scope: roster read failed; resolving per call: {e}");
+                return None;
+            }
+        };
+        let cfg = match self.custody.load().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::debug!("read scope: custody read failed; resolving per call: {e:#}");
+                return None;
+            }
+        };
+        Some(Arc::new(PinnedFolderKeyResolver {
+            roster: reply.folders,
+            cfg,
+        }))
+    }
+
     async fn do_set_nonce(&self, folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
         let reply = self
             .folders
@@ -1139,6 +1194,66 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
     }
 }
 
+/// One page read's custody view ([`FolderKeyResolver::read_scope`]): the
+/// roster and custody [`NestFolderKeyResolver`] read once, answered from by the
+/// same pure decisions its per-call methods make — so a scope answers exactly
+/// what the resolver would have answered at the moment it was made, without
+/// one roster read per set. Reads only, and for one read only (the trait
+/// method's ⚠).
+pub struct PinnedFolderKeyResolver {
+    roster: Vec<fauna_protocol::folders::FolderSummary>,
+    cfg: fauna_core::data::FoldersConfig,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl FolderKeyResolver for PinnedFolderKeyResolver {
+    async fn resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
+        resolve_custody_from(&self.roster, &self.cfg, name_hash)
+    }
+
+    async fn resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+        resolve_custody_by_ref(&self.roster, &self.cfg, folder_ref)
+    }
+
+    async fn set_nonce(&self, folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
+        Ok(resolve_set_nonce_from(&self.roster, &self.cfg, folder))
+    }
+
+    async fn set_nonce_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<Option<[u8; 32]>> {
+        Ok(resolve_set_nonce_by_ref(
+            &self.roster,
+            &self.cfg,
+            folder_ref,
+        ))
+    }
+
+    async fn set_lineage(
+        &self,
+        _folder: &str,
+        name_hash: &[u8; 32],
+    ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
+        Ok(custody::set_lineage_by_hash(
+            &self.roster,
+            &self.cfg,
+            name_hash,
+        ))
+    }
+
+    async fn set_lineage_ref(
+        &self,
+        folder_ref: &FolderRef,
+    ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+        Ok(custody::set_lineage_by_ref(
+            &self.roster,
+            &self.cfg,
+            folder_ref,
+        ))
+    }
+
+    // `read_scope` keeps its `None` default: a scope is already one read.
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl FolderKeyResolver for NestFolderKeyResolver<Arc<fauna_client::NestClient>> {
@@ -1171,6 +1286,10 @@ impl FolderKeyResolver for NestFolderKeyResolver<Arc<fauna_client::NestClient>> 
         folder_ref: &FolderRef,
     ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
         self.do_set_lineage_ref(folder_ref).await
+    }
+
+    async fn read_scope(&self) -> Option<Arc<dyn FolderKeyResolver>> {
+        self.do_read_scope().await
     }
 }
 
@@ -1206,6 +1325,10 @@ impl FolderKeyResolver for NestFolderKeyResolver<fauna_rpc_wasm::WsRpcClient> {
         folder_ref: &FolderRef,
     ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
         self.do_set_lineage_ref(folder_ref).await
+    }
+
+    async fn read_scope(&self) -> Option<Arc<dyn FolderKeyResolver>> {
+        self.do_read_scope().await
     }
 }
 
@@ -1277,6 +1400,97 @@ mod tests {
                 .expect("encode reply");
             Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
         }
+    }
+
+    /// A custody reader that counts its reads.
+    struct CountingCustody {
+        cfg: FoldersConfig,
+        loads: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl FolderKeyReader for CountingCustody {
+        async fn load(&self) -> anyhow::Result<FoldersConfig> {
+            self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.cfg.clone())
+        }
+    }
+
+    /// A page read asks once per set — the judge a set's lineage, the label
+    /// render a set's custody. Per call, the resolver re-reads the roster and
+    /// custody for each (2 × N roster reads, each N rows long: on a large
+    /// account the read that never landed, `docs/goal/ui/README.md` § List
+    /// pages). Its read scope reads them ONCE and answers every set exactly as
+    /// the per-call methods do.
+    #[test]
+    fn a_read_scope_reads_the_roster_and_custody_once_for_every_set() {
+        use fauna_client_testkit::block_on;
+        use std::sync::atomic::Ordering;
+        let nonce = [0x0C; 32];
+        let mut rows: Vec<FolderSummary> = (0..6)
+            .map(|i| FolderSummary {
+                id: 10 + i,
+                ..row(&format!("set-{i}"), None)
+            })
+            .collect();
+        rows.push(member_row(nonce));
+        let nest = Arc::new(RosterNest::default());
+        *nest.rows.lock().unwrap() = rows.clone();
+        let custody = Arc::new(CountingCustody {
+            cfg: member_custody(nonce),
+            loads: Default::default(),
+        });
+        let resolver = NestFolderKeyResolver::new(
+            Arc::clone(&nest),
+            Arc::clone(&custody) as Arc<dyn FolderKeyReader>,
+        );
+        let hashes: Vec<[u8; 32]> = rows.iter().map(|r| set_name_hash(&r.name)).collect();
+
+        let per_call: Vec<_> = hashes
+            .iter()
+            .map(|h| block_on(resolver.do_set_lineage(h)).expect("lineage"))
+            .collect();
+        assert_eq!(
+            nest.lists(),
+            rows.len(),
+            "per call: one roster read per set"
+        );
+        assert_eq!(custody.loads.load(Ordering::SeqCst), rows.len());
+
+        let scope = block_on(resolver.do_read_scope()).expect("a scope");
+        let scoped: Vec<_> = hashes
+            .iter()
+            .map(|h| block_on(scope.set_lineage("", h)).expect("lineage"))
+            .collect();
+        for (r, h) in rows.iter().zip(&hashes) {
+            let by_ref = FolderRef::Local(r.id);
+            assert_eq!(
+                block_on(scope.set_lineage_ref(&by_ref)).expect("by row"),
+                block_on(resolver.do_set_lineage_ref(&by_ref)).expect("by row"),
+            );
+            let shape = |c: anyhow::Result<ResolvedCustody>| match c {
+                Ok(ResolvedCustody::OwnerOnly { .. }) => "owner-only",
+                Ok(ResolvedCustody::ContentKeyed(_)) => "content-keyed",
+                Err(_) => "undetermined",
+            };
+            assert_eq!(
+                shape(block_on(scope.resolve(h))),
+                shape(block_on(resolver.do_resolve(h))),
+            );
+        }
+        assert_eq!(
+            scoped, per_call,
+            "the scope answers as the per-call reads do"
+        );
+        assert!(
+            scoped.iter().any(|l| l.live == Some(nonce)),
+            "the member set's nonce is answered"
+        );
+        // Every read but one is a per-call method's (3 × N above); the scope
+        // itself made exactly one of each.
+        let per_call_reads = rows.len() * 3;
+        assert_eq!(nest.lists(), per_call_reads + 1);
+        assert_eq!(custody.loads.load(Ordering::SeqCst), per_call_reads + 1);
     }
 
     /// The raw group id of the shared set these re-fetch tests use, and its

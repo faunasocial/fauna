@@ -64,29 +64,32 @@ func placeInboundInvite(
 		logger.Warn("smtp: an emailed invitation was delivered but not placed on the calendar",
 			"actor", actor, "step", step, "err", err)
 	}
-	// The calendar key is the actor's non-epoch recipient key — the one the
-	// MDA seals a CalDAV PUT to — not the mail-ingest epoch key.
-	pubkey, mlkemEk, _, err := wsrpc.FetchRecipientMLSPubkeyHybrid(ctx, caller, actorID, false)
-	if err != nil || pubkey == nil {
+	// The recipient's calendar key (owner-key-material.md § Path B-sibling-5):
+	// the key the MDA seals a CalDAV PUT to, standing, never the mail-ingest
+	// epoch key. A recipient with no calendar key gets no placement — never a
+	// calendar record under the mail key, which the nest refuses.
+	row, err := wsrpc.FetchRecipientKeyRow(ctx, caller, actorID, false)
+	if err != nil {
 		fail("fetch calendar key", err)
 		return
 	}
+	if row.Calendar == nil {
+		fail("fetch calendar key", fmt.Errorf("the recipient has no calendar key registered"))
+		return
+	}
+	cal := row.Calendar
 	indexKey, err := wsrpc.FetchRecipientIndexKey(ctx, caller, actorID)
 	if err != nil {
 		fail("fetch index key", err)
 		return
 	}
-	if indexKey == nil {
-		indexKey = pubkey
-	}
-	body, err := mailfauna.EncryptToRecipientHybrid([]byte(invite.Ics), pubkey, mlkemEk)
+	body, err := mailfauna.SealRecordHybrid(mailfauna.RecordKindCalendar, []byte(invite.Ics), cal.Pubkey, cal.MlkemEk)
 	if err != nil {
 		fail("seal body", err)
 		return
 	}
-	hint, err := mailfauna.EncryptToRecipientHybrid(
-		mailfauna.Tokenize(invite.Ics).CanonicalBytes, indexKey,
-		mailfauna.IndexHintMlkemEk(indexKey, pubkey, mlkemEk))
+	hint, err := mailfauna.SealRecordIndexHint(mailfauna.RecordKindCalendar,
+		mailfauna.Tokenize(invite.Ics).CanonicalBytes, indexKey, cal.Pubkey, cal.MlkemEk)
 	if err != nil {
 		fail("seal index hint", err)
 		return

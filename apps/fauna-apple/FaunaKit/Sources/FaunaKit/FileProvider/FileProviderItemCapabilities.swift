@@ -13,19 +13,30 @@ import Foundation
     /// rename capability on any of its items: the host says which it is
     /// (`FfiFileProviderHost.isReadOnly`), and refuses a write that arrives
     /// anyway — the extension refuses it first, before any byte is staged.
+    ///
+    /// On iOS the same word carries the keep: a file the holder-keeps gate does
+    /// not hold (`kept`) advertises `.allowsEvicting`, without which the OS
+    /// refuses every eviction, and a kept one does not. macOS keeps by content
+    /// policy instead (`FileProviderKeep`), the capability deprecated there.
     public enum FileProviderItemCapabilities {
-        public static func capabilities(isFolder: Bool, readOnly: Bool)
+        public static func capabilities(isFolder: Bool, readOnly: Bool, kept: Bool)
             -> NSFileProviderItemCapabilities
         {
+            var capabilities: NSFileProviderItemCapabilities
             if readOnly {
-                return isFolder ? [.allowsContentEnumerating, .allowsReading] : [.allowsReading]
+                capabilities = isFolder ? [.allowsContentEnumerating, .allowsReading] : [.allowsReading]
+            } else {
+                capabilities = isFolder
+                    ? [
+                        .allowsContentEnumerating, .allowsReading, .allowsAddingSubItems,
+                        .allowsRenaming, .allowsDeleting,
+                    ]
+                    : [.allowsReading, .allowsWriting, .allowsRenaming, .allowsDeleting, .allowsReparenting]
             }
-            return isFolder
-                ? [
-                    .allowsContentEnumerating, .allowsReading, .allowsAddingSubItems,
-                    .allowsRenaming, .allowsDeleting,
-                ]
-                : [.allowsReading, .allowsWriting, .allowsRenaming, .allowsDeleting, .allowsReparenting]
+            #if os(iOS)
+                if !isFolder && !kept { capabilities.insert(.allowsEvicting) }
+            #endif
+            return capabilities
         }
 
         /// The platform's refusal of a write on a read-only set: the user lacks

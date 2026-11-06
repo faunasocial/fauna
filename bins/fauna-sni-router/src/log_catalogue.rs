@@ -108,12 +108,8 @@ mod tests {
     #[test]
     fn every_catalogued_event_id_passes_nest_admission() {
         for id in EVENTS {
-            assert!(!id.is_empty());
-            assert!(id.len() <= fauna_protocol::log_plane::MAX_EVENT_BYTES);
             assert!(
-                id.chars().all(|c| c.is_ascii_lowercase()
-                    || c.is_ascii_digit()
-                    || matches!(c, '_' | '.' | '-')),
+                fauna_protocol::log_plane::event_id_is_admissible(id),
                 "{id} would be rejected by nest admission"
             );
         }

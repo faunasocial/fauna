@@ -25,7 +25,6 @@ new feature (`apple-e2e-automation.md` § Architecture).
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
 
 # apple-only: this is the regression gate for apple's own `/element/scroll-into-view`
 # no-op-stub bug (module docstring above). tui already serves this route (has for much
@@ -83,13 +82,6 @@ def test_scroll_into_view_centres_a_below_the_fold_post(logged_in_app):
     flag been flipped alone, silently left the card wherever it was.
     """
     app = logged_in_app
-    if not getattr(app.driver, "_supports_scroll_into_view", False):
-        skip_unbuilt(
-            app.driver,
-            surface="POST /element/scroll-into-view",
-            detail="this bridge does not serve a targeted scroll",
-            tracked="testing.md",
-        )
 
     _seed_feed(app, 12)
     last = app.feed.post_card_count() - 1
@@ -119,13 +111,6 @@ def test_scroll_into_view_actually_moves_the_element(logged_in_app):
     requires it to have moved, which no stub can satisfy.
     """
     app = logged_in_app
-    if not getattr(app.driver, "_supports_scroll_into_view", False):
-        skip_unbuilt(
-            app.driver,
-            surface="POST /element/scroll-into-view",
-            detail="this bridge does not serve a targeted scroll",
-            tracked="testing.md",
-        )
 
     _seed_feed(app, 12)
     last = app.feed.post_card_count() - 1
@@ -157,13 +142,6 @@ def test_scroll_to_raises_on_an_absent_element(logged_in_app):
     quietly degrading `scroll_to` into the best-effort `_scroll_into_view`.
     """
     app = logged_in_app
-    if not getattr(app.driver, "_supports_scroll_into_view", False):
-        skip_unbuilt(
-            app.driver,
-            surface="POST /element/scroll-into-view",
-            detail="this bridge does not serve a targeted scroll",
-            tracked="testing.md",
-        )
 
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
     app.driver.wait_for("feed-view")

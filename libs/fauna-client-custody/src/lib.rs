@@ -734,40 +734,15 @@ impl fauna_client_capabilities::custody_ceremony::CustodyHostingDepositor
     }
 }
 
-/// Fetch the receipts custodian NESTS deposited at this account's own nest
-/// (stage (c)'s owner-side leg) and fold each through the same
-/// verify-against-the-recorded-accept path the channel-carried receipts use
-/// (`ingest_receipt_from_nest`). A failed fetch (a refusal, a transport fault)
-/// degrades the leg to a no-op (the reconcile sweep's best-effort posture); a refused receipt is a verification verdict,
-/// logged and never retried.
+/// The shared stage (c) owner-side leg
+/// ([`fauna_client_capabilities::custody_ceremony::ingest_nest_receipts`], the
+/// one web's `custodyFacetLoad` runs too), its skips logged.
 async fn ingest_nest_receipts(nest: &Arc<NestClient>, records: &impl CeremonyRecords) {
-    let receipts =
-        fauna_client_capabilities::custody_hosting::CustodyReceiptsClient::new(Arc::clone(nest));
-    match receipts.list().await {
-        Ok(reply) => {
-            for row in reply.rows {
-                let bytes = row.receipt.to_vec();
-                match records
-                    .update(|cfg| {
-                        fauna_client_capabilities::custody_ceremony::ingest_receipt_from_nest(
-                            cfg, &bytes,
-                        )
-                    })
-                    .await
-                {
-                    Ok(Ok(_outcome)) => {}
-                    Ok(Err(refused)) => {
-                        tracing::debug!("nest-door custody receipt refused: {refused}");
-                    }
-                    Err(e) => {
-                        tracing::debug!("nest-door custody receipt capture failed: {e}");
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::debug!("custody receipt fetch skipped: {e}");
-        }
+    for skipped in
+        fauna_client_capabilities::custody_ceremony::ingest_nest_receipts(Arc::clone(nest), records)
+            .await
+    {
+        tracing::debug!("{skipped}");
     }
 }
 

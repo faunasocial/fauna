@@ -39,10 +39,10 @@ public sealed partial class PostTipDisplay : UserControl
     {
         _item = item;
         TipTotalText.Text = item.TipTotalText;
-        TipTotalText.Visibility = FeedPage.BoolToVisibility(item.HasTipTotal);
+        TipTotalText.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasTipTotal);
         TipCountText.Text = item.TipCountText;
-        TipCountText.Visibility = FeedPage.BoolToVisibility(item.HasTips);
-        TipListButton.Visibility = FeedPage.BoolToVisibility(item.HasTips);
+        TipCountText.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasTips);
+        TipListButton.Visibility = Feed.PostCardBind.BoolToVisibility(item.HasTips);
     }
 
     private void TipListButton_Click(object sender, RoutedEventArgs e)

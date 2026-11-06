@@ -40,7 +40,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import x25519
 
 from common.accounts import actor_id_hex
 from common.auth import UNBINDING_MAX_DEVICES, set_tier_caps, user_create_folder
@@ -50,25 +49,21 @@ from helpers.atproto_consent import (  # noqa: F401 — pytest fixtures adopted 
     consent_bridge,
     consent_nest,
 )
-from helpers.client_metadata_server import client_document
 from helpers.folder_content import _log_path, on_demand_mount_stands
 from helpers.fuse_mount import release_mount, run_through_mount
-from helpers.oauth_client import OAuthClient
 from helpers.principal_session import PrincipalSession, upgrade
 from helpers.waiting import wait_until
+from tests.test_folder_deposit_adoption import _depositor
 from tests.api.test_folder_deposit import (  # noqa: F401 — fixtures adopted by import
-    _approve_with_grant,
     _everything_on_disk,
     _inbox,
-    _raw,
+    _signed,
     consent_nest_env,
     metadata_server,
 )
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.linux]
 
-DOCUMENT = "/adoption-on-demand-client.json"
-REDIRECT_URI = "http://127.0.0.1:17778/callback"
 NAME = "deposited-on-demand-e1.txt"
 MARKER = b"adopted-on-demand-deposit-plaintext-7c2e"
 
@@ -163,30 +158,16 @@ def test_an_on_demand_seat_adopts_a_parked_deposit(
             mail.navigate()
             mail.ensure_mail_enabled()
 
-            # The third party's deposit, through the door on its principal session.
-            scope_str = f"fauna:folder:deposit:{folder_id}"
-            metadata_server.documents[DOCUMENT] = client_document(
-                metadata_server.client_id(DOCUMENT), REDIRECT_URI, scope_str
-            )
-            holder = x25519.X25519PrivateKey.generate()
-            holder_pub = _raw(holder.public_key())
-            client = OAuthClient(
-                base=nest["url"],
-                htu_origin=f"https://{HANDLE_DOMAIN}",
-                redirect_uri=REDIRECT_URI,
-                scope=scope_str,
-                holder_x25519=holder_pub,
-                client_id_url=metadata_server.client_id(DOCUMENT),
-            )
-            token = _approve_with_grant(
-                nest, client, holder_pub, folder_id, scope_str, choose=False
-            )["access_token"]
+            # The third party's deposit, through the door on its principal session. The
+            # owner approves on the app's own request card, so the grant's Mint is logged
+            # and the live account runtime's reconcile sweep keeps the row.
+            client, token = _depositor(nest, metadata_server, folder_id, app)
             session = PrincipalSession(upgrade(nest, client, token))
             try:
                 ok, reply = session.call(
                     "fauna.folders.deposit",
-                    {"folder_id": folder_id, "name": NAME, "content_type": "text/plain",
-                     "body": MARKER},
+                    _signed(client, {"folder_id": folder_id, "name": NAME, "content_type": "text/plain",
+                     "body": MARKER}),
                 )
             finally:
                 session.ws.close()

@@ -29,6 +29,16 @@ const NOT_KEYS: &[(&str, &str)] = &[
         "a sentinel invite cause `snapshots::invite_request::message_for` maps \
          to `onboarding.invite.error.already_registered`",
     ),
+    (
+        "invite.error.domain_not_hosted",
+        "a sentinel invite cause `snapshots::invite_request::message_for` maps \
+         to `onboarding.invite.error.domain_not_hosted`",
+    ),
+    (
+        "invite.error.unreachable",
+        "a sentinel invite cause `snapshots::invite_request::message_for` maps \
+         to `onboarding.invite.error.unreachable`",
+    ),
 ];
 
 /// `true` for a literal the scan never treats as a key: a reserved hostname

@@ -33,9 +33,8 @@ mod common;
 use common::backup_nests::*;
 use common::register_user;
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use fauna_alloc_probe::LargestAlloc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -53,51 +52,18 @@ use futures_util::StreamExt;
 
 // ── the allocation counter ───────────────────────────────────────────────────
 
-struct PeakAlloc;
-
-static TRACKING: AtomicBool = AtomicBool::new(false);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn note(size: usize) {
-    if TRACKING.load(Ordering::Relaxed) {
-        PEAK.fetch_max(size, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: every call forwards to `System` unchanged; the counter only reads
-// the requested size.
-unsafe impl GlobalAlloc for PeakAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note(layout.size());
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note(layout.size());
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note(new_size);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: PeakAlloc = PeakAlloc;
+static GLOBAL: LargestAlloc = LargestAlloc;
 
 /// One test at a time: the counter is process-wide.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn start_tracking() {
-    PEAK.store(0, Ordering::Relaxed);
-    TRACKING.store(true, Ordering::Relaxed);
+    LargestAlloc::start();
 }
 
 fn stop_tracking() -> usize {
-    TRACKING.store(false, Ordering::Relaxed);
-    PEAK.load(Ordering::Relaxed)
+    LargestAlloc::stop()
 }
 
 // ── the fixture ──────────────────────────────────────────────────────────────

@@ -1119,8 +1119,12 @@ pub fn compose_decoration_plan(src: &str, caret: usize) -> ComposeMarkerPlan {
     let caret_line = lines
         .iter()
         .position(|l| caret >= l.start && caret <= l.end);
-    let is_revealed =
-        |start: usize, end: usize| reveals.iter().any(|r| r.start <= start && end <= r.end);
+    // `reveals` are disjoint marker spans in ascending order, so the only span that can hold
+    // `[start, end)` is the last one starting at or before `start` — a binary search, not a scan.
+    let is_revealed = |start: usize, end: usize| {
+        let i = reveals.partition_point(|r| r.start <= start);
+        i > 0 && end <= reveals[i - 1].end
+    };
 
     for d in &decos {
         if !matches!(
@@ -1129,13 +1133,16 @@ pub fn compose_decoration_plan(src: &str, caret: usize) -> ComposeMarkerPlan {
         ) {
             continue; // content kind — each app styles it from decoration_map, unchanged
         }
-        let Some((li, line)) = lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| d.start >= l.start && d.start <= l.end)
-        else {
+        // Lines are disjoint and ascending: the candidate is the last one starting at or before
+        // `d.start`.
+        let li = lines.partition_point(|l| l.start <= d.start);
+        let Some(li) = li.checked_sub(1) else {
             continue;
         };
+        let line = &lines[li];
+        if d.start > line.end {
+            continue;
+        }
         if line.is_code {
             continue; // fenced ``` marker — literal
         }
@@ -1161,12 +1168,9 @@ pub fn compose_decoration_plan(src: &str, caret: usize) -> ComposeMarkerPlan {
 /// strictly before `off` (clamped to `src.len()`). The caret-line rule for
 /// [`compose_show_markers_dim_ranges`]; matches each app's own computation (windows/android
 /// `lineOf`, GTK `TextIter::line`).
-fn line_index(src: &str, off: usize) -> usize {
-    let clamped = off.min(src.len());
-    src.as_bytes()[..clamped]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
+fn line_index(newlines: &[usize], src_len: usize, off: usize) -> usize {
+    let clamped = off.min(src_len);
+    newlines.partition_point(|&p| p < clamped)
 }
 
 /// The compose-field **"show markers" (dimmed live-preview) mode** reveal policy — the whole-line
@@ -1193,7 +1197,13 @@ pub fn compose_show_markers_dim_ranges(src: &str, caret: usize) -> Vec<RevealSpa
     if decos.is_empty() {
         return Vec::new();
     }
-    let caret_line = line_index(src, caret);
+    let newlines: Vec<usize> = src
+        .bytes()
+        .enumerate()
+        .filter(|&(_, b)| b == b'\n')
+        .map(|(i, _)| i)
+        .collect();
+    let caret_line = line_index(&newlines, src.len(), caret);
     decos
         .iter()
         .filter(|d| {
@@ -1202,7 +1212,7 @@ pub fn compose_show_markers_dim_ranges(src: &str, caret: usize) -> Vec<RevealSpa
                 MdDecorationKind::Marker | MdDecorationKind::ListMarker
             )
         })
-        .filter(|d| line_index(src, d.start) != caret_line)
+        .filter(|d| line_index(&newlines, src.len(), d.start) != caret_line)
         .map(|d| RevealSpan {
             start: d.start,
             end: d.end,
@@ -2480,6 +2490,22 @@ mod tests {
         let (hide, dim) = cplan("```\na *b* c\n```", 99);
         assert_eq!(hide, vec![]);
         assert_eq!(dim, vec![]);
+    }
+
+    #[test]
+    fn compose_reveal_rules_scale_linearly_on_a_large_marker_dense_body() {
+        // 5,000 lines × 20 `**b**` runs = 100,000 runs (200,000 markers). The per-marker line and
+        // reveal scans and the per-decoration newline count were quadratic here (minutes).
+        let line = "**b** ".repeat(20);
+        let src = vec![line.as_str(); 5_000].join("\n");
+        let caret = src.len() / 2;
+        let plan = compose_decoration_plan(&src, caret);
+        // Every marker is either hidden or (inside the caret's run) dimmed; none are dropped.
+        assert_eq!(plan.hide.len() + plan.dim.len(), 200_000);
+        assert!(plan.dim.len() <= 4);
+        // Show-markers mode dims every marker off the caret line.
+        let dim = compose_show_markers_dim_ranges(&src, caret);
+        assert_eq!(dim.len(), 200_000 - 40);
     }
 
     // ── compose_show_markers_dim_ranges: markers DIM off the caret line, revealed on it ──────

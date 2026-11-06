@@ -32,6 +32,10 @@ pub mod dns;
 // identical body. Distinct from `auth::DmarcPolicy` (inbound verify side).
 #[cfg(feature = "dmarc-policy")]
 pub mod dmarc_publish;
+// One strict RFC 7489 §6.2 `dmarc-uri` reader, shared by the admin write of our
+// own `rua=`/`ruf=` destination and the outbound sender's read of a peer's
+// `rua=`. Pure, dependency-free, so it is compiled under every feature set.
+pub mod dmarc_uri;
 // DMARC aggregate-report receive (docs/goal/behavior/dmarc-reporting.md
 // § Aggregate-report receive): bounded unpack + a strict, DOCTYPE-refusing XML
 // reader for the RFC 7489 §A.1 fields + the per-report summary (`dmarc-report`);

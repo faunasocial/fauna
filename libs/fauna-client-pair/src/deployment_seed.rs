@@ -154,6 +154,9 @@ mod tests {
         async fn forward_discard(&self) -> Result<u64, PairNestError> {
             unreachable!()
         }
+        fn nest_url(&self) -> String {
+            "https://box.test".into()
+        }
         async fn this_nest(&self) -> Result<SelfNest, PairNestError> {
             Ok(SelfNest {
                 id: self.claimed.to_vec(),

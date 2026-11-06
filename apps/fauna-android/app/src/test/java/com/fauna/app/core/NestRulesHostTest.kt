@@ -29,7 +29,6 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import social.fauna.generated.Ids
 import uniffi.fauna_client_policy.NestRuleLine
-import uniffi.fauna_core.ContentLabelEntry
 import uniffi.fauna_client_policy.NestRulesSummary
 import uniffi.fauna_client_policy.RuleKind
 import uniffi.fauna_core.LocalizedText
@@ -104,7 +103,7 @@ class NestRulesHostTest {
         assertTrue(editor.setKeywordsInline(row, term))
         assertTrue(editor.setReason(row, editor.view().reasonDefaultKey, "Not for you"))
         assertTrue(editor.view().canSave)
-        return FfiContentPolicy("inherit", "inherit", "inherit", "inherit", document = editor.documentBytes())
+        return FfiContentPolicy(document = editor.documentBytes())
     }
 
     @Test
@@ -128,13 +127,10 @@ class NestRulesHostTest {
         assertEquals("Not for you", decision.guardianReason)
         compose.setContent { GuardianReason(decision.guardianReason) }
         compose.onNodeWithTag(Ids.CONTENT_POLICY_BLOCKED_REASON).assertTextEquals("Not for you")
-        // The verdict a floor drove names no reason.
-        val floor = ContentPolicyInputs(contentPolicy = FfiContentPolicy("block", "inherit", "inherit", "inherit"))
-        val floored = RegionPlaneHost.render(
-            listOf(ContentLabelEntry(category = "nsfw", confidencePerMille = 900.toUShort())), floor, subject.copy(text = "homework"),
-        )
-        assertEquals("block", floored.verdict)
-        assertNull(floored.guardianReason)
+        // An item no guardian rule fires on carries no guardian reason.
+        val missed = RegionPlaneHost.render(emptyList(), inputs, subject.copy(text = "homework"))
+        assertEquals("show", missed.verdict)
+        assertNull(missed.guardianReason)
     }
 
     @Test
@@ -164,6 +160,7 @@ class NestRulesHostTest {
                 ),
             ),
             notApplied = null,
+            notAppliedSentence = null,
         )
         compose.setContent { NestRulesCard(summary) }
         compose.onNodeWithTag(Ids.SETTINGS_NEST_RULES_SECTION).assertExists()

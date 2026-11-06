@@ -870,3 +870,111 @@ func TestMintBoundedGrantEpochFieldRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestDeriveRecipientDavPubkeysSealsAsTheKind pins the `derive-recipient-dav-pubkeys`
+// mode the e2e harness registers every recipient with: four halves of the right
+// lengths, distinct from the mail pair, and a record sealed to the calendar pair
+// as `calendar-record` opens with the calendar grant payload of the same MSEK and
+// with no mail key (owner-key-material.md § Path B-sibling-5).
+func TestDeriveRecipientDavPubkeysSealsAsTheKind(t *testing.T) {
+	msek := make([]byte, 32)
+	if _, err := rand.Read(msek); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	out, err := deriveRecipientDavPubkeys(msek)
+	if err != nil {
+		t.Fatalf("deriveRecipientDavPubkeys: %v", err)
+	}
+	const pair = 32 + 1184
+	if len(out) != 2*pair {
+		t.Fatalf("got %d bytes, want %d", len(out), 2*pair)
+	}
+	calendarPub, calendarEk := out[:32], out[32:pair]
+	mailPub, err := deriveRecipientPubkey(msek)
+	if err != nil {
+		t.Fatalf("deriveRecipientPubkey: %v", err)
+	}
+	if bytes.Equal(calendarPub, mailPub) || bytes.Equal(calendarPub, out[pair:pair+32]) {
+		t.Fatalf("the calendar pubkey must differ from the mail and card pubkeys")
+	}
+	xwing := append(append([]byte{}, calendarEk...), calendarPub...)
+	sealed, err := fauna_ffi.SealRecordToRecipientXwing(fauna_ffi.FfiRecordKindCalendar, []byte("BEGIN:VEVENT"), xwing)
+	if err != nil {
+		t.Fatalf("SealRecordToRecipientXwing: %v", err)
+	}
+	material, err := fauna_ffi.DeriveRecipientDavMaterial(msek)
+	if err != nil {
+		t.Fatalf("DeriveRecipientDavMaterial: %v", err)
+	}
+	if !bytes.Equal(material.CalendarPubkey, calendarPub) {
+		t.Fatalf("the mode and the FFI material disagree on the calendar pubkey")
+	}
+	mail, err := fauna_ffi.DeriveRecipientMailXwingMaterial(msek)
+	if err != nil {
+		t.Fatalf("DeriveRecipientMailXwingMaterial: %v", err)
+	}
+	if _, err := fauna_ffi.OpenMailRecordWithKey(sealed, mail.CapabilitySecret); err == nil {
+		t.Fatalf("the mail grant payload opened a calendar record")
+	}
+	got, err := fauna_ffi.OpenRecordWithKey(fauna_ffi.FfiRecordKindCalendar, sealed, material.CalendarCapabilitySecret)
+	if err != nil {
+		t.Fatalf("the calendar grant payload must open its calendar record: %v", err)
+	}
+	if string(got) != "BEGIN:VEVENT" {
+		t.Fatalf("recovered %q", got)
+	}
+	if _, err := fauna_ffi.OpenRecordWithKey(fauna_ffi.FfiRecordKindCalendar, sealed, mail.CapabilitySecret); err == nil {
+		t.Fatalf("the mail grant payload opened a calendar record under the calendar kind")
+	}
+}
+
+// TestOpenRecordsWithGrantTriesEachKeyUnderTheRecordsKind pins the
+// `open-records-with-grant` mode's holder side: a minted mail grant unsealed
+// with the holder secret opens the mail record and not a calendar record of
+// the same MSEK, each tried under the record's own kind.
+func TestOpenRecordsWithGrantTriesEachKeyUnderTheRecordsKind(t *testing.T) {
+	holder := fauna_ffi.GenerateX25519Keypair()
+	msek := make([]byte, 32)
+	owner := make([]byte, 32)
+	grantID := make([]byte, 16)
+	for _, b := range [][]byte{msek, owner, grantID} {
+		if _, err := rand.Read(b); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+	}
+	blob, err := mintGrant(owner, grantID, holder.Pubkey, msek, nil, 1_700_000_000, 1_700_000_000+86_400, nil)
+	if err != nil {
+		t.Fatalf("mintGrant: %v", err)
+	}
+	mailPub, err := deriveRecipientPubkey(msek)
+	if err != nil {
+		t.Fatalf("deriveRecipientPubkey: %v", err)
+	}
+	material, err := fauna_ffi.DeriveRecipientDavMaterial(msek)
+	if err != nil {
+		t.Fatalf("DeriveRecipientDavMaterial: %v", err)
+	}
+	mailRecord, err := sealMailRecord([]byte("Subject: hi"), mailPub)
+	if err != nil {
+		t.Fatalf("seal mail: %v", err)
+	}
+	calendarRecord, err := sealRecord(fauna_ffi.FfiRecordKindCalendar, []byte("BEGIN:VEVENT"), material.CalendarPubkey)
+	if err != nil {
+		t.Fatalf("seal calendar: %v", err)
+	}
+	keys, err := unsealGrantKeys(blob, holder.Secret)
+	if err != nil {
+		t.Fatalf("unsealGrantKeys: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("a mail grant carries one key-bearing scope, got %d", len(keys))
+	}
+	mail := openRecordWithKeys(keys, fauna_ffi.FfiRecordKindMail, mailRecord)
+	if len(mail.OpenedBy) != 1 || mail.OpenedBy[0] != "content.read{mail}" {
+		t.Fatalf("the mail record must open by content.read{mail}, got %v", mail.OpenedBy)
+	}
+	calendar := openRecordWithKeys(keys, fauna_ffi.FfiRecordKindCalendar, calendarRecord)
+	if len(calendar.OpenedBy) != 0 || calendar.PlaintextB64 != "" {
+		t.Fatalf("the mail grant opened a calendar record: %+v", calendar)
+	}
+}

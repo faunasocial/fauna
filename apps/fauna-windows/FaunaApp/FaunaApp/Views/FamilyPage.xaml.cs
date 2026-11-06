@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Controls;
 using FaunaApp.Core.Services;
+using FaunaApp.Helpers;
 using FaunaApp.Core.ViewModels;
 using uniffi.fauna_core;
 using uniffi.fauna_ffi;
@@ -23,10 +24,10 @@ public sealed partial class FamilyPage : Page
     private FamilyViewModel? _vm;
     internal FamilyViewModel? ViewModel => _vm;
 
-    // The unknown-sender-mail / feed-sources / content-floor option catalogs are
+    // The unknown-sender-mail / feed-sources / unknown-peer-dm option catalogs are
     // no longer a local literal — PopulateSelect below pulls them live from the
     // shared fauna_core::format catalogs (FaunaFfiMethods.UnknownSenderOptions() /
-    // FeedSourcesOptions() / ContentFloorOptions()) at each call site
+    // FeedSourcesOptions() / UnknownPeerDmOptions()) at each call site
     // (family-safety.md § Where logic lives).
 
     private bool _initializingSelect;
@@ -34,6 +35,11 @@ public sealed partial class FamilyPage : Page
     public FamilyPage()
     {
         this.InitializeComponent();
+        // The content rules' save (family-safety.md § App surface → Content
+        // rules) — the shared editor's own button, a fauna.family.policy.update
+        // under the hood (FfiFamilyClient.SaveContentRules).
+        RulesEditor.SaveButtonControl.FaunaGate("fauna.family.policy.update");
+        RulesEditor.SaveHandler = SaveContentRulesAsync;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -41,6 +47,7 @@ public sealed partial class FamilyPage : Page
         base.OnNavigatedTo(e);
         if (e.Parameter is ServiceClients clients && _vm is null)
         {
+            RulesEditor.Rpc = clients.Rpc;
             _vm = new FamilyViewModel(clients.Rpc!);
             _vm.PropertyChanged += ViewModel_PropertyChanged;
             _vm.FeatureLimits.Changed += QueueFeatureLimitsRepaint;
@@ -64,12 +71,11 @@ public sealed partial class FamilyPage : Page
         PopulateSelect(UnknownSenderSelect, FaunaFfiMethods.UnknownSenderOptions(), _vm.PolicyUnknownSenderMail, failClosed: "hold");
         PopulateSelect(FeedSourcesSelect, FaunaFfiMethods.FeedSourcesOptions(), _vm.PolicyFeedSources, failClosed: "block");
         PopulateSelect(UnknownPeerDmSelect, FaunaFfiMethods.UnknownPeerDmOptions(), _vm.PolicyUnknownPeerDm, failClosed: "hold");
-        PopulateContentFloorSelects();
         await _vm.LoadCommand.ExecuteAsync(null);
         PopulateSelect(UnknownSenderSelect, FaunaFfiMethods.UnknownSenderOptions(), _vm.PolicyUnknownSenderMail, failClosed: "hold");
         PopulateSelect(FeedSourcesSelect, FaunaFfiMethods.FeedSourcesOptions(), _vm.PolicyFeedSources, failClosed: "block");
         PopulateSelect(UnknownPeerDmSelect, FaunaFfiMethods.UnknownPeerDmOptions(), _vm.PolicyUnknownPeerDm, failClosed: "hold");
-        PopulateContentFloorSelects();
+        ReloadRulesEditor();
         UpdateGuardianSectionVisibility();
         UpdateSupervisedSectionVisibility();
         UpdateNoApprovalsText();
@@ -127,6 +133,10 @@ public sealed partial class FamilyPage : Page
                 break;
             case nameof(FamilyViewModel.SelectedWardActorId):
                 UpdatePolicyEditorVisibility();
+                // The content rules are one ward's: a different ward, or a stored
+                // content policy that changed (a save's re-read), opens a fresh
+                // editor; a re-read that changed nothing keeps the one being edited.
+                ReloadRulesEditor();
                 // The guardian Feature limits host is one ward's: drop the previous
                 // ward's rows and editor, then re-read for this one (the authored
                 // read re-joins the nest's capability set on every family load).
@@ -164,15 +174,9 @@ public sealed partial class FamilyPage : Page
                     // overwhelmingly common rendered value (an absent wire), so the
                     // per-property case below would rarely fire on a ward switch.
                     SelectInCombo(UnknownPeerDmSelect, _vm.PolicyUnknownPeerDm);
-                    // The four content floors + Notify belong in this unconditional
-                    // resync for exactly the reason above: `inherit` is every floor's
-                    // compile-time default AND the overwhelmingly common stored value,
-                    // so the per-property cases below almost never fire — a ward
-                    // switch would otherwise leave the previous ward's floor showing.
-                    SelectInCombo(ContentNsfwSelect, _vm.PolicyContentNsfw);
-                    SelectInCombo(ContentSpamSelect, _vm.PolicyContentSpam);
-                    SelectInCombo(ContentPhishingSelect, _vm.PolicyContentPhishing);
-                    SelectInCombo(ContentCommercialSelect, _vm.PolicyContentCommercial);
+                    // Notify belongs in this unconditional resync for exactly the
+                    // reason above: off is both its default and the common stored
+                    // value, so its per-property case below almost never fires.
                     ContentNotifyToggle.IsOn = _vm.PolicyContentNotify;
                     Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
                         ContentNotifyToggle, _vm.PolicyContentNotify ? "on" : "off");
@@ -215,18 +219,6 @@ public sealed partial class FamilyPage : Page
                 break;
             case nameof(FamilyViewModel.PolicyUnknownPeerDm):
                 SelectInCombo(UnknownPeerDmSelect, _vm.PolicyUnknownPeerDm);
-                break;
-            case nameof(FamilyViewModel.PolicyContentNsfw):
-                SelectInCombo(ContentNsfwSelect, _vm.PolicyContentNsfw);
-                break;
-            case nameof(FamilyViewModel.PolicyContentSpam):
-                SelectInCombo(ContentSpamSelect, _vm.PolicyContentSpam);
-                break;
-            case nameof(FamilyViewModel.PolicyContentPhishing):
-                SelectInCombo(ContentPhishingSelect, _vm.PolicyContentPhishing);
-                break;
-            case nameof(FamilyViewModel.PolicyContentCommercial):
-                SelectInCombo(ContentCommercialSelect, _vm.PolicyContentCommercial);
                 break;
             case nameof(FamilyViewModel.PolicyContentNotify):
                 if (ContentNotifyToggle.IsOn != _vm.PolicyContentNotify)
@@ -533,43 +525,34 @@ public sealed partial class FamilyPage : Page
         _vm.PolicyUnknownPeerDmEdited = true;
     }
 
-    // ── Content-floor selects (inherit/collapse/block) ──────────────────────
-    // All four render the ONE shared ContentFloorOptions() catalog, so their value
-    // list cannot drift from what fauna.family.policy.update accepts
-    // (family-safety.md § Content policy). failClosed: "block" — never `inherit`.
+    // ── Content rules — the guardian's mounting of the shared rule editor
+    //     (family-policy-rules-section; family-safety.md § App surface → Content
+    //     rules) ────────────────────────────────────────────────────────────
 
-    private void PopulateContentFloorSelects()
+    /// <summary>The (ward, stored content policy) the open editor was loaded from —
+    /// <see cref="FamilyViewModel.SelectedWardRulesKey"/>.</summary>
+    private string? _rulesSource;
+
+    /// <summary>Open a fresh guardian editor over the selected ward's content policy
+    /// (<c>FfiRuleEditor.ForGuardian</c> — every rule it holds shows as a row, so
+    /// the document the guardian saves carries every rule that binds) when the ward
+    /// or what the nest stored changed; tui's <c>rules_source</c> twin.</summary>
+    private void ReloadRulesEditor()
     {
         if (_vm is null) return;
-        var options = FaunaFfiMethods.ContentFloorOptions();
-        PopulateSelect(ContentNsfwSelect, options, _vm.PolicyContentNsfw, failClosed: "block");
-        PopulateSelect(ContentSpamSelect, options, _vm.PolicyContentSpam, failClosed: "block");
-        PopulateSelect(ContentPhishingSelect, options, _vm.PolicyContentPhishing, failClosed: "block");
-        PopulateSelect(ContentCommercialSelect, options, _vm.PolicyContentCommercial, failClosed: "block");
+        var source = _vm.SelectedWardRulesKey;
+        if (source == _rulesSource) return;
+        _rulesSource = source;
+        RulesEditor.Load(source is null ? null : FfiRuleEditor.ForGuardian(_vm.SelectedWardContentPolicy));
     }
 
-    private void ContentNsfwSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    /// <summary><c>rule-editor-save-button</c> on this page — the shared
+    /// <c>FfiFamilyClient.SaveContentRules</c> for the selected ward, then a re-read,
+    /// so what paints after a save is what the nest stored.</summary>
+    private async Task<RuleEditorSaveOutcome> SaveContentRulesAsync(byte[] document)
     {
-        if (_initializingSelect || _vm is null) return;
-        _vm.PolicyContentNsfw = SelectedValue(ContentNsfwSelect, "block");
-    }
-
-    private void ContentSpamSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_initializingSelect || _vm is null) return;
-        _vm.PolicyContentSpam = SelectedValue(ContentSpamSelect, "block");
-    }
-
-    private void ContentPhishingSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_initializingSelect || _vm is null) return;
-        _vm.PolicyContentPhishing = SelectedValue(ContentPhishingSelect, "block");
-    }
-
-    private void ContentCommercialSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_initializingSelect || _vm is null) return;
-        _vm.PolicyContentCommercial = SelectedValue(ContentCommercialSelect, "block");
+        if (_vm is null) return new RuleEditorSaveOutcome(null);
+        return new RuleEditorSaveOutcome(await _vm.SaveContentRulesAsync(document));
     }
 
     // ── Row interactions ─────────────────────────────────────────────────

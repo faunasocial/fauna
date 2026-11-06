@@ -31,6 +31,10 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.web,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.android,
+    pytest.mark.windows,
     pytest.mark.feature("turn-on-mail"),
 ]
 

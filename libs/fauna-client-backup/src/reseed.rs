@@ -116,6 +116,275 @@ pub struct DeliveredCorpus {
     pub folder_paths_without_seal: Vec<String>,
     /// Sum of the delivered paths' plaintext sizes.
     pub plaintext_bytes: u64,
+    /// Sets the leg itself refused before a byte of them was recorded — the
+    /// nest-held pull-back's ledger and acceptance checks
+    /// (`client-device-custodian.md` § *What the pull-back trusts the holder
+    /// for*). The driver reports each as given, first, and never sends it to
+    /// materialize: a refused set is never in [`Self::sets`].
+    pub refused: Vec<SetResult>,
+    /// Rows the holder listed in a reserved set that the set's sealed ledger
+    /// does not name, `<set>/<path>` — neither landed nor recorded, reported so
+    /// the owner sees what the holder offered beyond the owner's own ledger.
+    pub unanchored_rows: Vec<String>,
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The nest-held pull-back's preflight
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// What this device knows about one reserved-set ledger the holder serves,
+/// against its own generation pin for it (`client-device-custodian.md`
+/// § *What the pull-back trusts the holder for*, anchor (ii)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum LedgerVerdict {
+    /// At or above the generation this device verified there.
+    Vouched {
+        generation: u32,
+        pinned: u32,
+        /// Unix seconds this device last verified the ledger, when known.
+        verified_at: Option<i64>,
+    },
+    /// Below the generation this device verified there — an older genuine
+    /// ledger, pulled only on the owner's word.
+    RolledBack {
+        generation: u32,
+        pinned: u32,
+        verified_at: Option<i64>,
+    },
+    /// This device holds no pin for it — never audited this destination, or a
+    /// store that was cleared — so freshness is the owner's word alone.
+    Unvouched { generation: u32 },
+    /// This device holds a pin for it but the holder lists no such ledger — a
+    /// family or a whole set withheld, the holder's power "to omit" — read as
+    /// a rollback to nothing: older than this device verified, pulled (that
+    /// is, the set lands without it) only on the owner's word.
+    Withheld {
+        pinned: u32,
+        verified_at: Option<i64>,
+    },
+}
+
+impl LedgerVerdict {
+    /// The verdict for a ledger served at `generation` against `pin`.
+    pub fn judge(
+        generation: u32,
+        pin: Option<&crate::audit::LedgerPin>,
+        last_passed_at: Option<i64>,
+    ) -> Self {
+        match pin {
+            None => Self::Unvouched { generation },
+            Some(pin) => {
+                let verified_at = pin.seen_live_at.or(last_passed_at);
+                if generation < pin.generation {
+                    Self::RolledBack {
+                        generation,
+                        pinned: pin.generation,
+                        verified_at,
+                    }
+                } else {
+                    Self::Vouched {
+                        generation,
+                        pinned: pin.generation,
+                        verified_at,
+                    }
+                }
+            }
+        }
+    }
+
+    /// The verdict for a pinned ledger the holder does not list.
+    pub fn withheld(pin: &crate::audit::LedgerPin, last_passed_at: Option<i64>) -> Self {
+        Self::Withheld {
+            pinned: pin.generation,
+            verified_at: pin.seen_live_at.or(last_passed_at),
+        }
+    }
+
+    /// Worst first: a withheld ledger, a rollback, then no pin, then vouched.
+    fn severity(self) -> u8 {
+        match self {
+            Self::Withheld { .. } => 3,
+            Self::RolledBack { .. } => 2,
+            Self::Unvouched { .. } => 1,
+            Self::Vouched { .. } => 0,
+        }
+    }
+}
+
+/// One ledger as the preflight opened it: its mirror path inside the set, the
+/// custody manifest hash it was read under (what binds the run to exactly the
+/// ledger the owner accepted), and the verdict.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LedgerPreflight {
+    pub path: String,
+    /// Empty for a [`LedgerVerdict::Withheld`] ledger: the acceptance then
+    /// names its absence, so one that appears after the confirm reads stale.
+    pub manifest_hash_hex: String,
+    pub verdict: LedgerVerdict,
+}
+
+/// One reserved set the holder serves at least one ledger for, or this device
+/// holds at least one pin for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SetPreflight {
+    /// The holder's own set name (`__mail`, …), not the landing name.
+    pub set_name: String,
+    /// Every family ledger of the set the holder listed, in family order,
+    /// then every pinned one it withholds ([`LedgerVerdict::Withheld`]).
+    pub ledgers: Vec<LedgerPreflight>,
+}
+
+impl SetPreflight {
+    /// The set's line: its worst ledger's verdict.
+    pub fn verdict(&self) -> Option<LedgerVerdict> {
+        self.ledgers
+            .iter()
+            .map(|l| l.verdict)
+            .max_by_key(|v| v.severity())
+    }
+}
+
+/// **The pull-back's preflight** — the read the confirm is built from: every
+/// reserved set's ledger opened under the owner's key and compared to this
+/// device's pin, and the covered folders by set name. Nothing is written.
+///
+/// Also the owner's **acceptance**: the run is handed the preflight whose
+/// lines the owner confirmed, and refuses a reserved set it does not name
+/// ([`SetRefusal::NotAccepted`]) or whose ledger differs from the one named
+/// ([`SetRefusal::PreflightStale`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PullBackPreflight {
+    pub sets: Vec<SetPreflight>,
+    /// The covered-folder mirror sets the holder lists, by set name — the
+    /// declared residual: they come as the holder holds them.
+    pub folder_sets: Vec<String>,
+}
+
+impl PullBackPreflight {
+    /// The accepted record for `set_name`, if the owner was shown it.
+    pub fn set(&self, set_name: &str) -> Option<&SetPreflight> {
+        self.sets.iter().find(|s| s.set_name == set_name)
+    }
+
+    /// The acceptance a host takes when the owner is shown no lines (an app
+    /// whose confirm does not yet carry them): only the sets this device
+    /// vouches for, so a rolled-back or unvouched set is never pulled without
+    /// the owner's word.
+    #[must_use]
+    pub fn vouched_only(mut self) -> Self {
+        self.sets
+            .retain(|s| matches!(s.verdict(), Some(LedgerVerdict::Vouched { .. })));
+        self
+    }
+
+    /// Serialized for a process or language boundary (the ffi and wasm faces
+    /// hand the acceptance back on confirm), JSON so either side can log it.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// The inverse of [`Self::to_json`].
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text).map_err(|e| format!("the restore's acceptance: {e}"))
+    }
+}
+
+/// This device's pins at one destination, read off its audit store — what the
+/// preflight judges each ledger against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DevicePins {
+    pub pins: std::collections::BTreeMap<String, crate::audit::LedgerPin>,
+    pub last_passed_at: Option<i64>,
+}
+
+impl DevicePins {
+    /// `destination_id`'s pins in `store`; a destination never audited has
+    /// none. An unreadable store is an error — the preflight never treats
+    /// "could not read" as "never verified".
+    pub fn from_store(
+        store: &dyn crate::audit::AuditStateStore,
+        destination_id: &str,
+    ) -> Result<Self, String> {
+        let snapshot = store
+            .load()
+            .map_err(|e| format!("reading this device's backup checks: {e}"))?;
+        Ok(snapshot
+            .records
+            .iter()
+            .find(|r| r.state.destination_id == destination_id)
+            .map(|r| Self {
+                pins: r.state.verified_ledger_generations.clone(),
+                last_passed_at: r.state.last_passed_at,
+            })
+            .unwrap_or_default())
+    }
+}
+
+/// `YYYY-MM-DD` (UTC) of unix seconds — the date a confirm line names.
+fn utc_date(secs: i64) -> String {
+    let (y, m, d) = fauna_core::caltime::civil_from_days(secs.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `backup-destination-reseed-confirm-modal`'s body on a nest-kind row: one
+/// line per reserved set, then one for the covered folders when the holder
+/// lists any. Keys, resolved with
+/// [`fauna_core::localized::LocalizedText::resolve_nested`] (the set name is
+/// itself a key), so the button accepts exactly what every app shows.
+pub fn preflight_lines(preflight: &PullBackPreflight) -> Vec<fauna_core::localized::LocalizedText> {
+    use fauna_core::localized::LocalizedText;
+    let mut lines = Vec::new();
+    for set in &preflight.sets {
+        let name = segment_set_label(&set.set_name);
+        let Some(verdict) = set.verdict() else {
+            continue;
+        };
+        lines.push(match verdict {
+            LedgerVerdict::Vouched {
+                generation,
+                verified_at: Some(at),
+                ..
+            } => LocalizedText::key_args(
+                "backups.reseed_preflight_vouched",
+                [
+                    ("set", name),
+                    ("generation", generation.to_string()),
+                    ("date", utc_date(at)),
+                ],
+            ),
+            LedgerVerdict::Vouched { generation, .. } => LocalizedText::key_args(
+                "backups.reseed_preflight_vouched_undated",
+                [("set", name), ("generation", generation.to_string())],
+            ),
+            LedgerVerdict::RolledBack {
+                generation, pinned, ..
+            } => LocalizedText::key_args(
+                "backups.reseed_preflight_rolled_back",
+                [
+                    ("set", name),
+                    ("generation", generation.to_string()),
+                    ("pinned", pinned.to_string()),
+                ],
+            ),
+            LedgerVerdict::Unvouched { generation } => LocalizedText::key_args(
+                "backups.reseed_preflight_unvouched",
+                [("set", name), ("generation", generation.to_string())],
+            ),
+            LedgerVerdict::Withheld { pinned, .. } => LocalizedText::key_args(
+                "backups.reseed_preflight_withheld",
+                [("set", name), ("pinned", pinned.to_string())],
+            ),
+        });
+    }
+    if !preflight.folder_sets.is_empty() {
+        lines.push(LocalizedText::key_arg(
+            "backups.reseed_preflight_folders",
+            "count",
+            preflight.folder_sets.len().to_string(),
+        ));
+    }
+    lines
 }
 
 /// Phase 2 — deliver this device's held corpus to the target as ordinary
@@ -180,6 +449,16 @@ pub enum SetRefusal {
     /// or no nonce for the target). Never sent: the nest refuses an unsigned
     /// re-home, and the driver never asks it to.
     RehomeUnsigned,
+    /// A reserved set of the holder's copy the owner was not shown at the
+    /// confirm — or was shown and did not accept (a rollback, a set this
+    /// device never verified). Never sent; nothing of it was recorded
+    /// (`client-device-custodian.md` § *What the pull-back trusts the holder
+    /// for*).
+    NotAccepted,
+    /// `preflight_stale` — a ledger the run opened differs from the one the
+    /// owner accepted at the confirm: the holder's copy moved in between.
+    /// Never sent; nothing of the set was recorded.
+    PreflightStale,
     /// Any other rejection, by its wire code.
     Other { code: String },
 }
@@ -429,7 +708,9 @@ where
         SetAxis::Folder => 1,
     });
 
-    let mut sets = Vec::with_capacity(order.len());
+    // The sets the leg refused itself come first, as the leg reported them:
+    // nothing of them was recorded, so there is nothing to ask the nest.
+    let mut sets = delivered.refused.clone();
     for set in order {
         let folder_display_name = match set.axis {
             SetAxis::Segment => None,
@@ -498,6 +779,8 @@ impl SetRefusal {
             Self::FolderUnnamed => FOLDER_UNNAMED_CODE,
             Self::TargetMissing => RpcError::CODE_BACKUP_TARGET_MISSING,
             Self::RehomeUnsigned => REHOME_UNSIGNED_CODE,
+            Self::NotAccepted => NOT_ACCEPTED_CODE,
+            Self::PreflightStale => PREFLIGHT_STALE_CODE,
             Self::Other { code } => code,
         }
     }
@@ -514,6 +797,8 @@ impl SetRefusal {
             FOLDER_UNNAMED_CODE => Self::FolderUnnamed,
             RpcError::CODE_BACKUP_TARGET_MISSING => Self::TargetMissing,
             REHOME_UNSIGNED_CODE => Self::RehomeUnsigned,
+            NOT_ACCEPTED_CODE => Self::NotAccepted,
+            PREFLIGHT_STALE_CODE => Self::PreflightStale,
             other => Self::Other {
                 code: other.to_string(),
             },
@@ -535,6 +820,8 @@ impl SetRefusal {
             Self::FolderUnnamed => "backups.reseed_refused_folder_unnamed",
             Self::TargetMissing => "backups.reseed_refused_target_missing",
             Self::RehomeUnsigned => "backups.reseed_refused_rehome_unsigned",
+            Self::NotAccepted => "backups.reseed_refused_not_accepted",
+            Self::PreflightStale => "backups.reseed_refused_preflight_stale",
             Self::Other { .. } => "backups.reseed_refused_other",
         }
     }
@@ -546,6 +833,12 @@ pub const FOLDER_UNNAMED_CODE: &str = "folder_unnamed";
 /// [`SetRefusal::RehomeUnsigned`]'s code. Local: the driver holds the set and
 /// the nest never sees it.
 pub const REHOME_UNSIGNED_CODE: &str = "rehome_unsigned";
+
+/// [`SetRefusal::NotAccepted`]'s code. Local: the pull-back holds the set.
+pub const NOT_ACCEPTED_CODE: &str = "not_accepted";
+
+/// [`SetRefusal::PreflightStale`]'s code. Local: the pull-back holds the set.
+pub const PREFLIGHT_STALE_CODE: &str = "preflight_stale";
 
 /// How a delivered set is named to the owner: a reserved segment set by
 /// [`segment_set_label`]; a covered folder by its display name, else its set
@@ -626,6 +919,13 @@ pub fn result_lines(outcome: &ReseedOutcome) -> Vec<fauna_core::localized::Local
             "backups.reseed_gap_unnamed_files",
             "count",
             delivered.folder_paths_without_seal.len().to_string(),
+        ));
+    }
+    if !delivered.unanchored_rows.is_empty() {
+        lines.push(LocalizedText::key_arg(
+            "backups.reseed_note_unanchored_rows",
+            "count",
+            delivered.unanchored_rows.len().to_string(),
         ));
     }
     lines
@@ -1447,6 +1747,203 @@ mod tests {
         let out = block_on(run_reseed(&BackupClient::new(&target), vec![7; 32], &leg)).unwrap();
         assert!(!out.is_whole());
     }
+
+    /// **A set the leg refused is reported first and never sent**: the driver
+    /// asks the nest nothing about it, and the outcome is not whole.
+    #[test]
+    fn a_set_the_leg_refused_is_reported_and_never_materialized() {
+        let l = Log::default();
+        let target = FakeTarget {
+            log: &l,
+            owed: Default::default(),
+            grant_ok: true,
+            materialize: BTreeMap::from([("__landing/card".to_string(), Some(Ok(1)))]),
+        };
+        let refused = SetResult {
+            set: set("__landing/mail", SetAxis::Segment),
+            outcome: SetOutcome::Refused {
+                refusal: SetRefusal::NotAccepted,
+                detail: "not confirmed".into(),
+            },
+        };
+        let leg = FakeLeg {
+            log: &l,
+            rows: 1,
+            unsigned: None,
+            result: Ok(DeliveredCorpus {
+                refused: vec![refused.clone()],
+                unanchored_rows: vec!["__mail/x".into()],
+                ..corpus(vec![set("__landing/card", SetAxis::Segment)])
+            }),
+        };
+        let out = block_on(run_reseed(&BackupClient::new(&target), vec![7; 32], &leg)).unwrap();
+
+        assert_eq!(
+            log(&l),
+            ["grant:32", "deliver", "materialize:__landing/card:-"]
+        );
+        assert_eq!(out.sets[0], refused);
+        assert!(!out.is_whole());
+        let lines = result_lines(&out);
+        assert!(lines.iter().any(|l| l
+            == &fauna_core::localized::LocalizedText::key_args(
+                "backups.reseed_set_refused",
+                [
+                    ("set", "backups.reseed_set_mail".to_string()),
+                    ("remedy", "backups.reseed_refused_not_accepted".to_string()),
+                    ("code", NOT_ACCEPTED_CODE.to_string()),
+                ],
+            )));
+        assert_eq!(
+            lines.last(),
+            Some(&fauna_core::localized::LocalizedText::key_arg(
+                "backups.reseed_note_unanchored_rows",
+                "count",
+                "1",
+            ))
+        );
+    }
+
+    fn pin(generation: u32) -> crate::audit::LedgerPin {
+        crate::audit::LedgerPin {
+            generation,
+            seen_live_at: Some(86_400 * 365),
+        }
+    }
+
+    /// The verdict against the pin: below is a rollback, at or above is
+    /// vouched (dated by the pin's sighting, else the last passed audit), and
+    /// no pin is unvouched.
+    #[test]
+    fn a_ledger_is_judged_against_this_devices_pin() {
+        assert!(matches!(
+            LedgerVerdict::judge(3, Some(&pin(4)), None),
+            LedgerVerdict::RolledBack {
+                generation: 3,
+                pinned: 4,
+                ..
+            }
+        ));
+        assert!(matches!(
+            LedgerVerdict::judge(4, Some(&pin(4)), None),
+            LedgerVerdict::Vouched {
+                generation: 4,
+                pinned: 4,
+                ..
+            }
+        ));
+        assert_eq!(
+            LedgerVerdict::judge(
+                5,
+                Some(&crate::audit::LedgerPin {
+                    generation: 4,
+                    seen_live_at: None
+                }),
+                Some(9)
+            ),
+            LedgerVerdict::Vouched {
+                generation: 5,
+                pinned: 4,
+                verified_at: Some(9)
+            }
+        );
+        assert_eq!(
+            LedgerVerdict::judge(5, None, Some(9)),
+            LedgerVerdict::Unvouched { generation: 5 }
+        );
+        assert_eq!(
+            LedgerVerdict::withheld(
+                &crate::audit::LedgerPin {
+                    generation: 4,
+                    seen_live_at: None
+                },
+                Some(9)
+            ),
+            LedgerVerdict::Withheld {
+                pinned: 4,
+                verified_at: Some(9)
+            }
+        );
+    }
+
+    /// The confirm's lines: one per reserved set by its worst ledger, then
+    /// one for the folders when the holder lists any.
+    #[test]
+    fn the_preflight_lines_name_each_set_by_its_worst_ledger_then_the_folders() {
+        use fauna_core::localized::LocalizedText;
+        let ledger = |verdict| LedgerPreflight {
+            path: "p".into(),
+            manifest_hash_hex: "00".into(),
+            verdict,
+        };
+        let preflight = PullBackPreflight {
+            sets: vec![
+                SetPreflight {
+                    set_name: "__mail".into(),
+                    ledgers: vec![
+                        ledger(LedgerVerdict::judge(4, Some(&pin(4)), None)),
+                        ledger(LedgerVerdict::judge(1, Some(&pin(2)), None)),
+                    ],
+                },
+                SetPreflight {
+                    set_name: "__card".into(),
+                    ledgers: vec![ledger(LedgerVerdict::judge(4, Some(&pin(4)), None))],
+                },
+                SetPreflight {
+                    set_name: "__calendar".into(),
+                    ledgers: vec![ledger(LedgerVerdict::judge(6, None, None))],
+                },
+                SetPreflight {
+                    set_name: "__post".into(),
+                    ledgers: vec![
+                        ledger(LedgerVerdict::judge(1, Some(&pin(2)), None)),
+                        ledger(LedgerVerdict::withheld(&pin(5), None)),
+                    ],
+                },
+            ],
+            folder_sets: vec!["__folder/aa/7".into(), "__folder/aa/8".into()],
+        };
+        assert_eq!(
+            preflight_lines(&preflight),
+            vec![
+                LocalizedText::key_args(
+                    "backups.reseed_preflight_rolled_back",
+                    [
+                        ("set", "backups.reseed_set_mail".to_string()),
+                        ("generation", "1".to_string()),
+                        ("pinned", "2".to_string()),
+                    ],
+                ),
+                LocalizedText::key_args(
+                    "backups.reseed_preflight_vouched",
+                    [
+                        ("set", "backups.reseed_set_card".to_string()),
+                        ("generation", "4".to_string()),
+                        ("date", "1971-01-01".to_string()),
+                    ],
+                ),
+                LocalizedText::key_args(
+                    "backups.reseed_preflight_unvouched",
+                    [
+                        ("set", "backups.reseed_set_calendar".to_string()),
+                        ("generation", "6".to_string()),
+                    ],
+                ),
+                LocalizedText::key_args(
+                    "backups.reseed_preflight_withheld",
+                    [
+                        ("set", "backups.reseed_set_post".to_string()),
+                        ("pinned", "5".to_string()),
+                    ],
+                ),
+                LocalizedText::key_arg("backups.reseed_preflight_folders", "count", "2"),
+            ]
+        );
+        assert_eq!(
+            PullBackPreflight::from_json(&preflight.to_json()).unwrap(),
+            preflight
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1504,6 +2001,8 @@ mod shared_view_tests {
             SetRefusal::FolderUnnamed,
             SetRefusal::TargetMissing,
             SetRefusal::RehomeUnsigned,
+            SetRefusal::NotAccepted,
+            SetRefusal::PreflightStale,
             SetRefusal::Other {
                 code: "something_new".into(),
             },

@@ -1,0 +1,32 @@
+# The RUSTC_WRAPPER in front of kache on every machine kache wraps — one small
+# program, the same binary on Windows, macOS and Linux
+# (docs/goal/architecture/build-compile-cache.md § The launcher). Cargo hands a
+# wrapper a command line whenever the line fits for CARGO, not counting what the
+# wrapper adds; this program hands the machine's kache tail every compile as
+# `<rustc> @<argfile>`, so kache's own additions can never push rustc's command
+# line past the OS limit.
+#
+# Installed outside every checkout by `just kache-launcher-install`. Std only:
+# a third-party need waits for the project's dependency review, never lands here
+# directly.
+[package]
+name = "kache-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "kache-launcher"
+path = "src/main.rs"
+
+# The tests' stand-in for kache: it records the argv it was started with and
+# each `@file`'s lines as JSON. Never installed — the install recipe builds
+# `--bin kache-launcher` only. Not under `src/bin/`, which the repository's
+# `.gitignore` drops (`bin/`, the .NET build output).
+[[bin]]
+name = "fake-tail"
+path = "src/fake_tail.rs"
+test = false
+doc = false

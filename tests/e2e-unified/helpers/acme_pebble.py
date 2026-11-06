@@ -40,8 +40,10 @@ CA extraction from here.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -195,6 +197,22 @@ def wait_tcp(host: str, port: int, timeout: float) -> None:
         except OSError:
             time.sleep(0.25)
     raise RuntimeError(f"{host}:{port} not reachable within {timeout}s")
+
+
+@functools.lru_cache(maxsize=1)
+def docker_usable() -> bool:
+    """Whether this box can run the stack: the docker CLI and a daemon behind it.
+
+    Asked once a run. The stack's fixture is session-scoped, so without this
+    answer a box with no docker fails it once and pytest replays that failure at
+    every later app launch of the selection, marked test or not."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
 
 
 class AcmePebble:

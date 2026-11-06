@@ -217,6 +217,13 @@ impl RpcError {
     /// `fauna_client_sync::is_device_grant_revoked`.
     pub const CODE_SYNC_DEVICE_GRANT_REVOKED: &'static str = "fauna.sync.device_grant_revoked";
 
+    /// `fauna.auth.device_bind`'s refusal of a connection already bound to a
+    /// *different* device key: a connection binds once (`devices.md` § Listing
+    /// Devices → *The binding* → *Web binds its one socket in band*), and a
+    /// repeat naming the same key is an idempotent success.
+    pub const CODE_AUTH_DEVICE_BIND_ALREADY_BOUND: &'static str =
+        "fauna.auth.device_bind.already_bound";
+
     /// `fauna.sync.register`'s tier device-cap refusal: a **new** `device_id`
     /// past the caller's `max_devices`, with nothing written (`devices.md`
     /// § Step 4). A re-register of a device the actor already holds is never

@@ -94,6 +94,10 @@
                                         Content="{x:Bind local:AdminSettingsPage.SaveTierLabel}"
                                         Click="SaveTier_Click"
                                         HorizontalAlignment="Left" />
+                                <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierDeleteButton}"
+                                        Content="{x:Bind local:AdminSettingsPage.DeleteTierLabel}"
+                                        Click="DeleteTier_Click"
+                                        HorizontalAlignment="Left" />
                             </StackPanel>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>

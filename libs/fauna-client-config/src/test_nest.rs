@@ -66,6 +66,14 @@ pub(crate) struct FakeConfigNest {
     /// The published custody rows as they stood when the rotate ceremony
     /// arrived — the evidence for the published-before-dispatch ordering.
     pub(crate) plane_at_rotate: Mutex<Option<Vec<fauna_core::data::DeploymentSeedEntry>>>,
+    /// The live connection's number. `None`, the default, is a transport that
+    /// keeps no per-connection memo — every `fauna.nest.info` reader reads, as
+    /// before the memo; `Some` makes this fake a transport with one
+    /// (`fauna_protocol::read_nest_info`).
+    pub(crate) connection: Mutex<Option<u64>>,
+    /// The per-connection `fauna.nest.info` memo, offered while `connection` is
+    /// set.
+    pub(crate) nest_info_memo: fauna_protocol::NestInfoMemo,
 }
 
 impl RpcRequester for FakeConfigNest {
@@ -148,6 +156,18 @@ impl RpcRequester for FakeConfigNest {
         }
         .expect("encode reply");
         Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
+    }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        *self.connection.lock().unwrap()
+    }
+
+    fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+        self.connection
+            .lock()
+            .unwrap()
+            .is_some()
+            .then_some(&self.nest_info_memo)
     }
 }
 

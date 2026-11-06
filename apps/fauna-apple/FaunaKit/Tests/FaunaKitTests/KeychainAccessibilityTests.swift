@@ -15,6 +15,7 @@ import Security
 /// preference round-trip. Everything a wrong constant or a missing `SynchronizableAny` would
 /// break is caught here, without touching the system keychain.
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainAccessibilityTests {
     // MARK: - Policy: which accessibility class + sync flag per state
 
@@ -72,11 +73,11 @@ struct KeychainAccessibilityTests {
     }
 
     /// The plane decoration (`ios.md` § Credential Storage, *keychain plane*): on macOS a
-    /// data-protection query selects that keychain AND addresses the app-only account access
+    /// data-protection query selects that keychain AND addresses the family App ID access
     /// group (never the File Provider's shared group — the extension must not be able to read
     /// the seed), while the legacy plane adds nothing, so a legacy query addresses the default
     /// file-based keychain. On iOS both add nothing.
-    @Test func planeAttributesSelectTheKeychainAndTheAppOnlyGroup() {
+    @Test func planeAttributesSelectTheKeychainAndTheAppIdGroup() {
         let dp = KeychainStore.matchQuery(service: "svc", account: "secret_key", plane: .dataProtection)
         let legacy = KeychainStore.matchQuery(service: "svc", account: "secret_key", plane: .legacy)
         #if os(macOS)

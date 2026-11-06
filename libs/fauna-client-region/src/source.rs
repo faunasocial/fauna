@@ -163,6 +163,17 @@ pub fn declared_from_posix_locale(
     })
 }
 
+/// **The POSIX shells' one platform leaf** (tui, linux): the process's own
+/// `LC_ALL` / `LANG` through [`declared_from_posix_locale`], then the e2e
+/// override ([`with_e2e_override`]) every app reads.
+pub fn declared_from_process_locale() -> Option<DeclaredRegion> {
+    let leaf = declared_from_posix_locale(
+        std::env::var("LC_ALL").ok().as_deref(),
+        std::env::var("LANG").ok().as_deref(),
+    );
+    with_e2e_override(leaf, RegionSource::SystemLocale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

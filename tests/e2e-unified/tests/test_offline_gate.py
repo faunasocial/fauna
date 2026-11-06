@@ -36,7 +36,6 @@ import pytest
 from common.auth import register_user
 from common.nest import start_nest_in_place, stop_nest
 from helpers import registry_audit
-from helpers.app_surface import skip_unbuilt
 from helpers.backup_destinations import DestinationEnrollment
 from helpers.budgets import UI_SETTLE_S
 
@@ -71,27 +70,16 @@ def _connection_status(app) -> str | None:
 
 
 def _require_connection_status(app) -> str:
-    """The indicator's text, or a DECLARED skip where this app's shell does not
-    paint it (convention 7: a bare skip reads as coverage, a declared one is
-    counted and, under ``--strict-app``, fails).
+    """The indicator's text, asserted present.
 
-    ``ui.yaml`` lists ``connection-status`` as implemented on all 7 apps, so its
-    absence on a page an app reaches is parity debt, never a fact about the
-    platform. Found on linux, whose admin shell paints none: the admin-plane
-    journey below skipped there behind a message that named no surface.
+    ``ui.yaml`` lists ``connection-status`` as implemented on all 7 apps and every
+    app's shell paints it, the admin shell included, so its absence on a page an
+    app reaches is a red, never a skip.
     """
     text = _connection_status(app)
-    if text is None:
-        skip_unbuilt(
-            app.driver,
-            surface="the connection-status indicator on this page's shell",
-            detail=(
-                "these journeys read the nest connection's state off the global "
-                "indicator, and this app's shell for the page under test paints "
-                "none, though ui.yaml lists it as implemented on all 7 apps"
-            ),
-            tracked="transport-connection.md § Connection-status indicator (app UI)",
-        )
+    assert text is not None, (
+        "the shell for the page under test paints no connection-status indicator"
+    )
     return text
 
 

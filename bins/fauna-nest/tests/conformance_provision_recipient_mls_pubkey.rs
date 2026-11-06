@@ -64,6 +64,39 @@ async fn approve_mta(state: &Arc<AppState>, bridge_actor: [u8; 32]) {
         .unwrap();
 }
 
+/// A request carrying real calendar and card pairs — the halves an app
+/// derives from its MSEK (`owner-key-material.md` § Path B-sibling-5 / -6) and
+/// every registration carries as required fields. Struct-update the mail
+/// fields over it.
+fn dav_pairs() -> ProvisionRecipientMlsPubkeyRequest {
+    use fauna_mls::wrapped_blob::{
+        DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair,
+        derive_recipient_dav_xwing_keypair,
+    };
+    let msek = [0x3Cu8; 32];
+    let pair = |kind: DavKind| {
+        let root = derive_dav_root(kind, &msek);
+        (
+            ByteBuf::from(derive_recipient_dav_hpke_keypair(kind, &root).1.to_vec()),
+            ByteBuf::from(
+                derive_recipient_dav_xwing_keypair(kind, &root)
+                    .public
+                    .mlkem_encaps_key()
+                    .to_vec(),
+            ),
+        )
+    };
+    let (calendar_pubkey, calendar_mlkem_ek) = pair(DavKind::Calendar);
+    let (card_pubkey, card_mlkem_ek) = pair(DavKind::Card);
+    ProvisionRecipientMlsPubkeyRequest {
+        calendar_pubkey,
+        calendar_mlkem_ek,
+        card_pubkey,
+        card_mlkem_ek,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn admin_provision_recipient_mls_pubkey_round_trip() {
     let (router, state) = router_with_state().await;
@@ -83,7 +116,7 @@ async fn admin_provision_recipient_mls_pubkey_round_trip() {
         actor_id: ByteBuf::from(recipient.to_vec()),
         mls_pubkey: ByteBuf::from(pubkey.to_vec()),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let provision_payload = Bytes::from(encode_canonical(&provision_req).unwrap().to_vec());
     let provision_reply_bytes = dispatch(
@@ -128,6 +161,17 @@ async fn admin_provision_recipient_mls_pubkey_round_trip() {
         &pubkey[..],
         "fetched bytes must equal provisioned bytes"
     );
+    // The calendar and card pairs ride the same reply, byte-equal to what
+    // the one provision request registered (`owner-key-material.md` § Path
+    // B-sibling-5 → *Registration*).
+    let cal = fetch_reply
+        .calendar_key
+        .expect("the calendar pair rides the reply");
+    assert_eq!(cal.mls_pubkey, provision_req.calendar_pubkey);
+    assert_eq!(cal.mlkem_ek, provision_req.calendar_mlkem_ek);
+    let card = fetch_reply.card_key.expect("the card pair rides the reply");
+    assert_eq!(card.mls_pubkey, provision_req.card_pubkey);
+    assert_eq!(card.mlkem_ek, provision_req.card_mlkem_ek);
 }
 
 #[tokio::test]
@@ -143,7 +187,7 @@ async fn non_admin_cannot_provision_recipient_mls_pubkey() {
         actor_id: ByteBuf::from(vec![0x42u8; 32]),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(
@@ -188,6 +232,7 @@ async fn provision_stores_epoch_seal_key_schedule() {
                 mlkem_ek: ByteBuf::from(vec![0x04u8; 1184]),
             },
         ]),
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let reply_bytes = dispatch(
@@ -248,6 +293,7 @@ async fn provision_rejects_malformed_epoch_keys() {
             mls_pubkey: ByteBuf::from(vec![0x01u8; 31]),
             mlkem_ek: ByteBuf::from(vec![0x04u8; 1184]),
         }]),
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(
@@ -274,6 +320,7 @@ async fn provision_rejects_malformed_epoch_keys() {
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
         epoch_keys: Some(too_many),
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(
@@ -313,6 +360,7 @@ async fn provision_rejects_epoch_index_outside_sanity_bound() {
                 mls_pubkey: ByteBuf::from(vec![0x01u8; 32]),
                 mlkem_ek: ByteBuf::from(vec![0x04u8; 1184]),
             }]),
+            ..dav_pairs()
         };
         Bytes::from(encode_canonical(&req).unwrap().to_vec())
     };
@@ -388,6 +436,7 @@ async fn provision_accepts_honest_horizon_publish_and_refresh() {
             mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
             mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
             epoch_keys: Some(keys),
+            ..dav_pairs()
         };
         Bytes::from(encode_canonical(&req).unwrap().to_vec())
     };
@@ -430,7 +479,7 @@ async fn provision_recipient_mls_pubkey_rejects_malformed_actor_id() {
         actor_id: ByteBuf::from(vec![0u8; 31]),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(
@@ -490,7 +539,7 @@ async fn provision_creates_canonical_handle_alias() {
         actor_id: ByteBuf::from(recipient.to_vec()),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     dispatch(
@@ -536,7 +585,7 @@ async fn provision_without_mail_domain_creates_no_alias() {
         actor_id: ByteBuf::from(recipient.to_vec()),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     dispatch(
@@ -583,7 +632,7 @@ async fn provision_canonical_alias_is_idempotent() {
         actor_id: ByteBuf::from(recipient.to_vec()),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     for _ in 0..2 {
@@ -639,7 +688,7 @@ async fn provision_does_not_clobber_another_actors_localpart() {
         actor_id: ByteBuf::from(newcomer.to_vec()),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     dispatch(
@@ -674,7 +723,7 @@ async fn provision_recipient_mls_pubkey_rejects_malformed_pubkey() {
         actor_id: ByteBuf::from(vec![0x42u8; 32]),
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 16]),
         mlkem_ek: ByteBuf::from(vec![0x55u8; 1184]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(
@@ -713,7 +762,7 @@ async fn admin_provision_recipient_mlkem_ek_round_trip() {
         actor_id: ByteBuf::from(recipient.to_vec()),
         mls_pubkey: ByteBuf::from(pubkey.to_vec()),
         mlkem_ek: ByteBuf::from(mlkem_ek.clone()),
-        ..Default::default()
+        ..dav_pairs()
     };
     let provision_payload = Bytes::from(encode_canonical(&provision_req).unwrap().to_vec());
     let provision_reply_bytes = dispatch(
@@ -769,7 +818,7 @@ async fn provision_rejects_malformed_mlkem_ek() {
         mls_pubkey: ByteBuf::from(vec![0xDDu8; 32]),
         // One byte short of a valid ML-KEM-768 ek.
         mlkem_ek: ByteBuf::from(vec![0x7u8; 1183]),
-        ..Default::default()
+        ..dav_pairs()
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
     let err = dispatch(

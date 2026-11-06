@@ -1115,6 +1115,10 @@ pub(crate) struct ApprovedConsent {
     pub login_did: Option<String>,
     pub scopes: Vec<String>,
     pub sets: Vec<fauna_protocol::atproto_pds::ConsentSetInfo>,
+    /// The kind manifest the card showed, the JWS its binding snapshot at the
+    /// start: what the redemption records on the principal row, never the
+    /// document as re-resolved by then (`third-party.md` § The manifest).
+    pub fauna_manifest: Option<String>,
 }
 
 pub(crate) async fn read_consent_state(
@@ -1138,6 +1142,7 @@ pub(crate) async fn read_consent_state(
                 login_did,
                 scopes: split_scopes(&row.scopes),
                 sets: row.sets.clone(),
+                fauna_manifest: row.binding.fauna_manifest.clone(),
             })))
         }
         (Some(_), _) => Ok(ConsentState::Denied),
@@ -1512,10 +1517,27 @@ fn resolve_consent_handler() -> RpcHandler {
                     return resolve_install(&state, &actor_id, &req).await;
                 }
             }
-            // The chosen folder must be a folder row of the RESOLVING account;
-            // anything else resolves nothing — the uniform answer, saying
-            // nothing about whose folder an id is.
-            if let Some(folder) = req.folder {
+            // Every folder the approval would grant must be a folder row of
+            // the RESOLVING account — the card's chosen folder, and on an
+            // approve each folder a qualified folder-plane scope the request
+            // already named (`authorization-server.md` § Consent → *The card
+            // chooses the folder*: "the approve refused when it is not one of
+            // the account's"). Anything else
+            // resolves nothing — the uniform answer, saying nothing about
+            // whose folder an id is.
+            let mut folders: Vec<i64> = req.folder.into_iter().collect();
+            if req.approved
+                && let Some(row) = &row
+            {
+                folders.extend(
+                    row.scopes
+                        .split_whitespace()
+                        .filter_map(fauna_bridge_atproto::fauna_scope::folder_qualifier),
+                );
+            }
+            folders.sort_unstable();
+            folders.dedup();
+            for folder in folders {
                 let owned = state
                     .db
                     .get_folder_by_id(folder)
@@ -1646,8 +1668,9 @@ async fn resolve_install(
 /// capability grant to the plugin's key before it resolved
 /// (`third-party-kinds.md` § The record doors); this mints the binding row
 /// that grant's holder is named by. A plugin uninstalled while its card was
-/// open binds nothing and refuses, and the grant minted to the card's key
-/// ends with the refusal (`CacheDb::bind_account_to_plugin`).
+/// open — or uninstalled and installed again, or replaced under another
+/// manifest — binds nothing and refuses, and the grant minted to the card's
+/// key ends with the refusal (`CacheDb::bind_account_to_plugin`).
 async fn bind_plugin(
     state: &Arc<AppState>,
     actor_id: &[u8; 32],
@@ -1661,6 +1684,7 @@ async fn bind_plugin(
             &row.scopes,
             row.client_name.as_deref(),
             row.binding.attested.holder_x25519.as_ref(),
+            row.binding.fauna_manifest.as_deref(),
         )
         .await
         .map_err(
@@ -1994,21 +2018,11 @@ fn set_integration_level_handler() -> RpcHandler {
                     .set_atproto_identity_active(&actor_id, false)
                     .await
                     .map_err(internal)?;
-                // D10 § Revocation: un-host / deactivation cascades the same
-                // destroy as an explicit `revoke_authoring_delegation` — the
-                // server's delegated authoring credential must not outlive the
-                // hosting it was granted for. Unlike the DID this is NOT
-                // retained across the round trip: re-entering a hosted level
-                // re-mints a fresh K and the client re-provisions a fresh cert
-                // (the deliberate asymmetry — a server-held signing credential
-                // is re-consented, not silently restored). Posts already
-                // published stay verifiable from their embedded cert.
-                // Idempotent, like every effect here, so the retry converges.
-                state
-                    .db
-                    .delete_atproto_authoring_key(&actor_id)
-                    .await
-                    .map_err(internal)?;
+                // The authoring delegation is deliberately left in place: its
+                // lifetime is the account's consent, not the hosting level — a
+                // Fauna principal holding `post.author` consumes it with no PDS
+                // at all (D10 § Revocation). It ends only by the user's revoke,
+                // its own lapse, or the succession burn.
             }
             if plan.mints_identity {
                 // A previously RETIRED identity is archived out of the way
@@ -2118,13 +2132,15 @@ fn set_integration_level_handler() -> RpcHandler {
 /// is not laziness about latency — the records must be deleted by the single
 /// per-user repo writer, signed with the bridge-custodied key nest cannot read.
 ///
-/// Two things are deliberately NOT destroyed. The **identity** survives: the DID
+/// Three things are deliberately NOT destroyed. The **identity** survives: the DID
 /// row and its sealed key blob are retained, which is what makes the section's
 /// "still reversible in identity terms" literally true and lets a later
 /// re-enable restore the same DID rather than mint a second one. And the
 /// **projection floor** survives, because it is the record of what the user
 /// consented to publish — the boundary a later re-enable is measured against,
-/// not part of the presence being destroyed.
+/// not part of the presence being destroyed. And the **authoring delegation**
+/// survives: its lifetime is the account's consent, which a Fauna principal
+/// holding `post.author` uses with no presence at all (D10 § Revocation).
 ///
 /// The identity's *terminal* destruction — the PLC tombstone — is deliberately
 /// unreachable from here: it must be signed with the user's senior rotation key,
@@ -2159,7 +2175,7 @@ fn delete_presence_handler() -> RpcHandler {
             // ── effects, in the same discipline as the transition kind:
             // every one idempotent, the level written LAST, so a crash leaves
             // the old level over partially-applied effects and the retry
-            // converges (no SQL transaction can span these four stores).
+            // converges (no SQL transaction can span these three stores).
 
             // The login plane goes first and unconditionally. Whatever the
             // current level, a presence that is being destroyed must not keep
@@ -2171,14 +2187,9 @@ fn delete_presence_handler() -> RpcHandler {
                 .map_err(internal)?;
             notify_atproto_sessions_changed(&state, &actor_id, Some(false)).await;
 
-            // D10 § Revocation: the server-held delegated authoring credential
-            // must not outlive the hosting it was granted for — the same
-            // cascade a step-down performs.
-            state
-                .db
-                .delete_atproto_authoring_key(&actor_id)
-                .await
-                .map_err(internal)?;
+            // The authoring delegation survives the sweep, as it survives a
+            // step-down: it is the account's consent, not part of the presence
+            // (D10 § Revocation).
 
             // The durable tombstone. This is the row the bridge converges on,
             // and the reason the sweep needs no `deleting` state and no
@@ -4027,8 +4038,7 @@ async fn round_trip_profile_update(
     cert_bytes: &[u8],
 ) -> Result<ExternalWriteResult, RpcError> {
     use fauna_bridge_atproto::outbound::PROFILE_SELF_RKEY;
-    use fauna_core::data::Timestamp;
-    use fauna_core::encoding::{EmbedAsBytes, canonical_decode, canonical_encode, sign_envelope};
+    use fauna_core::encoding::{EmbedAsBytes, canonical_decode};
 
     // Re-checked here as the GUARANTEE; the up-front `check_write_input_shape`
     // pass is what makes it decidable before any row is applied.
@@ -4046,30 +4056,32 @@ async fn round_trip_profile_update(
         }
     };
 
-    // Read-modify-write over the current profile. An account with no profile
-    // row yet gets a fresh one — there is nothing to preserve, so the empty
-    // fields below are the honest starting state, not a loss.
-    let mut profile = crate::profile_handlers::current_or_fresh_profile(state, actor).await?;
-    profile.display_name = parsed.display_name;
-    profile.bio = parsed.bio;
     // Authoritative, absence included — and each field independent of the other,
     // so a record carrying only a banner clears the avatar and vice versa. The
     // pre-flight has already refused any ref that resolves to nothing, so an
     // unresolvable one here would be a genuine inconsistency between the two
     // asks; it is reported rather than silently dropping the user's picture.
-    profile.avatar = resolve_profile_picture(state, actor, w, parsed.avatar.as_deref()).await?;
-    profile.banner = resolve_profile_picture(state, actor, w, parsed.banner.as_deref()).await?;
-    profile.updated_at = Timestamp::now();
+    // Resolved before the base is read: they depend on the record alone.
+    let avatar = resolve_profile_picture(state, actor, w, parsed.avatar.as_deref()).await?;
+    let banner = resolve_profile_picture(state, actor, w, parsed.banner.as_deref()).await?;
 
     let cert: EmbedAsBytes = canonical_decode(cert_bytes)
         .map_err(|e| internal(format!("stored delegation cert is not embed-as-bytes: {e}")))?;
-    let (bytes, env) = sign_envelope(signer, &profile)
-        .map_err(|e| internal(format!("sign delegated profile: {e}")))?;
-    let wire = canonical_encode(&EmbedAsBytes::from_signed(bytes, env).with_signer_auth(cert))
-        .map_err(|e| internal(format!("encode delegated profile: {e}")))?;
 
-    // The gate, on the real bytes — the same call `fauna.profile.set` makes.
-    crate::profile_handlers::ingest_profile_core(state, *actor, &wire).await?;
+    // Read-modify-write over the current profile, through the one delegated
+    // editor: it reads the base, signs, and stores through the gate
+    // `fauna.profile.set` uses, on the real bytes — only while that base is
+    // still the latest, so an owner's write landing in between is kept, not
+    // overwritten. An account with no profile row yet gets a fresh
+    // one — there is nothing to preserve, so the empty fields are the honest
+    // starting state, not a loss.
+    crate::profile_handlers::write_delegated_profile(state, actor, signer, &cert, |p| {
+        p.display_name = parsed.display_name.clone();
+        p.bio = parsed.bio.clone();
+        p.avatar = avatar;
+        p.banner = banner;
+    })
+    .await?;
 
     Ok(ExternalWriteResult {
         at_uri: Some(format!("at://{did}/{}/{PROFILE_SELF_RKEY}", w.collection)),
@@ -10214,6 +10226,43 @@ mod tests {
                 assert!(!reply.resolved, "folder {folder}");
                 assert_eq!(fetch(&state, &opened.consent_id).await.status, "pending");
             }
+        }
+
+        /// A folder the REQUEST already named is held to the resolving
+        /// account as the card's choice is: approving a row whose qualified
+        /// deposit or read scope names another account's folder, or no folder
+        /// at all, resolves nothing and leaves the row live; the account's own
+        /// folder approves.
+        #[tokio::test]
+        async fn a_requested_folder_not_the_resolving_accounts_resolves_nothing() {
+            let state = fixture_state().await;
+            seed_user_and_bridge(&state).await;
+            let other: [u8; 32] = [9u8; 32];
+            state.db.create_user(&other, "free", "test").await.unwrap();
+            let theirs = state.db.create_folder("Theirs", &other).await.unwrap();
+            let mine = state.db.create_folder("Mine", &USER).await.unwrap();
+
+            for scope in [
+                format!("fauna:folder:deposit:{theirs}"),
+                format!("fauna:folder:read:{theirs}"),
+                format!("fauna:folder:deposit:{}", theirs + 1000),
+            ] {
+                let opened = create_with_scopes(&state, &[&scope, "fauna:feed:read"]).await;
+                let reply = resolve_choosing(&state, USER, &opened.consent_id, true, None)
+                    .await
+                    .unwrap();
+                assert!(!reply.resolved, "{scope}");
+                assert_eq!(fetch(&state, &opened.consent_id).await.status, "pending");
+            }
+
+            let own = create_with_scopes(&state, &[&format!("fauna:folder:deposit:{mine}")]).await;
+            assert!(
+                resolve_choosing(&state, USER, &own.consent_id, true, None)
+                    .await
+                    .unwrap()
+                    .resolved
+            );
+            assert_eq!(fetch(&state, &own.consent_id).await.status, "approved");
         }
 
         /// A folder on any other answer is malformed: an approval of a row

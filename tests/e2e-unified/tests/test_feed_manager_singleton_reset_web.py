@@ -54,7 +54,7 @@ from nacl.signing import SigningKey
 
 from actions import ActionLayer
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from conftest import MAIL_PRIMARY_DOMAIN
 from common.accounts import single_account_seed
 from drivers import create_driver
@@ -204,8 +204,8 @@ def test_web_sign_out_then_new_identity_rebuilds_feed_manager(
 
     # A: a registered, handled actor whose FeedManager singleton is the one at
     # risk of leaking into B's session.
-    actor_a = register_handled_actor(
-        port, handle="alice" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor_a = admit_adult(
+        nest, "alice" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN, token=True
     )
     secret_a = bytes(actor_a["signing_key"]).hex()
 
@@ -304,8 +304,8 @@ def test_web_add_account_rebuilds_feed_manager(
 
     # A: a registered, handled actor whose FeedManager singleton is the one at
     # risk of leaking into B's session (same idiom as the sign-out-door test).
-    actor_a = register_handled_actor(
-        port, handle="addacct-a" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor_a = admit_adult(
+        nest, "addacct-a" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN, token=True
     )
     secret_a = bytes(actor_a["signing_key"]).hex()
 

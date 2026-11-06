@@ -34,9 +34,12 @@ use crate::config::SyncPaths;
 /// shared fn's doc for the per-platform table).
 ///
 /// An explicit `--data-dir` (tests, e2e) keeps the store **inside** that root
-/// instead: a test launch must never read or write the box's real
-/// install-scoped state (testing.md § conventions point 10 — the same branch
-/// `NestTrust.installPinStore()` takes for `FaunaE2E.isActive`).
+/// instead (`<root>/trust`, the spawner's `agent_trust_dir`): a test launch
+/// must never read or write the box's real install-scoped state (convention
+/// 10). The app that spawned it writes its own data dir, so it keeps a read
+/// replica of its pin file there (`agent_spawner::spawned_agent_pin_replica_dir`,
+/// `transport-trust.md` § Pin custody across processes, *an isolated agent
+/// reads its app's replica*).
 ///
 /// `Err` (the shared no-home refusal) when the production layout has no
 /// absolute home — the same refusal [`SyncPaths::new`] carries.
@@ -76,6 +79,44 @@ mod tests {
         assert_eq!(
             trust_dir(Some(Path::new("/tmp/run-42"))).unwrap(),
             PathBuf::from("/tmp/run-42/trust")
+        );
+    }
+
+    /// The e2e-isolated agent reads the pins its app mints (`transport-trust.md`
+    /// § Pin custody across processes, *an isolated agent reads its app's
+    /// replica*). Under `--data-dir` this agent reads `<root>/trust`, never the
+    /// box's trust home, while the app writes its own data dir — so the app's
+    /// writer store keeps a read replica where this agent reads. The replica
+    /// dir is the spawner's derivation (`agent_pin_replica_dir_for`, the one
+    /// the windows app and tui consult) and the read dir is this crate's
+    /// [`trust_dir`]: a pin the writer mints must be the pin the consumer
+    /// returns, or the agent waits on `PinRequired` for good against every
+    /// self-signed nest its app trusted.
+    #[test]
+    fn a_pin_the_app_mints_reaches_an_agent_on_a_data_dir() {
+        use fauna_client::cert_binding::{
+            DiskPinStore, NestIdentityPinStore, ReadOnlyDiskPinStore,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app_dir = tmp.path().join("app-data");
+        let agent_root = tmp.path().join("agent-data");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let replica = fauna_client_sync::agent_spawner::agent_pin_replica_dir_for(Some(
+            agent_root.as_os_str(),
+        ));
+        let writer = DiskPinStore::open_in_dir_mirrored_to(&app_dir, replica.as_deref());
+        let consumer = ReadOnlyDiskPinStore::open_in_dir(&trust_dir(Some(&agent_root)).unwrap());
+
+        assert_eq!(consumer.get("nest.example:443"), None, "nothing pinned yet");
+        writer.set("nest.example:443", [7; 32]);
+        assert_eq!(consumer.get("nest.example:443"), Some([7; 32]));
+        writer.remove("nest.example:443");
+        assert_eq!(
+            consumer.get("nest.example:443"),
+            None,
+            "the user's re-trust (a removal) reaches the agent too"
         );
     }
 

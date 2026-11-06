@@ -100,6 +100,28 @@ public class RecoveryKitVM {
     /// not just run a ceremony.
     public var sweepView: FfiSweepView?
 
+    /// `SuccessionHandoff.memberReviewDeferred`, mirrored the way `sweepView`
+    /// mirrors the carried sweep: the static is the truth across a switch, this
+    /// is what the view observes.
+    public var memberReviewDeferred = false
+
+    /// Two of the ephemeral member-review pass's three gates (`settings.md`
+    /// § Recovery kit → *The ephemeral member-review pass*): a succession sweep
+    /// ran this app run, and the user has not deferred. The third, that items
+    /// remain, is the roster the section holds. ⚠ Dropping the sweep gate would
+    /// paint the pass on every ordinary session that carries an open item — the
+    /// standing clutter the two-surface ruling exists to prevent.
+    public var memberReviewPassOpen: Bool {
+        sweepView != nil && !memberReviewDeferred
+    }
+
+    /// *Review The Rest Later*: hides the pass and writes no verdict. Purely
+    /// local — "later" is not an answer about anybody.
+    public func deferMemberReview() {
+        SuccessionHandoff.deferMemberReview()
+        memberReviewDeferred = true
+    }
+
     /// The account runtime's last dead read — what the let-go renders from
     /// (`settings.md` § Recovery kit, the fifth act;
     /// `account-data-taxonomy.md` clause (3)(j)). Empty until the read lands,
@@ -162,6 +184,7 @@ public class RecoveryKitVM {
     /// the minted secret must not survive the view that displayed it, and the
     /// two typed buffers are a recovery phrase and a confirm token.
     public func clearHeldSecrets() {
+        successorKitShownTo = nil
         mintedSecretHex = nil
         mintedKitUri = nil
         mintedLandsAt = nil
@@ -583,6 +606,7 @@ public class RecoveryKitVM {
         // (`SuccessionHandoff.rearmUnshownKit` carries the argument).
         if let stranded = SuccessionHandoff.takeStrandedKit(asSuccessor: sessionActorIdHex) {
             showKit(stranded)
+            successorKitShownTo = sessionActorIdHex
             logMessage(level: .info, target: "fauna.app",
                        message: "[succession-kit] discharge claimed by \(sessionActorIdHex) "
                                 + "→ showing the kit an off-screen section minted "
@@ -623,7 +647,10 @@ public class RecoveryKitVM {
         // matched on `status.kind` (this type's doc).
         for attempt in 1...Self.successionMintAttempts {
             await createOrReplaceKit(usingHeldPhrase: false)
-            if mintedSecretHex != nil { return }
+            if mintedSecretHex != nil {
+                successorKitShownTo = sessionActorIdHex
+                return
+            }
             await loadStatus()
             if Self.mintCanNeverLand(status) {
                 logMessage(level: .error, target: "fauna.app",
@@ -663,6 +690,35 @@ public class RecoveryKitVM {
     /// The kit this view model holds on screen, packaged for
     /// ``SuccessionHandoff/rearmUnshownKit(successor:stranded:)`` — `nil` when
     /// nothing was minted.
+    /// The successor whose owed kit this view model put on screen — set only by
+    /// ``dischargeOwedSuccessionKit(sessionActorIdHex:)``, cleared with the
+    /// secret. Read by ``handOnUnseenSuccessorKit()``.
+    @ObservationIgnored private var successorKitShownTo: String?
+
+    /// Called from the section's `onDisappear`, BEFORE ``clearHeldSecrets()``,
+    /// when the navigation stack itself tore the section down (iOS's Settings
+    /// push re-seed — `AppState.settingsReseedGeneration`) rather than the user
+    /// leaving the page: the successor kit it holds is handed to the next live
+    /// section (`SuccessionHandoff.rearmUnshownKit`) instead of being wiped.
+    /// Returns whether there was one to hand on.
+    ///
+    /// ⚠ Measured on iOS 2026-11-01 (`test_identity_succession_ceremony.py`):
+    /// the mint landed on screen, and 72 ms later the stack's re-seed popped and
+    /// re-pushed the Account page. The departing section cleared the only copy
+    /// of the successor's RecoveryKey and the re-pushed one found `owed=false` —
+    /// a registered kit held by nobody, `identity-succession.md` § The
+    /// RecoveryKey's *strictly worse than never-created*. macOS never re-seeds
+    /// (its `launchGate` mounts the shell once, already on Account). A real page
+    /// leave still clears: the shown-once custody rule is untouched, because a
+    /// remount is not a leave.
+    @discardableResult
+    public func handOnUnseenSuccessorKit() -> Bool {
+        guard let successor = successorKitShownTo, let kit = heldKit else { return false }
+        SuccessionHandoff.rearmUnshownKit(successor: successor, stranded: kit)
+        successorKitShownTo = nil
+        return true
+    }
+
     public var heldKit: SuccessionHandoff.StrandedKit? {
         mintedSecretHex.map {
             SuccessionHandoff.StrandedKit(secretHex: $0, kitUri: mintedKitUri,

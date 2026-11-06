@@ -9,8 +9,8 @@ guide: docs/guides/app-tour.md § Conversations
 ## What a user gets
 
 Type in the box above the list and it narrows to conversations whose name or
-last message matches, including the text of encrypted messages, which only your
-device can read. The sort button cycles latest, oldest and unread first.
+last message matches, including the text of encrypted messages, which your
+device reads for itself. The sort button cycles latest, oldest and unread first.
 
 ## Coverage contract
 
@@ -32,21 +32,21 @@ Stamped 2026-09-19 at e9152e3330.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5 docker |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ⚠ partial | 0.1.3-dev+3a518178 standalone |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+79c80402 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5-dev+1703723b standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_filters_thread_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_conversations_real_search.py::test_search_filters_on_real_decrypted_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_search_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_finds_a_term_past_the_visible_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_filters_thread_list` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_real_search.py::test_search_filters_on_real_decrypted_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_search_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_search.py::test_search_finds_a_term_past_the_visible_snippet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_sort_button_cycles_three_orders_without_error` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_unread_until_its_thread_is_opened` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_messaging.py::test_conversation_row_shows_when_it_last_moved` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -772,6 +772,55 @@ fn sanitized<'a>(mut lines: Vec<Line<'a>>) -> Vec<Line<'a>> {
     lines
 }
 
+/// How many chars of one painted line survive per pane column in
+/// [`visible_window`]: several, so zero-width content (combining marks, the
+/// control bytes [`sanitize_line`] strips next) never pulls a visible cell out of
+/// the window — a cut only ever lands far past the pane's right edge.
+const CLIPPED_CHARS_PER_COLUMN: usize = 4;
+
+/// The part of a page's painted lines a pane `height` rows by `width` columns
+/// actually shows when scrolled by `offset`: those rows only, each clipped well
+/// past the right edge (a `Paragraph` painting without wrap clips there anyway).
+///
+/// The element list stays whole — registry, scroll and hit-testing count every
+/// line — but sanitizing and laying out a line nobody can see is pure cost, and
+/// a multi-megabyte mail body is one such line: stripping and painting all of it
+/// on every frame is what stalled the conversations page
+/// (`mail-message-size.md` § Implementation status today). So the per-frame
+/// paint is bounded by the pane, never by the content.
+fn visible_window(
+    lines: Vec<Line<'static>>,
+    offset: usize,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let budget = width.max(1).saturating_mul(CLIPPED_CHARS_PER_COLUMN);
+    lines
+        .into_iter()
+        .skip(offset)
+        .take(height)
+        .map(|mut line| {
+            let mut left = budget;
+            let mut keep = line.spans.len();
+            for (i, span) in line.spans.iter_mut().enumerate() {
+                if left == 0 {
+                    keep = i;
+                    break;
+                }
+                match span.content.char_indices().nth(left) {
+                    Some((cut, _)) => {
+                        span.content = std::borrow::Cow::Owned(span.content[..cut].to_string());
+                        left = 0;
+                    }
+                    None => left -= span.content.chars().count(),
+                }
+            }
+            line.spans.truncate(keep);
+            line
+        })
+        .collect()
+}
+
 /// What one [`element_lines`] pass produced.
 struct PaintedLines {
     lines: Vec<Line<'static>>,
@@ -1417,14 +1466,18 @@ fn render_page(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) -> Dra
     );
     let height = body_area.height.saturating_sub(2) as usize; // the block's borders
     let offset = scroll_offset(painted.focused_line, painted.lines.len(), height);
+    let window = visible_window(
+        painted.lines,
+        offset as usize,
+        height,
+        body_area.width.saturating_sub(2) as usize,
+    );
     frame.render_widget(
-        Paragraph::new(sanitized(painted.lines))
-            .scroll((offset, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(app.page.label()),
-            ),
+        Paragraph::new(sanitized(window)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(app.page.label()),
+        ),
         body_area,
     );
 
@@ -2239,6 +2292,36 @@ mod tests {
             2,
             "a row the area is too short to paint gets no hit region"
         );
+    }
+
+    /// The paint window is the pane: only the scrolled-to rows, each clipped far
+    /// past the right edge but never at a visible cell, whatever the content's
+    /// size — a multi-megabyte line costs a frame its first few hundred chars.
+    #[test]
+    fn the_paint_window_is_bounded_by_the_pane_not_the_content() {
+        let huge = "z".repeat(3 * 1024 * 1024);
+        let lines: Vec<Line<'static>> = (0..100)
+            .map(|i| Line::from(vec![Span::raw("> "), Span::raw(format!("{i}:{huge}"))]))
+            .collect();
+        let window = visible_window(lines, 10, 5, 80);
+        assert_eq!(window.len(), 5, "only the pane's rows are kept");
+        let first: String = window[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            first.starts_with("> 10:zzz"),
+            "the window starts at the offset: {first:.20}"
+        );
+        for line in &window {
+            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert_eq!(
+                chars,
+                80 * CLIPPED_CHARS_PER_COLUMN,
+                "clipped past the edge, not at it"
+            );
+        }
+        // A short line is left whole.
+        let short = visible_window(vec![Line::from("hi")], 0, 5, 80);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].spans[0].content, "hi");
     }
 
     // ---- nav-key-hints: the key-hint footer -------------------------------

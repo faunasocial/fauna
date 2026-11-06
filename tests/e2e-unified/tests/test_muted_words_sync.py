@@ -2,9 +2,11 @@
 device is never lost because another device changed the list at the same time.
 
 Goal doc: ``docs/goal/architecture/content-moderation-and-ranking.md``
-§ Implementation status today, leg 4 (the muted list rides the account's
-sealed ``UserConfig.moderation`` and merges per entry, so two concurrent adds
-both survive).
+§ Implementation status today → *The moderation kind's rows — one per keyword,
+one per hidden id* (each muted word is its own latest-wins
+``fauna.state.moderation`` row, so two concurrent adds are two rows and both
+survive; a removal is a stamped tombstone that still propagates);
+``docs/features/muted-words.md`` outcome 5.
 
 The journey: two seats of one account on this machine (convention 16) — seat A
 the app under test, seat B the fleet's tui sibling (`helpers.fleet.SiblingSeats`).
@@ -27,7 +29,10 @@ import pytest
 from helpers.fleet import SiblingSeats, poked_pass
 from helpers.waiting import wait_until
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3, pytest.mark.tui, pytest.mark.android, pytest.mark.linux, pytest.mark.web,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.windows,
+]
 
 #: A seat's own add round trip.
 ADD_S = 120.0

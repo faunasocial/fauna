@@ -265,6 +265,16 @@ class Program
             Environment.Exit(SelfTest.PackedAttrChecks());
             return;
         }
+        if (args.Length > 0 && args[0] == "--self-test-launch-status")
+        {
+            Environment.Exit(SelfTest.LaunchStatus());
+            return;
+        }
+        if (args.Length > 0 && args[0] == "--self-test-stall-verdict")
+        {
+            Environment.Exit(SelfTest.StallVerdictChecks());
+            return;
+        }
         // Retry on a bind conflict rather than the old one-shot draw+Start:
         // any two bridges racing the same 18000-19000 draw — or a plain-socket holder
         // sharing the range, like the web bridge — could otherwise die at startup.
@@ -307,6 +317,12 @@ class Program
 
         StartMuteBridgeHeartbeat();
 
+        // Convention 11's windows-app stall verdict and stack, judged from here
+        // while a stalled op is still in flight (StallWatch says why from here).
+        StallWatch.Reply = WriteJson;
+        StallWatch.Trace = DiagFile;
+        StallWatch.Start();
+
         // Per-phase action costs go to the diag FILE, never stderr — the same
         // reason DiagFile exists at all: an instrument that can block on a full
         // pipe goes quiet exactly when the run is busiest, which is when it is
@@ -337,9 +353,15 @@ class Program
                 {
                     await HandleRequest(ctx);
                 }
+                // Both failure replies carry the stall verdict (and, on the
+                // app-side verdict, the UI thread's stack) when the op stalled
+                // (StallWatch): a held UI thread fails a find as "not found" too.
                 catch (ElementNotFoundException ex)
                 {
-                    await WriteJson(ctx.Response, 404, new { error = ex.Message });
+                    await WriteJson(ctx.Response, 404, new
+                    {
+                        error = ex.Message + StallWatch.TakeReport(ctx.Response),
+                    });
                 }
                 // Convention 11's disabled-actuation refusal: 409, NEVER 404. The
                 // element was found; its state is the problem. A 404 sends
@@ -359,9 +381,26 @@ class Program
                         index = ex.Index,
                     });
                 }
+                // The other 409 on `/element/select`: the picker is enabled but
+                // never painted the option asked for. Its wording carries no
+                // disabled-actuation text, which is how the driver tells the two
+                // apart (`SelectOptionNotOfferedException`).
+                catch (SelectOptionNotOfferedException ex)
+                {
+                    await WriteJson(ctx.Response, 409, new
+                    {
+                        error = ex.Message,
+                        status = 409,
+                        id = ex.Id,
+                        index = ex.Index,
+                    });
+                }
                 catch (Exception ex)
                 {
-                    await WriteJson(ctx.Response, 500, new { error = ex.ToString() });
+                    await WriteJson(ctx.Response, 500, new
+                    {
+                        error = ex.ToString() + StallWatch.TakeReport(ctx.Response),
+                    });
                 }
                 finally
                 {
@@ -412,6 +451,9 @@ class Program
         // Recording the holder is what lets a waiter name the culprit, and it has
         // to be reported from the WAITER because the holder may never finish.
         var gateWait = System.Diagnostics.Stopwatch.StartNew();
+        // Never stopped: the stall watcher reads the reply budget off it, which
+        // like the driver's own budget counts the queueing below.
+        var arrived = System.Diagnostics.Stopwatch.StartNew();
         if (!await _uiaGate.WaitAsync(TimeSpan.FromSeconds(SlowGateWaitSeconds)))
         {
             var holder = Volatile.Read(ref _gateHolder);
@@ -432,6 +474,15 @@ class Program
         Volatile.Write(ref _gateHolder, $"{method} {path}");
         Volatile.Write(ref _gateHeldSinceTicks, DateTime.UtcNow.Ticks);
         var served = System.Diagnostics.Stopwatch.StartNew();
+        // An op that asks the app's UI thread something is watched for a stall
+        // (convention 11's windows-app leg, StallWatch). Read once: the switch
+        // below may replace _session.
+        var watchedSession = StallWatch.IsAppRoute(path) ? _session : null;
+        if (watchedSession is not null)
+            StallWatch.Begin($"{method} {path}", ctx.Response, watchedSession, arrived);
+        var succeeded = false;
+        try
+        {
         try
         {
         switch (path)
@@ -478,7 +529,8 @@ class Program
                 sessionEnv["FAUNA_E2E_SESSION_EPOCH"] = _sessionEpoch.ToString();
                 _session = new SessionManager();
                 _session.Launch(sessionReq.App, sessionReq.Args ?? "", sessionEnv,
-                                sessionReq.PackageFamilyName, sessionReq.PackageAppId);
+                                sessionReq.PackageFamilyName, sessionReq.PackageAppId,
+                                sessionReq.CpuAffinityMask, sessionReq.Aumid);
                 // The actuation gate is a per-SESSION value read from the launch
                 // environment the driver just posted — the same dictionary
                 // `SessionManager.Launch` already picks FAUNA_E2E_DATA_DIR and
@@ -507,6 +559,7 @@ class Program
             case "/session/status" when method == "GET":
             {
                 var (running, exitCode) = _session?.AppStatus() ?? (false, (int?)null);
+                var waits = _session?.WaitSamples();
                 int statusEpoch; int fencedPushes; string? lastFencedEpoch;
                 lock (_stateLock)
                 {
@@ -517,6 +570,12 @@ class Program
                 await WriteJson(ctx.Response, 200, new {
                     running,
                     exit_code = exitCode,
+                    cpu_ms = _session?.AppCpuMs(),
+                    launched_at = _session?.LaunchedAt?.ToString("o"),
+                    exited_at = _session?.AppExitedAt()?.ToString("o"),
+                    cpu_affinity_mask = _session?.AppAffinityMask(),
+                    wait_samples = waits?.samples,
+                    wait_ready_samples = waits?.ready,
                     package_full_name = _session?.AppPackageFullName(),
                     session_epoch = statusEpoch,
                     fenced_state_pushes = fencedPushes,
@@ -874,9 +933,20 @@ class Program
                 await WriteJson(ctx.Response, 404, new { error = $"Unknown route: {method} {path}" });
                 break;
         }
+        succeeded = true;
+        }
+        // A UIA call that gave up on an unresponsive app (UIA_E_TIMEOUT) before
+        // the watcher looked: judge it now, while the thread may still be held,
+        // so the failure reply carries the verdict.
+        catch (Exception ex) when (watchedSession is not null && StallWatch.LooksLikeUiaTimeout(ex))
+        {
+            StallWatch.ExamineNow();
+            throw;
+        }
         }
         finally
         {
+            if (watchedSession is not null) StallWatch.End(succeeded);
             served.Stop();
             Volatile.Write(ref _gateHolder, "(idle)");
             // Release BEFORE narrating, and narrate to the file only — never
@@ -950,6 +1020,7 @@ class Program
                 // push (old epoch) so it can't overwrite the live session's snapshot
                 // with its stale one. Still 200 so the old agent doesn't error-spin.
                 var pushedState = await ReadJson<Dictionary<string, object>>(ctx.Request);
+                var agentUp = false;
                 lock (_stateLock)
                 {
                     if (EpochMatches(ctx.Request))
@@ -957,6 +1028,7 @@ class Program
                         // Normalize top-level keys from camelCase to snake_case
                         // so Python always sees snake_case regardless of what the app sends.
                         cachedAppState = NormalizeKeys(pushedState);
+                        agentUp = true;
                     }
                     else
                     {
@@ -971,6 +1043,8 @@ class Program
                         _lastFencedEpoch = ctx.Request.QueryString["epoch"];
                     }
                 }
+                // This session's agent is up: the launch's CPU wait stops being sampled.
+                if (agentUp) _session?.AgentUp();
                 await WriteJson(ctx.Response, 200, new { received = true });
                 break;
 
@@ -1053,8 +1127,26 @@ class Program
             ?? throw new InvalidOperationException("Failed to parse request body");
     }
 
-    static async Task WriteJson(HttpListenerResponse resp, int status, object data)
+    /// <summary>Responses already answered. A stalled op can be answered by the
+    /// stall watcher (<see cref="StallWatch"/>, at its reply budget) while its own
+    /// request thread is still inside a UIA call; whichever writes first claims the
+    /// response, and the other's write is dropped rather than racing it.</summary>
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<HttpListenerResponse, object>
+        _answered = new();
+
+    static bool ClaimResponse(HttpListenerResponse resp)
     {
+        lock (_answered)
+        {
+            if (_answered.TryGetValue(resp, out _)) return false;
+            _answered.Add(resp, new object());
+            return true;
+        }
+    }
+
+    internal static async Task WriteJson(HttpListenerResponse resp, int status, object data)
+    {
+        if (!ClaimResponse(resp)) return;
         resp.StatusCode = status;
         resp.ContentType = "application/json";
         var json = JsonSerializer.Serialize(data, JsonOpts);
@@ -1067,8 +1159,12 @@ class Program
 
 // PackageFamilyName/PackageAppId: launch in that registered package's context, so
 // the app runs with its identity (SessionManager.StartInPackageContext).
+// Aumid: activate an installed package's application the way its Start-menu entry
+// does (SessionManager.ActivateApplication) — the Store install's launch, which
+// carries no environment; App then only names the exe for the bridge's diagnostics.
 record SessionRequest(string App, string? Args, Dictionary<string, string>? Environment,
-                      string? PackageFamilyName = null, string? PackageAppId = null);
+                      string? PackageFamilyName = null, string? PackageAppId = null,
+                      long? CpuAffinityMask = null, string? Aumid = null);
 record ElementRequest(string Id, int Index = 0, List<ScopeStep>? Scope = null);
 record TypeRequest(string Id, string Text, int Index = 0, List<ScopeStep>? Scope = null);
 record PhysicalTypeRequest(

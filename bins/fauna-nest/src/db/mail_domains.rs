@@ -702,9 +702,12 @@ impl CacheDb {
     /// the per-domain policy select (`dmarc-reporting.md` § Multi-domain
     /// deployments). The merge rule is the shared
     /// `fauna_mail::dmarc_publish::set_policy_mode_json`: `policy_mode` and
-    /// `subdomain_policy_mode` set together, the default (`reject`) clearing
-    /// both. Same single-lock read-merge-write as
-    /// [`Self::set_role_address_override`], for the same reason.
+    /// `subdomain_policy_mode` set together, both cleared only when the
+    /// effective deployment-wide policy (`DmarcPolicyOverrides::publish_base`,
+    /// read under the same lock) already publishes `mode` — so a domain can be
+    /// made stricter than a softened deployment. Same single-lock
+    /// read-merge-write as [`Self::set_role_address_override`], for the same
+    /// reason.
     pub async fn set_dmarc_policy_mode(
         &self,
         domain_name: &str,
@@ -715,6 +718,10 @@ impl CacheDb {
 
         let domain_id: [u8; 16] = {
             let conn = self.conn.lock().await;
+            let base = super::singleton::read_singleton_json_in::<
+                super::mail_policy::DmarcPolicyOverrides,
+            >(&conn, "mail_dmarc_policy")?
+            .publish_base();
             let row: Option<(Vec<u8>, Option<String>)> = conn
                 .query_row(
                     "SELECT domain_id, dmarc_overrides FROM mail_domains
@@ -726,7 +733,7 @@ impl CacheDb {
                 .context("read dmarc_overrides")?;
             let (id_blob, current_json) =
                 row.ok_or_else(|| anyhow!("no active mail_domains row for {}", name))?;
-            let new_json = set_policy_mode_json(current_json.as_deref(), mode);
+            let new_json = set_policy_mode_json(current_json.as_deref(), mode, &base);
 
             if id_blob.len() != 16 {
                 return Err(anyhow!("domain_id must be 16 bytes, got {}", id_blob.len()));

@@ -720,9 +720,7 @@ mod tests {
         let read = |author: String| {
             fauna_protocol::encode_canonical(&FeedAuthorPostsRequest {
                 author,
-                cursor: None,
-                limit: None,
-                extra: Default::default(),
+                ..Default::default()
             })
             .unwrap()
         };
@@ -1107,9 +1105,9 @@ mod tests {
     /// The form gate's fetch door (TP4, `encryption-at-rest.md` § Capability
     /// tiering → *Third-party holders*): a `remote` principal is served no
     /// blob carrying a key-bearing tuple over a kind it did not create, even
-    /// one stored before its row existed; its `ext.*` grant and an
-    /// undecodable blob are served as before. A `device` principal is
-    /// served all three.
+    /// one stored before its row existed, nor a blob this build cannot decode
+    /// (a remote principal's own decoder may be laxer);
+    /// its `ext.*` grant is served. A `device` principal is served all three.
     #[tokio::test]
     async fn fetch_serves_a_remote_principal_no_reserved_tuple() {
         use fauna_mls::wrapped_blob::{GrantBlob, GrantIndex, GrantWindow, ScopeTuple};
@@ -1133,7 +1131,7 @@ mod tests {
         let ext = blob(2, ScopeTuple::ext_kind_read("ext.app.example.notes"));
         let opaque = b"opaque".to_vec();
         for (form, mut served) in [
-            (ExecutionForm::Remote, vec![ext.clone(), opaque.clone()]),
+            (ExecutionForm::Remote, vec![ext.clone()]),
             (
                 ExecutionForm::Device,
                 vec![reserved.clone(), ext.clone(), opaque.clone()],
@@ -1393,6 +1391,81 @@ mod tests {
         .await
         .expect_err("no custody pull");
         assert_eq!(err.code, "fauna.sync.invalid_request");
+    }
+
+    /// One counted request does a page of work: a page of
+    /// the walk loads that page's rows (plus the one that overflowed it),
+    /// never the whole scope, and the HTTP door's single-record GET loads at
+    /// most a page — even for the scope's last item, which a walk of the feed
+    /// would reach only after reading every page before it.
+    #[tokio::test]
+    async fn a_record_door_read_loads_at_most_one_page_of_rows() {
+        use crate::db::account_state::STATE_FEED_ROWS_LOADED;
+        let (state, b) = records_fixture(&[RECORDS]).await;
+        const ROWS: usize = 120;
+        let mut entry = v1_envelope();
+        entry.resize(48 * 1024, 0x5e);
+        let key = |i: usize| {
+            let mut k = [0x77u8; 32];
+            k[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            k
+        };
+        for i in 0..ROWS {
+            let put = fauna_protocol::account_state::AccountStatePutRequest {
+                scope: NOTES.into(),
+                writer_id: hex::encode(WRITER),
+                writer_seq: i as i64 + 1,
+                item_key: fauna_protocol::ByteBuf::from(key(i).to_vec()),
+                op: fauna_protocol::account_state::OP_STATE_PUT.into(),
+                entry: fauna_protocol::ByteBuf::from(entry.clone()),
+                ..Default::default()
+            };
+            call(
+                &state,
+                &b,
+                "fauna.account.state.put",
+                fauna_protocol::encode_canonical(&put).unwrap(),
+            )
+            .await
+            .expect("its own kind, as its own writer");
+        }
+        let loaded = || STATE_FEED_ROWS_LOADED.with(|n| n.replace(0));
+
+        loaded();
+        let reply = call(&state, &b, "fauna.sync.changes.list", listed(NOTES))
+            .await
+            .expect("its own scope lists");
+        let page = rows(&reply);
+        assert!(
+            page > 0 && page < ROWS / 2,
+            "the scope spans several pages, got a page of {page}"
+        );
+        let walk_loaded = loaded();
+        assert!(
+            walk_loaded <= page + 1,
+            "a page of the walk loaded {walk_loaded} rows for a page of {page}"
+        );
+
+        let caller = resolve_principal(&state, &b)
+            .await
+            .expect("resolve")
+            .expect("a live principal");
+        loaded();
+        let found = crate::records_door::item_records(
+            &state,
+            caller,
+            "ext.app.example.notes",
+            key(ROWS - 1),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the GET of its own record answers"));
+        let get_loaded = loaded();
+        assert_eq!(found.len(), 1, "the item's one row");
+        assert_eq!(found[0]["key"], hex::encode(key(ROWS - 1)));
+        assert!(
+            get_loaded <= page,
+            "one GET loaded {get_loaded} rows, more than a page of {page}"
+        );
     }
 
     /// A token whose family was consented without the arm reaches neither
@@ -2056,6 +2129,22 @@ mod tests {
         actor(state.clone(), ACCOUNT, admit([0xC5; 32], "by-hand"))
             .await
             .expect("the admin admits a member on their own socket");
+        // A write whose row carries no detail of its own is attributed too.
+        call(
+            &state,
+            &b,
+            "fauna.admin.set_registration_mode",
+            fauna_protocol::encode_canonical(
+                &fauna_protocol::node_policy::SetRegistrationModeRequest {
+                    mode: "invite_required".into(),
+                    max_free_users: None,
+                    extra: Default::default(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("rw:users sets the registration mode");
 
         let rows = state.db.list_audit(10, None).await.unwrap();
         let detail_for = |target: [u8; 32]| {
@@ -2073,6 +2162,11 @@ mod tests {
         );
         let by_hand = detail_for([0xC5; 32]);
         assert!(!by_hand.contains("via_principal"), "{by_hand}");
+        let mode_set = rows
+            .iter()
+            .find(|r| r.action == "nest.registration_mode_set")
+            .and_then(|r| r.detail.clone());
+        assert_eq!(mode_set.as_deref(), Some(marker.as_str()));
     }
 
     /// The nest-side pages (`authorization-server.md` § Scope grammar → *The

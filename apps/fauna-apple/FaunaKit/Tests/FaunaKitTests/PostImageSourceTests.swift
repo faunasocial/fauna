@@ -77,7 +77,7 @@ private let proxiedPath = "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%
 }
 
 @Test func theProxiedPathIsTakenOnlyWhenThePostHasNoBlobImage() {
-    // tui's `proxied_post_image` precedence: the one `post-image` slot takes a
+    // `RenderDocument::proxied_post_image_ref`'s precedence: the one `post-image` slot takes a
     // blob image first, exactly as before the variant existed.
     let bridged = RenderDocument(blocks: [.proxiedImage(path: proxiedPath, alt: "")])
     #expect(documentMediaProxiedImagePath(bridged) == proxiedPath)
@@ -89,7 +89,7 @@ private let proxiedPath = "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%
 }
 
 @Test func theProxiedVideoPathIsTakenOnlyWhenThePostHasNoBlobVideo() {
-    // `RenderDocument::proxied_post_video`'s precedence: the one `video-thumbnail` slot takes
+    // `RenderDocument::proxied_post_video_ref`'s precedence: the one `video-thumbnail` slot takes
     // a blob video first; a proxied-only post paints the path; an image-only post has none.
     let bridged = RenderDocument(blocks: [.proxiedVideo(path: proxiedPath, alt: "")])
     #expect(documentMediaProxiedVideoPath(bridged) == proxiedPath)

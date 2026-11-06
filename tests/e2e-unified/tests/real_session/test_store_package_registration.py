@@ -393,9 +393,9 @@ def unvirtualized_dir(request):
 
     pytest's `tmp_path` lives under `%LocalAppData%\\Temp`, and that is precisely
     the tree a packaged app's writes get **virtualized** out of: this package
-    declares `unvirtualizedResources` scoped by flexible virtualization to
-    `%LocalAppData%\\Fauna` *only* (§ Data continuity), so every other AppData path
-    keeps the default redirect into `%LocalAppData%\\Packages\\<PFN>\\LocalCache\\…`.
+    declares no virtualization opt-out (the manifest's Properties comment;
+    `installers/windows.md` § Data continuity), so every AppData write keeps the
+    default redirect into `%LocalAppData%\\Packages\\<PFN>\\LocalCache\\…`.
     A packaged agent's log — and the launcher's exit-code file — would land there
     and the test would read an empty dir, failing as a 180s timeout that looks
     like a hang rather than the redirect it is.
@@ -440,7 +440,7 @@ class TestStoreAgentSecondInstance:
     ----------------------------------------------------------------
     S5 was written as an observation. But nothing here needs an eye: the
     survivor-selection is a kernel-arbitrated named mutex
-    (`pipe_server::InstanceLock`), and it has three witnesses that are not a
+    (`fauna_ipc::pipe_transport::InstanceLock`), and it has three witnesses that are not a
     screen — the loser's **exit code**, the loser's **log line**, and the
     winner **still answering its pipe**. A logon is only a *way of starting two
     agents*; starting two agents directly is the same mechanism without waiting

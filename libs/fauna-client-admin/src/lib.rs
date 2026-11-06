@@ -2367,6 +2367,24 @@ pub struct IssuerKeyView {
     pub rotation_in_flight: bool,
 }
 
+/// The issuer key set's read, as the `admin-nest-oauth-*` section paints it.
+///
+/// Three honest states, never collapsed into an empty list: "we haven't asked"
+/// and "we couldn't find out" must not read like "no keys", and the forced
+/// arm's confirm can only name what it drops once the set has answered. One
+/// owner for the native Rust shells (tui, linux) — they each hand-copied it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum OauthKeysRead {
+    /// Not read yet — the section's state until the first read lands.
+    #[default]
+    Unread,
+    /// The set answered; the shared folds decide every line painted from it.
+    Ready(IssuerKeyView),
+    /// The read failed — already worded, the section's reason line. Any read
+    /// error (e.g. a transport fault) lands here.
+    Failed(String),
+}
+
 /// Fold the `fauna.oauth.issuer_key_status` reply into the control's view.
 ///
 /// `served_until` saturates rather than wrapping: the horizon is a `u64`

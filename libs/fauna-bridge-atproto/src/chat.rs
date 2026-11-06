@@ -109,17 +109,80 @@ pub async fn poll_convos(
     Ok(polled)
 }
 
+/// Why [`send_dm`] did not send.
+#[derive(Debug)]
+pub enum SendDmError {
+    /// The service refused this message or this conversation (a 4xx other
+    /// than 401, 408 or 429 — the peer's chat setting refuses the sender, the
+    /// conversation cannot be opened), or the peer is no DID. Another pass
+    /// would be refused the same way.
+    Refused(anyhow::Error),
+    /// Worth another pass: a transport fault, a 5xx, a rate limit, a session
+    /// the service did not accept.
+    Transient(anyhow::Error),
+}
+
+impl std::fmt::Display for SendDmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(e) => write!(f, "refused: {e:#}"),
+            Self::Transient(e) => write!(f, "transient: {e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SendDmError {}
+
+/// Is an HTTP status the chat service answered a refusal of this request
+/// itself, as against a fault another pass may not meet — the split
+/// [`SendDmError`] draws.
+#[must_use]
+pub fn status_is_refusal(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 401 | 408 | 429)
+}
+
+/// Is `s` a DID the chat service can address: `did:plc:` or `did:web:`, and
+/// well-formed DID syntax.
+#[must_use]
+pub fn is_peer_did(s: &str) -> bool {
+    (s.starts_with("did:plc:") || s.starts_with("did:web:"))
+        && s.parse::<atrium_api::types::string::Did>().is_ok()
+}
+
+/// Sort one chat-service call's failure into [`SendDmError`].
+fn classify<E>(call: &str, e: atrium_xrpc::Error<E>) -> SendDmError
+where
+    E: std::fmt::Debug,
+    atrium_xrpc::Error<E>: std::fmt::Display,
+{
+    let refused = matches!(
+        &e,
+        atrium_xrpc::Error::XrpcResponse(r) if status_is_refusal(r.status.as_u16())
+    );
+    let err = anyhow::anyhow!("{call} failed: {e}");
+    if refused {
+        SendDmError::Refused(err)
+    } else {
+        SendDmError::Transient(err)
+    }
+}
+
 /// Send `text` to `peer_did` in the one-to-one conversation the account has
 /// with them (found or opened by the chat service). Returns the sent message's
 /// id.
 ///
 /// # Errors
-/// `peer_did` is no DID; a `getConvoForMembers` or `sendMessage` failure.
-pub async fn send_dm(agent: &BlueskyAgent, peer_did: &str, text: &str) -> anyhow::Result<String> {
+/// [`SendDmError::Refused`] when `peer_did` is no DID or the service refused
+/// the conversation or the message; [`SendDmError::Transient`] otherwise.
+pub async fn send_dm(
+    agent: &BlueskyAgent,
+    peer_did: &str,
+    text: &str,
+) -> Result<String, SendDmError> {
     configure_chat_proxy(agent);
     let peer: atrium_api::types::string::Did = peer_did
         .parse()
-        .map_err(|e| anyhow::anyhow!("peer is not a DID: {e}"))?;
+        .map_err(|e| SendDmError::Refused(anyhow::anyhow!("peer is not a DID: {e}")))?;
     let convo = agent
         .api
         .chat
@@ -132,7 +195,7 @@ pub async fn send_dm(agent: &BlueskyAgent, peer_did: &str, text: &str) -> anyhow
             .into(),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("getConvoForMembers failed: {e}"))?;
+        .map_err(|e| classify("getConvoForMembers", e))?;
     let sent = agent
         .api
         .chat
@@ -151,6 +214,38 @@ pub async fn send_dm(agent: &BlueskyAgent, peer_did: &str, text: &str) -> anyhow
             .into(),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("sendMessage failed: {e}"))?;
+        .map_err(|e| classify("sendMessage", e))?;
     Ok(sent.id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal is the service turning down this request; a session, a
+    /// timeout, a rate limit or a server fault is worth another pass.
+    #[test]
+    fn a_refusal_is_a_4xx_but_auth_timeout_and_rate_limit() {
+        for refused in [400, 403, 404, 413, 422] {
+            assert!(status_is_refusal(refused), "{refused}");
+        }
+        for transient in [200, 401, 408, 429, 500, 502, 503] {
+            assert!(!status_is_refusal(transient), "{transient}");
+        }
+    }
+
+    #[test]
+    fn a_peer_did_is_plc_or_web_and_parses() {
+        assert!(is_peer_did("did:plc:bob"));
+        assert!(is_peer_did("did:web:example.com"));
+        for not in [
+            "did:x",
+            "did:key:z6Mkabc",
+            "did:plc:bad id",
+            "did:plc:",
+            "bob.example",
+        ] {
+            assert!(!is_peer_did(not), "{not}");
+        }
+    }
 }

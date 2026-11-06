@@ -54,7 +54,7 @@ use crate::app::UiMessage;
 /// The device label every tui-registered sync device shows in the nest's device
 /// list (the analog of linux's `fauna-linux` / macOS's `fauna-macos`).
 #[cfg(any(unix, windows))]
-const DEVICE_LABEL: &str = "fauna-tui";
+pub(crate) const DEVICE_LABEL: &str = "fauna-tui";
 
 /// One rendered folder↔folder binding row, as the cross-platform Folders
 /// page render reads it (the tui twin of linux's `LocationBinding`). A flat,
@@ -112,6 +112,12 @@ pub struct RenderedLocationBinding {
     /// offers none).
     pub free_space: Option<RenderedFreeSpace>,
 }
+
+/// The group sets' review lists, keyed by the set's `FolderRef` wire form — a
+/// cfg-free map of the shared row, so `settings::folders` renders them on every
+/// platform without naming the gated agent types.
+pub type GroupConflicts =
+    std::collections::BTreeMap<String, Vec<fauna_core::sync::RetainedConflict>>;
 
 /// The flat, cfg-free projection of
 /// [`fauna_client_sync::agent::FreeSpaceVerb`] — one bound row's
@@ -624,6 +630,37 @@ impl SyncAgentState {
         }
     }
 
+    /// The group sets' review lists as the status poll last read them, keyed
+    /// by the set's `FolderRef` wire form. Empty before install, where tui
+    /// drives no agent, and on a set with nothing to review.
+    pub fn rendered_set_conflicts(&self) -> GroupConflicts {
+        #[cfg(any(unix, windows))]
+        if let Some(surface) = self.inner.as_ref() {
+            return surface.rendered_set_conflicts();
+        }
+        GroupConflicts::new()
+    }
+
+    /// *Use the other version* on a group set's review row — the
+    /// `conflict-resolve-button` gesture (`group-set.md` § Build design — the
+    /// group set, decision 9). Never optimistic: the row goes when the agent's
+    /// list no longer holds it, and a refusal lands on `error-message`.
+    pub fn restore_retained_version(
+        &self,
+        folder_id: String,
+        conflict_id: i64,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::app::UiMessage>,
+    ) {
+        #[cfg(any(unix, windows))]
+        if let Some(surface) = self.inner.as_ref() {
+            surface.restore_retained_version(folder_id, conflict_id, tx);
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (folder_id, conflict_id, tx);
+        }
+    }
+
     /// Set the bound folder at `path` to `mode` (`"always"` | `"on-demand"`) —
     /// the `folder-location-mode-toggle` gesture. Fire-and-forget on the agent
     /// seam like every other binding mutation; the reconcile after the push
@@ -700,7 +737,10 @@ impl SyncAgentState {
 /// uses, collapsing the unix-only [`fauna_client_sync::agent_spawner::LingerState`]
 /// so the Folders page — which compiles everywhere — never names it.
 pub fn linger_enabled() -> Option<bool> {
-    #[cfg(unix)]
+    // macOS answers by `cfg`, not by a failed `loginctl` probe: there is no
+    // linger concept there — the `gui/<uid>` launchd domain IS the login
+    // session (`sync-agent.md` § Packaging + lifecycle, *A tui-only mac*).
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         use fauna_client_sync::agent_spawner::{LingerControl, LingerState, LoginctlUser};
         match LoginctlUser.state() {
@@ -709,7 +749,7 @@ pub fn linger_enabled() -> Option<bool> {
             LingerState::Unavailable => None,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         None
     }
@@ -721,7 +761,7 @@ pub fn linger_enabled() -> Option<bool> {
 /// This is the one place tui runs a privileged-ish machine mutation, and it is
 /// only ever the user's own explicit gesture.
 pub fn set_linger(enabled: bool) -> Option<bool> {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         use fauna_client_sync::agent_spawner::{LingerControl, LoginctlUser};
         if !LoginctlUser.set(enabled) {
@@ -729,7 +769,7 @@ pub fn set_linger(enabled: bool) -> Option<bool> {
         }
         linger_enabled()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         let _ = enabled;
         None
@@ -749,7 +789,8 @@ pub fn set_linger(enabled: bool) -> Option<bool> {
 /// agent's fleet-view `prior` (`account-data-taxonomy.md` § The generation machinery
 /// → *The source of `prior`*), which the seedless agent cannot attest itself.
 /// `predecessor_chain` pairs those keys with their identities (ruling (8)(c)'s
-/// per-signer bound).
+/// per-signer bound). `reach_registry` supplies the reach hint of each
+/// capability push (`onboarding-provisioning.md` § Reach hint).
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     client: Arc<NestClient>,
@@ -760,6 +801,7 @@ pub fn init(
     attested_predecessors: &[fauna_core::identity::ActorId],
     predecessor_chain: &[(fauna_core::identity::ActorId, fauna_core::crypto::BackupKey)],
     corpus: fauna_client_sync::agent::SuccessionCorpusContext,
+    reach_registry: fauna_client_accounts::AccountRegistry,
 ) -> SyncAgentState {
     #[cfg(any(unix, windows))]
     {
@@ -772,6 +814,7 @@ pub fn init(
             attested_predecessors,
             predecessor_chain,
             corpus,
+            reach_registry,
         )
     }
     #[cfg(not(any(unix, windows)))]
@@ -785,6 +828,7 @@ pub fn init(
             attested_predecessors,
             predecessor_chain,
             corpus,
+            reach_registry,
         );
         SyncAgentState::default()
     }
@@ -1121,6 +1165,41 @@ mod native {
             });
         }
 
+        /// The status poll's latest reading of the group sets' review lists.
+        pub(super) fn rendered_set_conflicts(&self) -> super::GroupConflicts {
+            self.model.lock().unwrap().set_conflicts().clone()
+        }
+
+        /// Ask the agent to restore the retained version, then re-read the
+        /// lists so the used row goes without waiting for the 10 s poll. A
+        /// refusal changes nothing agent-side — the row stands — and is posted
+        /// for `error-message`, since only the user can act on it.
+        pub(super) fn restore_retained_version(
+            &self,
+            folder_id: String,
+            conflict_id: i64,
+            tx: UnboundedSender<UiMessage>,
+        ) {
+            let provisioner = Arc::clone(&self.provisioner);
+            let model = Arc::clone(&self.model);
+            tokio::spawn(async move {
+                match provisioner
+                    .restore_retained_version(folder_id, conflict_id)
+                    .await
+                {
+                    Ok(()) => {
+                        provisioner.refresh_set_conflicts(&model).await;
+                        let _ = tx.send(UiMessage::Data(DataMessage::SyncAgentChanged));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(UiMessage::Data(DataMessage::RetainedRestoreRefused(
+                            e.to_string(),
+                        )));
+                    }
+                }
+            });
+        }
+
         /// Push one bind (`add_binding`); confirm into the model on success, the
         /// tui twin of linux's `push_bind`. `reconcile_once`'s own `to_bind` loop
         /// awaits `bind_location` inline instead of spawning per-row, so this is
@@ -1221,6 +1300,8 @@ mod native {
             device_id,
             device_label: DEVICE_LABEL.to_string(),
             nest_url: nest_url.to_string(),
+            // Set by `init` from the session's registry.
+            reach_registry: None,
         }
     }
 
@@ -1243,17 +1324,30 @@ mod native {
     /// (`sync-agent.md` § Packaging + lifecycle) — the one per-OS line in an
     /// otherwise OS-neutral surface.
     ///
-    /// * **unix** — production writes+ensures the systemd user unit; under e2e
-    ///   the same shared spawner direct-child-spawns the agent into this
-    ///   launch's isolated XDG world, so no machine-global systemd surface is
-    ///   touched while the real agent binary still runs.
+    /// * **unix but macOS** — production writes+ensures the systemd user unit;
+    ///   under e2e the same shared spawner direct-child-spawns the agent into
+    ///   this launch's isolated XDG world, so no machine-global systemd surface
+    ///   is touched while the real agent binary still runs.
+    /// * **macos** — production writes/heals the per-user
+    ///   `social.fauna.sync-agent` LaunchAgent and bootstraps it (the one
+    ///   shared launchd writer the desktop app also uses — a mac installed from
+    ///   the archive alone gets its resident agent from tui); under e2e the same
+    ///   direct-child spawn into the launch's isolated `HOME`.
     /// * **windows** — a console-less detached child (the shape the C# app
     ///   used). No e2e arm is needed: there is no per-user unit to avoid
     ///   writing, and the isolation an isolated XDG world gives unix for free
     ///   arrives here as the harness's forwarded `--pipe-name`/`--data-dir`,
     ///   which the shared spawner reads from the environment.
     fn platform_spawner() -> Arc<dyn fauna_client_sync::agent::AgentSpawner> {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
+        {
+            // The mode switch as on linux below: e2e direct-child-spawns, so a
+            // test launch never bootstraps the machine-global LaunchAgent.
+            Arc::new(fauna_client_sync::agent_spawner::LaunchdAgentSpawner::new(
+                crate::e2e_mode_enabled(),
+            ))
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             // Selects the spawner MODE, not whether we provision: under e2e the
             // `SystemdUserUnitSpawner` direct-child-spawns the agent into the
@@ -1285,6 +1379,7 @@ mod native {
         attested_predecessors: &[fauna_core::identity::ActorId],
         predecessor_chain: &[(fauna_core::identity::ActorId, fauna_core::crypto::BackupKey)],
         corpus: SuccessionCorpusContext,
+        reach_registry: fauna_client_accounts::AccountRegistry,
     ) -> SyncAgentState {
         // This account's id (`sync-agent-credentials.md` § Credential model):
         // the agent registers under it, and the custodian handle carries it.
@@ -1301,16 +1396,19 @@ mod native {
         let bearer_source = Arc::new(AgentBearerSource(client.auth().bearer()));
         let provisioner = match SyncAgentProvisioner::new(
             Arc::clone(&client),
-            with_predecessor_chain(
-                build_capability_inputs(
-                    secret,
-                    device_id,
-                    nest_url,
-                    predecessors,
-                    attested_predecessors,
-                ),
-                predecessor_chain,
-            ),
+            AgentCapabilityInputs {
+                reach_registry: Some(reach_registry),
+                ..with_predecessor_chain(
+                    build_capability_inputs(
+                        secret,
+                        device_id,
+                        nest_url,
+                        predecessors,
+                        attested_predecessors,
+                    ),
+                    predecessor_chain,
+                )
+            },
             platform_spawner(),
             bearer_source,
             Some(Arc::new(TuiReachabilityObserver { tx: tx.clone() })),
@@ -1341,25 +1439,7 @@ mod native {
         // tui while it runs (`fauna_client_sync::attachment`). Once per process
         // — an account switch re-inits this surface, the app stays open — and
         // the same endpoint the provisioner resolves.
-        {
-            static ATTACHMENT: std::sync::OnceLock<
-                Option<fauna_client_sync::attachment::AppAttachment>,
-            > = std::sync::OnceLock::new();
-            ATTACHMENT.get_or_init(|| {
-                fauna_ipc::endpoint::AgentEndpoint::default_for_user()
-                    .inspect_err(|e| tracing::warn!("agent attachment: no endpoint: {e}"))
-                    .ok()
-                    .map(|endpoint| {
-                        fauna_client_sync::attachment::attach_app(
-                            endpoint,
-                            fauna_client_sync::attachment::AttachingApp {
-                                app: "tui".into(),
-                                notification_identity: None,
-                            },
-                        )
-                    })
-            });
-        }
+        fauna_client_sync::attachment::hold_app_attachment("tui");
 
         // The `sync-agent-status` poll (`sync-agent.md` § Local agent health).
         // Starts at the post-auth hook alongside the convergence loop, so the
@@ -1527,6 +1607,12 @@ mod native {
                 if before != after {
                     let _ = tx.send(UiMessage::Data(DataMessage::SyncAgentChanged));
                 }
+            }
+
+            // A group set's review list is a level too: the fold records a row
+            // inside the agent, so no gesture here produces it.
+            if provisioner.refresh_set_conflicts(&model).await {
+                let _ = tx.send(UiMessage::Data(DataMessage::SyncAgentChanged));
             }
 
             // The aftermath's corpus line. Skipped entirely for every identity

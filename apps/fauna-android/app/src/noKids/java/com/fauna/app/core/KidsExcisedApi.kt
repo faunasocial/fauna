@@ -57,6 +57,47 @@ abstract class KidsExcisedApi {
     private var atprotoSettingsMachine: uniffi.fauna_atproto_settings_machine.AtprotoSettingsMachine? =
         null
 
+    // The connected-apps machine behind a deposited file version's author line
+    // (`folder-deposit.md` ruling 3) — a connection-bound singleton so its
+    // once-per-key depositor reads (`depositor_read_wanted`) and its roster
+    // survive across media detail opens. Built lazily by [depositorApps], torn
+    // down by [detachKidsExcised]; no observer and no mail machine — only its
+    // principal rows name a depositor.
+    @Volatile
+    private var depositorAppsMachine: uniffi.fauna_client_connected_apps.ConnectedAppsMachine? = null
+
+    private fun depositorApps(): uniffi.fauna_client_connected_apps.ConnectedAppsMachine? =
+        depositorAppsMachine ?: synchronized(this) {
+            depositorAppsMachine ?: api.nestClient?.let { client ->
+                com.fauna.ffi.buildConnectedAppsMachine(
+                    client,
+                    object : uniffi.fauna_client_connected_apps.ConnectedAppsObserver {
+                        override fun onChanged() = Unit
+                    },
+                    null,
+                )
+            }?.also { depositorAppsMachine = it }
+        }
+
+    /** A file version's author line (`file-version-author`), composed by the
+     *  shared `ConnectedAppsMachine::version_author`: the recorder alone, or
+     *  "<app> via <owner>" / "a connected app via <owner>" on a version a
+     *  connected app deposited (`folder-deposit.md` ruling 3). `null` until
+     *  connected to a nest — the caller then paints the plain wording. */
+    fun versionAuthor(authorDisplay: String, depositedBy: String?): uniffi.fauna_core.LocalizedText? =
+        depositorApps()?.versionAuthor(authorDisplay, depositedBy)
+
+    /** Read the connected-apps roster when naming the listed versions'
+     *  depositors ([depositedBy], hex writer keys) wants it — the shared
+     *  `depositor_read_wanted`, asked once per key, so a key no roster will
+     *  ever name costs one read, never a loop. tui's `depositor_roster_op` is
+     *  the same shape. */
+    suspend fun readDepositorRoster(depositedBy: List<String>) {
+        if (depositedBy.isEmpty()) return
+        val machine = depositorApps() ?: return
+        if (machine.depositorReadWanted(depositedBy)) machine.refresh()
+    }
+
     /**
      * One Profile-header picture (`profile-avatar` / `profile-banner`) by its
      * hex blob hash, from the nest that served the profile: this nest when
@@ -80,6 +121,22 @@ abstract class KidsExcisedApi {
     }
 
     /**
+     * The feed composer rail's sign-out / account-switch leave door
+     * (`reserved-folders.md` § The leave-flush promise): the OUTGOING session's
+     * `posts` drafts handle and the manager's drafts snapshot, captured now so
+     * [ApiClient.clearAuth] can run the save before it closes the client —
+     * [detachKidsExcised] nulls the manager and `clearAuth` nulls the handle
+     * right after. `null` when no manager was ever built (no Feed page opened,
+     * so no compose input exists to lose) or no session is wired. The same
+     * `saveIfChanged` launch gate and dedup as the debounced save.
+     */
+    internal fun captureFeedLeaveFlush(): (suspend () -> Unit)? {
+        val sync = api.postsDraftsSync() ?: return null
+        val snapshot = feedManager?.draftsSnapshotBytes() ?: return null
+        return { sync.saveIfChanged(snapshot) }
+    }
+
+    /**
      * Detach the singletons above for [ApiClient.clearAuth]: drop their
      * observers and the references now, and return the close of their FFI
      * handles for the off-main teardown that follows `client.disconnect()`.
@@ -92,11 +149,56 @@ abstract class KidsExcisedApi {
         searchMgr?.clearObservers()
         searchManager = null
         atprotoSettingsMachine = null
+        depositorAppsMachine = null
+        archiveLinksHost.stop()
         return {
             feedMgr?.close()
             searchMgr?.close()
         }
     }
+
+    // Phase two of archive import — the account's archive links
+    // (`archive-import.md` § Linking and merging, ruling 8). Lazy: this
+    // superclass is constructed before [ApiClient]'s own fields, the scope among them.
+    private val archiveLinksHost by lazy { ArchiveLinksHost(api.connectionScope) }
+
+    /** The Contacts rows' archive-link painter — every row's phase-two
+     *  affordances, re-emitted on every read of the shared views. */
+    val archiveLinkPainter: kotlinx.coroutines.flow.StateFlow<ArchiveLinkPainter>
+        get() = archiveLinksHost.painter
+
+    /**
+     * Adopt the links the just-built conversations session registered as its
+     * archive-signal sink (`FfiNestClient.archiveLinks()`) and drive them — at
+     * login now, then on the host's one-second tick. A no-op when the login
+     * wired none (no session, or no recording device id).
+     */
+    internal fun startArchiveLinks(client: FfiNestClient) {
+        val links = try {
+            client.archiveLinks()
+        } catch (e: Exception) {
+            ShellLog.w("ArchiveLinks", "archiveLinks: ${e.message}")
+            null
+        } ?: return
+        archiveLinksHost.start(links)
+    }
+
+    /** The links to hand the archive-import machine (`attachLinks`) before a
+     *  run, so a completed run sets the Done step's link counts and announces
+     *  itself; `null` while no session wired them. */
+    internal fun currentArchiveLinks(): uniffi.fauna_archive_import_machine.ArchiveLinks? =
+        archiveLinksHost.current()
+
+    /** Re-read the views with the Contacts roster. */
+    suspend fun refreshArchiveLinks() = archiveLinksHost.refresh()
+
+    /** `contact-archive-link-yes` / `-no`: the row's same-person answer. */
+    suspend fun answerArchiveLink(contact: String, platform: String, yes: Boolean) =
+        archiveLinksHost.answer(contact, platform, yes)
+
+    /** `contact-archive-unlink`: future merges stop, claimed content stays. */
+    suspend fun unlinkArchiveLink(contact: String, platform: String) =
+        archiveLinksHost.unlink(contact, platform)
 
     /**
      * The feed manager's `{"started": N, "completed": M}` reload counters as a
@@ -546,6 +648,18 @@ abstract class KidsExcisedApi {
      *  the shared machine deliberately does not self-spawn it. */
     fun buildMailImportMachine(): uniffi.fauna_client_mail_settings.MailImportMachine? =
         api.nestClient?.let { com.fauna.ffi.buildMailImportMachine(it) }
+
+    /** The import-from-an-export-archive wizard (`archive-import.md` § The
+     *  wizard and its machine) for the signed-in actor whose sync device id is
+     *  [deviceIdHex] — the shared `fauna_ffi::build_archive_import_machine`.
+     *  `null` before a connection; throws on a bearer-only session (no identity
+     *  key to sign the imported posts with), which the page states as
+     *  unavailable. ⚠ Like mail import, a Start/Resume that lands `RUNNING`
+     *  obliges the caller to spawn `runImport()` once. */
+    fun buildArchiveImportMachine(
+        deviceIdHex: String,
+    ): uniffi.fauna_archive_import_machine.ArchiveImportMachine? =
+        api.nestClient?.let { com.fauna.ffi.buildArchiveImportMachine(it, deviceIdHex) }
 
     /** Per-account spam training (`fauna.bridges.*_spam_*`). Needs the actor secret +
      *  node URL to unwrap/re-seal the sealed spam model client-side (the tier-1

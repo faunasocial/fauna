@@ -124,6 +124,13 @@ def _serving_port(client) -> int:
     return int(client.call("fauna.setup.status", {})["serving_port"])
 
 
+#: The three tests below drive the session nest's EDITABLE serving port. A docker
+#: nest is router-fronted by the image's own s6 wiring (see `fronted_nest`), so
+#: its port is a fixed 443 the deployment sets, not an admin choice — the input is
+#: disabled by design (`principles.md` § One configuration surface, bucket 1) and
+#: docker declares them out; `test_a_router_fronted_nest_shows_the_serving_port_
+#: read_only` is the docker-mode witness of that same fact.
+@pytest.mark.standalone_only
 @pytest.mark.feature("admin-nest")
 def test_serving_port_field_renders(admin_app):
     """The admin-nest page renders its heading and the admin-set serving-port
@@ -138,6 +145,7 @@ def test_serving_port_field_renders(admin_app):
     )
 
 
+@pytest.mark.standalone_only
 @pytest.mark.feature("admin-nest")
 def test_serving_port_round_trips(admin_app, nest_instance):
     """Setting the admin serving port from the UI writes through
@@ -189,6 +197,7 @@ def test_serving_port_round_trips(admin_app, nest_instance):
             _wait(lambda: _serving_port(client) == restore_port)
 
 
+@pytest.mark.standalone_only
 @pytest.mark.feature("admin-nest")
 def test_serving_port_invalid_surfaces_error(admin_app, nest_instance):
     """An out-of-range port (a u16 must be in [1, 65535]) is rejected client-side

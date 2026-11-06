@@ -99,12 +99,129 @@ static class SelfTest
         return failures;
     }
 
+    /// <summary>A CPU stand-in that outlives any budget here: <see cref="SessionManager.Quit"/>
+    /// ends it. <c>cmd</c>, not <c>ping</c>, which spends no CPU to read.</summary>
+    private const string SpinArgs = "/c for /L %i in (1,1,2000000000) do @rem";
+
+    /// <summary>How long the spinning stand-in gets to show its first CPU time. Named
+    /// and generous (convention 14): the poll returns the moment it does, and only a
+    /// bridge that reads nothing pays this.</summary>
+    private static readonly TimeSpan CpuReadingBudget = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Pins what <c>/session/status</c> reports for a launch's timeout report
+    /// (convention 6's launch-timeout rider): the app's own CPU time from the tracked
+    /// handle, the instant it was started, a CPU pin read back, a CPU reading that
+    /// survives the app's exit — a launch that died still says what it ran — and the
+    /// launch's CPU wait, sampled once a second from the thread table: a stand-in that
+    /// waits reads no thread Ready at any sample, one that spins is sampled at all.
+    ///
+    /// <para>Run: <c>FauiBridge.exe --self-test-launch-status</c>; exit code = failures.</para>
+    /// </summary>
+    public static int LaunchStatus()
+    {
+        var failures = 0;
+        void Check(bool condition, string description)
+        {
+            Console.WriteLine(condition
+                ? $"[self-test] PASS: {description}"
+                : $"[self-test] FAIL: {description}");
+            if (!condition) failures++;
+        }
+
+        // 1. The CPU the app actually got, and when it was started.
+        var session = new SessionManager();
+        var before = DateTime.UtcNow;
+        try
+        {
+            session.Launch("cmd.exe", SpinArgs);
+            var after = DateTime.UtcNow;
+            Check(session.LaunchedAt >= before && session.LaunchedAt <= after,
+                $"the launch instant is the launch's (got {session.LaunchedAt:o}, between {before:o} and {after:o})");
+            var deadline = DateTime.UtcNow + CpuReadingBudget;
+            long? cpu = session.AppCpuMs();
+            while (DateTime.UtcNow < deadline && (cpu ?? 0) <= 0)
+            {
+                Thread.Sleep(50);
+                cpu = session.AppCpuMs();
+            }
+            Check(cpu > 0, $"a spinning app reports its own CPU time (got {cpu?.ToString() ?? "null"} ms)");
+            var spinning = session.AppThreadsReady();
+            Check(spinning is { total: > 0 },
+                $"a spinning app's thread table is read (got {spinning?.ready.ToString() ?? "null"} Ready of {spinning?.total.ToString() ?? "null"})");
+            Check(session.WaitSamples().samples > 0,
+                $"a launch's CPU wait is sampled from the launch on (got {session.WaitSamples().samples} sample(s))");
+        }
+        finally
+        {
+            session.Quit();
+        }
+        Check(session.AppCpuMs() is null, "no tracked app reports no CPU time, rather than a zero");
+        Check(session.AppThreadsReady() is null, "no tracked app reports no thread table, rather than zeros");
+
+        // 2. A CPU pin reads back. CPU 1: a mask that is not a lowest-n one, which is
+        // what the fence's sweep treats as a deliberate pin.
+        var pinned = new SessionManager();
+        const long CpuOne = 0b10;
+        try
+        {
+            pinned.Launch("ping.exe", "-n 30 127.0.0.1", cpuAffinityMask: CpuOne);
+            Check(pinned.AppAffinityMask() == CpuOne,
+                $"a launch's CPU pin reads back (got {pinned.AppAffinityMask()?.ToString() ?? "null"})");
+            // A stand-in that waits (ping sleeps between its echoes) asks for no CPU:
+            // its threads are Waiting, none Ready — the blocked launch's reading, at
+            // one read and across the one-a-second samples alike.
+            Thread.Sleep(2500);
+            var waiting = pinned.AppThreadsReady();
+            Check(waiting is { ready: 0, total: > 0 },
+                $"a waiting app has no thread Ready (got {waiting?.ready.ToString() ?? "null"} Ready of {waiting?.total.ToString() ?? "null"})");
+            var sampled = pinned.WaitSamples();
+            Check(sampled is { samples: >= 2, ready: 0 },
+                $"a waiting app's CPU wait samples read none Ready (got {sampled.ready} Ready at {sampled.samples} sample(s))");
+        }
+        finally
+        {
+            pinned.Quit();
+        }
+
+        // 3. The reading survives the exit, and the status says exited — and when.
+        var exiting = new SessionManager();
+        try
+        {
+            Check(exiting.AppExitedAt() is null, "no tracked app reports no exit instant");
+            exiting.Launch("ping.exe", "-n 3 127.0.0.1");
+            Check(exiting.AppExitedAt() is null, "a running app reports no exit instant");
+            using var witness = Process.GetProcessById(exiting.AppPid);
+            witness.WaitForExit(30_000);
+            var (running, exitCode) = exiting.AppStatus();
+            Check(!running && exitCode == 0, $"the stand-in has exited (running={running}, exit={exitCode})");
+            Check(exiting.AppCpuMs() is not null, "an exited app still reports the CPU it ran");
+            var exitedAt = exiting.AppExitedAt();
+            Check(exitedAt > exiting.LaunchedAt && exitedAt <= DateTime.UtcNow,
+                $"an exited app reports when it exited, after its launch (got {exitedAt:o}, launched {exiting.LaunchedAt:o})");
+        }
+        finally
+        {
+            exiting.Quit();
+        }
+        // The close drops the handle: what the app died of is unread after it, so a
+        // driver reads it BEFORE its `DELETE /session` (convention 6's close rider).
+        var (afterRunning, afterExit) = exiting.AppStatus();
+        Check(!afterRunning && afterExit is null && exiting.AppExitedAt() is null,
+            $"after the close no exit code or instant is left to read (exit={afterExit?.ToString() ?? "null"})");
+
+        Console.WriteLine(failures == 0
+            ? "[self-test] PASS — /session/status reports the app's CPU time, launch instant, exit instant, pin and sampled CPU wait."
+            : $"[self-test] {failures} FAILURE(S)");
+        return failures;
+    }
+
     /// <summary>
     /// Pins <see cref="ScrollPolicy"/> — the arithmetic <c>Actions.cs::ScrollIntoView</c>'s
     /// sweep and <c>Actions.cs::Scroll</c>'s blind-fallback container choice run on — with
     /// no real UIA element, window, or app.
     ///
-    /// <para>Five checks, run against the SAME constants production uses
+    /// <para>Six checks, run against the SAME constants production uses
     /// (<see cref="ScrollPolicy.SweepStepViewportFraction"/> etc. — never a hardcoded
     /// duplicate, so a future edit to the constant is graded by this test rather than
     /// silently drifting from it):</para>
@@ -122,6 +239,9 @@ static class SelfTest
     /// <item>The container-chooser: given synthetic bounding-rect areas with the
     /// NARROWEST one enumerated FIRST (mirroring a settings page's nav rail preceding its
     /// content frame in UIA tree order), the WIDEST one's index wins.</item>
+    /// <item>Where a sweep stops: <see cref="ScrollPolicy.ReachedBottom"/> reads the
+    /// position, never whether it moved, because a scroll that has not landed yet does
+    /// not move either.</item>
     /// </list>
     ///
     /// <para>Run: <c>FauiBridge.exe --self-test-scroll-policy</c>; exit code = failures.</para>
@@ -181,6 +301,15 @@ static class SelfTest
         Check(ScrollPolicy.WidestIndex(wideContentThenNarrowRail) == 0,
             "the widest scrollable candidate wins when enumerated first too");
 
+        // 6. Where a sweep stops: only the position says the bottom. A page's first two
+        // targets are 0 and one viewport, so a scroll that has not landed reads 0 twice.
+        Check(!ScrollPolicy.ReachedBottom(0.0),
+            "a position that stayed at the top is not the bottom (a scroll that has not landed reads the same)");
+        Check(!ScrollPolicy.ReachedBottom(75.0), "a mid-page position is not the bottom");
+        Check(ScrollPolicy.ReachedBottom(100.0), "the end of the range is the bottom");
+        Check(ScrollPolicy.Landed(25.0, 25.0), "a position at its target has landed");
+        Check(!ScrollPolicy.Landed(0.0, 25.0), "a position short of its target has not landed");
+
         Console.WriteLine(failures == 0
             ? "[self-test] PASS — sweep step policy and container choice are gap-free and cheap."
             : $"[self-test] {failures} FAILURE(S)");
@@ -204,6 +333,164 @@ static class SelfTest
     ///
     /// <para>Run: <c>FauiBridge.exe --self-test-actuation-gate</c>; exit code = failures.</para>
     /// </summary>
+    /// <summary>
+    /// The windows app's stall verdict (<see cref="StallVerdict"/>), every corner,
+    /// with no app and no stall: the half of convention 11's stall stack that decides
+    /// whether a stack is taken at all, so it must be assertable without one.
+    /// </summary>
+    public static int StallVerdictChecks()
+    {
+        var failures = 0;
+        void Check(bool condition, string description)
+        {
+            Console.WriteLine(condition
+                ? $"[self-test] PASS: {description}"
+                : $"[self-test] FAIL: {description}");
+            if (!condition) failures++;
+        }
+
+        var parked = new StallReadings(
+            StallSeconds: 25, CpuStartMs: 1000, CpuNowMs: 1180, UiTid: 4242,
+            UiState: 5, UiWaitReason: "ExecutionDelay", NotResponding: true);
+
+        var (kind, clause) = StallVerdict.Decide(parked);
+        Check(kind == StallKind.AppSide,
+            "CPU moved and the UI thread is Waiting: the app's own code, so the stack is taken");
+        Check(clause.Contains("ON THE UI THREAD") && clause.Contains("+180 ms")
+              && clause.Contains("Waiting (ExecutionDelay)") && clause.Contains("Not Responding"),
+            $"the app-side clause names the CPU, the state and the window: {clause}");
+
+        Check(StallVerdict.Decide(parked with { UiState = 2, UiWaitReason = null }).Kind == StallKind.AppSide,
+            "a Running UI thread in an app that ran is app-side too (computing, not starved)");
+
+        foreach (var ready in new[] { 1, 3, 7 })
+        {
+            var (k, c) = StallVerdict.Decide(parked with { UiState = ready, UiWaitReason = null });
+            Check(k == StallKind.Box && c.Contains("not an app finding") && c.Contains("no stack taken"),
+                $"a UI thread in state {ready} waits for a core: the box, never a stack ({c})");
+        }
+
+        var (idleKind, idleClause) = StallVerdict.Decide(parked with { CpuNowMs = 1000 });
+        Check(idleKind == StallKind.Box && idleClause.Contains("ran no CPU"),
+            $"an app that ran no CPU across the stall was starved whole: the box ({idleClause})");
+
+        // Cycles decide over milliseconds when both were read: a ~2 s window (a UIA
+        // timeout) can show +0 ms for a process that ran, never +0 cycles.
+        var (tickKind, tickClause) = StallVerdict.Decide(
+            parked with { CpuNowMs = 1000, CyclesStart = 5_000_000, CyclesNow = 9_000_000 });
+        Check(tickKind == StallKind.AppSide && tickClause.Contains("M cycles"),
+            $"+0 ms but +4 M cycles: the app ran, so it is app-side ({tickClause})");
+        Check(StallVerdict.Decide(
+                parked with { CyclesStart = 5_000_000, CyclesNow = 5_000_000 }).Kind == StallKind.Box,
+            "+180 ms but +0 cycles: the cycles decide, and nothing ran");
+
+        Check(StallVerdict.Decide(parked with { UiTid = 0 }).Kind == StallKind.Unmeasured,
+            "no UI thread found: UNMEASURED, never a verdict");
+        Check(StallVerdict.Decide(parked with { CpuNowMs = null }).Kind == StallKind.Unmeasured,
+            "no CPU reading: UNMEASURED, never a verdict");
+        Check(StallVerdict.Decide(parked with { UiState = null }).Kind == StallKind.Unmeasured,
+            "no thread state: UNMEASURED, never a verdict");
+        Check(StallVerdict.Decide(parked with { UiState = null }).Clause.Contains("UNMEASURED"),
+            "the unmeasured clause says so");
+
+        // The faked starved reading a test uses to prove the box gets no stack.
+        var (fakeKind, _) = StallVerdict.Decide(StallVerdict.Starved(parked));
+        Check(fakeKind == StallKind.Box, "the faked starved reading decides the box");
+        Check(StallVerdict.Decide(StallVerdict.Starved(parked with { UiTid = 0 })).Kind == StallKind.Box,
+            "the faked starved reading decides the box even before a UI thread is found");
+
+        // Which routes are watched: the app's UI-thread asks, never the control routes.
+        Check(StallWatch.IsAppRoute("/element/text") && StallWatch.IsAppRoute("/registry")
+              && StallWatch.IsAppRoute("/window/close"),
+            "element, registry and window routes are watched");
+        Check(!StallWatch.IsAppRoute("/session") && !StallWatch.IsAppRoute("/health")
+              && !StallWatch.IsAppRoute("/session/status") && !StallWatch.IsAppRoute("/nest/start"),
+            "control routes are not watched");
+
+        Check(StallWatch.ReplyBudgetSeconds < 120,
+            "the reply budget lands under the driver's 120 s BRIDGE_RPC_TIMEOUT_S, so the verdict is delivered");
+        Check(StallWatch.ExamineAfterSeconds + 5 < StallWatch.ReplyBudgetSeconds,
+            "an op is examined well before it is answered");
+
+        Check(StallWatch.LooksLikeUiaTimeout(new TimeoutException()),
+            "a TimeoutException is a UIA timeout");
+        Check(StallWatch.LooksLikeUiaTimeout(
+                new InvalidOperationException("wrapped", new System.Runtime.InteropServices.COMException(
+                    "uia", unchecked((int)0x80131505)))),
+            "a wrapped UIA_E_TIMEOUT HRESULT is a UIA timeout");
+        Check(StallWatch.LooksLikeUiaTimeout(new System.ComponentModel.Win32Exception(1460)),
+            "the main-window re-resolve's ERROR_TIMEOUT Win32Exception is a UIA timeout");
+        Check(!StallWatch.LooksLikeUiaTimeout(new System.ComponentModel.Win32Exception(5)),
+            "another Win32 error is not");
+        Check(!StallWatch.LooksLikeUiaTimeout(new InvalidOperationException("other")),
+            "any other failure is not");
+
+        // A catch that answers an app read with "absent" answers for the element,
+        // never for the app: a held UI thread or a crashed app is let through.
+        Check(!UiaSwallow.MayAnswerAbsent(new TimeoutException("UIA Timeout")),
+            "a UIA timeout is never answered as an absent element");
+        Check(!UiaSwallow.MayAnswerAbsent(new System.ComponentModel.Win32Exception(1460)),
+            "the main-window re-resolve's ERROR_TIMEOUT is never answered as an absent element");
+        Check(!UiaSwallow.MayAnswerAbsent(
+                new InvalidOperationException("wrapped", new TimeoutException("UIA Timeout"))),
+            "a wrapped UIA timeout is never answered as an absent element");
+        Check(!UiaSwallow.MayAnswerAbsent(new AppExitedException("the app exited")),
+            "a crashed app is never answered as an absent element");
+        Check(UiaSwallow.MayAnswerAbsent(new ElementNotFoundException("x", 0, 0))
+              && UiaSwallow.MayAnswerAbsent(new InvalidOperationException("property not supported"))
+              && UiaSwallow.MayAnswerAbsent(new System.ComponentModel.Win32Exception(5)),
+            "an element's own failure (not found, a property it lacks, a refused call) may still answer absent");
+
+        // A transient UIA timeout is waited out within the budget (convention 14); a
+        // lasting one escapes UNCHANGED so the stall verdict still rides the reply.
+        var attempts = 0;
+        var traced = new List<string>();
+        var got = UiaRetry.Run("probe", () =>
+        {
+            if (++attempts == 1) throw new TimeoutException("UIA Timeout");
+            return "found";
+        }, TimeSpan.FromSeconds(5), traced.Add, pauseMs: 1);
+        Check(got == "found" && attempts == 2, "a UIA timeout once is retried and the read returns");
+        Check(traced.Count == 1 && traced[0].Contains("absorbed") && traced[0].Contains("ms"),
+            "an absorbed timeout is traced with its elapsed time");
+
+        attempts = 0;
+        var rootRetry = UiaRetry.Run("root", () =>
+        {
+            if (++attempts == 1) throw new System.ComponentModel.Win32Exception(1460);
+            return 7;
+        }, TimeSpan.FromSeconds(5), null, pauseMs: 1);
+        Check(rootRetry == 7, "the root acquisition's ERROR_TIMEOUT is retried too");
+
+        attempts = 0;
+        var lasting = new TimeoutException("UIA Timeout");
+        Exception? escaped = null;
+        try
+        {
+            UiaRetry.Run<int>("lasting", () => { attempts++; throw lasting; },
+                TimeSpan.FromMilliseconds(150), null, pauseMs: 20);
+        }
+        catch (Exception ex) { escaped = ex; }
+        Check(ReferenceEquals(escaped, lasting) && attempts > 1,
+            "a lasting UIA timeout escapes unchanged at the budget, never an answer");
+
+        attempts = 0;
+        escaped = null;
+        try
+        {
+            UiaRetry.Run<int>("notfound", () => { attempts++; throw new ElementNotFoundException("x", 0, 0); },
+                TimeSpan.FromSeconds(5), null, pauseMs: 1);
+        }
+        catch (Exception ex) { escaped = ex; }
+        Check(escaped is ElementNotFoundException && attempts == 1,
+            "a not-found is not a timeout: no retry here");
+
+        Console.WriteLine(failures == 0
+            ? "[self-test] stall verdict: all checks passed"
+            : $"[self-test] stall verdict: {failures} check(s) FAILED");
+        return failures == 0 ? 0 : 1;
+    }
+
     public static int ActuationGateChecks()
     {
         var failures = 0;
@@ -315,8 +602,23 @@ static class SelfTest
         // of what it refused.
         Check(strictRecorded.Count == 1, "a strict refusal is marked too, not only thrown");
 
+        // 7. The OTHER select 409: an enabled picker asked for an option it never
+        // painted. `http_bridge.py::select` raises `SelectOptionNotOffered` for a 409
+        // whose text lacks "element is disabled", so this wording must never carry
+        // it, and it must name the value, the picker and what was painted.
+        var notOffered = new SelectOptionNotOfferedException(
+            "compose-gate-tier-select", 0, "tier-sold", "Everyone, Followers");
+        Check(!notOffered.Message.Contains("element is disabled"),
+            $"the not-offered refusal never reads as the disabled one (got: {notOffered.Message})");
+        Check(notOffered.Message.Contains("\"tier-sold\"")
+              && notOffered.Message.Contains("\"compose-gate-tier-select\"[0]")
+              && notOffered.Message.Contains("[Everyone, Followers]"),
+            $"the not-offered refusal names value, picker and painted options (got: {notOffered.Message})");
+        Check(notOffered.Id == "compose-gate-tier-select" && notOffered.Index == 0,
+            "the not-offered refusal carries id/index so Program can answer the shared 409 body");
+
         Console.WriteLine(failures == 0
-            ? "[self-test] PASS — the actuation gate's verdict, flags, marker and refusal are pinned."
+            ? "[self-test] PASS — the actuation gate's verdict, flags, marker and both select refusals are pinned."
             : $"[self-test] {failures} FAILURE(S)");
         return failures;
     }
@@ -483,7 +785,15 @@ static class SelfTest
         Check(PackedAttr.TryRead("a=x%3By;b=50%25", "b", out var pct) && pct == "50%",
             $"%25 unescapes to '%' (got {pct ?? "null"})");
 
-        // 5. Not a pack → the caller keeps the HelpText verbatim.
+        // 5. A key may be snake case: `oracle_ops` is the attribute's name on every app, and
+        //    one such key must not turn the whole pack back into a bare value.
+        const string Roster = "revoked=;status=connected;oracle_ops=3";
+        Check(PackedAttr.TryRead(Roster, "oracle_ops", out var snake) && snake == "3",
+            $"a snake-case key reads its own value (got {snake ?? "null"})");
+        Check(PackedAttr.TryRead(Roster, "status", out var beside) && beside == "connected",
+            $"a snake-case key leaves its neighbours readable (got {beside ?? "null"})");
+
+        // 6. Not a pack → the caller keeps the HelpText verbatim.
         Check(!PackedAttr.TryRead("painted", "state", out _), "a bare value is not a pack");
         Check(!PackedAttr.TryRead("true", "checked", out _), "a bare true is not a pack");
         Check(!PackedAttr.TryRead("YWJjZA==", "state", out _),
@@ -496,6 +806,8 @@ static class SelfTest
             "a trailing ';' is not a pack (the packer never writes one)");
         Check(!PackedAttr.TryRead("State=idle;position=0", "state", out _),
             "an upper-case key is not a pack key");
+        Check(!PackedAttr.TryRead("_state=idle;position=0", "state", out _),
+            "a key starts with a letter");
         Check(!PackedAttr.TryRead("", "state", out _) && !PackedAttr.TryRead(null, "state", out _),
             "no HelpText is not a pack");
 

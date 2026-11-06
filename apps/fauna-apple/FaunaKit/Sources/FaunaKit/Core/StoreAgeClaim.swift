@@ -142,15 +142,9 @@ public final class StoreAgeClaimRound {
     }
 
     private func attestOrNil(band: String, machine: AgeClaimMachine) async -> AgeAttestationPlain? {
-        #if FAUNA_KIDS
-        // The kids app sends a declared-only claim. App Attest signs under the
-        // RUNNING bundle's App ID (`social.fauna.faunakids`), and an armed nest
-        // pins the main app's App ID alone, so a kids attestation would fail the
-        // check and refuse the whole admission (`family-safety.md` § The account
-        // age band, outcome 2). It attests once the nest pins a second App ID for
-        // the kids bundle.
-        return nil
-        #else
+        // App Attest signs under the RUNNING bundle's App ID; the kids flavor's
+        // `iosAgeAttestationAppId()` answers the kids App ID, which the nest pins
+        // beside the main app's, so both builds attest the same way.
         guard let applicationId else { return nil }
         do {
             let nonce = try await machine.requestAgeNonce()
@@ -175,7 +169,6 @@ public final class StoreAgeClaimRound {
             warn("attestation unavailable, claim is declared-only: \(error)")
             return nil
         }
-        #endif
     }
 
     private func warn(_ reason: String) {

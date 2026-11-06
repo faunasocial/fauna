@@ -262,7 +262,14 @@ public class EventsVM {
             do {
                 let draft = try await sync.restoreDrafts()
                 guard generation == self.draftsGeneration else { return }   // superseded
-                self.resumableDraft = draft
+                guard let draft else { return }
+                // The shared FILL rule (events.md § Persistence, *A restore FILLS*):
+                // the load retries a read lost to the transport for minutes, so it can
+                // land after the user has started an event — a draft holding user
+                // input keeps it, whole.
+                let live = self.resumableDraft
+                    ?? FfiEventDrafts(summary: "", dtstart: "", dtend: "", description: "", location: "")
+                self.resumableDraft = fillEventDraft(live: live, restored: draft)
             } catch {
                 logMessage(level: .warn, target: "fauna.events.drafts",
                            message: "[drafts] restore on launch failed (non-fatal): \(error)")
@@ -337,6 +344,15 @@ public class EventsVM {
             try? await sync.saveDrafts(summary: "", dtstart: "", dtend: "",
                                         description: "", location: "")
         }
+    }
+
+    /// The new-event form's explicit discard (`event-form-discard`, events.md
+    /// § Persistence): clears the drafts rail and closes the form, whose
+    /// per-open `@State` fields die with it — so the next open is blank. The
+    /// plain close/Cancel keeps the draft; only this button drops it.
+    public func discardCompose() {
+        clearDraftsRail()
+        showNewEvent = false
     }
 
     /// Flush the pending autosave immediately — the leave-flush promise

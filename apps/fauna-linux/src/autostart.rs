@@ -56,6 +56,41 @@ pub fn should_start_hidden(is_autostart_launch: bool, tray_host_available: bool)
     is_autostart_launch && tray_host_available
 }
 
+/// This launch's window-activation decision, once made: `0` = not yet,
+/// `1` = stayed hidden (tray-resident), `2` = a window was shown. Published to
+/// e2e state as `launch` ([`launch_state_json`]) — the windows twin is
+/// `App.xaml.cs`'s `state["launch"]`, whose shape this matches.
+static LAUNCH_WINDOW_DECISION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Record where launch routing left the window: hidden by the autostart gate,
+/// or shown (the main window presented, or a routed wizard). The FIRST record
+/// wins — later windows (a finished wizard's main window, a tray restore) are
+/// not this launch's decision.
+pub fn record_launch_window(shown: bool) {
+    use std::sync::atomic::Ordering;
+    let _ = LAUNCH_WINDOW_DECISION.compare_exchange(
+        0,
+        if shown { 2 } else { 1 },
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+}
+
+/// The `launch` e2e state value — `{"autostart", "window_shown"}` — or `None`
+/// until the decision is recorded, so a test waiting for the KEY waits for the
+/// gate itself (convention 14) and "not decided" never reads as "hidden".
+pub fn launch_state_json() -> Option<serde_json::Value> {
+    let shown = match LAUNCH_WINDOW_DECISION.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => false,
+        2 => true,
+        _ => return None,
+    };
+    Some(serde_json::json!({
+        "autostart": is_autostart_launch(),
+        "window_shown": shown,
+    }))
+}
+
 /// True when this process was launched by the desktop session's autostart
 /// entry. Parsed ad-hoc from argv — `fauna-desktop` has no clap, and GTK takes
 /// over argv (see `--version` in `main`).
@@ -242,6 +277,22 @@ mod tests {
     #[test]
     fn autostart_with_a_tray_host_starts_hidden() {
         assert!(should_start_hidden(true, true));
+    }
+
+    /// The `launch` state is absent until routing decides, then keeps the
+    /// FIRST decision: a later window (a finished wizard's main window) is not
+    /// this launch's activation.
+    #[test]
+    fn the_launch_decision_is_absent_until_recorded_and_the_first_record_wins() {
+        assert_eq!(launch_state_json(), None);
+        record_launch_window(false);
+        record_launch_window(true);
+        let launch = launch_state_json().expect("recorded");
+        assert_eq!(launch["window_shown"], serde_json::json!(false));
+        assert_eq!(
+            launch["autostart"],
+            serde_json::json!(is_autostart_launch())
+        );
     }
 
     /// The stock-GNOME trap: no tray host ⇒ a hidden window would be

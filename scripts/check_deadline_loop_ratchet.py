@@ -117,7 +117,11 @@ def _returns_value(node: ast.Return) -> bool:
 # (`drivers/base.py::wait_for` raises TimeoutError; `::assert_on_screen` raises
 # AssertionError) — a bare call to one of these after a loop is exactly as
 # much a signal as a literal `raise`/`assert` written inline.
-_RAISING_CALL_NAMES = {"wait_for", "assert_on_screen"}
+# `OnboardingActions.wait_for_page` / `wait_for_handle_entry` wrap `wait_for`
+# and re-raise its TimeoutError with the page the app is on, so they count too.
+_RAISING_CALL_NAMES = {
+    "wait_for", "assert_on_screen", "wait_for_page", "wait_for_handle_entry",
+}
 
 
 def _is_raising_call(node: ast.AST) -> bool:

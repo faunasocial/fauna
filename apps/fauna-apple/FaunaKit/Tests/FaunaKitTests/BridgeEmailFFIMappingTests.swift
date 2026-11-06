@@ -167,9 +167,11 @@ import Foundation
 
 @Test func emailFilterPickerOptionsAreUnifiedAndValid() throws {
     // Every rule-kind tag the (now shared) picker offers must compose a real
-    // rule via the shared encoder — the guard against iOS/macOS picker drift recurring.
+    // rule via the shared encoder the form itself calls (`PrivacySettingsVM`), every
+    // input filled — the guard against iOS/macOS picker drift recurring.
     for opt in EmailFilterOptions.ruleKinds {
-        _ = try encodeEmailFilterRule(kind: opt.tag, value: "v")
+        _ = try encodeEmailFilterRuleInputs(inputs: FfiFilterRuleInputs(
+            kind: opt.tag, value: "v", headerValue: "v", spamScore: "5"))
     }
     #expect(EmailFilterOptions.actions.contains { $0.tag == "Allow" })
     #expect(EmailFilterOptions.actions.contains { $0.tag == "Forward" })

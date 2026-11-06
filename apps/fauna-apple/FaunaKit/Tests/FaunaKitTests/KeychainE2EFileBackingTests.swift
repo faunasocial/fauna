@@ -14,6 +14,7 @@ import Foundation
 /// and flushed its stale map over it on the next save, so the relaunch minted a new writer key and
 /// enrolled a new device row.
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainE2EFileBackingTests {
     /// Points `KeychainStore` at a throwaway durable directory for the body, then wipes the store
     /// and restores the environment — the same shape as `KeychainDurableDeleteRollbackTests`.

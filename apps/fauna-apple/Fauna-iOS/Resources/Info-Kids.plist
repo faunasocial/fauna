@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The Fauna Kids app's Info.plist (the `Fauna-Kids-iOS` target): the main
+         app's Info.plist minus photo backup, which is not in the kids app's Kept
+         set (docs/goal/behavior/account-age-band.md § The account age band, the
+         kids-app bullet, item (4)) — no NSPhotoLibraryUsageDescription and no
+         `social.fauna.sync.upload` task id (BackgroundScheduler registers none
+         under FAUNA_KIDS). Everything else is the main file's, key for key:
+         test_apple_identifier_pins.py holds the two equal but for exactly those
+         removals, the version-lockstep gate reads this file's version too, and
+         `just apple-kids-check` reads the packaged kids plist back. -->
+    <!-- Must match BackgroundScheduler.custodianPullTaskId /
+         .widgetRefreshTaskId exactly, both ways — a registered-but-unpermitted
+         identifier is a runtime failure, and a permitted-but-unregistered one
+         lets a pending request launch into no handler. -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>social.fauna.sync.custodian</string>
+        <string>social.fauna.widget.refresh</string>
+    </array>
+    <!-- One mode per BGTask kind, or `BGTaskScheduler.submit` refuses the request
+         (BGTaskSchedulerErrorCodeNotPermitted): `fetch` gates the widget-refresh
+         BGAppRefreshTask (the home-screen widget's count, kept current without the
+         app open); `processing` gates the custodian pull's BGProcessingTask (the
+         Kept backups page's client-device custodian). test_apple_identifier_pins.py
+         pins the set both ways. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>fetch</string>
+        <string>processing</string>
+    </array>
+    <!-- Export compliance: NO. Apple's rule ("Complying with Encryption Export
+         Regulations"): set NO when the app uses only encryption that is exempt
+         from export compliance documentation requirements. Fauna implements only
+         standard, published algorithms and is not distributed in France; on
+         2026-11-06 the organisation's representative answered App Store Connect's
+         encryption questionnaire so, and App Store Connect replied that no
+         documents are needed. So no ITSEncryptionExportComplianceCode exists or
+         is owed. The US export posture (publicly available source, not subject
+         to the EAR) is a separate question:
+         docs/goal/architecture/export-compliance.md § What each store form answers. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+    <!-- Product version — must equal the root Cargo.toml [workspace.package]
+         version (product-version.md; version-lockstep merge gate). Before these
+         keys existed the iOS bundle silently inherited the pbxproj's
+         MARKETING_VERSION (then 0.0.0). CFBundleVersion is PINNED at 1: a store
+         re-upload mints a new product patch version instead (§ Reships). -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.6</string>
+    <!-- URL scheme for deep links (the FP context actions' fauna:// links —
+         FaunaDeepLink; mirrors Fauna-macOS/Resources/Info.plist). -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>fauna</string>
+            </array>
+            <key>CFBundleURLName</key>
+            <string>social.fauna.fauna</string>
+        </dict>
+    </array>
+</dict>
+</plist>

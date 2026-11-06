@@ -180,3 +180,122 @@ def test_a_succeeded_device_is_refused_and_routed_to_import(
             f"surface says: {app.error_text()!r}"
         ),
     )
+
+
+@pytest.fixture
+def linked_nest_b(request, nest_mode, tmp_path_factory):
+    """A second nest the dedicated identity also holds an account on — the
+    nest it had linked before the theft."""
+    from conftest import _start_dedicated_nest
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "succession-linked-b",
+    )
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+def _signs_in(nest, actor_id_hex: str, seed: bytes) -> bool:
+    """Whether the key still opens an account session at ``nest``; a superseded
+    key is refused at the handshake."""
+    from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
+
+    try:
+        with WsRpcAdminClient(
+            nest["url"], actor_id=bytes.fromhex(actor_id_hex), signing_key=seed
+        ) as ws:
+            ws.call("fauna.account.get", {})
+        return True
+    except RpcCallError as err:
+        assert "superseded" in str(err), f"refused for another reason: {err!r}"
+        return False
+
+
+@pytest.mark.feature("take-your-account-back")
+def test_the_successors_device_retires_the_stolen_key_at_a_linked_nest(
+    request, succeedable_app, nest_instance, linked_nest_b
+):
+    """take the account back at A → the stolen key still signs in at the linked
+    nest B → the successor's device comes up → B refuses the stolen key.
+
+    `succession-linked-nests.md` § The road: A keeps B as an owed nest when the
+    recovery burns the pairing, and every seed-holding runtime of the successor
+    delivers the statement there in its full pass. The pairing, B's account and
+    B's copy of the registration chain (what the link action's reconcile would
+    have carried) are fixture state; the device that delivers is the app.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from common.auth import register_user
+    from helpers.budgets import ACCOUNT_RUNTIME_ASSEMBLY_S
+    from helpers.succession import registration_chain
+
+    app, user = succeedable_app
+    nest_b = linked_nest_b
+    old_hex = user["actor_id_hex"]
+    old_seed = bytes(user["signing_key"])
+
+    # ── Arrange: the identity linked to B, B holding the same chain ──────
+    register_user(nest_b["port"], old_hex, admin_signing_key=nest_b["admin"]["signing_key"])
+    kit_secret = register_recovery_kit(
+        nest_instance["url"], actor_id_hex=old_hex, identity_seed_hex=old_seed.hex()
+    )
+    with WsRpcAdminClient(
+        nest_b["url"], actor_id=bytes.fromhex(old_hex), signing_key=old_seed
+    ) as ws:
+        for record in registration_chain(nest_instance["url"], old_hex):
+            ws.call("fauna.recovery.registration.submit", {"registration": record})
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes.fromhex(old_hex), signing_key=old_seed
+    ) as ws:
+        ws.call(
+            "fauna.pair.add",
+            {
+                "private_nest_id": bytes.fromhex(nest_b["nest_id"]),
+                "capabilities": ["mls_pull", "namespace_sync", "post_forward"],
+                "nest_url": nest_b["url"],
+            },
+        )
+
+    # ── The theft is answered at A; B has not heard of it yet ───────────
+    successor_seed = secrets.token_bytes(32).hex()
+    successor_id = succeed_identity(
+        nest_instance["url"],
+        old_actor_id_hex=old_hex,
+        recovery_secret_hex=kit_secret,
+        successor_seed_hex=successor_seed,
+        old_seed_hex=old_seed.hex(),
+    )
+    assert not _signs_in(nest_instance, old_hex, old_seed), "control: A retired the key"
+    assert _signs_in(nest_b, old_hex, old_seed), "control: nothing has reached B yet"
+
+    # ── The user's device comes back as the successor ───────────────────
+    # Signed in with the successor's seed, as the device that ran the recovery
+    # is. The refusal → import route itself is the journey above; this one is
+    # about what that device's runtime does once it holds the account.
+    from common.auth import mint_and_hold_token
+    from conftest import _login_app_as
+    from nacl.signing import SigningKey
+
+    successor_sk = SigningKey(bytes.fromhex(successor_seed))
+    successor = {
+        "signing_key": successor_sk,
+        "actor_id_hex": successor_id,
+        "actor_id_bytes": bytes(successor_sk.verify_key),
+        "token": mint_and_hold_token(nest_instance["url"], successor_sk),
+        "handle": user.get("handle"),
+    }
+    _login_app_as(app, request, nest_instance, successor, verify_live_actor=True)
+
+    # ── B stops taking the stolen key, with nobody touching B ──────────
+    wait_until(
+        lambda: not _signs_in(nest_b, old_hex, old_seed),
+        ACCOUNT_RUNTIME_ASSEMBLY_S,
+        interval=2.0,
+        diagnose=lambda: (
+            "the successor's device came up but the stolen key still signs in at "
+            f"the linked nest B ({nest_b['url']}): the road never delivered. "
+            f"Successor {successor_id}; app error {app.error_text()!r}"
+        ),
+    )

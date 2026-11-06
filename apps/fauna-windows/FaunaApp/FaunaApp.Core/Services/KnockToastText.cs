@@ -1,3 +1,4 @@
+using uniffi.fauna_core;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.Services;
@@ -36,4 +37,15 @@ internal static class KnockToastText
         };
         return (title, body);
     }
+
+    /// <summary>
+    /// Whether this knock raises no toast: its message carries a word muted at
+    /// Hide, so the row it rings collapses on the notifications page, and a toast
+    /// cannot be revealed (`notifications.md` § Muted words rule 6). The shared
+    /// <c>knock_push_muted_for</c> decides; <paramref name="keywords"/> is the
+    /// process-held list (<see cref="MutedKeywordsCache.Keywords"/>), never a
+    /// fresh read.
+    /// </summary>
+    public static bool Withheld(FfiKnock knock, IReadOnlyList<MutedKeyword> keywords) =>
+        FaunaFfiMethods.KnockPushMutedFor(knock, keywords as MutedKeyword[] ?? keywords.ToArray());
 }

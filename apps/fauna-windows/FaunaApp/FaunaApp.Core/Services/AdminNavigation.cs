@@ -33,6 +33,11 @@ public static class AdminNavigation
     public const string Nest = "admin-nest";
     public const string Aliases = "admin-aliases";
     public const string Mail = "admin-mail";
+    // The DMARC aggregate-report summary (dmarc-reporting.md § Admin pane summary
+    // surface; ui.yaml admin-mail-reports). A primary admin page (in
+    // navigation.admin_pages, right after admin-mail). State-protocol id
+    // "admin-mail-reports" (actions/admin.py open_mail_reports).
+    public const string MailReports = "admin-mail-reports";
     // The deployment-wide CalDAV-enable toggle (admin.md § 8 Calendar, ratified
     // 2026-06-17). A primary admin page (in navigation.admin_pages, right after
     // admin-mail), the CalDAV-enable sibling of admin-mail. State-protocol id
@@ -72,14 +77,14 @@ public static class AdminNavigation
     /// <summary>
     /// The admin sub-pages in shell display order (matching ui.yaml
     /// <c>navigation.admin_pages</c>: dashboard, users, settings, nest, mail,
-    /// calendar, contacts, files, aliases) followed by the contextual detail
+    /// mail-reports, calendar, contacts, files, aliases) followed by the contextual detail
     /// pages (web, dns, bridges-pending, custody-hosting, logs). The first
     /// (<see cref="Dashboard"/>) is the default landing page when the shell is
     /// entered via <c>admin-tab</c>.
     /// </summary>
     public static readonly IReadOnlyList<string> SubPages = new[]
     {
-        Dashboard, Users, Settings, Nest, Mail, Calendar, Contacts, Files, Web, Aliases, Dns, BridgesPending,
+        Dashboard, Users, Settings, Nest, Mail, MailReports, Calendar, Contacts, Files, Web, Aliases, Dns, BridgesPending,
         CustodyHosting, Logs,
     };
 
@@ -96,6 +101,7 @@ public static class AdminNavigation
         Nest => Nest,
         Aliases => Aliases,
         Mail => Mail,
+        MailReports => MailReports,
         Calendar => Calendar,
         Contacts => Contacts,
         Files => Files,

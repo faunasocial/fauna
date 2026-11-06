@@ -1617,6 +1617,10 @@ async fn the_identity_plane_rides_including_the_published_key_halves() {
     let mls_pubkey = vec![0xA6u8; 32];
     let mlkem_ek = vec![0x9Eu8; 32];
     let index_pubkey = vec![0x7Du8; 32];
+    let calendar_pubkey = vec![0xC1u8; 32];
+    let calendar_mlkem_ek = vec![0xC2u8; 32];
+    let card_pubkey = vec![0xC3u8; 32];
+    let card_mlkem_ek = vec![0xC4u8; 32];
 
     {
         let conn = state.db.conn().await;
@@ -1648,13 +1652,19 @@ async fn the_identity_plane_rides_including_the_published_key_halves() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO actor_mls_pubkeys (actor_id, mls_pubkey, updated_at, mlkem_ek)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO actor_mls_pubkeys
+                 (actor_id, mls_pubkey, updated_at, mlkem_ek,
+                  calendar_pubkey, calendar_mlkem_ek, card_pubkey, card_mlkem_ek)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 actor.clone(),
                 mls_pubkey.clone(),
                 1_755_000_403_i64,
-                mlkem_ek.clone()
+                mlkem_ek.clone(),
+                calendar_pubkey.clone(),
+                calendar_mlkem_ek.clone(),
+                card_pubkey.clone(),
+                card_mlkem_ek.clone()
             ],
         )
         .unwrap();
@@ -1686,11 +1696,15 @@ async fn the_identity_plane_rides_including_the_published_key_halves() {
         );
     }
 
-    // The two published key halves, on the bytes: a demotion that kept the table
+    // The published key halves, on the bytes: a demotion that kept the table
     // and dropped these columns would pass the entry-name check above.
     for (col, bytes) in [
         ("actor_mls_pubkeys.mls_pubkey", &mls_pubkey),
         ("actor_mls_pubkeys.mlkem_ek", &mlkem_ek),
+        ("actor_mls_pubkeys.calendar_pubkey", &calendar_pubkey),
+        ("actor_mls_pubkeys.calendar_mlkem_ek", &calendar_mlkem_ek),
+        ("actor_mls_pubkeys.card_pubkey", &card_pubkey),
+        ("actor_mls_pubkeys.card_mlkem_ek", &card_mlkem_ek),
         ("actor_index_pubkeys.index_pubkey", &index_pubkey),
     ] {
         let needle = hex::encode(bytes);

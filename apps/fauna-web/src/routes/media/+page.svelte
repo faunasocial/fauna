@@ -3,7 +3,7 @@
   import { connectionStatus, identity, onActorChange } from "#lib/store";
   import { registerActorScopedReset } from "#lib/actorScope";
   import { sharedRpcPort } from "#lib/rpc";
-  import { ensureWasm, mediaSortLabel, offlineAffordance } from "#lib/wasm";
+  import { ensureWasm, mediaSortLabel, mediaSortDirectionLabel, offlineAffordance } from "#lib/wasm";
   import {
     createMediaMachine,
     shareLinkExpiryLabel,
@@ -14,10 +14,12 @@
   import { makeOfflineGate } from "#lib/offline-gate";
   import type { MediaPageSnapshot, MediaItemSummary, FileVersionSummary } from "#lib/media-machine";
   import { resolveLocalized } from "#lib/i18n/localized";
+  import type { LocalizedText } from "#lib/i18n/localized";
+  import { createConnectedAppsMachine, type ConnectedAppsMachine } from "#lib/wasm-connected-apps";
   import MessageBanner from "#lib/components/MessageBanner.svelte";
   import { getDeviceId } from "#lib/device-id";
   import { t } from "#lib/i18n/strings";
-  import { byteSize, relativeTime } from "#lib/value-format";
+  import { byteSize, localDate, relativeTime } from "#lib/value-format";
   import { toArrayBufferView } from "#lib/bytes";
   import { consumePendingSearchNav } from "#lib/search";
   import { IDS } from '#lib/generated/uiIds';
@@ -139,6 +141,10 @@
     thumbAttempted.clear();
     machine = null;
     snap = null;
+    // The depositor roster is one actor's: the incoming actor reads its own.
+    appsMachine?.free();
+    appsMachine = null;
+    appsRosterTick = 0;
   }
 
   onMount(() => {
@@ -195,6 +201,8 @@
 
   onDestroy(() => {
     cleanupActorScope?.();
+    appsMachine?.free();
+    appsMachine = null;
     if (timer) clearInterval(timer);
     // Release the painted thumbnails' object-URLs so they don't leak.
     for (const url of Object.values(thumbUrls)) URL.revokeObjectURL(url);
@@ -208,6 +216,12 @@
   }
   function changeSort(value: string): void {
     machine?.setSort(value);
+    applySnapshot();
+  }
+  // `media-sort-direction`: stable option values "ascending" (default) /
+  // "descending", applied to whichever sort key is active.
+  function changeDirection(value: string): void {
+    machine?.setDescending(value === "descending");
     applySnapshot();
   }
   // A followed scope's minted value routes to the async on-demand listing fetch
@@ -347,12 +361,57 @@
       const raw: string = await machine.fileVersions(item.filter_value, item.path, showPruned);
       if (detailItem !== item) return;
       detailVersions = JSON.parse(raw) as FileVersionSummary[];
+      void readDepositorRoster(detailVersions);
     } catch (e: unknown) {
       if (detailItem !== item) return;
       const message = e instanceof Error ? e.message : String(e);
       detailError = t.media.versions_error({ message });
     } finally {
       if (detailItem === item) detailLoading = false;
+    }
+  }
+
+  // ── The deposited version's author line (`folder-deposit.md` ruling 3) ───
+  // The shared connected-apps machine composes it ("<app> via <owner>" for a
+  // version a connected app deposited), so no app re-derives the depositor
+  // wording. Built on first need — a version list that names a depositor —
+  // over the SPA socket; its roster is read when `depositorReadWanted` says
+  // the roster cannot name a listed key yet (asked once per key). tui's
+  // `depositor_roster_op` is the same shape.
+  let appsMachine: ConnectedAppsMachine | null = null;
+  // Bumped when the machine is built or a roster read lands, so the author
+  // lines re-render.
+  let appsRosterTick = $state(0);
+
+  function versionAuthor(version: FileVersionSummary, _tick: number): string {
+    if (appsMachine) {
+      const lt = JSON.parse(
+        appsMachine.versionAuthorJson(version.author_display, version.deposited_by ?? undefined),
+      ) as LocalizedText;
+      return resolveLocalized(lt);
+    }
+    return version.deposited_by
+      ? t.media.version_author_deposited_unknown({ author: version.author_display })
+      : t.media.version_author({ author: version.author_display });
+  }
+
+  async function readDepositorRoster(versions: FileVersionSummary[]): Promise<void> {
+    const keys = versions.map((v) => v.deposited_by).filter((k): k is string => !!k);
+    const secretHex = $identity?.secretHex;
+    if (keys.length === 0 || !secretHex) return;
+    try {
+      if (!appsMachine) {
+        appsMachine = await createConnectedAppsMachine(
+          { onChanged: () => {} },
+          await sharedRpcPort(secretHex),
+          secretHex,
+        );
+      }
+      if (appsMachine.depositorReadWanted(keys)) await appsMachine.refresh();
+      appsRosterTick++;
+    } catch (e: unknown) {
+      // The generic depositor wording stays; the version list is unaffected.
+      console.warn("media: depositor roster read failed", e);
     }
   }
 
@@ -543,7 +602,7 @@
   }
 
   function shareExpiresText(expiresAt: number): string {
-    return t.share_link.expires({ date: new Date(expiresAt * 1000).toLocaleDateString() });
+    return t.share_link.expires({ date: localDate(expiresAt * 1000) });
   }
 
   // The row whose revoke confirm is armed — its name goes in the confirm body.
@@ -589,6 +648,17 @@
         {#each SORT_KEYS as key}
           <option value={key}>{sortLabel(key)}</option>
         {/each}
+      </select>
+    </label>
+
+    <label class="ctrl">
+      <select
+        data-testid={IDS.MEDIA_SORT_DIRECTION}
+        value={snap?.descending ? "descending" : "ascending"}
+        onchange={(e) => changeDirection(e.currentTarget.value)}
+      >
+        <option value="ascending">{resolveLocalized(mediaSortDirectionLabel(false))}</option>
+        <option value="descending">{resolveLocalized(mediaSortDirectionLabel(true))}</option>
       </select>
     </label>
 
@@ -745,7 +815,7 @@
                   >{byteSize(version.size_bytes)}</span
                 >
                 <span data-testid={IDS.FILE_VERSION_AUTHOR} class="version-author muted"
-                  >{t.media.version_author({ author: version.author_display })}</span
+                  >{versionAuthor(version, appsRosterTick)}</span
                 >
                 {#if version.pruned}
                   <span data-testid={IDS.FILE_VERSION_PRUNED_BADGE} class="version-pruned muted"

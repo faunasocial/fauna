@@ -223,6 +223,34 @@ pub enum ChannelMessageBody {
     /// caches peer candidates and falls back to the nest — which is the
     /// contract's own always-on source, so the degradation is honest.
     ShareEndpoints(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// One **archive-link signal** between two accepted contacts — the
+    /// canonical-CBOR `ArchiveSignal` bytes (an announce, a link offer or
+    /// answer, an origin index, a claim; `docs/goal/behavior/archive-import.md`
+    /// § Linking and merging (phase two)), riding the pair's direct channel.
+    /// The signal vocabulary lives in the archive-import machine crate; this
+    /// crate and `fauna-conversations` carry it as opaque bytes.
+    ///
+    /// **Never a chat bubble**, the `Custody` discipline verbatim: the
+    /// receive loop hands the bytes to the session-wired
+    /// [`ArchiveSignalSink`](../../fauna_conversations/backend/trait.ArchiveSignalSink.html)
+    /// as a thread *effect* and renders nothing — no snippet, no activity
+    /// stamp, no unread count. A direct thread that has carried only these
+    /// bodies is not listed on any rail.
+    ///
+    /// **Trust:** the bytes are a *claim* until the sink's implementor binds
+    /// them to the MLS-authenticated sender and to that sender's accepted
+    /// roster row; every ref, fingerprint and post id inside is
+    /// self-asserted.
+    ///
+    /// **Older clients:** exactly the `Custody` argument — a decoder that
+    /// predates this variant fails the record's dag-cbor decode inside
+    /// [`MlsEngine::decrypt`](../../fauna_mls/engine/struct.MlsEngine.html#method.decrypt),
+    /// and the shared poll loop skips undecodable records without stalling
+    /// the feed, which is what makes the variant additive-legal within the
+    /// major (`version-compatibility.md` § Dim 2). The skip costs only the
+    /// prompt: the authoritative link state is the archive folder, and the
+    /// sender's next round repeats every pending signal.
+    Archive(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 /// The operation carried by a [`ChannelMessageBody::Reaction`] message —

@@ -53,6 +53,10 @@ def _tip_rows(app) -> list[tuple[int, str]]:
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("paid-posts-and-tips")
 def test_a_tip_on_your_post_arrives_as_a_notification(logged_in_app, nest_instance):
     app = logged_in_app

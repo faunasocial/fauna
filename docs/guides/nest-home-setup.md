@@ -1,7 +1,6 @@
 # Set up a Fauna nest at home
 
-A **home nest** is a Fauna server on a machine on your own network — a
-mini-PC, a NAS, a Raspberry Pi, a spare laptop. It is never reachable from the
+A **home nest** is a Fauna server on a machine on your own network — a mini-PC, a Raspberry Pi, a spare laptop, or anything else that runs 64-bit Ubuntu 26.04 LTS. It is never reachable from the
 internet. Your calendar, contacts, files and messages live on hardware you can
 touch.
 
@@ -213,8 +212,8 @@ Accept the certificate warning the first time, same as above.
   - A disk snapshot of the `fauna-data` storage area on a schedule is still
     worth having as a second line of defence, but it isn't the primary answer
     and you can't restore it from the app.
-- **Consider encrypting the disk.** Your content is already stored encrypted on the nest, apart from what you publish to everyone, a community room's posts and messages if this nest is its home, and anything you've given the nest permission to read, such as the sign-in of an account you link on another network; and the text of one of your messages, or of a post only some people can open, that someone who can open it attaches to a report. Your nest also sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send, as well as the sizes and dates of what you store. An encrypted disk keeps all of that from whoever takes the machine.
-- **Keep your recovery kit safe** — the code the app showed you once when you created your identity, which the app also calls your recovery phrase. It gets your account back if you lose every device ([Your recovery kit](identity-and-devices.md#your-recovery-kit)); if you skipped it, make one under **Settings → Account → Recovery Kit**. The claim itself leaves no recovery secret for you to keep: the claim code is used up the moment you claim, and your Fauna app keeps a copy of the server's own key for you.
+- **Consider encrypting the disk.** Your content is already stored encrypted on the nest, apart from your profile, what you publish to everyone, a community room's posts and messages if this nest is its home, and anything you've given the nest permission to read, such as the sign-in of an account you link on another network; and the text of one of your messages, or of a post only some people can open, that someone who can open it attaches to a report. Your nest also sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send, as well as the sizes and dates of what you store. An encrypted disk keeps all of that from whoever takes the machine.
+- **Keep your recovery kit safe** — the code the app showed you once when you created your identity. It gets your account back if you lose every device ([Your recovery kit](identity-and-devices.md#your-recovery-kit)); if you skipped it, make one under **Settings → Account → Recovery Kit**. The claim itself leaves no recovery secret for you to keep: the claim code is used up the moment you claim, and your Fauna app keeps a copy of the server's own key for you.
 
 The Fauna software updates itself: on the default Stable builds the machine picks up a new version within the hour, and installs it. Keeping the operating system patched is up to you — the `unattended-upgrades` package from Step 3 installs Ubuntu's security updates, but some of them take effect only after a restart, so restart the machine now and then.
 

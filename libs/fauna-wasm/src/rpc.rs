@@ -407,7 +407,7 @@ async fn caldav_find_event(
     // recipient keypair, so this saves the second re-derivation
     // `unseal_event_body` + `unseal_fauna_ext` would otherwise each pay
     // .
-    let keys = caldav::DavRecipientKeys::from_mseks(msek, prior_mseks);
+    let keys = caldav::DavRecipientKeys::from_mseks(caldav::DavKind::Calendar, msek, prior_mseks);
     let plaintext = keys.unseal(&entry.encrypted_body).map_err(err_to_js)?;
     let ics = String::from_utf8(plaintext)
         .map_err(|e| JsValue::from_str(&format!("VEVENT body not UTF-8: {e}")))?;
@@ -4819,41 +4819,23 @@ impl WsRpcClient {
                 return to_js(&serde_json::json!({ "calendars": [] }));
             };
             let dav = caldav::CalDavClient::new(client);
-            let mut reply = dav
-                .list_calendars(caldav::bridge_routing::ListCalendarsRequest {
-                    actor_id: actor_id.to_vec(),
-                })
+            // The shared load: best-effort lazy Personal — a provision failure
+            // still returns the (empty) list rather than erroring the page
+            // load, and is logged instead of dropped.
+            let reply = dav
+                .list_calendars_with_personal(&actor_id, &msek)
                 .await
                 .map_err(err_to_js)?;
-            if reply.calendars.is_empty() {
-                // Best-effort lazy Personal: a provision failure still returns the
-                // (empty) list rather than erroring the page load.
-                let meta = caldav::CalendarMetadata {
-                    displayname: "Personal".into(),
-                    color: "#3273dc".into(),
-                    description: String::new(),
-                    ..Default::default()
-                };
-                if let Ok(sealed) = caldav::seal_calendar_metadata(&meta, &msek) {
-                    let _ = dav
-                        .provision_calendar(caldav::bridge_routing::ProvisionCalendarRequest {
-                            actor_id: actor_id.to_vec(),
-                            calendar_id: caldav::personal_calendar_id().to_vec(),
-                            encrypted_metadata: sealed,
-                            update_metadata: false,
-                        })
-                        .await;
-                    reply = dav
-                        .list_calendars(caldav::bridge_routing::ListCalendarsRequest {
-                            actor_id: actor_id.to_vec(),
-                        })
-                        .await
-                        .map_err(err_to_js)?;
-                }
+            if let Some(e) = &reply.personal_provision_error {
+                tracing::error!("caldav_list_calendars: lazy Personal: {e}");
             }
             // Derived once for the whole list — every row's metadata reuses it
             // instead of paying its own X-Wing keygen .
-            let keys = caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+            let keys = caldav::DavRecipientKeys::from_mseks(
+                caldav::DavKind::Calendar,
+                &msek,
+                &prior_mseks,
+            );
             let calendars: Vec<serde_json::Value> = reply
                 .calendars
                 .iter()
@@ -4939,7 +4921,11 @@ impl WsRpcClient {
             let calendar_id = hex_array_32(&calendar_id_hex)?;
             // Derived once for the whole page — every row reuses it instead of
             // paying its own X-Wing keygen .
-            let keys = caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+            let keys = caldav::DavRecipientKeys::from_mseks(
+                caldav::DavKind::Calendar,
+                &msek,
+                &prior_mseks,
+            );
             // The shared read: a row that will not unseal or parse rejects the
             // promise with its cause instead of vanishing from the list.
             let events: Vec<serde_json::Value> = caldav::CalDavClient::new(client)
@@ -4985,7 +4971,8 @@ impl WsRpcClient {
             else {
                 return to_js(&serde_json::json!({ "addressbooks": [] }));
             };
-            let keys = carddav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+            let keys =
+                carddav::DavRecipientKeys::from_mseks(carddav::DavKind::Card, &msek, &prior_mseks);
             let books = carddav::CardDavClient::new(client)
                 .list_addressbooks_decoded(
                     carddav::bridge_routing::ListAddressbooksRequest {
@@ -5022,7 +5009,8 @@ impl WsRpcClient {
                 return to_js(&serde_json::json!({ "cards": [] }));
             };
             let addressbook_id = hex_array_32(&addressbook_id_hex)?;
-            let keys = carddav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+            let keys =
+                carddav::DavRecipientKeys::from_mseks(carddav::DavKind::Card, &msek, &prior_mseks);
             let page = carddav::CardDavClient::new(client)
                 .query_cards_decoded(
                     carddav::bridge_routing::QueryCardsRequest {
@@ -5462,7 +5450,11 @@ impl WsRpcClient {
                 .export_calendar_ics(
                     &actor_id,
                     &calendar_id,
-                    &caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                    &caldav::DavRecipientKeys::from_mseks(
+                        caldav::DavKind::Calendar,
+                        &msek,
+                        &prior_mseks,
+                    ),
                 )
                 .await
                 .map_err(|e| match e {
@@ -6959,6 +6951,91 @@ impl WsRpcClient {
         crate::mail_admin::WasmMailImportMachine::build(self.inner.clone())
     }
 
+    /// `WasmArchiveImportMachine` for the user-facing `archive-import` page
+    /// (`archive-import.md` § The wizard and its machine), over this session's
+    /// socket and the tab's custody. `ownerSecretHex` is the identity secret
+    /// the archive folder seals under; `deviceIdHex` the sync device id the
+    /// change records are stamped with. Throws on a malformed either.
+    #[wasm_bindgen(js_name = archiveImportMachine)]
+    pub fn archive_import_machine(
+        &self,
+        owner_secret_hex: String,
+        device_id_hex: String,
+    ) -> Result<crate::archive_import::WasmArchiveImportMachine, JsValue> {
+        crate::archive_import::WasmArchiveImportMachine::build(
+            self.inner.clone(),
+            self.actor_id_hex.clone(),
+            &owner_secret_hex,
+            &device_id_hex,
+        )
+    }
+
+    /// Register the account's imported threads as `manager`'s `Archive` rail
+    /// source (`archive-import.md` § What each category becomes), through the
+    /// shared `threads::register_archive_threads` every app calls. Reads
+    /// nothing — follow with `manager.refreshArchiveThreads()`. Same
+    /// arguments as `archiveImportMachine`; throws on a malformed either.
+    #[wasm_bindgen(js_name = registerArchiveThreads)]
+    pub fn register_archive_threads(
+        &self,
+        manager: &crate::conversations::WasmConversationsManager,
+        owner_secret_hex: String,
+        device_id_hex: String,
+    ) -> Result<(), JsValue> {
+        crate::archive_import::register_threads(
+            self.inner.clone(),
+            self.actor_id_hex.clone(),
+            manager.shared_manager(),
+            &owner_secret_hex,
+            &device_id_hex,
+        )
+    }
+
+    /// Build the account's archive links (phase two, `archive-import.md` §
+    /// Linking and merging) over the same seam as `registerArchiveThreads`,
+    /// registered as `manager`'s FaunaMls backend's archive-signal sink, and
+    /// return them: the SPA drives them once, on a one-second tick while
+    /// `workDue()`, attaches them to the import machine before a Start or
+    /// Resume, and paints the Contacts rows from `linkViews()`. Call once per
+    /// manager build. Throws on a manager without the FaunaMls rail or a
+    /// malformed secret or device id.
+    #[wasm_bindgen(js_name = registerArchiveLinks)]
+    pub fn register_archive_links(
+        &self,
+        manager: &crate::conversations::WasmConversationsManager,
+        owner_secret_hex: String,
+        device_id_hex: String,
+    ) -> Result<crate::archive_import::WasmArchiveLinks, JsValue> {
+        crate::archive_import::register_links(
+            self.inner.clone(),
+            self.actor_id_hex.clone(),
+            manager,
+            &owner_secret_hex,
+            &device_id_hex,
+        )
+    }
+
+    /// Register the account's folded archive comments as `manager`'s comment
+    /// source, through the shared `comments::register_archive_comments` every
+    /// app calls. Reads nothing — follow with
+    /// `manager.refreshArchiveComments()`. Throws on a malformed secret or
+    /// device id.
+    #[wasm_bindgen(js_name = registerArchiveComments)]
+    pub fn register_archive_comments(
+        &self,
+        manager: &crate::feed::WasmFeedManager,
+        owner_secret_hex: String,
+        device_id_hex: String,
+    ) -> Result<(), JsValue> {
+        crate::archive_import::register_comments(
+            self.inner.clone(),
+            self.actor_id_hex.clone(),
+            manager.shared_manager(),
+            &owner_secret_hex,
+            &device_id_hex,
+        )
+    }
+
     /// `WasmDmarcReportsMachine` for the web `admin-mail-reports` page — the
     /// DMARC aggregate reports peer mail servers send about this nest's
     /// domains. Admin-class, connection-only.
@@ -7105,11 +7182,11 @@ impl WsRpcClient {
     pub fn folders_actor_members(&self, name: String) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let reply = FoldersClient::new(client)
-                .actor_members_list(name)
+            let members = FoldersClient::new(client)
+                .row_actor_members(name)
                 .await
                 .map_err(err_to_js)?;
-            to_js(&reply.members)
+            to_js(&members)
         })
     }
 
@@ -7125,11 +7202,11 @@ impl WsRpcClient {
     pub fn folders_members(&self, name: String) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
-            let reply = FoldersClient::new(client)
-                .members_list(name)
+            let members = FoldersClient::new(client)
+                .row_device_members(name)
                 .await
                 .map_err(err_to_js)?;
-            to_js(&reply.members)
+            to_js(&members)
         })
     }
 

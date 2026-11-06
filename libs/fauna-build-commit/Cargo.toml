@@ -1,11 +1,16 @@
 [package]
 name = "fauna-build-commit"
-description = "The one build-script derivation of FAUNA_BUILD_COMMIT — the commit a Fauna binary was built from"
+description = "The one derivation of FAUNA_BUILD_COMMIT — the commit a Fauna artifact was built from — as the commit!() macro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# A build-dependency only: no runtime code, no dependencies. Every binary that
-# names its build commit (the nest's `/api/v1/health`, the apps' Status pages)
-# calls `emit()` from its own `build.rs` and reads `option_env!` back.
+# A procedural macro, expanded only in the crate that IS the artifact (a
+# binary's `main`, the thin `fauna-ffi` cdylib) — never in a library
+# (`ui/status.md` § State & data shape, the build leg; the crate doc says why).
+[lib]
+proc-macro = true
+
+# No dependencies: `proc_macro` is the compiler's own, and the expansion is
+# written as source and `str::parse`d.
 [dependencies]

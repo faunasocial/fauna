@@ -37,7 +37,23 @@ internal sealed class HostAddressReporter
             // refused nest-side → a pointless Failed each connect). Mirrors
             // linux's `if is_admin { report_host_address() }`.
             if (!await _rpc.AmIAdminAsync().ConfigureAwait(false)) return;
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("HostAddressReporter",
+                $"host-address report skipped: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+        await RunAdminAsync().ConfigureAwait(false);
+    }
 
+    /// <summary>Report without re-reading the gate — for a caller that already
+    /// holds a confirmed admin (<see cref="AdminGateState"/>'s false→true
+    /// transition). Never throws.</summary>
+    public async Task RunAdminAsync()
+    {
+        try
+        {
             var outcome = await _rpc.ReportHostAddressAsync().ConfigureAwait(false);
             switch (outcome)
             {

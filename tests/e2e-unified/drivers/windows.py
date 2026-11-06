@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import datetime
 import json
 import os
 import shutil
@@ -8,17 +9,24 @@ import subprocess
 import sys
 import tempfile
 import re
+import threading
 import time
+import urllib.request
 import weakref
 from pathlib import Path
 
 from .base import detached_agent_log_text, stitch_agent_log
-from .http_bridge import HttpBridgeDriver
+from .http_bridge import HttpBridgeDriver, LaunchWitnesses, launch_timeout_report
+from .local_launch import is_ntstatus_crash
 from .port_util import drain_pipes, popen_group_kwargs, reap_descendants_of
 
 # An ordinary tracing line from the app: `2026-09-01T16:03:35.432106Z  INFO …`.
 # Used only to decide where a multi-line fatal stack trace STOPS.
 _APP_LOG_LINE_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+#: The bridge's own line at every launch (`flaui-bridge/SessionManager.cs::Launch`):
+#: where one launch's record starts in a buffer the bridge keeps across relaunches.
+_BRIDGE_LAUNCH_MARK = "[bridge] launch epoch="
 
 # The launch-collision chooser's own UIA anchor (`ui.yaml`'s
 # `launch-instance-chooser`, `LaunchInstanceChooserPage.xaml`). A launch that
@@ -95,6 +103,15 @@ _EXIT_CODE_NOTES: dict[int, str] = {
     ),
 }
 
+#: True when the bridge's ``exit_code`` is a crash (an NTSTATUS of error severity —
+#: the `0xC…` codes in `_EXIT_CODE_NOTES`, the CLR's `0xE0434352` — or
+#: `STATUS_BREAKPOINT`), never a kill or a signal: `TerminateProcess(-1)` is what
+#: .NET's `Process.Kill` leaves — a sibling bridge's data-dir sweep, say (this
+#: driver's own close never reads back as one: the bridge drops the handle with the
+#: kill, `SessionManager.Quit`) — and CTRL_C_EXIT is a signal. Shared with tui's
+#: ConPTY leg, so the one rule lives in `drivers/local_launch.py`.
+_is_crash_exit = is_ntstatus_crash
+
 
 def _atexit_cleanup():
     """Kill any bridge processes still alive when Python exits."""
@@ -121,6 +138,41 @@ atexit.register(_atexit_cleanup)
 # that was going to be slow regardless, and a genuinely wedged build still fails
 # bounded rather than hanging the suite.
 _BRIDGE_BUILD_BUDGET_S = 1800.0
+
+
+#: When the FlaUI bridge answers an app op its app has not answered: a 504 carrying
+#: the stall verdict (and, on the app-side verdict, the UI thread's stack), sent
+#: before the driver's own `BRIDGE_RPC_TIMEOUT_S` can expire into a bare socket
+#: timeout. Mirrors `flaui-bridge/StallWatch.cs::ReplyBudgetSeconds`.
+BRIDGE_STALL_REPLY_BUDGET_S = 100.0
+
+#: The launch-environment key the bridge reads the stall-capture helper's path
+#: from (`StallWatch.CaptureBinEnv`).
+STALL_CAPTURE_BIN_ENV = "FAUNA_E2E_STALL_CAPTURE_BIN"
+
+#: The helper-binary registry entry that helper is (`helpers/helper_bins.py`).
+STALL_CAPTURE_HELPER = "fauna-e2e-stall-capture"
+
+
+def _default_stall_capture_bin(env: dict) -> None:
+    """Hand the bridge the stall-capture helper (e2e convention 11, the windows
+    app's stall stack): the bridge runs it on its app-side verdict to name what
+    holds the app's UI thread.
+
+    Built at collection time for every run that launches the windows app
+    (`helpers/helper_bins.py`, reached through `WINDOWS_APP_LAUNCH`), so this is
+    a memo replay and never a build. A driver used outside such a run (a
+    hand-driven session) gets no helper, and the bridge then says the stack is
+    UNMEASURED and why, rather than this launch failing. A caller-supplied value
+    wins."""
+    if STALL_CAPTURE_BIN_ENV in env:
+        return
+    from helpers import helper_bins
+
+    try:
+        env[STALL_CAPTURE_BIN_ENV] = str(helper_bins.helper_bin(STALL_CAPTURE_HELPER))
+    except (helper_bins.HelperBinNotPrebuilt, RuntimeError):
+        pass
 
 
 def _ensure_bridge_built() -> None:
@@ -632,9 +684,8 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         polled-with-a-sleep — the decision key's presence is the causal barrier
         (e2e convention 14).
 
-        Windows-only, deliberately: the OS handle enumeration has no cross-app
-        analogue, so a test that needs it branches on ``hasattr`` rather than
-        pretending every driver can answer."""
+        macos answers the same shape from its automation server; no other driver
+        has an OS window list to read."""
         return self._get("/session/windows").get("windows", [])
 
     def foreground_report(self, *, clear: bool = False) -> dict:
@@ -775,7 +826,80 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             except Exception:
                 time.sleep(0.3)
 
+        self._start_bridge_keepalive()
+
+    # The FlaUI bridge exits after `Program.cs`'s 60 s `IdleTimeout` without a request
+    # — its own orphan guard. A live app keeps it fed (its TestAgent polls the bridge),
+    # but an idle SEAT of a live run is not an orphan: a two-seat journey quits seat A
+    # and drives seat B for minutes, and the watchdog then took seat A's bridge with
+    # it, so the relaunch that ends the journey (`hard_reload` → `recover`) found
+    # nothing to answer (measured 2026-10-29: `test_engagement_cues.py`'s cross-device
+    # witness, whose bridge-dead driver then skipped the rest of the invocation).
+    # Convention 9's die-with-the-run guarantee is the job object
+    # (`reap_descendants_of`), not this watchdog, so a heartbeat that lives in THIS
+    # process — and dies with it — keeps a live run's seat without weakening the orphan
+    # guard: a killed run stops beating and the watchdog still fires.
+    _KEEPALIVE_PERIOD_S = 20.0
+
+    def _start_bridge_keepalive(self) -> None:
+        self._stop_bridge_keepalive()
+        stop = threading.Event()
+        self._keepalive_stop = stop
+        url, proc = self._url, self._bridge_proc
+
+        def beat() -> None:
+            while not stop.wait(self._KEEPALIVE_PERIOD_S):
+                if proc.poll() is not None:
+                    return
+                try:
+                    urllib.request.urlopen(f"{url}/health", timeout=5).read()
+                except Exception:  # noqa: BLE001 — a busy or dying bridge is the next real request's to classify
+                    pass
+
+        threading.Thread(target=beat, name="flaui-bridge-keepalive", daemon=True).start()
+
+    def _stop_bridge_keepalive(self) -> None:
+        stop = getattr(self, "_keepalive_stop", None)
+        if stop is not None:
+            stop.set()
+            self._keepalive_stop = None
+
+    @staticmethod
+    def _refuse_an_unfenced_real_keyring(config: dict) -> None:
+        """Fence the `use_real_keyring` opt-in before anything starts.
+
+        That mode leaves the shared store's file arm off, so the app reaches the
+        box's real Credential Manager: convention 12's Windows arm, never an
+        ordinary suite's launch. The box has one store per user and no private
+        instance to run instead (linux's mode has a private daemon), so the only
+        thing between the launch and the installed product's rows is the namespace,
+        and a test that thinks a file is in play has the wrong mode."""
+        if not config.get("use_real_keyring"):
+            return
+        from helpers.windows_credman import refuse_unless_unique
+
+        refuse_unless_unique(config.get("keyring_app"), "a windows use_real_keyring launch")
+        for key in ("credential_dir", "seed_credentials"):
+            if config.get(key):
+                raise RuntimeError(
+                    f"a windows use_real_keyring launch has no file store, so {key} "
+                    "has nothing to name; the harness writes no row into the box's "
+                    "real Credential Manager, the app does"
+                )
+
+    def double_click(self, element_id: str, index: int = 0, *, scope: str | None = None) -> None:
+        """A genuine double click has no UIA equivalent (`Actions.DoubleClick`), so it
+        is physical `SendInput` and needs an ATTACHED interactive desktop. On a
+        WTS-disconnected session (`query session` -> `Disc`) it can only fail with
+        `Win32Exception(5)` as an HTTP 500, so declare the environment instead
+        (convention 7, `helpers/windows_session.py`)."""
+        from helpers.windows_session import skip_unless_attached_desktop
+
+        skip_unless_attached_desktop()
+        super().double_click(element_id, index, scope=scope)
+
     def launch(self, config: dict) -> None:
+        self._refuse_an_unfenced_real_keyring(config)
         # Stored purely for a caller that needs to re-launch from a MODIFIED copy
         # of its own original config (e.g. dropping `seed_credentials` for a
         # no-reseed relaunch, `test_add_account_provisioning.py`) — every other
@@ -789,7 +913,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
 
         # Launch the app
         self._app_path = config["app_path"]
-        app_args = config.get("args", "")
+        app_args = config.get("app_args", "")
         # The nest URL key is `url` across every _build_app_config branch
         # (uniform with the web/macos/ios drivers, which read config["url"]).
         # Reading "nest_url" here was drift: the app launched with NO
@@ -830,6 +954,9 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # child. A caller-supplied override in `config["environment"]` (merged above) wins.
         env.setdefault("FAUNA_E2E_RESCAN_MS", "30000")
         _default_sync_agent_pin(env)
+        # The bridge's stall-capture helper (`flaui-bridge/StallWatch.cs`): read by
+        # the BRIDGE out of the launch environment, never by the app.
+        _default_stall_capture_bin(env)
 
         # The app's own agent trace (`FaunaApp.Core/Logs/E2eTrace.cs`), reachable
         # from a test that does NOT own its driver. Tests that build their own
@@ -886,7 +1013,8 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         #     (`tests/common/accounts.py::build_registry_seed`) by writing the file
         #     the store reads on its first `get` — no app code, no UI.
         #  2. The suite stops writing identities into the dev machine's real
-        #     Credential Manager, so parallel sessions can't collide there.
+        #     Credential Manager, so parallel sessions can't collide there. The one
+        #     exception is `use_real_keyring` below, convention 12's Windows arm.
         #
         # Kept on the driver (not a fresh dir per launch) because `recover()` re-posts
         # this same session body, so the dir it names has to outlive the process that
@@ -902,7 +1030,8 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # mirrors `drivers/linux.py`'s `config.get("credential_dir") or ...` fallback.
         # Isolation otherwise comes from the unique mkdtemp dir, so the namespace only
         # has to agree with the app (CredentialStore.DefaultNamespace).
-        if self._cred_dir is None:
+        real_keyring = bool(config.get("use_real_keyring"))
+        if self._cred_dir is None and not real_keyring:
             supplied = config.get("credential_dir")
             self._cred_dir = supplied or tempfile.mkdtemp(prefix="fauna-e2e-creds-")
             self._owns_cred_dir = not supplied  # a caller-supplied dir outlives THIS
@@ -914,7 +1043,18 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             self._cred_store_owner_config = {
                 key: config.get(key) for key in ("credential_dir", "keyring_app")
             }
-        env["FAUNA_E2E_CREDENTIAL_DIR"] = self._cred_dir
+        if real_keyring:
+            # The app's own store resolution, unforced: with no credential dir the
+            # shared crate takes its Credential Manager arm under this namespace,
+            # which `_refuse_an_unfenced_real_keyring` has fenced. Popped, not just
+            # unset here, because a caller's environment may name a dir for an
+            # agent's sake. The rows are the test's to give back; nothing below
+            # carries or empties them.
+            self._keyring_app = config["keyring_app"]
+            self._cred_store_owner_config = {"keyring_app": self._keyring_app}
+            env.pop("FAUNA_E2E_CREDENTIAL_DIR", None)
+        else:
+            env["FAUNA_E2E_CREDENTIAL_DIR"] = self._cred_dir
         env["FAUNA_KEYRING_APP"] = self._keyring_app
         # The store principal survives a relaunch (convention 10's carve-out,
         # `HttpBridgeDriver._begin_principal_slot_carry`), begun BEFORE the
@@ -932,8 +1072,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # today, the derived named-row id paragraph's windows sentence).
         # Reuses the `_principal_slot_carry_live` decision the call above just
         # made.
-        self._begin_install_device_secret_row_carry(
-            os.path.join(self._cred_dir, f"{self._keyring_app}.json"))
+        self._begin_install_device_secret_row_carry(self._credential_file())
         # The generic cross-driver contract linux/tui/macos/ios already publish:
         # the store THIS launch resolved, named the same way on every driver so a
         # helper can read it back without knowing which app it is holding
@@ -1024,13 +1163,24 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             self._owns_data_dir = not supplied
             os.makedirs(self._data_dir, exist_ok=True)
         env["FAUNA_E2E_DATA_DIR"] = self._data_dir
+        # The agent's e2e custody hold (`content_keys::custody_reread_held`, the
+        # compile-gated `FAUNA_E2E_CUSTODY_HOLD_FILE` seam), as linux/tui set it: a
+        # path in this launch's scratch dir that does not exist, so the hold is
+        # inert until a test creates the file
+        # (`helpers/folder_content.py::hold_custody_reread`). It rides the session
+        # body's environment, which the spawned `fauna-sync-agent.exe` inherits.
+        # A caller-supplied override wins. Read back via `custody_hold_file()`.
+        env.setdefault(
+            "FAUNA_E2E_CUSTODY_HOLD_FILE",
+            os.path.join(self._local_appdata, "custody-hold"),
+        )
         #: Same contract as `_resolved_credential_dir` above — windows is the one
         #: client whose `launch_config` also has to carry a data dir (its relaunch
         #: is a same-device restart), so an attaching helper needs to read it back.
         self._resolved_data_dir = self._data_dir
 
         # The seed map is written VERBATIM: the C# store keys its file backend by
-        # the logical key itself (`SecretKeyMap` resolves every key verbatim), so
+        # the logical key itself (`LogicalSecretStore` passes every key through), so
         # `build_registry_seed(...)` output lands exactly where
         # `LogicalSecretStore` looks.
         seed = config.get("seed_credentials")
@@ -1052,11 +1202,23 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         if config.get("package_family_name"):
             self._session_body["package_family_name"] = config["package_family_name"]
             self._session_body["package_app_id"] = config.get("package_app_id") or "FaunaApp"
+        # A launch held to one CPU: the forced-failure half of convention 6's
+        # launch-timeout rider (`test_launch_timeout_forced_windows.py`), kept in the
+        # session body so `recover()` relaunches the same way.
+        if config.get("cpu_affinity_mask"):
+            self._session_body["cpu_affinity_mask"] = config["cpu_affinity_mask"]
+        log_mark = self._app_log_size()
+        posted_at = time.time()
         self._post("/session", self._session_body)
         self._launched_once = True
         # Dismiss any system dialogs (e.g. Windows Firewall) that may block the app
         time.sleep(2)
         self.dismiss_system_dialogs()
+        self._await_first_launch_ready(posted_at, log_mark)
+
+    def _await_first_launch_ready(self, posted_at: float, log_mark: int) -> None:
+        """The first-launch gate; its timeout names its suspect (convention 6's
+        launch-timeout rider), through the builder `recover()` prints through."""
         # Wait for TestAgent's poll loop to actually be alive before returning
         # control to the caller: a freshly-spawned FaunaApp.exe is a
         # low-priority background process the OS has not yet scheduled fair CPU
@@ -1097,13 +1259,160 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                 pass
             time.sleep(0.2)
         else:
-            raise TimeoutError(
-                f"TestAgent poll loop never became responsive within "
-                f"{self._RELAUNCH_READY_BUDGET_S:.0f}s of launch (no /app/state "
-                f"push observed, and no launch-collision chooser rendered "
-                f"either) — the app process may have failed to start, or "
-                f"is catastrophically starved of CPU"
+            raise TimeoutError(self._launch_timeout_report(posted_at, log_mark))
+
+    def launch_activated(self, aumid: str, *, app_path: str, ready_id: str,
+                         timeout: float | None = None) -> None:
+        """Start an INSTALLED package's application by its AUMID and drive it by UI
+        Automation alone — the Store install's launch shape (`feature-catalog.md`
+        § Implementation status today, how the Windows Store install is driven).
+
+        Everything :meth:`launch` sets up is for a build that carries the e2e
+        automation surface, and a Store build carries none (convention 15): no
+        TestAgent publishes `/app/state`, no `FAUNA_E2E_*` variable is read, no
+        credential file, data dir or `%LOCALAPPDATA%` relocation reaches it. So this
+        posts no environment, no arguments and no seed. The bridge activates the
+        application the way its Start-menu entry does
+        (`SessionManager.ActivateApplication`), which is the one way the package's
+        identity reaches the process: an exe started directly from the package's
+        folder runs with none (`installers/windows.md` § Store distribution, the
+        package-identity measurement). Readiness is the window's own UIA tree
+        showing ``ready_id``; every later read and act is the bridge's
+        out-of-process ``/element/*``, which the bridge keeps alive with its own
+        heartbeat since no agent polls it.
+
+        ``app_path`` is the exe inside the package's install location, named for
+        the bridge's diagnostics only. Teardown is the ordinary :meth:`teardown`.
+        """
+        self._start_bridge()
+        self._app_path = app_path
+        self._session_body = {"app": app_path, "args": "", "environment": {}, "aumid": aumid}
+        self._post("/session", self._session_body)
+        self._launched_once = True
+        budget = self._RELAUNCH_READY_BUDGET_S if timeout is None else timeout
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:  # deadline-ok: waits on the window's own UIA tree
+            try:
+                if self.is_visible(ready_id):
+                    return
+            except Exception:  # noqa: BLE001 — a window still coming up answers nothing yet
+                pass
+            if not self.app_running():
+                status = self._get("/session/status")
+                raise AssertionError(
+                    f"the activated app ({aumid}) exited before {ready_id!r} showed: "
+                    f"{self._exit_code_phrase(status)}; bridge: {self._bridge_lines(5)}"
+                )
+            time.sleep(0.5)  # sleep-ok: poll cadence inside a deadline poll
+        raise TimeoutError(
+            f"the activated app ({aumid}) never showed {ready_id!r} within {budget:.0f}s; "
+            f"{self.diagnose(ready_id)}; bridge: {self._bridge_lines(5)}"
+        )
+
+    def _launch_timeout_report(
+        self, posted_at: float, log_mark: int, notes: tuple[str, ...] = ()
+    ) -> str:
+        """`launch_timeout_report` over this launch's witnesses, for both launch
+        paths. Never raises: it runs inside a ``raise``."""
+        try:
+            witnesses = self._launch_witnesses(posted_at, log_mark, notes)
+        except Exception as exc:  # noqa: BLE001 - must never mask the real failure
+            return (
+                f"launch timeout ({self._RELAUNCH_READY_BUDGET_S:.0f} s): UNKNOWN — "
+                f"the witnesses could not be gathered: {type(exc).__name__}: {exc}"
             )
+        return launch_timeout_report(witnesses)
+
+    def _launch_witnesses(
+        self, posted_at: float, log_mark: int, notes: tuple[str, ...]
+    ) -> LaunchWitnesses:
+        """The four witnesses, each read from what this process holds: the bridge's
+        handle on the app it started (its CPU time, and the CPU wait the bridge
+        sampled from its thread table once a second since the launch —
+        `SessionManager.WaitSamples`), the log since `log_mark`, the inherited stderr
+        since this launch, and this machine's own agent ledger."""
+        from helpers import launch_load
+
+        deadline_at = time.time()
+        process_unread = ""
+        try:
+            status = self._get("/session/status")
+        except Exception as exc:  # noqa: BLE001 - a silent bridge is itself the finding
+            status = None
+            process_unread = (
+                f"the bridge did not answer /session/status ({type(exc).__name__}: {exc})"
+            )
+
+        started_at = self._bridge_instant((status or {}).get("launched_at"))
+        cpu_ms = (status or {}).get("cpu_ms")
+        wait_share, wait_basis, wait_unread = self._wait_reading(status)
+        running = None if status is None else bool(status.get("running"))
+        stderr_lines = self._bridge_log_of_this_launch()
+        log_lines = self._app_log_slice(log_mark)[1]
+        crash_reports = self._crash_reports_section(stderr_lines, dead=running is False)
+        return LaunchWitnesses(
+            budget_s=self._RELAUNCH_READY_BUDGET_S,
+            posted_at=posted_at,
+            deadline_at=deadline_at,
+            process_started_at=started_at,
+            alive=running,
+            process_unread=process_unread,
+            exit_phrase=self._exit_code_phrase(status) if running is False else "",
+            cpu_s=None if cpu_ms is None else cpu_ms / 1000.0,
+            cpu_wall_s=deadline_at - (started_at or posted_at),
+            cpu_unread="" if cpu_ms is not None else "the bridge reports no cpu_ms for its app",
+            cpu_wait_share=wait_share,
+            cpu_wait_basis=wait_basis,
+            cpu_wait_unread=wait_unread,
+            log_lines=log_lines,
+            record_text=self._app_log_since(log_mark),
+            stderr_lines=stderr_lines,
+            machine=launch_load.machine_window(posted_at, deadline_at, apps=("windows",)),
+            notes=[*notes, *([crash_reports] if crash_reports else [])],
+        )
+
+    @staticmethod
+    def _wait_reading(status: dict | None) -> tuple[float | None, str, str]:
+        """(share of the launch the app spent waiting for a CPU, how it was read,
+        why unread) from the bridge's `wait_samples` / `wait_ready_samples`: its
+        one-a-second reads of the app's thread table since the launch."""
+        if status is None:
+            return None, "", "the bridge did not answer /session/status"
+        samples, ready = status.get("wait_samples"), status.get("wait_ready_samples")
+        if samples is None or ready is None:
+            return None, "", "the bridge reports no wait_samples for its app (an older bridge build?)"
+        if not samples:
+            return None, "", "the bridge took no thread-table sample of this launch"
+        return (
+            ready / samples,
+            f"a thread Ready at {ready} of the bridge's {samples} one-a-second thread-table reads",
+            "",
+        )
+
+    @staticmethod
+    def _bridge_instant(text: object) -> float | None:
+        """A bridge `o`-format UTC instant as epoch seconds, or None."""
+        try:
+            return datetime.datetime.fromisoformat(str(text)).timestamp()
+        except ValueError:
+            return None
+
+    def _bridge_log_of_this_launch(self) -> list[str]:
+        """The bridge's buffer from this launch on. The bridge outlives the app across
+        relaunches, so its buffer still holds the last instance's crash, and that
+        report must not read as this launch's fault."""
+        captured = [str(ln).rstrip() for ln in list(getattr(self, "_bridge_log", None) or [])]
+        for index in range(len(captured) - 1, -1, -1):
+            if _BRIDGE_LAUNCH_MARK in captured[index]:
+                return captured[index:]
+        return captured
+
+    def custody_hold_file(self) -> str | None:
+        """The file whose existence holds this launch's agent from re-reading
+        custody (`FAUNA_E2E_CUSTODY_HOLD_FILE`, set in `launch()`); None before
+        `launch()`. Driven through `helpers/folder_content.py::hold_custody_reread`."""
+        env = (self._session_body or {}).get("environment", {})
+        return env.get("FAUNA_E2E_CUSTODY_HOLD_FILE")
 
     def launch_environment(self) -> dict | None:
         """This driver launches — and relaunches — by POSTing ``_session_body``,
@@ -1123,6 +1432,21 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         true)` (`SessionManager.Quit` — no WM_CLOSE, no app-side cleanup)."""
         return self._session_body is not None
 
+    def quit_app(self) -> None:
+        """The user quits the app and leaves the machine as it is
+        (`HttpBridgeDriver.quit_app`'s contract) — the bridge closes its own app
+        child and the bridge, the credential dir and the data dir all stay, so
+        the later `hard_reload()` → `recover()` has a bridge to ask and a store
+        to reopen. The inherited `_stop_app()` is the `teardown()` half on
+        windows: it kills the bridge and reclaims the dirs, after which
+        `recover()` returns False."""
+        if self._session_body is None:
+            return
+        self._read_exit_before_close("quit_app()")
+        closed = self._delete("/session").get("closed", True)
+        if not closed:
+            raise RuntimeError("the FlaUI bridge could not close the app tracked for this session")
+
     def kill_uncleanly(self) -> None:
         """Hard-kill the app the bridge tracks (`PlatformDriver.kill_uncleanly`).
 
@@ -1135,6 +1459,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         tolerates the dead app (its own `DELETE /session` is a no-op on none)."""
         if not self.supports_unclean_kill():
             super().kill_uncleanly()  # the NotImplementedError with the contract
+        self._read_exit_before_close("kill_uncleanly()")
         closed = self._delete("/session?sweep=false").get("closed", True)
         if not closed:
             raise RuntimeError("the FlaUI bridge could not kill the app tracked for this session")
@@ -1165,6 +1490,12 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # top (flaui-bridge/SessionManager.cs::Quit owns the mechanism); surfacing
         # that here as a failed recover() costs ONE legible skip instead of every
         # remaining module in the session.
+        #
+        # And the app it is about to close may already be dead of a crash — the
+        # `app` fixture reaches here when a reset was never acknowledged, which is
+        # how three dead apps were relaunched unseen in one passing run. The
+        # relaunch goes ahead either way; the death is recorded for the phase.
+        self._read_exit_before_close("the relaunch in recover()")
         sweep_mark = self._untracked_sweep_count()
         try:
             closed = self._delete("/session").get("closed", True)
@@ -1188,8 +1519,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # config/env to recompute a live decision from (it only harvests + rearms
         # the once-per-launch restore), so calling it again with the SAME
         # resolved store is exactly the relaunch shape.
-        self._begin_install_device_secret_row_carry(
-            os.path.join(self._cred_dir, f"{self._keyring_app}.json"))
+        self._begin_install_device_secret_row_carry(self._credential_file())
         # …and THEN empty the store the new process will open, so the relaunched
         # app comes back SIGNED OUT — the default relaunch contract every other
         # driver gets for free from a fresh per-launch dir, and the reason
@@ -1237,6 +1567,13 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             idx = tokens.index("--nest-url")
             del tokens[idx:idx + 2]
             recover_body["args"] = " ".join(tokens)
+        # Where the app's own log ends RIGHT NOW, with the old process gone and the
+        # new one not yet started, so a failure below can report what the relaunched
+        # process wrote rather than what its predecessor left behind. Without this
+        # the tail is dominated by the dead instance's retry churn and cannot answer
+        # the only question that matters: did the new process log anything at all?
+        log_mark = self._app_log_size()
+        posted_at = time.time()
         try:
             self._post("/session", recover_body)
         except Exception:
@@ -1263,12 +1600,6 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # legitimately take far longer than the old advisory 30 s, and a green run
         # pays only the real boot time either way — so the ceiling is generous and
         # the verdict is honest, rather than tight and ignored.
-        # Where the app's own log ends RIGHT NOW, so a failure below can report
-        # what the relaunched process wrote rather than what its predecessor
-        # left behind. Without this the tail is dominated by the dead instance's
-        # retry churn and cannot answer the only question that matters: did the
-        # new process log anything at all?
-        log_mark = self._app_log_size()
         fence_mark = self._fenced_push_count()
         # A relaunch that only worked because the bridge swept a leaked instance is
         # a PASSING run hiding a real harness defect — the exact shape that let row
@@ -1322,28 +1653,22 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                 status = self._get("/session/status")
             except Exception:
                 status = {}
-            alive = status.get("running")
             # Delta, not the bridge's lifetime total: the fence legitimately
             # discards pushes from an instance killed moments ago, so only what
             # arrived AFTER this relaunch says anything about this relaunch.
             total = status.get("fenced_state_pushes")
             fenced = None if total is None else total - fence_mark
-            liveness = (
-                "RUNNING (alive but publishing nothing this session can see)"
-                if alive
-                else "GONE (died during launch)" if alive is False else "UNKNOWN"
-            )
             # The fence tally is the discriminator: pushes arriving under a stale
             # epoch mean an agent IS alive and talking, just not this session's —
             # the opposite diagnosis, and the opposite fix, from "no agent at all".
             fence_note = (
-                f" {fenced} state push(es) arrived SINCE this relaunch and were "
+                f"{fenced} state push(es) arrived SINCE this relaunch and were "
                 f"EPOCH-FENCED (last carried epoch {status.get('last_fenced_epoch')!r} "
                 f"vs current {status.get('session_epoch')!r}) — an agent is alive and "
                 f"pushing, just not this session's, so a previous instance SURVIVED "
                 f"its kill and is still holding this account's instance lock."
                 if fenced
-                else " No state push arrived at all since the relaunch, fenced or "
+                else "No state push arrived at all since the relaunch, fenced or "
                 "otherwise — no agent is running anywhere."
                 if fenced == 0
                 else ""
@@ -1356,22 +1681,25 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             # untracked instance existed, this names it and its parent.
             swept = status.get("untracked_survivors") or []
             sweep_note = (
-                f" The previous kill left {len(swept)} app process(es) still owning this "
+                f"The previous kill left {len(swept)} app process(es) still owning this "
                 f"data dir, which the bridge then killed: {'; '.join(swept)}."
                 if swept
                 else ""
             )
+            print(self._launch_timeout_report(posted_at, log_mark, (fence_note, sweep_note)))
             print(
-                f"[e2e] windows: relaunched app published no state within "
-                f"{self._RELAUNCH_READY_BUDGET_S:.0f}s. Bridge says the app process is "
-                f"{liveness}.{fence_note}{sweep_note} "
-                f"Everything the relaunched process wrote to its own log follows "
-                f"(data dir {self._data_dir}), then the bridge's own account of the "
-                f"kill and the relaunch:"
+                f"[e2e] windows: the app's data dir is {self._data_dir}; the bridge's own "
+                f"account of the kill and the relaunch follows:"
             )
-            print(self._app_log_since(log_mark))
             print(self._bridge_lines())
         return ready
+
+    def _credential_file(self) -> str | None:
+        """The file-backed store this launch resolved, or `None` on a
+        `use_real_keyring` launch, which has no file."""
+        if self._cred_dir is None:
+            return None
+        return os.path.join(self._cred_dir, f"{self._keyring_app}.json")
 
     def _erase_credential_store_for_relaunch(self) -> None:
         """Empty this driver's file-backed credential store, with the old process
@@ -1447,8 +1775,10 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         pin set — replayed a login into an app that had already auto-logged-in,
         the second concurrent same-actor login its docstring warns about.
 
-        False only if `launch()` was never called, so there is nothing to
-        preserve (mirrors macOS's `self._cred_dir is None` guard)."""
+        False if `launch()` was never called, so there is nothing to preserve
+        (mirrors macOS's `self._cred_dir is None` guard), and on a
+        `use_real_keyring` launch, whose store no relaunch empties, so there is
+        no erase for a pin to suppress."""
         if self._cred_dir is None or self._data_dir is None:
             return False
         # `_launch_config` here is a stale, never-updated snapshot of the FIRST
@@ -1459,6 +1789,34 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # un-pin keys from.
         self._record_relaunch_pin({}, ("credential_dir", "keyring_app"))
         return True
+
+    def seed_pending_factory_reset(
+        self, nest_url: str, handle: str, claim_code: str
+    ) -> None:
+        """CR-2 slot seam (windows). The app's credential store is the shared
+        crate's harness file `{FAUNA_E2E_CREDENTIAL_DIR}/{FAUNA_KEYRING_APP}.json`
+        (`CredentialStore.cs` → `SharedSecretBackend`), the same file backend
+        linux and tui resolve, keyed by every registry logical key verbatim — so
+        the active account's per-actor `fauna/<actor>/pending_factory_reset`
+        record is what the reconcile reads back. See
+        `PlatformDriver.seed_pending_factory_reset` for the contract.
+
+        Requires `preserve_state_across_relaunch()` to have pinned the store
+        (the journey does that before calling here); without it `recover()`
+        empties the store and the seeded slot would not survive."""
+        if self._cred_dir is None:
+            raise RuntimeError(
+                "seed_pending_factory_reset() called before a launch that resolved "
+                "the file-backed credential store — pin it via "
+                "preserve_state_across_relaunch() first"
+            )
+        self._ensure_pending_factory_reset_in_json_file(
+            os.path.join(self._cred_dir, f"{self._keyring_app}.json"),
+            nest_url,
+            handle,
+            claim_code,
+            native_mirror_prefix=None,
+        )
 
     def _fenced_push_count(self) -> int:
         """How many state pushes the bridge's epoch fence has discarded so far."""
@@ -1649,18 +2007,20 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                     "app, not a crash"
                 )
             else:
-                parts.append(f"app process: DEAD — {self._exit_code_phrase(status)}")
+                # The launch tag names WHICH app died, so a failure carrying this
+                # line marks that death reported and the relaunch that follows does
+                # not fail the next test for it again (`helpers/app_deaths.py`).
+                from helpers import app_deaths
+
+                launch = status.get("launched_at")
+                tag = f" {app_deaths.tag(launch)}" if launch else ""
+                parts.append(f"app process: DEAD — {self._exit_code_phrase(status)}{tag}")
 
             tail = [str(ln).rstrip() for ln in (getattr(self, "_bridge_log", None) or [])]
-            reports = self._diagnostic_lines(tail, bridge=False)
             dead = status is not None and not status.get("running")
-            if reports and (dead or any("[fauna] FATAL" in ln for ln in reports)):
-                body = "\n".join(reports[-self._CRASH_REPORT_LINES:])
-                parts.append(
-                    "--- the app's own crash reports, whole (`[fauna] FATAL` is an "
-                    "unhandled exception; the LAST `[fauna] FIRST-CHANCE` before a "
-                    f"death is the candidate for one no hook saw) ---\n{body}"
-                )
+            crash_reports = self._crash_reports_section(tail, dead=dead)
+            if crash_reports:
+                parts.append(crash_reports)
             if tail:
                 body = "\n".join(tail[-tail_lines:])
                 parts.append(
@@ -1675,6 +2035,20 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             return "\n" + "\n".join(parts)
         except Exception as exc:  # noqa: BLE001 - must never mask the real failure
             return f"\n(ack diagnostics unavailable: {type(exc).__name__}: {exc})"
+
+    def _crash_reports_section(self, captured: list[str], *, dead: bool) -> str:
+        """The app's own crash reports, whole, or "". Only a captured ``[fauna]
+        FATAL`` or a dead app earns the section: a wedge with neither stays a tail,
+        its handled ``FIRST-CHANCE`` chatter left out."""
+        reports = self._diagnostic_lines(captured, bridge=False)
+        if not reports or not (dead or any("[fauna] FATAL" in ln for ln in reports)):
+            return ""
+        body = "\n".join(reports[-self._CRASH_REPORT_LINES:])
+        return (
+            "--- the app's own crash reports, whole (`[fauna] FATAL` is an "
+            "unhandled exception; the LAST `[fauna] FIRST-CHANCE` before a "
+            f"death is the candidate for one no hook saw) ---\n{body}"
+        )
 
     #: How much of the app's own crash reports to carry: the same budget
     #: :meth:`bridge_error_diagnostics` gives them, since a single report is a
@@ -1735,6 +2109,66 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         phrase = f"exit code {code} (0x{unsigned:08X})"
         return f"{phrase} — {note}" if note else phrase
 
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider: was the app already dead of a crash?
+
+        Read BEFORE the `DELETE /session`, never after: the bridge's close is a
+        hard kill (`SessionManager.Quit` — `Process.Kill`, no WM_CLOSE), so the
+        close itself cannot raise the crash, and it drops the handle with the
+        kill, after which `/session/status` answers `exit_code: null`. A crash
+        exit (`_is_crash_exit`) is recorded with `helpers/app_deaths.py`, whose
+        phase wrapper fails the phase that found it; the close goes on either way.
+
+        Silent on a live app, on no tracked handle (nothing launched, or this
+        driver's own earlier kill), on a kill or signal, and on a bridge that
+        cannot answer — the close below meets that one itself. Never raises: it
+        runs at the head of every close, failure paths included."""
+        if self._session_body is None:
+            return
+        try:
+            status = self._get("/session/status")
+        except Exception:  # noqa: BLE001 - the close below meets a silent bridge itself
+            return
+        try:
+            if status.get("running") or not _is_crash_exit(status.get("exit_code")):
+                return
+            report = self._app_death_report(close, status)
+        except Exception as exc:  # noqa: BLE001 - a diagnosis must never break the close
+            report = (
+                f"the app died before {close} closed it: "
+                f"{self._exit_code_phrase(status)} (diagnostics unavailable: "
+                f"{type(exc).__name__}: {exc})"
+            )
+        from helpers import app_deaths
+
+        app_deaths.record(report, launch=status.get("launched_at"))
+
+    def _app_death_report(self, close: str, status: dict) -> str:
+        """The recorded death: the verdict first (the live-reason line carries the
+        first line alone), then when it died on the bridge's clock, then the same
+        post-mortem an ack timeout carries — the app's crash reports whole, the
+        app + bridge tail and `fauna.log` — read now, before the close's cleanup
+        reclaims the data dir the log lives in."""
+        return (
+            f"the app died before {close} closed it: {self._exit_code_phrase(status)}\n"
+            f"{self._exit_instant_phrase(status)}. The close is a hard kill, so the "
+            "app died on its own before it: during the last command the harness sent "
+            "it (a reset, a teardown's sign-out) or after the test's last step."
+            f"{self.ack_timeout_diagnostics()}"
+        )
+
+    def _exit_instant_phrase(self, status: dict) -> str:
+        """`it exited +37 s after its launch, 3 s before this close` — offsets on
+        the harness's clock, from the bridge's `launched_at` / `exited_at`."""
+        exited = self._bridge_instant(status.get("exited_at"))
+        if exited is None:
+            return "the bridge reports no exited_at, so when it died is unread"
+        before = f"{max(0.0, time.time() - exited):.0f} s before this close"
+        launched = self._bridge_instant(status.get("launched_at"))
+        if launched is None:
+            return f"it exited {before}"
+        return f"it exited +{max(0.0, exited - launched):.0f} s after its launch, {before}"
+
     def _untracked_sweep_count(self) -> int:
         """How many kills have had to sweep an app instance the bridge never
         tracked (`flaui-bridge/SessionManager.cs::ClearDataDirOwners`)."""
@@ -1785,6 +2219,19 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         except Exception:  # noqa: BLE001
             return 0
 
+    def _app_log_slice(self, mark: int) -> tuple[Path | None, list[str], str]:
+        """(the current log, its lines after byte offset ``mark``, why it could not
+        be read). Never raises: every caller is a failure path."""
+        path = self._app_log_path()
+        if path is None:
+            return None, [], f"  (no app log under {self._data_dir}\\logs at all)"
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(mark)
+                return path, fh.read().decode("utf-8", errors="replace").splitlines(), ""
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never mask the failure
+            return path, [], f"  (app log {path.name} unreadable: {type(exc).__name__}: {exc})"
+
     def _app_log_since(self, mark: int, limit: int = 40) -> str:
         """What the app logged after byte offset ``mark``, for a failure to carry.
 
@@ -1802,15 +2249,9 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         literally the first thing the app does, ahead of the window itself, so a
         relaunch that logged nothing never got that far.
         """
-        path = self._app_log_path()
-        if path is None:
-            return f"  (no app log under {self._data_dir}\\logs at all)"
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(mark)
-                new = fh.read().decode("utf-8", errors="replace").splitlines()
-        except Exception as exc:  # noqa: BLE001 - diagnostics must never mask the failure
-            return f"  (app log {path.name} unreadable: {type(exc).__name__}: {exc})"
+        path, new, unread = self._app_log_slice(mark)
+        if unread:
+            return unread
         if not new:
             return (
                 f"  *** {path.name}: the relaunched process wrote NOTHING. It never "
@@ -1846,6 +2287,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         (a harness leak, `SessionManager.Quit`), which is wrong exactly when the
         sibling is another driver's live app sharing one install world — a test
         closing the first of two colliding instances."""
+        self._read_exit_before_close("teardown")
         try:
             self._delete("/session" if sweep_data_dir_peers else "/session?sweep=false")
         except Exception:
@@ -1893,6 +2335,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
 
     def _force_kill(self) -> None:
         """Kill the bridge process. Safe to call multiple times."""
+        self._stop_bridge_keepalive()
         if self._bridge_proc:
             self._bridge_proc.terminate()
             try:

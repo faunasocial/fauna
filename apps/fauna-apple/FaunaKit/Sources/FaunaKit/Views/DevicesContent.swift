@@ -246,6 +246,15 @@ private struct CustodyHeldCard: View {
                 .foregroundStyle(.secondary)
             automationText(Ids.custodyHeldBytes, ValueFormat.custodyHeldBytesText(row.receipt))
                 .font(.caption)
+            // The owner's cold-device restore address (`devices.md` § Custody
+            // facet): a NEST-form hold only, the accept's URL verbatim, for the
+            // host to hand over out of band. A device-form hold renders nothing.
+            if let address = row.custodianNestUrl {
+                automationText(Ids.custodyHeldRestoreAddress, L.devices.custodyHeldRestoreAddress(address: address))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             LabeledContent(L.devices.custodyBudgetLabel) {
                 TextField(L.devices.custodyBudgetLabel, text: $draft)
                     .multilineTextAlignment(.trailing)
@@ -265,7 +274,10 @@ private struct CustodyHeldCard: View {
                 .controlSize(.small)
                 .disabled(row.stopped)
                 .accessibilityIdentifier(Ids.custodyHeldStopButton)
-                .automationActivate(Ids.custodyHeldStopButton, isEnabled: { !row.stopped }) { stop() }
+                // `text` reads back the rendered label, so a test can witness
+                // the stopped relabel on both apple apps (no AX fallback).
+                .automationActivate(Ids.custodyHeldStopButton, isEnabled: { !row.stopped },
+                                    text: { row.stopped ? L.devices.custodyStoppedBytesRemain : L.devices.custodyStop }) { stop() }
                 // Always available, stopped or not: stop is the pause and this
                 // is the reclaim.
                 Button(L.devices.custodyRemove, role: .destructive) {
@@ -463,11 +475,28 @@ private struct CustodyMintFlow: View {
 /// + child IDs) into FaunaKit. Removal is direct (no confirm dialog) — the
 /// canonical cross-app behaviour, matching `device-remove-button` with no
 /// `device-remove-confirm` element.
+/// The rename affordance's controls on one `device-card`, in paint order
+/// (`ui/devices.md` § Device names): closed, the card's `device-rename-button`;
+/// open, the editor — input, confirm, cancel — which REPLACES that button on its
+/// own card (tui's `devices_elements` paints the same sequence). `DeviceCard`
+/// reads it to decide what paints, so the unit test of this function pins the view.
+enum DeviceRenameAffordance {
+    static func controlIds(renaming: Bool) -> [String] {
+        renaming
+            ? [Ids.deviceRenameInput, Ids.deviceRenameConfirmButton, Ids.deviceRenameCancelButton]
+            : [Ids.deviceRenameButton]
+    }
+}
+
 private struct DeviceCard: View {
     let vm: DevicesMachineVM
     let device: DeviceSummary
     let index: Int
     let localDeviceId: String?
+
+    /// The rename editor's open flag and draft (page-local; a fresh visit closes it).
+    @State private var renaming = false
+    @State private var renameDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -559,6 +588,36 @@ private struct DeviceCard: View {
                 value: { paint.checked ? "on" : "off" }
             ) { toggleParticipation() }
 
+            // The rename affordance (`devices.md` § Device names): ONE editor,
+            // keyed by `device_id`, never the painted index. Which of its
+            // controls paint is `DeviceRenameAffordance.controlIds` — the open
+            // editor REPLACES the card's rename button, as on tui.
+            let renameControls = DeviceRenameAffordance.controlIds(renaming: renaming)
+            if renameControls.contains(Ids.deviceRenameInput) {
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent(L.devices.renameLabel) {
+                        TextField(L.devices.renameLabel, text: $renameDraft)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit(confirmRename)
+                    }
+                    .font(.caption)
+                    .accessibilityIdentifier(Ids.deviceRenameInput)
+                    .automationField(Ids.deviceRenameInput, text: $renameDraft, commit: confirmRename)
+                    HStack(spacing: 12) {
+                        Button(L.devices.renameConfirm) { confirmRename() }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                            .accessibilityIdentifier(Ids.deviceRenameConfirmButton)
+                            .automationActivate(Ids.deviceRenameConfirmButton) { confirmRename() }
+                        Button(L.common.cancel, role: .cancel) { renaming = false }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                            .accessibilityIdentifier(Ids.deviceRenameCancelButton)
+                            .automationActivate(Ids.deviceRenameCancelButton) { renaming = false }
+                    }
+                }
+            }
+
             HStack {
                 if !device.folders.isEmpty {
                     HStack(spacing: 4) {
@@ -570,6 +629,13 @@ private struct DeviceCard: View {
                     }
                 }
                 Spacer()
+                if renameControls.contains(Ids.deviceRenameButton) {
+                    Button(L.devices.rename) { openRename() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.deviceRenameButton)
+                        .automationActivate(Ids.deviceRenameButton) { openRename() }
+                }
                 Button(L.common.remove, role: .destructive) {
                     removeDevice()
                 }
@@ -591,6 +657,18 @@ private struct DeviceCard: View {
 
     private func removeDevice() {
         Task { await vm.removeDevice(index: index) }
+    }
+
+    private func openRename() {
+        renameDraft = vm.deviceName(deviceId: device.deviceId) ?? device.label
+        renaming = true
+    }
+
+    private func confirmRename() {
+        let id = device.deviceId
+        let text = renameDraft
+        renaming = false
+        Task { await vm.renameDevice(deviceId: id, label: text) }
     }
 
     /// The toggle's paint, drawn by the devices machine at every snapshot

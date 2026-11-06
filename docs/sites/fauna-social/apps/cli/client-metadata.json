@@ -1,0 +1,12 @@
+{
+  "client_id": "https://fauna.social/apps/cli/client-metadata.json",
+  "client_name": "Fauna for AI assistants",
+  "client_uri": "https://fauna.social",
+  "application_type": "native",
+  "redirect_uris": ["http://127.0.0.1/"],
+  "response_types": ["code"],
+  "grant_types": ["authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+  "token_endpoint_auth_method": "none",
+  "dpop_bound_access_tokens": true,
+  "scope": "fauna:feed:read fauna:feed:read:account fauna:identity:op:post.author fauna:admin:read:dashboard fauna:admin:rw:users fauna:admin:rw:settings fauna:admin:rw:nest fauna:admin:read:logs fauna:admin:rw:web fauna:admin:rw:dns fauna:admin:rw:mail fauna:admin:read:mail-reports fauna:admin:rw:aliases fauna:admin:rw:calendar fauna:admin:rw:contacts fauna:admin:rw:files fauna:admin:read:bridges-pending fauna:notifications:read fauna:notifications:write fauna:identity:op:profile.author fauna:identity:op:conversation.read fauna:identity:op:conversation.send fauna:profile:read"
+}

@@ -29,7 +29,7 @@ sys.path.insert(0, str(E2E))
 
 from drivers import macos  # noqa: E402
 
-BINARY = REPO / "apps/fauna-apple/.build/arm64-apple-macosx/debug/FaunaMacOS"
+BINARY = REPO / "apps/fauna-apple/.build/debug/FaunaMacOS"  # SwiftPM's symlink, either build system
 #: How long the Photos dialog may stay unanswered once it is on screen.
 ANSWER_WAIT_S = 300
 

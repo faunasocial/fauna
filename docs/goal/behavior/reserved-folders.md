@@ -130,9 +130,12 @@ any app-side plumbing. That seam — `FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS`, un
 autosave-window seam's compile-time gate — exists to **lengthen** the window, never to shorten it:
 it is how a leave-flush witness on an app that keeps running after its leave door (iOS) recovers the
 property process death gives every other leg, namely that the debounce provably cannot be what
-saved the draft. web is the one app the seam cannot reach, because `wasm32-unknown-unknown` has no
-process environment; its 150 ms override remains its own substitute, and it shortens where the seam
-lengthens, so web's leave-flush leg still races the debounce rather than ruling it out.
+saved the draft. web takes the same seam through another door: `wasm32-unknown-unknown` has no
+process environment, so the harness writes the same name into the page origin's `localStorage` and
+`fauna-wasm`'s `e2eDraftsAutosaveWindowMs` reads it through the shared grammar
+(`fauna_client_drafts::sync::parse_e2e_autosave_debounce`), in place of web's own 150 ms test
+cadence (2026-10-30). Web's tab-leave witness (`test_web_leave_flush.py`) takes it too, since
+its dispatched `pagehide` leaves the page running exactly as iOS's background door leaves the app.
 
 ### The leave-flush promise
 
@@ -196,15 +199,29 @@ identity) and the factory reset (the nest the rails live on was just wiped).
 account switch and the e2e reset alike — capturing each rail's snapshot before the teardown drops
 the managers and saving it on the stop task ahead of the client's disconnect, so the erase and the
 next sign-in's restore queue behind it. tui's quit and sign-out doors share one body
-(`drafts_autosave::LeaveFlush`, each rail bounded on its own). The witness is
+(`drafts_autosave::LeaveFlush`, each rail bounded on its own).
+**macos and ios** (2026-10-31) flush all three, bounded at 2.5 s, through `flushDraftRails` on
+each app state: `SignOutSection` runs it behind the sign-out-blocked refusal and ahead of the push
+row's drop and the runtime stop, and `switchAccount` runs it ahead of the teardown. The teardown
+itself does not, so the identity-changed verdict skips it as linux's does. The witness is
 `tests/e2e-unified/tests/test_drafts_sign_out_flush.py`, `drafts-survive` outcome 13: type a post,
 sign out through the app's own gesture with the autosave window re-timed past the whole test,
 read the draft off the nest, sign in again and find it in the composer by value. It drives the
 user's gesture, never the harness reset, because linux's e2e reset tears its windows down without
-passing the sign-out branch; it is green on tui and linux (Linux, 2026-10-10). web,
-android and apple are not yet audited for this door and stay
-unmarked, so `just features-parity drafts-survive` reads them as gaps like the quit door's; web
-also cannot take the window seam (no process environment), so its leg needs a witness of its own.
+passing the sign-out branch; it is green on tui and linux (Linux, 2026-10-10).
+**web** (2026-10-30) flushes all three in `identity.logout()` (`apps/fauna-web/src/lib/store.ts`),
+awaiting `#lib/drafts-leave-flush`'s `flushDraftRailsNow()` after the sign-out record is written
+and before the account runtime's stop retires the session — the same body its tab-leave door fires
+and forgets, each rail bounded by the shared `fauna_client_drafts::LEAVE_FLUSH_BUDGET` (3 s, the
+bound tui's doors take; windows keeps its own 5 s). Its leg is the same witness, the window seam
+reaching it through `localStorage` (above). web's account switch is a full reload, whose `pagehide`
+only fires the flush and forgets it, so the switcher (`performSwitch`, the Account settings page)
+awaits the same `flushDraftRailsNow()` after the registry accepts the activation and before the
+reload, and the add-account door fires it as the wizard opens, while the outgoing session still
+holds its rails; the switch leg's witness is
+`test_account_switcher_web.py::test_web_switching_identity_saves_the_draft_inside_its_autosave_window`.
+android and apple are not yet audited for this door and
+stay unmarked, so `just features-parity drafts-survive` reads them as gaps like the quit door's.
 
 ## Contacts Sync
 

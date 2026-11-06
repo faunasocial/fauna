@@ -182,6 +182,7 @@ public static class ScreenTimeCache
         lock (_gate) RecomputeLocked();
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Test-only: advance the clock by <paramref name="minutes"/> of
     /// foreground use, in the accrual steps a real caller would tick in, then
@@ -192,8 +193,8 @@ public static class ScreenTimeCache
     /// asserts what a ward actively using the app accrues. Driven only by the
     /// debug-only <c>TestAgent</c>'s <c>screen_time_heartbeat</c> command
     /// (testing.md § convention 14's fake clock + <c>run_now</c> poke;
-    /// § convention 15 keeps this whole path out of release artifacts via
-    /// <c>TestAgent</c>'s own build-type gate).
+    /// § convention 15 keeps this whole path out of release artifacts — the
+    /// <c>TestAgent</c>'s own build-type gate, and the same gate on this method).
     /// </summary>
     internal static async Task AdvanceTestClockAndTickAsync(int minutes, INestRpcClient rpc)
     {
@@ -216,6 +217,7 @@ public static class ScreenTimeCache
         }
         await HeartbeatStepAsync(active: true, rpc);
     }
+#endif
 
     /// Set from <c>App.xaml.cs</c>'s <c>Window.Activated</c> — whether the app
     /// window currently has focus. Production-only signal for <see

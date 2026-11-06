@@ -367,13 +367,20 @@ fn writer_grant_register_handler() -> RpcHandler {
             // § Cross-location backup protocol → *The writer seat*).
             match state
                 .db
-                .register_backup_writer(&actor_id, &writer, succeeds.as_ref())
+                .register_backup_writer(&actor_id, &writer, succeeds.as_ref(), req.in_force_only)
                 .await
                 .map_err(internal)?
             {
                 WriterSeatOutcome::Seated => encode_reply(&WriterGrantRegisterReply {
                     ok: true,
-                    extra: Default::default(),
+                    ..Default::default()
+                }),
+                // A settled answer, not an error: the carry reads it as the
+                // owner's freeze and leaves the seat alone.
+                WriterSeatOutcome::Revoked => encode_reply(&WriterGrantRegisterReply {
+                    ok: false,
+                    seat_revoked: true,
+                    ..Default::default()
                 }),
                 WriterSeatOutcome::Held { holder } => Err(writer_seat_held(holder)),
             }

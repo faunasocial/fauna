@@ -34,6 +34,11 @@ public class ConnectedAppsViewModelTests
         private static readonly Dictionary<string, string> Map = new()
         {
             ["connected_apps/verbatim"] = "{text}",
+            ["connected_apps/row_head"] = "{name} · {badge}",
+            ["connected_apps/publisher_line"] = "{publisher} — {client_id}",
+            ["connected_apps/bullet"] = "  • {text}",
+            ["connected_apps/indented"] = "  {text}",
+            ["connected_apps/class_device"] = "App on a device",
             ["connected_apps/class_app_password"] = "Signed in with an app password",
             ["connected_apps/class_signer"] = "Nostr signer app",
             ["connected_apps/publisher"] = "From {domain}",
@@ -46,6 +51,8 @@ public class ConnectedAppsViewModelTests
             ["connected_apps/blocked_since"] = "Blocked {time}",
             ["connected_apps/consent_ends_holder"] =
                 "This app now uses a new key. Approving ends the access its earlier key was given.",
+            ["connected_apps/consent_assistant_reach"] =
+                "Whatever you allow here, the AI assistant you connect can read or do.",
             ["settings/mail/credential_revoked"] = "Compromised — access revoked",
             ["atproto_settings/consent_heading"] = "An app wants to connect",
             ["atproto_settings/consent_client"] = "{name} — {client_id}",
@@ -54,6 +61,11 @@ public class ConnectedAppsViewModelTests
             ["atproto_settings/consent_code"] = "Confirmation code: {code}",
             ["atproto_settings/consent_set_heading"] = "Some of that comes from “{title}” ({nsid}):",
             ["atproto_settings/consent_set_heading_unnamed"] = "Some of that comes from {nsid}:",
+            ["connected_apps/install_heading"] = "Install this plugin on your nest",
+            ["connected_apps/install_heading_bind"] = "Connect this plugin on your nest to your account",
+            ["connected_apps/install_framing"] = "Installing grants nothing.",
+            ["connected_apps/install_form"] = "Runs as: {form}",
+            ["connected_apps/install_digest"] = "Module: {digest}",
         };
 
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;
@@ -102,6 +114,13 @@ public class ConnectedAppsViewModelTests
 
         public override Task Revoke(string key) { Calls.Add($"Revoke:{key}"); return Task.CompletedTask; }
 
+        public override Task SetExternalAppsEnabled(bool enabled)
+        {
+            Calls.Add($"SetExternalAppsEnabled:{enabled}");
+            Snap = Snap with { @externalAppsOff = !enabled };
+            return Task.CompletedTask;
+        }
+
         public override Task<string?> RevealSecret(string key)
         {
             Calls.Add($"RevealSecret:{key}");
@@ -130,13 +149,14 @@ public class ConnectedAppsViewModelTests
         bool loaded = true,
         ConsentCardRow[]? requests = null,
         ConnectedAppRow[]? principals = null,
-        BlockedAppRow[]? blocked = null) =>
+        BlockedAppRow[]? blocked = null,
+        bool externalAppsOff = false) =>
         new(
             @loaded: loaded,
             @requests: requests ?? Array.Empty<ConsentCardRow>(),
             @principals: principals ?? Array.Empty<ConnectedAppRow>(),
             @blocked: blocked ?? Array.Empty<BlockedAppRow>(),
-            @externalAppsOff: false,
+            @externalAppsOff: externalAppsOff,
             @error: null);
 
     private static ConnectedAppRow Row(
@@ -151,7 +171,8 @@ public class ConnectedAppsViewModelTests
         long? lastsUntilMillis = null,
         bool connected = true,
         bool paused = false,
-        MailAppPassword? mail = null) =>
+        MailAppPassword? mail = null,
+        ConsentSetRow[]? sets = null) =>
         new(
             @key: key,
             @class: cls,
@@ -164,7 +185,8 @@ public class ConnectedAppsViewModelTests
             @lastsUntilMillis: lastsUntilMillis,
             @connected: connected,
             @paused: paused,
-            @mail: mail);
+            @mail: mail,
+            @sets: sets);
 
     private static MailAppPassword MailRow(bool revoked = false) =>
         new(@muaUsername: "{handle}+abc@example.test", @kind: Verbatim("Password"), @revoked: revoked);
@@ -186,11 +208,101 @@ public class ConnectedAppsViewModelTests
             @sets: sets ?? Array.Empty<ConsentSetRow>(),
             @ends: ends);
 
+    private static ConsentInstallRow Install(bool bind = false) =>
+        new(
+            @executionForm: "wasm",
+            @requestedKinds: new[] { "ext.plugins.example.notes" },
+            @settings: Array.Empty<ConsentInstallSettingRow>(),
+            @publisherDomain: "plugins.example",
+            @publisherKey: "did:key:z6Mk",
+            @moduleDigest: "sha256:abc",
+            @hosts: Array.Empty<string>(),
+            @ingressPaths: Array.Empty<string>(),
+            @development: false,
+            @bind: bind);
+
+    private static ConsentCardRow InstallCard(bool bind = false) =>
+        Request() with { @install = Install(bind) };
+
+    // ── The roster row's settings link (connected-apps.md § Layout & flow, region 3) ──
+
+    [Theory]
+    [InlineData("wasm", true)]
+    [InlineData("container", true)]
+    [InlineData("device", false)]
+    [InlineData("remote", false)]
+    public void Only_a_hosted_plugins_row_links_to_its_settings_card(string cls, bool links)
+    {
+        Assert.Equal(links, ConnectedAppsViewModel.OpensSettingsCard(Row(cls: cls)));
+    }
+
+    // ── The install section (third-party.md § The runner contract → The install-approval leg) ──
+
+    [Fact]
+    public void An_ordinary_card_paints_no_install_section()
+    {
+        UseRealStrings();
+        Assert.Null(ConnectedAppsViewModel.InstallSection(Request()));
+    }
+
+    [Fact]
+    public void An_install_card_paints_each_leaf_from_the_shared_composition()
+    {
+        UseRealStrings();
+        var section = ConnectedAppsViewModel.InstallSection(InstallCard());
+        Assert.NotNull(section);
+        Assert.Equal("Install this plugin on your nest", section!.Heading);
+        // The leaf's text is the composed sentence; the raw form is its `form` attr.
+        Assert.Equal("Runs as: wasm", section.Form);
+        Assert.Equal("wasm", section.FormValue);
+        Assert.Equal("Module: sha256:abc", section.Digest);
+        // An admin's install card carries the framing line under the heading.
+        Assert.Equal("Installing grants nothing.", section.Framing);
+    }
+
+    [Fact]
+    public void A_bind_card_carries_no_framing_line()
+    {
+        UseRealStrings();
+        var section = ConnectedAppsViewModel.InstallSection(InstallCard(bind: true));
+        Assert.NotNull(section);
+        Assert.Equal("Connect this plugin on your nest to your account", section!.Heading);
+        Assert.Null(section.Framing);
+    }
+
     private static (ConnectedAppsViewModel Vm, FakeMachine M) Make(
         ConnectedAppsSnapshot snap, string handle = "alice")
     {
         var m = new FakeMachine(snap);
         return (new ConnectedAppsViewModel(m, handle), m);
+    }
+
+    // ── The external-apps switch ──
+
+    [Fact]
+    public async Task The_switch_state_attr_mirrors_the_snapshot_and_on_is_the_zero_value()
+    {
+        var (before, _) = Make(Snapshot(externalAppsOff: true));
+        Assert.Equal("on", before.ExternalAppsState);   // before any read: ON is the zero value
+
+        await before.VisitAsync();
+        Assert.Equal("off", before.ExternalAppsState);
+
+        var (on, _) = Make(Snapshot(externalAppsOff: false));
+        await on.VisitAsync();
+        Assert.Equal("on", on.ExternalAppsState);
+    }
+
+    [Fact]
+    public async Task The_switch_gesture_forwards_to_the_machine_and_paints_the_reread()
+    {
+        var (vm, m) = Make(Snapshot());
+        await vm.VisitAsync();
+
+        await vm.SetExternalAppsEnabledAsync(false);
+
+        Assert.Contains("SetExternalAppsEnabled:False", m.Calls);
+        Assert.Equal("off", vm.ExternalAppsState);
     }
 
     // ── A visit starts unread ──
@@ -456,6 +568,44 @@ public class ConnectedAppsViewModelTests
         Assert.DoesNotContain("Until you disconnect it", text);
     }
 
+    [Fact]
+    public void A_row_names_the_permission_set_after_its_scope_lines()
+    {
+        UseRealStrings();
+        var text = ConnectedAppsViewModel.RowText(Row(
+            scopes: new[] { "Read your posts" },
+            sets: new[]
+            {
+                new ConsentSetRow(
+                    @nsid: "app.bsky.authFullApp", @title: "Reading",
+                    @details: null, @memberDescriptions: new[] { "See posts" }),
+            }));
+
+        var lines = text.Split('\n').ToList();
+        var scope = lines.IndexOf("  • Read your posts");
+        var heading = lines.FindIndex(l => l.Contains("app.bsky.authFullApp"));
+        Assert.True(scope >= 0 && heading > scope, text);
+        Assert.Contains("Reading", lines[heading]);
+        Assert.True(lines.IndexOf("  • See posts") > heading, text);
+    }
+
+    [Fact]
+    public void A_composed_text_resolves_its_nested_entries_before_the_outer_template()
+    {
+        UseRealStrings();
+        // `connected_apps.row_head` is "{name} · {badge}": both holes are nested texts, and the
+        // nested badge is itself a key that must resolve before it fills the hole.
+        var composed = new ComposedText(
+            @text: new LocalizedText(@key: "connected_apps.row_head", @args: new Dictionary<string, string>()),
+            @nested: new Dictionary<string, LocalizedText>
+            {
+                ["name"] = Verbatim("Ivory"),
+                ["badge"] = new LocalizedText(@key: "connected_apps.class_device", @args: new Dictionary<string, string>()),
+            });
+
+        Assert.Equal($"Ivory · {Strings.Get("connected_apps/class_device")}", Strings.Resolve(composed));
+    }
+
     // ── The request card's text ──
 
     [Fact]
@@ -541,6 +691,28 @@ public class ConnectedAppsViewModelTests
     }
 
     [Fact]
+    public void The_clis_card_says_what_the_grant_reaches_before_what_the_approve_ends()
+    {
+        UseRealStrings();
+        var text = ConnectedAppsViewModel.RequestText(Request(
+            clientId: "https://fauna.social/apps/cli/client-metadata.json",
+            ends: Text("connected_apps.consent_ends_holder")));
+
+        var reach = text.IndexOf(Strings.Get("connected_apps/consent_assistant_reach"), StringComparison.Ordinal);
+        Assert.True(reach >= 0, text);
+        Assert.True(reach < text.IndexOf("This app now uses a new key.", StringComparison.Ordinal), text);
+    }
+
+    [Fact]
+    public void Another_apps_card_carries_no_reach_line()
+    {
+        UseRealStrings();
+        var text = ConnectedAppsViewModel.RequestText(Request());
+
+        Assert.DoesNotContain(Strings.Get("connected_apps/consent_assistant_reach"), text);
+    }
+
+    [Fact]
     public void The_binding_code_line_carries_the_code_and_the_raw_value_is_a_row_field()
     {
         UseRealStrings();
@@ -548,6 +720,33 @@ public class ConnectedAppsViewModelTests
 
         Assert.Equal("Confirmation code: XYZ-123", ConnectedAppsViewModel.RequestCodeText(request));
         Assert.Equal("XYZ-123", request.@code);   // what the e2e reads, never the prose
+    }
+
+    // ── The row's automation attributes ──
+
+    [Fact]
+    public void A_row_no_custodian_served_publishes_no_oracle_ops_at_all()
+    {
+        Assert.Equal("revoked=;status=connected", ConnectedAppsViewModel.RowAttributes(Row()));
+    }
+
+    [Fact]
+    public void A_served_row_publishes_its_window_count_beside_its_status()
+    {
+        var served = Row() with
+        {
+            @oracle = new OracleSummaryRow(@opsInWindow: 3, @requestsServed: 7, @lastOp: null),
+        };
+
+        Assert.Equal("revoked=;status=connected;oracle_ops=3", ConnectedAppsViewModel.RowAttributes(served));
+    }
+
+    [Fact]
+    public void A_burned_mail_row_reads_revoked_and_a_paused_row_reads_paused()
+    {
+        Assert.Equal("revoked=true;status=not_connected",
+            ConnectedAppsViewModel.RowAttributes(Row(connected: false, mail: MailRow(revoked: true))));
+        Assert.Equal("revoked=;status=paused", ConnectedAppsViewModel.RowAttributes(Row(paused: true)));
     }
 
     // ── The blocked row ──

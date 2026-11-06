@@ -130,6 +130,7 @@ fn params(base: &Path, device: &str, net: &Listeners) -> AccountRuntimeParams<Ne
         peer_transport: Some(mem_factory(net)),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+        enrollment_device_label: None,
     }
 }
 
@@ -250,10 +251,21 @@ async fn a_switched_off_device_never_binds_after_a_restart() {
 // ── The yield to the sync agent: the listener goes before the lock ─────────
 
 /// What `engine.lock` looked like at each instant a listener's accept side was
-/// dropped: `true` = still held by someone (the role had not been released).
+/// dropped (`held`), and at each instant its transport was closed (`closed`):
+/// `true` = still held by someone (the role had not been released).
 struct LockAtListenerDrop {
     store_dir: PathBuf,
     held: Mutex<Vec<bool>>,
+    closed: Mutex<Vec<bool>>,
+}
+
+impl LockAtListenerDrop {
+    fn lock_held(&self) -> bool {
+        matches!(
+            EngineLock::try_acquire(&self.store_dir),
+            EngineLockOutcome::Refused
+        )
+    }
 }
 
 /// Rides inside a listener's accept stream; its drop is the listener going.
@@ -261,10 +273,7 @@ struct ProbeOnDrop(Arc<LockAtListenerDrop>);
 
 impl Drop for ProbeOnDrop {
     fn drop(&mut self) {
-        let held = matches!(
-            EngineLock::try_acquire(&self.0.store_dir),
-            EngineLockOutcome::Refused
-        );
+        let held = self.0.lock_held();
         self.0.held.lock().unwrap().push(held);
     }
 }
@@ -298,6 +307,11 @@ impl PeerTransport for WitnessedListen {
     fn local_identity(&self) -> EndpointKey {
         self.inner.local_identity()
     }
+
+    async fn close(&self) {
+        let held = self.witness.lock_held();
+        self.witness.closed.lock().unwrap().push(held);
+    }
 }
 
 fn witnessed_factory(net: &Listeners, witness: &Arc<LockAtListenerDrop>) -> PeerTransportFactory {
@@ -330,12 +344,20 @@ fn witnessed_factory(net: &Listeners, witness: &Arc<LockAtListenerDrop>) -> Peer
 /// gone while that lock is still held, no instant has two endpoints on the
 /// one identity.
 ///
+/// The stand-down also CLOSES the transport before the lock goes, so every
+/// sibling connected to the yielding listener is told the connection is over
+/// instead of sending into its dead port (`peer_leg::stand_down`; the close
+/// itself is pinned on real iroh by `fauna_iroh`'s
+/// `closing_the_transport_tells_a_connected_peer_the_connection_is_over`).
+///
 /// Causal, never timed: the app's transport carries a probe inside its accept
 /// stream that reads `engine.lock` at the instant the stream is dropped, and
-/// the role fact flips only after the stand-down was awaited — so once the
-/// test reads the app a non-holder, the listener is already gone and the probe
-/// has spoken. Red-verified by releasing the lock ahead of the legs' stand-down
-/// in the driver's yield: the probe then finds the lock free.
+/// another in its `close`; the role fact flips only after the stand-down was
+/// awaited — so once the test reads the app a non-holder, the listener is
+/// already gone and both probes have spoken. Red-verified by releasing the
+/// lock ahead of the legs' stand-down in the driver's yield: the probe then
+/// finds the lock free; and by a stand-down that only drops the transport: the
+/// close probe then never speaks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_yield_to_the_agent_takes_the_listener_down_before_it_releases_the_role() {
     let tmp = tempfile::tempdir().unwrap();
@@ -348,6 +370,7 @@ async fn a_yield_to_the_agent_takes_the_listener_down_before_it_releases_the_rol
     let witness = Arc::new(LockAtListenerDrop {
         store_dir: store_dir.clone(),
         held: Mutex::new(Vec::new()),
+        closed: Mutex::new(Vec::new()),
     });
 
     let app = AccountStoreRuntime::start(AccountRuntimeParams {
@@ -377,6 +400,13 @@ async fn a_yield_to_the_agent_takes_the_listener_down_before_it_releases_the_rol
         vec![true],
         "the yielding listener went while engine.lock was still held — never after \
          the role was free for the agent to bind the same NodeId"
+    );
+    assert_eq!(
+        *witness.closed.lock().unwrap(),
+        vec![true],
+        "the yielding listener's transport was closed — every sibling connected to it \
+         told the connection is over — once, and while engine.lock was still held; a \
+         transport only dropped leaves those siblings sending into its dead port"
     );
 
     drop(presence);

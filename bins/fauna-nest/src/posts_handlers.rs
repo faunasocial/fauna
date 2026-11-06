@@ -188,6 +188,7 @@ fn posts_get_handler() -> RpcHandler {
                     encode_reply(&PostGetReply {
                         body: serde_bytes::ByteBuf::from(bytes),
                         author_display,
+                        counts: single_post_counts(&state, &actor_id, &post_id).await,
                         ..Default::default()
                     })
                 }
@@ -213,12 +214,18 @@ fn posts_get_handler() -> RpcHandler {
                         }
                         None => None,
                     };
+                    // The author's read keeps the body, and with it the counts.
+                    let counts = match &body {
+                        Some(_) => single_post_counts(&state, &actor_id, &post_id).await,
+                        None => None,
+                    };
                     encode_reply(&PostGetReply {
                         body: serde_bytes::ByteBuf::from(body.unwrap_or_default()),
                         admin_block: fauna_protocol::posts::AdminBlockMarker::from_reason(Some(
                             &reason,
                         )),
                         author_display,
+                        counts,
                         ..Default::default()
                     })
                 }
@@ -227,6 +234,31 @@ fn posts_get_handler() -> RpcHandler {
             }
         })
     })
+}
+
+/// The counts `fauna.posts.get` serves — `post_counts_best_effort`, on the rows
+/// this nest counts (`feed.md` § Layout & flow → *Reaction posts count and
+/// paint*, ruling 5). A lookup failure serves no counts, as every other read
+/// failure on this path does.
+async fn single_post_counts(
+    state: &Arc<AppState>,
+    actor: &[u8; 32],
+    post_id: &[u8; 32],
+) -> Option<fauna_protocol::posts::PostEngagementCounts> {
+    let source = state.db.get_post_source(post_id).await.ok()?;
+    let origin_nest_url = state.db.get_post_origin_nest_url(post_id).await.ok()?;
+    if !nest_counts_row(source.as_deref(), origin_nest_url.as_deref()) {
+        return None;
+    }
+    crate::interact_routes::post_counts_best_effort(state, actor, post_id).await
+}
+
+/// Whether this nest's own counters are the ones a row shows: not on a
+/// `bluesky` row, whose counters live at the origin, nor on a discovery stub
+/// (`origin_nest_url` set), whose counters are its home's.
+fn nest_counts_row(source: Option<&str>, origin_nest_url: Option<&str>) -> bool {
+    let is_bluesky = source.and_then(fauna_core::source::normalize).as_deref() == Some("bluesky");
+    !is_bluesky && origin_nest_url.is_none()
 }
 
 // ── fauna.posts.room_labels ────────────────────────────────────
@@ -706,4 +738,24 @@ pub fn register_posts_handlers(b: &mut RpcRouterBuilder) {
             handler: posts_delete_handler(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nest_counts_row;
+
+    /// The single-post read counts a local row and nothing whose counters live
+    /// elsewhere — a `bluesky` row (any token spelling) or a discovery stub.
+    #[test]
+    fn single_post_read_counts_only_rows_this_nest_counts() {
+        assert!(nest_counts_row(Some("fauna"), None));
+        assert!(nest_counts_row(Some("activitypub"), None));
+        assert!(nest_counts_row(Some("nostr"), None));
+        assert!(!nest_counts_row(Some("bluesky"), None));
+        assert!(!nest_counts_row(Some(" Bluesky "), None));
+        assert!(!nest_counts_row(
+            Some("fauna"),
+            Some("https://peer.example")
+        ));
+    }
 }

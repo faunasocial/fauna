@@ -46,6 +46,9 @@ from . import test_mail_enable_then_mua_round_trip as rt
 pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
+    # android: same shared enable_mail_plain preamble as the MUA round trip; marked,
+    # not run (no android venue yet).
+    pytest.mark.android,
     pytest.mark.linux,
     pytest.mark.windows,
     pytest.mark.macos,

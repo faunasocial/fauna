@@ -9,8 +9,8 @@ namespace FaunaApp.Tests;
 /// Windows leg of box-recovery step-4 (Task E). The OnboardingViewModel is a thin
 /// proxy over the shared UniFFI OnboardingMachine (branch tests live in
 /// libs/fauna-onboarding-machine), so these pin only the <b>windows glue</b> the
-/// two recovery pages bind: the box-list projection into dash-indexed
-/// <c>recover-box-item-{i}</c> item VMs, the method-button gating, the
+/// two recovery pages bind: the box-list projection, in order, into the
+/// <c>recover-box-item</c> row VMs, the method-button gating, the
 /// begin-recovery transition, and the placeholder self-hosted command.
 ///
 /// Constructs a real <see cref="OnboardingMachine"/> (the native fauna_ffi dll
@@ -51,16 +51,17 @@ public class OnboardingViewModelRecoveryTests
     }
 
     [Fact]
-    public void RecoveryBoxItems_MapMachineBoxesToDashIndexedIds()
+    public void RecoveryBoxItems_MapMachineBoxesInOrder()
     {
         var vm = NewVm();
         SeedBoxes(vm, BoxA, BoxB);
 
         Assert.True(vm.HasRecoveryBoxes);
         Assert.Equal(2, vm.RecoveryBoxItems.Count);
-        Assert.Equal("recover-box-item-0", vm.RecoveryBoxItems[0].BoxItemId);
-        Assert.Equal("recover-box-item-1", vm.RecoveryBoxItems[1].BoxItemId);
+        Assert.Equal(0, vm.RecoveryBoxItems[0].Index);
+        Assert.Equal(1, vm.RecoveryBoxItems[1].Index);
         Assert.Equal(BoxA, vm.RecoveryBoxItems[0].Id);
+        Assert.Equal(BoxB, vm.RecoveryBoxItems[1].Id);
         // head-8 … tail-8 short display (mirrors linux short_nest_id).
         Assert.Equal("aaaaaaaa…11111111", vm.RecoveryBoxItems[0].ShortId);
     }
@@ -115,12 +116,59 @@ public class OnboardingViewModelRecoveryTests
         Assert.NotEqual(OnboardingStep.VpsConfig, vm.CurrentStep);
     }
 
+    // A 64-hex placeholder seed, built rather than spelled so no secret-shaped
+    // literal sits in the file.
+    private static readonly string Line = "FAUNA_DEPLOYMENT_SEED=" + new string('a', 64);
+
     [Fact]
-    public void RecoverSelfhostedCommand_IsPendingPlaceholder()
+    public async System.Threading.Tasks.Task RecoverSelfhostedCommand_ResolvedLineReplacesPendingAndEnablesCopy()
     {
         var vm = NewVm();
-        Assert.Equal(
-            Strings.Get("onboarding/recovery/selfhosted_command_pending"),
-            vm.RecoverSelfhostedCommand);
+        SeedBoxes(vm, BoxA, BoxB);
+        vm.SelectRecoveryBox(BoxA);
+        string? asked = null;
+        vm.SelfhostedCommandResolver = id => { asked = id; return System.Threading.Tasks.Task.FromResult<string?>(Line); };
+
+        // Unresolved until the page's entry resolve runs.
+        Assert.Equal(Strings.Get("onboarding/recovery/selfhosted_command_pending"), vm.RecoverSelfhostedCommand);
+        Assert.False(vm.RecoverSelfhostedCopyEnabled);
+
+        await vm.ResolveSelfhostedCommandAsync();
+
+        Assert.Equal(BoxA, asked);
+        Assert.Equal(Line, vm.RecoverSelfhostedCommand);
+        Assert.Equal(Line, vm.RecoverSelfhostedCommandToCopy);
+        Assert.True(vm.RecoverSelfhostedCopyEnabled);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task RecoverSelfhostedCommand_UnresolvedKeepsPendingAndCopyDisabled()
+    {
+        var vm = NewVm();
+        SeedBoxes(vm, BoxA);
+        vm.SelectRecoveryBox(BoxA);
+        vm.SelfhostedCommandResolver = _ => System.Threading.Tasks.Task.FromResult<string?>(null);
+
+        await vm.ResolveSelfhostedCommandAsync();
+
+        Assert.Equal(Strings.Get("onboarding/recovery/selfhosted_command_pending"), vm.RecoverSelfhostedCommand);
+        Assert.Null(vm.RecoverSelfhostedCommandToCopy);
+        Assert.False(vm.RecoverSelfhostedCopyEnabled);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ResolveSelfhostedCommandAsync_DeadNestFallsBackToTheDevicesOwnStoreWithoutThrowing()
+    {
+        // A nest URL nothing listens on: the cold read fails, the device's own
+        // store answers (here: no custodied seed for this box → null), and the
+        // helper never throws — box-recovery.md § (b), "never either-or".
+        var secret = new byte[32];
+        var line = await FaunaApp.Core.Helpers.DeploymentSeedCustody.ResolveSelfhostedCommandAsync(
+            "ws://127.0.0.1:1", secret, BoxA);
+        Assert.Null(line);
+
+        var noNest = await FaunaApp.Core.Helpers.DeploymentSeedCustody.ResolveSelfhostedCommandAsync(
+            null, secret, BoxA);
+        Assert.Null(noNest);
     }
 }

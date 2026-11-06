@@ -85,7 +85,7 @@ fauna.conversations.welcome.deliver { actor_id: <peer_actor_id>, channel_id, wel
 > **Target state (designed 2026-08-17, unbuilt):** the sequencing/delivery
 > seat this flow implicitly gives the channel-home nest becomes a named,
 > re-pointable role a member device can hold — owner
-> [`p2p.md`](p2p.md) § Offline share initiation (the delivery-seat design);
+> [`p2p-shared-set.md`](p2p-shared-set.md) § Offline share initiation (the delivery-seat design);
 > nothing in the flow above changes until that builds.
 
 ### 4. Recipient Joins
@@ -351,6 +351,17 @@ sender is suppressed under every mode (the same rules the floor applies):
 | `contacts_only` | refused (the knock path refuses a stranger's knock too) |
 | `closed` | refused |
 
+**Whose edge the gate reads — the recipient's — and why the acceptor of a
+request is never meant to be a stranger to its sender.** The status above is
+the *recipient's* edge toward the caller (`reach_floor(recipient, sender)`),
+and accepting a knock writes the requester's edge as well as the acceptor's,
+under four guards `../ui/contacts.md` § Persistence → *The accept makes the
+edge mutual* owns (ratified 2026-10-23) — so once B accepts A's request, A and
+B may each open the conversation (built 2026-10-23; that doc's § Implementation
+status today names the pins). Without the second edge B's Welcome to A was
+refused here with the copy below, which told B to send a request to the person
+who had just sent one.
+
 **The refusal is one opaque typed error** — `fauna.conversations.forbidden`,
 the same code the supervised floor answers with — so a sender cannot
 distinguish `contacts_only` from `closed` from supervision by probing the DM
@@ -419,7 +430,12 @@ modes in two:
 - **`allow_knock` / `contacts_only` — still declared gaps.** Their verdicts
   turn on a *contact edge*, and with no signed sender every cross-nest party is
   a stranger; enforcing them here would refuse cross-nest *contacts* too.
-  Follow-on (unbuilt), blocked on the contact model learning home-nests.
+  Follow-on (unbuilt), blocked on the contact model learning home-nests —
+  and sequenced AFTER the accept learns to cross nests: the mutual-edge write
+  (`../ui/contacts.md` § Persistence → *The accept makes the edge mutual*,
+  guard 2) stops at this nest's `users`, so enforcing `allow_knock` here before
+  an accept can reach the requester's nest would refuse exactly the acceptor's
+  first Welcome. Not a choice: the cross-nest accept lands first.
 
 ⚠ **The cross-nest `closed` gate is kind-blind, deliberately, and that
 diverges from same-nest.** `req.channel_type` is peer-supplied and this handler
@@ -577,7 +593,7 @@ yet closed**. Neither is a licence to build on the described behaviour.
 A: There's no server-side limit; the shared session keeps the pool topped up to `KEYPACKAGE_TARGET = 20` (§ Key Package Management). Key packages expire after 30 days. If the one-time pool empties, the nest falls back to the actor's reusable last-resort key package (§ Key Package Fetch); only once neither a one-time nor a last-resort package is on file can no one initiate a DM to that user.
 
 **Q: What's the default inbox mode?**
-A: `allow_knock` — anyone can send a contact request (knock), but the recipient must accept before DMs flow. Other modes: `open` (anyone can DM), `contacts_only` (existing contacts only), `closed` (no incoming). Enforced on the same-nest DM plane since 2026-08-02, and `closed` is enforced cross-nest too since 2026-08-23 (§ Reach policy; the `allow_knock`/`contacts_only` cross-nest legs remain declared follow-ons there).
+A: `allow_knock` — anyone can send a contact request (knock), but the recipient must accept before DMs flow — and once they do, either of them may open the conversation, because the accept writes both edges (`../ui/contacts.md` § Persistence → *The accept makes the edge mutual*; built nest-side 2026-10-23). Other modes: `open` (anyone can DM), `contacts_only` (existing contacts only), `closed` (no incoming). Enforced on the same-nest DM plane since 2026-08-02, and `closed` is enforced cross-nest too since 2026-08-23 (§ Reach policy; the `allow_knock`/`contacts_only` cross-nest legs remain declared follow-ons there).
 
 **Q: How long do unanswered knocks last?**
 A: Pending knocks expire after 90 days. Accepted-but-unconfirmed contacts expire after 30 days.

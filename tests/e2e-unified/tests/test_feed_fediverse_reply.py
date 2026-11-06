@@ -54,15 +54,6 @@ def _unique(prefix: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def ap_binary():
-    """fauna-nest with ``activitypub`` + ``test-hooks`` — the federation
-    suite's build, replayed from the collection-time prebuild through
-    conftest's memoized ensure layer rather than paid inside a test."""
-    from conftest import _ensure_ap_nest_built
-    return _ensure_ap_nest_built()
-
-
-@pytest.fixture(scope="module")
 def fediverse_nest(ap_binary, tmp_path_factory):
     """One AP-enabled nest for the module, its domain its own loopback
     authority (the federation suite's shape). Each test registers its own
@@ -144,7 +135,10 @@ def _federating_user(nest):
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("fediverse")
 def test_a_reply_to_a_fediverse_post_reaches_its_author(
     request, app, fediverse_nest, follower
@@ -194,7 +188,10 @@ def test_a_reply_to_a_fediverse_post_reaches_its_author(
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("fediverse")
 def test_a_quote_of_a_fediverse_post_reaches_its_author(
     request, app, fediverse_nest, follower
@@ -237,7 +234,10 @@ def test_a_quote_of_a_fediverse_post_reaches_its_author(
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("fediverse")
 @pytest.mark.parametrize("kind", ["reply", "quote"])
 def test_replying_or_quoting_with_federation_off_is_refused_inline(

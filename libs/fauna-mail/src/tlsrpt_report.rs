@@ -20,7 +20,7 @@ use std::io::Write;
 use fauna_protocol::bridge_routing::TlsrptReportSummary;
 use serde::Deserialize;
 
-use crate::dmarc_report::{ReportError, malformed, read_bounded, top_n};
+use crate::dmarc_report::{InflateBudget, ReportError, malformed, read_bounded, top_n};
 
 /// Largest compressed report part accepted. A TLSRPT report is one JSON
 /// document per policy domain per day — kilobytes in practice.
@@ -135,6 +135,9 @@ pub fn extract_report_json(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
         .parse(raw_message)
         .ok_or_else(|| malformed("message does not parse as RFC 5322"))?;
     let mut last_err = malformed("no report attachment");
+    // One inflate budget for the whole message, not one per candidate part
+    // (`crate::dmarc_report::InflateBudget`).
+    let mut budget = InflateBudget::new(MAX_DECOMPRESSED_BYTES);
     for part in &msg.parts {
         let body: &[u8] = match &part.body {
             PartType::Binary(b) | PartType::InlineBinary(b) => b,
@@ -144,7 +147,7 @@ pub fn extract_report_json(raw_message: &[u8]) -> Result<Vec<u8>, ReportError> {
         if !is_report_candidate(part.content_type(), part.attachment_name()) {
             continue;
         }
-        match unpack(body) {
+        match unpack_bounded(body, MAX_COMPRESSED_BYTES, &mut budget) {
             Ok(json) => return Ok(json),
             Err(ReportError::Oversize) => return Err(ReportError::Oversize),
             Err(e) => last_err = e,
@@ -172,19 +175,23 @@ fn is_report_candidate(ct: Option<&mail_parser::ContentType<'_>>, name: Option<&
 
 /// Decompress one report part — gzip or bare JSON — under the size bounds.
 pub fn unpack(body: &[u8]) -> Result<Vec<u8>, ReportError> {
-    unpack_bounded(body, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES)
+    unpack_bounded(
+        body,
+        MAX_COMPRESSED_BYTES,
+        &mut InflateBudget::new(MAX_DECOMPRESSED_BYTES),
+    )
 }
 
 fn unpack_bounded(
     body: &[u8],
     max_compressed: usize,
-    max_decompressed: usize,
+    budget: &mut InflateBudget,
 ) -> Result<Vec<u8>, ReportError> {
     if body.len() > max_compressed {
         return Err(ReportError::Oversize);
     }
     if body.starts_with(&[0x1f, 0x8b]) {
-        return read_bounded(flate2::read::MultiGzDecoder::new(body), max_decompressed);
+        return budget.read(flate2::read::MultiGzDecoder::new(body));
     }
     let start = body
         .iter()
@@ -192,6 +199,7 @@ fn unpack_bounded(
         .unwrap_or(body.len());
     let rest = &body[start..];
     if rest.starts_with(b"{") || rest.starts_with(b"\xef\xbb\xbf{") {
+        budget.charge(body.len())?;
         return Ok(body.to_vec());
     }
     Err(malformed("attachment is not gzip or JSON"))
@@ -483,11 +491,49 @@ mod tests {
         let bomb = gzip_json(&vec![b' '; max_d + 1]);
         assert!(bomb.len() < max_c);
         assert_eq!(
-            unpack_bounded(&bomb, max_c, max_d),
+            unpack_bounded(&bomb, max_c, &mut InflateBudget::new(max_d)),
             Err(ReportError::Oversize)
         );
         assert_eq!(
-            unpack_bounded(&vec![b'{'; max_c + 1], max_c, max_d),
+            unpack_bounded(
+                &vec![b'{'; max_c + 1],
+                max_c,
+                &mut InflateBudget::new(max_d)
+            ),
+            Err(ReportError::Oversize)
+        );
+    }
+
+    /// A message of many failing-CRC candidate parts is bounded per message:
+    /// each inflates a quarter of the cap, so the fifth finds the budget spent
+    /// and the extractor answers `Oversize` without reaching the valid report
+    /// behind them.
+    #[cfg(feature = "outbound")]
+    #[test]
+    fn many_failing_candidates_are_bounded_per_message() {
+        use base64::Engine as _;
+        let quarter = MAX_DECOMPRESSED_BYTES / 4;
+        let mut bad = gzip_json(&vec![b' '; quarter]);
+        let crc_at = bad.len() - 8;
+        bad[crc_at] ^= 0xff;
+        let bad = base64::engine::general_purpose::STANDARD.encode(bad);
+        let good = base64::engine::general_purpose::STANDARD.encode(gzip_json(b"{}"));
+        let mut msg = String::from(
+            "From: r@reporter.test\r\nTo: tlsrpt@fauna.test\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/report; boundary=\"b\"\r\n\r\n",
+        );
+        for _ in 0..5 {
+            msg.push_str(&format!(
+                "--b\r\nContent-Type: application/tlsrpt+gzip\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\n{bad}\r\n"
+            ));
+        }
+        msg.push_str(&format!(
+            "--b\r\nContent-Type: application/tlsrpt+gzip\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{good}\r\n--b--\r\n"
+        ));
+        assert_eq!(
+            extract_report_json(msg.as_bytes()),
             Err(ReportError::Oversize)
         );
     }

@@ -28,6 +28,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.core.ArchiveLinkRowPaint
 import com.fauna.app.core.HexUtil
 import com.fauna.app.data.db.Contact
 import com.fauna.app.data.db.Knock
@@ -328,7 +329,11 @@ fun ContactsScreen(
             )
         }
 
-        val statusOrder = listOf("confirmed", "accepted", "pending", "blocked")
+        // Group order single-sourced in shared Rust
+        // (fauna_core::format::contact_roster_group_order via UniFFI): the
+        // canonical four, then any status this build does not name, so no
+        // contact drops out — contacts.md § Where logic lives → Roster status grouping.
+        val statusOrder = com.fauna.ffi.contactRosterGroupOrder(contacts.map { it.status })
 
         for (status in statusOrder) {
             val group = groupedContacts[status] ?: continue
@@ -652,11 +657,23 @@ private fun ContactItem(
     // another actor's profile in that flavor (search and the feed are compiled out).
     val clickable = contact.status != "blocked" && (!BuildConfig.KIDS || contact.status == "confirmed")
 
+    // Phase two of archive import (`archive-import.md` § Linking and merging,
+    // ruling 8): this row's share of the shared link views, worded by the
+    // machine crate's composers — no state or words computed here.
+    val painter by vm.archiveLinkPainter.collectAsState()
+    val context = LocalContext.current
+    val archiveLinks = remember(painter, contact.peerId, primary) {
+        painter.paints(context, contact.peerId, primary)
+    }
+
     ContactRowContent(
         primary = primary,
         publicName = publicName,
         labelsLine = labelsLine,
         onClick = if (clickable) ({ onOpenProfile(contact.peerId, contact.homeNestUrl) }) else null,
+        archiveLinks = archiveLinks,
+        onArchiveLinkAnswer = { paint, yes -> vm.answerArchiveLink(paint.contact, paint.platform, yes) },
+        onArchiveUnlink = { paint -> vm.unlinkArchiveLink(paint.contact, paint.platform) },
         trailing = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -701,13 +718,16 @@ fun ContactRowContent(
     labelsLine: String?,
     onClick: (() -> Unit)?,
     trailing: @Composable () -> Unit = {},
+    archiveLinks: List<ArchiveLinkRowPaint> = emptyList(),
+    onArchiveLinkAnswer: (ArchiveLinkRowPaint, Boolean) -> Unit = { _, _ -> },
+    onArchiveUnlink: (ArchiveLinkRowPaint) -> Unit = {},
 ) {
     ListItem(
         headlineContent = {
             Text(primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag(Ids.CONTACT_NAME))
         },
-        supportingContent = if (publicName == null && labelsLine == null) null else ({
+        supportingContent = if (publicName == null && labelsLine == null && archiveLinks.isEmpty()) null else ({
             Column {
                 if (publicName != null) {
                     Text(publicName, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -719,6 +739,7 @@ fun ContactRowContent(
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.testTag(Ids.CONTACT_LABELS))
                 }
+                ContactArchiveLinkAffordances(archiveLinks, onArchiveLinkAnswer, onArchiveUnlink)
             }
         }),
         trailingContent = trailing,
@@ -728,6 +749,52 @@ fun ContactRowContent(
             Modifier.testTag(Ids.CONTACT_ROW)
         }
     )
+}
+
+/**
+ * A row's phase-two archive-link affordances (`archive-import.md` § Linking and
+ * merging, ruling 8; `contacts.md` § User actions): `contact-archive-link-prompt`
+ * with `contact-archive-link-yes` / `-no` while the pair is asked,
+ * `contact-archive-linked` with `contact-archive-unlink` while linked. Painted
+ * inside the row's `contact-row` container so each ID is `contact-row[i]`'s
+ * own. Stateless — the words are the shared composers', resolved upstream.
+ */
+@Composable
+fun ContactArchiveLinkAffordances(
+    paints: List<ArchiveLinkRowPaint>,
+    onAnswer: (ArchiveLinkRowPaint, Boolean) -> Unit,
+    onUnlink: (ArchiveLinkRowPaint) -> Unit,
+) {
+    for (paint in paints) {
+        when (paint) {
+            is ArchiveLinkRowPaint.Asked -> Column {
+                Text(paint.prompt, style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONTACT_ARCHIVE_LINK_PROMPT))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onAnswer(paint, true) },
+                        modifier = Modifier.testTag(Ids.CONTACT_ARCHIVE_LINK_YES)) {
+                        Text(stringResource(R.string.archive_import_link_yes))
+                    }
+                    TextButton(onClick = { onAnswer(paint, false) },
+                        modifier = Modifier.testTag(Ids.CONTACT_ARCHIVE_LINK_NO)) {
+                        Text(stringResource(R.string.archive_import_link_no))
+                    }
+                }
+            }
+            is ArchiveLinkRowPaint.Linked -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(paint.label, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.CONTACT_ARCHIVE_LINKED))
+                TextButton(onClick = { onUnlink(paint) },
+                    modifier = Modifier.testTag(Ids.CONTACT_ARCHIVE_UNLINK)) {
+                    Text(stringResource(R.string.archive_import_unlink))
+                }
+            }
+        }
+    }
 }
 
 @Composable

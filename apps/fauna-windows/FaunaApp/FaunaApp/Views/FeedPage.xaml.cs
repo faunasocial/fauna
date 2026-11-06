@@ -33,7 +33,7 @@ namespace FaunaApp.Views;
 /// projections it rebuilds from the snapshot on every observer tick (the
 /// <c>ThreadRow</c> pattern: public wrappers so the DataTemplates materialize).
 /// </summary>
-public sealed partial class FeedPage : Page
+public sealed partial class FeedPage : Page, IPostCardPage
 {
     private FeedViewModel? _viewModel;
     private FeedNotifyObserver? _observer;
@@ -49,20 +49,13 @@ public sealed partial class FeedPage : Page
     /// field.</summary>
     private ConversationsSession? _convSession;
 
-    /// <summary>Lazily-built, session-lived <c>FfiWebClient</c> for the ⋯-menu's
-    /// own-post web-publishing verbs (web-content-hosting.md § Published-post
-    /// management) — built over the shared, auto-reconnecting WS-RPC connection
-    /// (mirrors <c>SettingsWebPage.EnsureViewModelAsync</c>), never a per-open
-    /// one-shot connection.</summary>
-    private uniffi.fauna_ffi.FfiWebClient? _webClient;
-
     /// <summary>
     /// The CURRENT nest HTTP client, resolved per call — never captured.
     /// <c>clients.Nest</c> is disposed by <c>App.DisposeNestClients</c> on the next
     /// re-login while this page instance can outlive that hand-off, so a captured
     /// reference starts throwing <see cref="ObjectDisposedException"/>
     /// (<c>apps/windows.md</c> § Client lifetime). Same rule the static
-    /// <see cref="_imageLoader"/> already follows.
+    /// <see cref="PostCardBind.GetImageLoader"/> already follows.
     /// </summary>
     private static INestHttpClient? Nest => App.CurrentNest;
 
@@ -77,23 +70,19 @@ public sealed partial class FeedPage : Page
     /// Page_Loaded, right after the initial hydrate (<see cref="OpenPostDetailByIdAsync"/>).</summary>
     private string? _deepLinkPostId;
 
-#if PAYMENTS
-    /// <summary>The flat tip-attribution window, built in code and dropped into
-    /// <c>TipListDialogHost</c> — see the field's PAYMENTS wiring in
-    /// <c>Page_Loaded</c> and dynamic-features.md § Platform-family surface
-    /// excision. Null until the first <c>Page_Loaded</c>.</summary>
-    private Views.Payments.PostTipListDialog? _tipListDialog;
-#endif
+    /// <summary>The home of a room-search post hit's room when that room is homed on
+    /// another nest (<c>room-search.md</c> § The surface → <i>Opening a hit</i>): the post
+    /// opens through <c>resolve_post_from</c> with it. Null for every other deep link.</summary>
+    private string? _deepLinkPostHomeUrl;
+
+    /// <summary>The post list's cards — the shared post-card behaviour (the profile's
+    /// Posts tab runs the same one over its author window), acting on this page's
+    /// timeline view model through <see cref="IPostCardPage"/>.</summary>
+    private readonly PostCardHost _cards;
 
     /// <summary>Page-owned render projections of the snapshot (rebuilt each tick).</summary>
-    public ObservableCollection<FeedPostItem> Posts { get; } = new();
+    public ObservableCollection<FeedPostItem> Posts => _cards.Posts;
     public ObservableCollection<FeedDefinition> Feeds { get; } = new();
-
-    // Singleton loader used by x:Bind on the post-image element. Static so the
-    // XAML-compiler-friendly `local:FeedPage.GetImageLoader()` call in FeedPage.xaml
-    // has a stable target regardless of which FeedPage instance hosts the row.
-    private static BlobImageLoader? _imageLoader;
-    public static BlobImageLoader? GetImageLoader() => _imageLoader;
 
     /// <summary>
     /// Exposes the compose bar for state-protocol injection (e.g. compose.file E2E test command).
@@ -103,12 +92,18 @@ public sealed partial class FeedPage : Page
     public FeedPage()
     {
         this.InitializeComponent();
+        _cards = new PostCardHost(this, PostsList, "feed", TipListDialogHost);
         // A region relay fold that changed the answer re-reads every card: the
         // region placeholder is part of FeedPostItem.ContentEquals, so Refresh
         // rebuilds exactly the rows whose verdict moved (region-blocking.md § How an
         // app obtains its region's policy). Raised off the UI thread — marshal back.
         Loaded += (_, _) => RegionPlaneHost.Changed += OnRegionChanged;
         Unloaded += (_, _) => RegionPlaneHost.Changed -= OnRegionChanged;
+        // The same re-read when the session nest's rules move (nest-rules.md § A
+        // change is announced): the nest placeholder and the guardian's reason are
+        // part of FeedPostItem.ContentEquals too. Raised off the UI thread.
+        Loaded += (_, _) => NestRulesHost.Changed += OnRegionChanged;
+        Unloaded += (_, _) => NestRulesHost.Changed -= OnRegionChanged;
         // The same re-read when the private contact overlay moves: AuthorLabel is part
         // of FeedPostItem.ContentEquals, so exactly the cards whose author was renamed
         // rebuild. Raised off the UI thread — marshal back.
@@ -117,6 +112,49 @@ public sealed partial class FeedPage : Page
     }
 
     private void OnRegionChanged() => DispatcherQueue.TryEnqueue(Refresh);
+
+    /// <summary>
+    /// Feed pages currently attached to the session's feed manager — the VM built and
+    /// its render hooked, the page's <see cref="OnNavigatedFrom"/> teardown not yet run.
+    /// At most one while the Feed page is on screen, and 0 everywhere else; anything
+    /// higher, or a 1 off the feed, is a left page still re-rendering on every manager
+    /// tick (<c>apps/windows.md</c> § Client lifetime, the third rule). Surfaced in the
+    /// e2e state protocol (<c>diagnostics.live_feed_pages</c>) so the leak fails as
+    /// itself, beside <see cref="MainPage.LiveSyncAgentPollers"/>.
+    /// </summary>
+    internal static int LiveFeedPages;
+
+    /// <summary>Whether this instance counts in <see cref="LiveFeedPages"/>.</summary>
+    private bool _attached;
+
+    /// <summary>
+    /// Set by <see cref="OnNavigatedFrom"/>: this page has left the screen for good
+    /// (FeedPage is not cached, so a later visit is a new instance). <see cref="Page_Loaded"/>
+    /// is <c>async void</c> and may resume after it — it then builds nothing, and
+    /// <see cref="Refresh"/> / <see cref="ReportPageError"/> paint nothing: a left page
+    /// writing the app-wide error mirror would blank, or fake, the error of the page
+    /// that is on screen.
+    /// </summary>
+    private bool _navigatedAway;
+
+    private void ViewModel_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        => Refresh();
+
+    /// <summary>The page's half of its teardown: stop rendering and detach from the
+    /// session's feed manager, which outlives the page.</summary>
+    private void DetachFromManager()
+    {
+        if (_viewModel is not null)
+        {
+            _viewModel.PropertyChanged -= ViewModel_PropertyChanged;
+            _viewModel.DetachFromManager();
+        }
+        if (_attached)
+        {
+            _attached = false;
+            System.Threading.Interlocked.Decrement(ref LiveFeedPages);
+        }
+    }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
@@ -127,15 +165,8 @@ public sealed partial class FeedPage : Page
             _crypto = clients.Crypto;
             _account = clients.Account;
             _convSession = clients.ConvSession;
-            // Resolve the CURRENT nest client per call — never capture `clients.Nest`.
-            // This loader is static (below), so it outlives every ServiceClients
-            // hand-off; the client it was handed gets disposed on the next re-login.
-            // Resolve the feed manager per call too: it is built later (Page_Loaded,
-            // below) than this loader, is rebuilt on re-auth, and holds the per-post keys
-            // that open a tier-restricted post's attachments.
-            _imageLoader ??= new BlobImageLoader(
-                () => App.CurrentNest, () => Core.FeedManagerHost.Current);
             _deepLinkPostId = clients.DeepLinkPostId;
+            _deepLinkPostHomeUrl = clients.DeepLinkPostHomeUrl;
 
             ComposeBar.PostRequested += OnComposePostRequested;
             ComposeBar.ComposeDialogRequested += () => ComposeDialog_Click(this, new RoutedEventArgs());
@@ -180,6 +211,10 @@ public sealed partial class FeedPage : Page
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        // Runs on every exit, the root-frame ones included (sign-out, account switch,
+        // the e2e reset — MainPage ends its inner page, Views.NestedFrame), and on those
+        // it runs AFTER the actor change: nothing below may assume a live session.
+        _navigatedAway = true;
         // Stop the cue-capture tick + scroll hook and flush every tracked card —
         // mirrors linux's unmap handling (off-screen is off-viewport). Must run
         // before the page is discarded: FeedPage isn't cached
@@ -188,6 +223,11 @@ public sealed partial class FeedPage : Page
         // sampling a detached ListView, and pin this whole page in memory.
         _cueObserver?.Unwire();
         base.OnNavigatedFrom(e);
+        // Stop rendering off the session's manager, which outlives this page: its
+        // observer used to stay registered, so every later mutation re-rendered this
+        // left page and blanked the app-wide error mirror under whatever page was on
+        // screen (DetachFromManager's own doc).
+        DetachFromManager();
         // Unsubscribe the VM's reconnect re-hydrate handler — the INestRpcClient
         // seam is app-lifetime, so an un-cleaned VM would leak (and re-fetch into
         // an orphaned snapshot observer).
@@ -197,14 +237,62 @@ public sealed partial class FeedPage : Page
         // control, so flush a still-pending debounced save NOW in case the
         // debounce window hadn't elapsed — fire-and-forget, best-effort (mirrors
         // ConversationsPage.Page_Unloaded's same flush for its own rail).
-        // Pending-only (not unconditional): FfiFeedManager rebuilds on every
-        // Feed-page load, so a torn-down instance nothing was ever typed into
-        // has nothing armed — an unconditional save here wrote a spurious empty
-        // snapshot indistinguishable from a real one to anything polling the
-        // rail (see FeedDraftsService.FlushIfPendingAsync).
+        // Pending-only (not unconditional): a navigation away from a page nothing
+        // was typed into has nothing armed — an unconditional save here wrote a
+        // spurious empty snapshot indistinguishable from a real one to anything
+        // polling the rail (see FeedDraftsService.FlushIfPendingAsync).
         _ = App.FeedDrafts?.FlushIfPendingAsync();
         if (MainPage.Current is not null && ReferenceEquals(MainPage.Current.ActiveFeedPage, this))
             MainPage.Current.ActiveFeedPage = null;
+    }
+
+    /// <summary>
+    /// Pair the session's feed manager with the drafts sync held at login and paint the
+    /// restored compose onto this page's compose bar — whenever the restore lands.
+    /// Fired from <see cref="Page_Loaded"/>, never awaited there.
+    /// </summary>
+    private async Task RestoreFeedDraftsAsync(
+        uniffi.fauna_ffi.FfiFeedManager manager, uniffi.fauna_ffi.IFfiDraftsSync feedDraftsSync)
+    {
+        // The session's one manager and the sync handle held at login are paired
+        // once — FeedDraftsService.EnsureAsync restores only for a new (manager,
+        // sync) pair, never on a repeat load. This page is not cached, so every
+        // load still repaints its fresh compose bar from the manager's snapshot
+        // below. Best-effort: a restore failure must never block the feed page.
+        Core.Logs.E2eTrace.Write("[feed-drafts] RestoreFeedDrafts: start");
+        try
+        {
+            var (feedDrafts, ranRestore) = await FeedDraftsService.EnsureAsync(
+                App.FeedDrafts, feedDraftsSync, manager, () => new ManagerFeedDraftStore(manager));
+            App.FeedDrafts = feedDrafts;
+            Core.Logs.E2eTrace.Write($"[feed-drafts] RestoreFeedDrafts: restore ran={ranRestore}");
+            var restoredCompose = manager.Snapshot().@compose;
+            Core.Logs.E2eTrace.Write($"[feed-drafts] RestoreFeedDrafts: restored text={restoredCompose.@text.Length} chars, tags={restoredCompose.@tags.Length} chars");
+            // This page instance's compose bar is new and knows nothing about
+            // the manager's compose state or text the user already typed.
+            // RestoreDraftIfEmpty only writes into empty fields (never
+            // clobbers in-progress typing) and suppresses ComposeChanged for
+            // its own assignment (never a restore->forward->re-save loop). For
+            // the skipped (already-typed) case, sync the CURRENT UI content
+            // into the manager explicitly — the suppressed assignment above
+            // cannot reach it via the event.
+            var alreadyTyped = !string.IsNullOrEmpty(ComposeBar.ComposeText) || !string.IsNullOrEmpty(ComposeBar.TagsText);
+            ComposeBar.RestoreDraftIfEmpty(restoredCompose.@text, restoredCompose.@tags);
+            // The audience's text fields come back here too; its ANSWER is painted by
+            // Refresh (PaintAudience), once the tier/room it names is offered.
+            ComposeBar.RestoreAudienceFieldsIfUntouched(restoredCompose);
+            if (alreadyTyped)
+            {
+                // Content-only sync — carries the just-restored attachment
+                // through rather than dropping it (ui/feed.md § Persistence →
+                // Attachments by content address).
+                _viewModel?.UpdateComposeText(ComposeBar.ComposeText, ComposeBar.TagsText);
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Core.Logs.E2eTrace.Write($"[feed-drafts] RestoreFeedDrafts: restore threw: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private async void Page_Loaded(object sender, RoutedEventArgs e)
@@ -216,7 +304,7 @@ public sealed partial class FeedPage : Page
         // follows that lifetime (Core.FeedManagerHost), which is exactly the
         // distinction this line makes readable in a trace.
         Core.Logs.E2eTrace.Write($"[feed-page] Page_Loaded enter instance={GetHashCode()} rpc={(_rpc is null ? "null" : "set")}");
-        if (_rpc is null) return;
+        if (_rpc is null || _navigatedAway) return;
         _pageError = null; // a fresh load supersedes any prior fire-and-forget failure
         LoadingRing.IsActive = true;
         LoadingRing.Visibility = Visibility.Visible;
@@ -235,7 +323,10 @@ public sealed partial class FeedPage : Page
             // re-auth/account-switch. Keyed on `_rpc`, so a re-auth (a fresh
             // NestRpcClient) still rebuilds.
             var manager = await Core.FeedManagerHost.GetOrBuildAsync(
-                _rpc, () => _rpc.BuildFeedManagerAsync());
+                _rpc, () => _rpc.BuildFeedManagerAsync(_account?.ResolveDeviceId()));
+            // The session's post-blob plane — built before the first card paints so
+            // a foreign-homed post's bytes never fall back to this nest.
+            await Core.PostBlobHostsHost.GetOrBuildAsync(_rpc);
             // The room-post key seam (ui/feed.md § Encryption at rest → Room-restricted —
             // the app half): install it wherever the feed manager and the conversations
             // session first coexist. Production always has a session here already (built
@@ -249,86 +340,70 @@ public sealed partial class FeedPage : Page
             {
                 manager.SetRoomPostKeys(_convSession);
             }
+            // Left while the builds above were awaited: OnNavigatedFrom has already
+            // run its teardown with nothing to tear down, so anything built from here
+            // on — the VM's observer on the session manager, the cue-capture timer —
+            // would stay attached to a page that is gone, for good.
+            if (_navigatedAway) return;
             _viewModel = new FeedViewModel(manager, _observer, _rpc);
-            _viewModel.PropertyChanged += (_, _) => Refresh();
-            PostsList.ItemsSource = Posts;
+            _viewModel.PropertyChanged += ViewModel_PropertyChanged;
+            _attached = true;
+            System.Threading.Interlocked.Increment(ref LiveFeedPages);
             FeedList.ItemsSource = Feeds;
 
-#if PAYMENTS
-            // §§ TipDisplayHost / TipListDialogHost — the payments plane lives in its
-            // own removable build item (dynamic-features.md § Platform-family surface
-            // excision); wire it the same way ProfilePage wires PaymentsAuthorSections,
-            // one seam further out since this one is per-card rather than a single
-            // section.
-            _tipListDialog = new Views.Payments.PostTipListDialog();
-            TipListDialogHost.Content = _tipListDialog;
-            PostsList.ContainerContentChanging += PostsList_ContainerContentChanging;
-#endif
-
             // Draft-persistence v2, feed leg (reserved-folders.md § Drafts Sync;
-            // feed.md § Persistence): pair the sync handle held at login with THIS
-            // freshly-built manager — FfiFeedManager rebuilds every Feed-page load,
-            // unlike the conversations manager, so App.FeedDrafts is rebuilt here
-            // too (android's shape: re-run restore per fresh manager rather than
-            // once per session). Retire any previous instance's pending debounce
-            // timer first — it is bound to a now-stale manager. Best-effort:
-            // App.FeedDraftsSync can be null (not logged in this way, or the login
-            // wiring hasn't finished) and a restore failure must never block the
-            // feed page loading.
-            App.FeedDrafts?.Dispose();
-            Core.Logs.E2eTrace.Write($"[feed-drafts] Page_Loaded: App.FeedDraftsSync={(App.FeedDraftsSync is null ? "null" : "set")}");
+            // feed.md § Persistence) — NOT awaited: the shared DraftsSync retries a
+            // launch read lost to the transport for minutes (conversation-drafts.md
+            // § Persistence), and the feed page must not wait on it. Landing late is
+            // safe because the manager's restore FILLS (PostDrafts::fill).
             if (App.FeedDraftsSync is { } feedDraftsSync)
-            {
-                var feedDrafts = new FeedDraftsService(feedDraftsSync, new ManagerFeedDraftStore(manager));
-                App.FeedDrafts = feedDrafts;
-                try
-                {
-                    await feedDrafts.RestoreOnLaunchAsync();
-                    var restoredCompose = manager.Snapshot().@compose;
-                    Core.Logs.E2eTrace.Write($"[feed-drafts] Page_Loaded: restored text={restoredCompose.@text.Length} chars, tags={restoredCompose.@tags.Length} chars");
-                    // Page_Loaded can fire more than once per login (a repeat "feed"
-                    // nav command rebuilds the manager each time), and this fresh
-                    // manager instance knows nothing about text the user already
-                    // typed before it existed. RestoreDraftIfEmpty only writes into
-                    // empty fields (never clobbers in-progress typing) and suppresses
-                    // ComposeChanged for its own assignment (never a restore->forward
-                    // ->re-save loop). For the skipped (already-typed) case, sync the
-                    // CURRENT UI content into the fresh manager explicitly — the
-                    // suppressed assignment above cannot reach it via the event.
-                    var alreadyTyped = !string.IsNullOrEmpty(ComposeBar.ComposeText) || !string.IsNullOrEmpty(ComposeBar.TagsText);
-                    ComposeBar.RestoreDraftIfEmpty(restoredCompose.@text, restoredCompose.@tags);
-                    // The audience's text fields come back here too; its ANSWER is painted by
-                    // Refresh (PaintAudience), once the tier/room it names is offered.
-                    ComposeBar.RestoreAudienceFieldsIfUntouched(restoredCompose);
-                    if (alreadyTyped)
-                    {
-                        // Content-only sync — carries the just-restored attachment
-                        // through rather than dropping it (ui/feed.md § Persistence →
-                        // Attachments by content address).
-                        _viewModel?.UpdateComposeText(ComposeBar.ComposeText, ComposeBar.TagsText);
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Core.Logs.E2eTrace.Write($"[feed-drafts] Page_Loaded: restore threw: {ex.GetType().Name}: {ex.Message}");
-                }
-            }
+                _ = RestoreFeedDraftsAsync(manager, feedDraftsSync);
 
             // Engagement-cue capture shell (engagement-cues.md §§ Cue vocabulary &
             // derivation / At rest, task-6): wire the viewport observer BEFORE
             // hydrating — mirrors linux's wire() then hydrate_cues() sequencing
             // (puts are suppressed pre-hydrate anyway, so the ordering between
-            // wiring and hydrate-completing is not itself a race). A hydrate
-            // failure (an unopenable rollup, never a merely-absent one) propagates
-            // to the catch below and surfaces on error-message, same as every
-            // other load-time failure here.
+            // wiring and hydrate-completing is not itself a race). The hydrate runs
+            // ONCE per manager (FeedManagerHost.HydrateCuesOnceAsync): it replaces
+            // the live engine, so a later Feed-page load re-running it would discard
+            // every verdict folded since. A hydrate failure (an unopenable rollup,
+            // never a merely-absent one) is reported on error-message and the page
+            // loads on, as linux's and tui's do; the report is a page error
+            // (ReportPageError), so it stays on the error line after the feed's own
+            // load below rather than being cleared by its first snapshot.
             _cueObserver = new CueViewportObserver(PostsList, () => _viewModel?.Manager, ReportPageError);
             _cueObserver.Wire();
-            await manager.HydrateCues();
+            try
+            {
+                await Core.FeedManagerHost.HydrateCuesOnceAsync(manager);
+            }
+            catch (System.Exception ex)
+            {
+                ShellLog.Warn(nameof(FeedPage), $"cue rollup hydrate failed: {ex.Message}");
+                ReportPageError(Core.Services.Strings.Error(ex));
+            }
+
+            // Layer-B opt-in (engagement-cues.md § Layer B): the shared producer
+            // contributes only while the manager's cached opt-in is true, and that
+            // cache is process memory — fill it from the persisted opt-in here so
+            // a relaunch (or a second device) is honoured without the user opening
+            // Personalization. Independent of the cue hydrate and non-fatal: logged,
+            // never painted, never skipping the reload below. A repeatable read, so
+            // running it on every feed visit is safe.
+            try
+            {
+                await manager.HydrateSignalOptin();
+            }
+            catch (System.Exception ex)
+            {
+                ShellLog.Warn(nameof(FeedPage), $"signal opt-in hydrate failed: {ex.Message}");
+            }
 
             // Initial hydrate: refresh the selector + bridge-feed lists and load the
             // current (local) feed's first page. The snapshot observer drives Refresh().
             await _viewModel.ReloadCommand.ExecuteAsync(null);
+            // Left while the hydrate ran: the teardown already detached what was built.
+            if (_navigatedAway) return;
             Refresh();
 
             // search.md § User actions (SearchNav.Post) — fire-and-forget: the
@@ -337,9 +412,17 @@ public sealed partial class FeedPage : Page
             // `finally` below unreached) for as long as the dialog stays open.
             if (_deepLinkPostId is { } deepLinkPostId)
             {
+                var deepLinkHome = _deepLinkPostHomeUrl;
                 _deepLinkPostId = null;
-                _ = OpenPostDetailByIdAsync(deepLinkPostId);
+                _deepLinkPostHomeUrl = null;
+                _ = OpenPostDetailByIdAsync(deepLinkPostId, deepLinkHome);
             }
+        }
+        catch (System.Exception ex) when (_navigatedAway)
+        {
+            // A load the page left before it finished, failing on a session the
+            // actor change already ended: never this screen's error to paint.
+            ShellLog.Info(nameof(FeedPage), $"feed page load ended with the page: {ex.GetType().Name}: {ex.Message}");
         }
         catch (System.Exception ex)
         {
@@ -365,11 +448,64 @@ public sealed partial class FeedPage : Page
     /// same way every other awaited manager call on this page does.</summary>
     private void ReportPageError(string message)
     {
+        // A failure reported after the page left (a cue emit flushed at teardown, an
+        // unlock that resolved late) is this page's, and the page is gone: never paint
+        // it on the app-wide mirror under the page now on screen.
+        if (_navigatedAway) return;
         _pageError = message;
         ErrorBar.Message = message;
         ErrorBar.IsOpen = true;
         App.CurrentErrorMessage = message;
     }
+
+    // ── IPostCardPage — what the post list's cards (PostCardHost) act on and paint on.
+    //    The cards act on this page's timeline view model; their failures land on this
+    //    page's error-message exactly as the handlers did when they lived here. ──
+
+    FeedViewModel? IPostCardPage.CardViewModel => _viewModel;
+    INestRpcClient? IPostCardPage.Rpc => _rpc;
+    ICryptoService? IPostCardPage.Crypto => _crypto;
+    ISessionAccount? IPostCardPage.Account => _account;
+
+    void IPostCardPage.ReportPageError(string message) => ReportPageError(message);
+
+    /// <summary>A verb that lands clears a previous verb's error, as web's does.</summary>
+    void IPostCardPage.ClearPageError()
+    {
+        if (_pageError is null) return;
+        _pageError = null;
+        Refresh();
+    }
+
+    void IPostCardPage.ShowError(string message)
+    {
+        ErrorBar.Message = message;
+        ErrorBar.IsOpen = true;
+        App.CurrentErrorMessage = message;
+    }
+
+    void IPostCardPage.ShowReportStatus(string? acknowledgement)
+    {
+        ReportStatusText.Text = acknowledgement ?? "";
+        ReportStatusText.Visibility = acknowledgement is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void IPostCardPage.RefreshCards() => Refresh();
+
+    /// <summary>Open the page's lightbox overlay (<c>image-lightbox</c>) on a picture
+    /// already loaded — a card's, or the post detail's.</summary>
+    public void ShowImageLightbox(Microsoft.UI.Xaml.Media.Imaging.BitmapImage image) => Lightbox.Show(image);
+
+    /// <summary>A card's activation opens its detail dialog. A REPOST ROW's own detail
+    /// would be blank (the repost post is empty by construction) — activation opens the
+    /// ORIGINAL's detail instead (feed.md § Interaction bar → Repost, ratified
+    /// 2026-08-10), mirroring linux/web/apple. <see cref="OpenPostDetailByIdAsync"/>
+    /// resolves through the same deep-link door a search hit uses, so an original outside
+    /// the loaded window still opens with real content instead of degrading to a no-op.</summary>
+    Task IPostCardPage.OpenPostDetailAsync(FeedPostItem item)
+        => item.IsRepostRow
+            ? OpenPostDetailByIdAsync(item.RepostedPostId!)
+            : ShowPostDetailDialogAsync(item);
 
     /// <summary>The last fire-and-forget failure reported via <see cref="ReportPageError"/>.
     /// Held separately from the snapshot's own error because <see cref="Refresh"/> runs on
@@ -381,10 +517,22 @@ public sealed partial class FeedPage : Page
     /// on every observer tick (mirrors ConversationsPage.Refresh()).</summary>
     private void Refresh()
     {
-        if (_viewModel is null) return;
+        if (_viewModel is null || _navigatedAway) return;
 
         SyncFeeds(_viewModel.Feeds);
-        SyncPosts(_viewModel.Posts);
+        // The imported-posts selection's notice + clear ← snapshot.imported_selected.
+        if (_viewModel.ImportedPlatformLabel is { } importedPlatform)
+        {
+            ImportedNotice.Text = S.Format("feed/imported_notice", importedPlatform);
+            ImportedClearButton.Content = S.Get("feed/imported_clear");
+            ImportedRow.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ImportedRow.Visibility = Visibility.Collapsed;
+        }
+        _cards.Sync(_viewModel.Posts);
+        _repaintDetailLabel?.Invoke();
         SyncBridgeFeeds(_viewModel.BridgeFeeds);
         SyncAvailableBridges(_viewModel.AvailableBridges);
         // Keep the compose-gate-tier-select options current with the author's own tiers
@@ -490,131 +638,6 @@ public sealed partial class FeedPage : Page
             : null;
     }
 
-    /// <summary>Rebuild the post-card rows from the snapshot's ordered, deduplicated
-    /// post list, kicking off the lazy per-post media + quoted-post resolution
-    /// (mirrors linux render_posts).</summary>
-    private void SyncPosts(IReadOnlyList<PostSummary> snapshot)
-    {
-        // Reconcile the bound rows against the snapshot IN PLACE: an UNCHANGED post keeps its
-        // existing FeedPostItem — and so its already-realized container plus any in-flight
-        // /api/v1/blob/<hash> image load — while only a post whose rendered content actually
-        // changed (media/quote/link-preview folded into the document, counts bumped, a remote
-        // image revealed) rebuilds its row to paint the change. The prior Posts.Clear()+rebuild
-        // every observer tick tore down a stable post's in-flight image fetch before it settled
-        // (each fire-once resolve trigger below re-emits a notify → Refresh → SyncPosts), so the
-        // post-image never appeared — the feed image-render gap (render-model.md § D6; feed.md
-        // § State & data shape). Generalizes the SyncFeeds/SyncAvailableBridges id-diff guard
-        // to per-row content via FeedPostItem.ContentEquals.
-        var target = new List<FeedPostItem>(snapshot.Count);
-        var bridgeRoster = _viewModel?.BridgeRoster;
-        foreach (var p in snapshot)
-            target.Add(new FeedPostItem(p, _viewModel?.Manager, bridgeRoster));
-        ObservableCollectionReconcile.Reconcile(
-            Posts, target, item => item.PostId, static (a, b) => a.ContentEquals(b));
-
-        // Kick off the lazy per-post media + quoted-post + link-preview resolution. Each trigger
-        // is fire-once (the guards below); the manager folds the resolved block + re-emits, and
-        // the reconcile above then rebuilds ONLY that post's row to paint the embed, leaving
-        // every sibling row (and its in-flight load) in place.
-        foreach (var p in snapshot)
-        {
-            // Trigger media resolution: the manager resolves the blob hash, folds an `Image`
-            // block into the document + re-emits → next Refresh rebuilds the row and paints the
-            // post-image from the document (render-model.md § D6). Fire-once on the unresolved
-            // sibling hash so the notify loop terminates once it's set.
-            if (p.hasMedia && p.mediaHash is null && _viewModel is not null)
-                _ = _viewModel.ResolveMediaAsync(p.postId);
-            // Trigger the quoted-post fold: the manager folds a `QuotedPost` block into the
-            // document + re-emits **idempotently** → next Refresh repaints the quoted-post card
-            // from the document. Fire-once — skip once the block is already folded (mirrors
-            // linux/android; the idempotent re-emit is the loop-safety backstop, not the gate).
-            if (p.quotedPostId is { } qid && DocumentRenderer.QuotedPost(p.document) is null && _viewModel is not null)
-                _ = _viewModel.ResolveQuotedPostAsync(qid);
-            // A REPOST ROW's original folds in through the SAME QuotedPost embed —
-            // resolve_quoted_post resolves either field, so a repost target needs no new
-            // render machinery, just the same fire-once trigger keyed on reposted_post_id
-            // instead of quoted_post_id (feed.md § Interaction bar → Repost, ratified
-            // 2026-08-10).
-            if (p.repostedPostId is { } rid && DocumentRenderer.QuotedPost(p.document) is null && _viewModel is not null)
-                _ = _viewModel.ResolveQuotedPostAsync(rid);
-            // Trigger link-preview resolution (render-model.md § D4): for EACH folded
-            // `LinkPreview` block still in `Resolving`, the shared
-            // `FeedManager::resolve_link_preview` resolves the url + re-emits → next Refresh
-            // paints a `link-preview-card` per `Resolved` state. Fire-once on the `Resolving`
-            // state — once terminal the block is `Resolved`/`Failed`, so this won't re-fire (the
-            // cached, idempotent resolve is the in-flight backstop, mirroring the media/quoted
-            // triggers above). The shared `resolving_link_preview_urls` face yields every
-            // unresolved url in body order, so a post with two bare URLs resolves BOTH — the
-            // single-preview `FirstOrDefault` twin this replaced would have stranded the second
-            // in `Resolving` forever (mirrors linux's identical loop).
-            if (_viewModel is not null)
-            {
-                foreach (var url in DocumentRenderer.ResolvingLinkPreviewUrls(p.document))
-                    _ = _viewModel.ResolveLinkPreviewAsync(url);
-            }
-            // Trigger the sold-post buyer teaser resolve (gap (2c), monetization.md § Per-post
-            // pay-to-unlock): the manager folds a resolved offer into `unlock_offer` + re-emits
-            // → next Refresh paints the card's SoldPostTeaser (a payments build's only; the
-            // resolve itself is a subscriptions read every flavor makes, as on tui and apple,
-            // and FeedPostItem's offer fields stay ungated inert data). Fire-once on
-            // unresolved — the shared resolve_post_unlock_offer itself no-ops (no I/O, no
-            // re-emit) unless gatedTier names a post-unlock-* tier, so gating on "any gated
-            // post with no offer yet" (rather than duplicating the tier-prefix check here) is
-            // correct AND cheap, matching linux's identical trigger.
-            if (p.gatedTier is not null && p.unlockOffer is null && _viewModel is not null)
-                _ = _viewModel.ResolvePostUnlockOfferAsync(p.postId);
-#if PAYMENTS
-            // Trigger the tip attribution resolve (monetization.md § Tips): no
-            // "does this post have tips" signal exists in the feed projection (unlike
-            // gatedTier above), so this fires for every post. The shared resolver
-            // writes a view on every outcome — including "no tips" and a transport
-            // error — so `tips == null` is a safe, terminating fire-once
-            // gate (mirrors ResolveMediaAsync). Gated: the resolve itself sends a
-            // wire kind excised entirely in a store-safe deployment (mirrors
-            // FeedViewModel.ResolvePostTipsAsync's own guard) — reading/displaying an
-            // already-resolved p.tips is NOT gated.
-            if (p.tips is null && _viewModel is not null)
-                _ = _viewModel.ResolvePostTipsAsync(p.postId);
-#endif   // PAYMENTS
-            // Trigger the C2PA-provenance check (media.md § C2PA provenance): the SAME
-            // authenticated blob GET the list-card image already performs also returns
-            // the `x-c2pa` header (BlobImageLoader.LoadWithC2paAsync shares its cache
-            // with the plain LoadAsync the image binding calls below — no extra
-            // request). Fire-once via FeedPostItem's own checked flag: unlike every
-            // trigger above, there is no manager/snapshot-side signal to gate on — this
-            // is pure client render glue, the same class as linux/android/apple's own
-            // per-app c2pa-badge wiring. Looked up post-Reconcile so the check lands on
-            // the STABLE row instance a content-unchanged tick kept (never the
-            // throwaway `target` item Reconcile may have discarded).
-            if (p.hasMedia && p.mediaHash is { Length: > 0 } mediaHash && GetImageLoader() is { } imgLoader)
-            {
-                var row = Posts.FirstOrDefault(i => i.PostId == p.postId);
-                if (row is { C2paChecked: false })
-                    _ = TriggerC2paCheckAsync(row, imgLoader, mediaHash);
-            }
-        }
-
-#if PAYMENTS
-        // Tip state or an unlock offer that arrived on THIS pass (the resolves above) must
-        // reach cards whose container was loaded on an earlier one — PostTipDisplay.Bind and
-        // SoldPostTeaser.Bind snapshot, and a non-recycling container is loaded once. See
-        // RefreshCardPayments.
-        RefreshCardPayments();
-#endif   // PAYMENTS
-    }
-
-    /// <summary>Resolves <paramref name="hash"/>'s `x-c2pa` hint (cache-shared with the
-    /// list-card image's own load, see the trigger in <see cref="SyncPosts"/>) and
-    /// records it on <paramref name="item"/>. Safe if the row has since scrolled out of
-    /// <see cref="Posts"/> or been replaced by a content-changed reconcile: the result
-    /// lands on the SPECIFIC captured instance, never a shared control, so a stale
-    /// completion just updates an orphaned view-model with no listener — the class of
-    /// bug <c>ImageHashBind</c>'s request-version guard exists for does not arise here.</summary>
-    private static async Task TriggerC2paCheckAsync(FeedPostItem item, BlobImageLoader loader, string hash)
-    {
-        var (_, hasC2pa) = await loader.LoadWithC2paAsync(hash);
-        item.SetHasC2pa(hasC2pa);
-    }
 
     /// <summary>Wire the single bridge-feed-unsubscribe affordance to the snapshot's
     /// subscribed bridge feeds (the `bridge-feed-unsubscribe-button` rows). Shown when
@@ -758,6 +781,11 @@ public sealed partial class FeedPage : Page
         await _viewModel.SetSearchQueryAsync(string.IsNullOrEmpty(query) ? null : query);
     }
 
+    private async void ImportedClear_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null) await _viewModel.ClearImportedAsync();
+    }
+
     private void FeedSearchClear_Click(object sender, RoutedEventArgs e)
     {
         // Clearing the box fires TextChanged → SetSearchQueryAsync(null) → re-query.
@@ -770,815 +798,9 @@ public sealed partial class FeedPage : Page
         if (_viewModel is not null) await _viewModel.LoadMoreAsync();
     }
 
-    private async void LikeButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button btn || btn.Tag is not string postId) return;
-        await RunVerbAsync("like", () => _viewModel!.LikeAsync(postId));
-    }
 
-    /// <summary>Run one interaction-bar verb and put a rejection on <c>error-message</c>
-    /// rather than let it escape the <c>async void</c> click handler unseen:
-    /// <see cref="FeedViewModel.VerbErrorCopy"/> reads a stated refusal in the user's
-    /// language (words under a restricted post — <c>ui/feed.md</c> § Encryption at rest,
-    /// ruling 6) and keeps any other failure's own text. A verb that lands clears a
-    /// previous verb's error, as web's does.</summary>
-    private async Task RunVerbAsync(string verb, Func<Task> run)
-    {
-        try
-        {
-            await run();
-            if (_pageError is not null)
-            {
-                _pageError = null;
-                Refresh();
-            }
-        }
-        catch (Exception ex)
-        {
-            ShellLog.Error(nameof(FeedPage), $"feed {verb} failed: {ex.Message}");
-            ReportPageError(FeedViewModel.VerbErrorCopy(ex));
-        }
-    }
 
-    /// <summary>Opens the reply compose surface (<c>feed-reply-dialog</c>) and, on submit,
-    /// composes a real reply through <c>FeedViewModel.ReplyAsync</c> (<c>FfiFeedManager::reply</c>)
-    /// — NOT <c>InteractAsync(id, "reply", body)</c>, whose native arm discards the typed text
-    /// outright (feed.md § Interaction bar; § Implementation status today). Submit/cancel live as
-    /// real <c>Button</c>s in the dialog's <c>Content</c>, mirroring <see cref="CreateFeed_Click"/>'s
-    /// create/cancel row: a <c>ContentDialog</c>'s template Primary/Close buttons cannot carry a
-    /// custom <c>AutomationId</c> (see the comment on that row), and <c>feed-reply-submit-button</c>
-    /// needs one. No-op on blank/whitespace-only text (mirrors linux's <c>build_reply_dialog</c>
-    /// guard) — unlike quote, an empty reply is meaningless.</summary>
-    private async void ReplyButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button btn || btn.Tag is not string postId) return;
 
-        var textBox = new TextBox
-        {
-            PlaceholderText = S.Get("feed/post/write_reply"),
-            AcceptsReturn = true,
-            TextWrapping = TextWrapping.Wrap,
-            Height = 100,
-        };
-        AutomationProperties.SetAutomationId(textBox, Ids.FeedReplyTextField);
-
-        ContentDialog? replyDialog = null;
-        bool shouldReply = false;
-
-        var buttonRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Right,
-        };
-        var cancelBtn = new Button { Content = S.Get("common/cancel") };
-        cancelBtn.Click += (s, _) => replyDialog?.Hide();
-        var submitBtn = new Button
-        {
-            Content = S.Get("common/reply"),
-            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
-        };
-        AutomationProperties.SetAutomationId(submitBtn, Ids.FeedReplySubmitButton);
-        submitBtn.Click += (s, _) =>
-        {
-            if (string.IsNullOrWhiteSpace(textBox.Text)) return;
-            shouldReply = true;
-            replyDialog?.Hide();
-        };
-        buttonRow.Children.Add(cancelBtn);
-        buttonRow.Children.Add(submitBtn);
-
-        var panel = new StackPanel { Spacing = 8 };
-
-        // Under a restricted target the dialog STATES where the reply goes —
-        // `feed-reply-audience`, the manager's own per-post answer, never decided here —
-        // and offers the explicit-public answer (`feed-reply-public-confirm`) only under
-        // *public by confirmation* (restricted-posts.md § Encryption at rest → *Ruling 5's
-        // build — the shape*, (d) + (e)). A public target paints neither. The checkbox is
-        // born unchecked at every open and never remembered.
-        var target = _viewModel.FindPost(postId);
-        var audience = target?.replyAudience;
-        CheckBox? publicConfirm = null;
-        if (target is not null && audience is { } a)
-        {
-            var audienceText = a switch
-            {
-                ReplyAudience.SealedToRoom => S.Format("feed/post/reply_audience_room", target.roomLabel ?? ""),
-                ReplyAudience.SealedToTier => S.Format("feed/post/reply_audience_tier", target.gatedTier ?? ""),
-                _ => S.Get("feed/post/reply_audience_public"),
-            };
-            var audienceLabel = new TextBlock { Text = audienceText, TextWrapping = TextWrapping.Wrap };
-            AutomationProperties.SetAutomationId(audienceLabel, Ids.FeedReplyAudience);
-            panel.Children.Add(audienceLabel);
-        }
-        panel.Children.Add(textBox);
-        if (audience == ReplyAudience.PublicByConfirmation)
-        {
-            publicConfirm = new CheckBox
-            {
-                Content = S.Get("feed/post/reply_public_confirm"),
-                IsChecked = false,
-            };
-            AutomationProperties.SetAutomationId(publicConfirm, Ids.FeedReplyPublicConfirm);
-            panel.Children.Add(publicConfirm);
-        }
-        panel.Children.Add(buttonRow);
-
-        var dialog = new ContentDialog
-        {
-            Title = S.Get("common/reply"),
-            Content = panel,
-            XamlRoot = this.XamlRoot,
-        };
-        AutomationProperties.SetAutomationId(dialog, Ids.FeedReplyDialog);
-        replyDialog = dialog;
-
-        await Controls.Dialogs.ShowAsync(dialog);
-
-        if (shouldReply)
-        {
-            var body = textBox.Text.Trim();
-            // The checkbox is only ever present (hence only ever checkable) under
-            // *public by confirmation*; the send path (prepare → upload → submit /
-            // confirmed / plain) lives in FeedViewModel.SendReplyAsync.
-            var confirmed = publicConfirm?.IsChecked == true;
-            await RunVerbAsync("reply", () => _viewModel!.SendReplyAsync(Nest, postId, body, confirmed));
-        }
-    }
-
-    /// <summary>Repost / un-repost toggle — through <c>FeedViewModel.RepostAsync</c>
-    /// (<c>FfiFeedManager::repost</c>), NOT the raw <c>InteractAsync(id, "repost")</c>: that
-    /// one-way call creates no repost post on a native target and can never take one back
-    /// (feed.md § Interaction bar → Repost, ratified 2026-08-10).
-    /// Matches <see cref="LikeButton_Click"/>'s shape.</summary>
-    private async void RepostButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button btn || btn.Tag is not string postId) return;
-        await RunVerbAsync("repost", () => _viewModel!.RepostAsync(postId));
-    }
-
-    /// <summary>Quote-repost — a repost WITH commentary (<c>Reference::Quote</c>) — through
-    /// <c>FeedViewModel.QuoteAsync</c> (<c>FfiFeedManager::quote</c>), NOT
-    /// <c>InteractAsync(id, "quote")</c>: the nest's native arm never composes a post from
-    /// that door (feed.md § Interaction bar; § Implementation status today). Fires with an
-    /// empty body — the ratified direct-tap shape (matches tui/linux/web/android/macos/ios);
-    /// a commentary composer is a separate fleet-wide follow-on. The nest bumps the target's
-    /// <c>quote_count</c> when the composed quoting post lands referencing it.</summary>
-    private async void QuoteButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button btn || btn.Tag is not string postId) return;
-        await RunVerbAsync("quote", () => _viewModel!.QuoteAsync(postId, ""));
-    }
-
-    /// <summary>Dispatch <c>load-remote-content-button</c> to the manager (D3): the manager
-    /// flips the in-memory reveal set for this post and re-emits; the next <c>Snapshot()</c>
-    /// projects <c>RemoteImage.revealed=true</c> → Refresh rebuilds the row →
-    /// FeedPostBodyBind repaints with fetched images (render-model.md § D3;
-    /// html-mail.md § Security &amp; privacy). NO local flip.</summary>
-    private void LoadRemoteContent_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is not null && sender is FrameworkElement fe && fe.DataContext is FeedPostItem item)
-            _viewModel.RevealRemoteImages(item.PostId);
-    }
-
-    /// <summary>Per-card <c>TipDisplayHost</c> fill, driven by the host's own
-    /// <c>Loaded</c> (see the ContentControl's comment in FeedPage.xaml for why that
-    /// and not <c>ContainerContentChanging</c>).
-    ///
-    /// <para>Declared unconditionally, body under <c>PAYMENTS</c>: a DataTemplate event
-    /// handler is resolved against this class at XAML-compile time and XAML carries no
-    /// <c>#if</c>, so hiding the whole method behind the excision would break the
-    /// store-safe build that the excision exists to produce.</para></summary>
-    private void TipDisplayHost_Loaded(object sender, RoutedEventArgs e)
-    {
-#if PAYMENTS
-        if (sender is ContentControl host && host.DataContext is FeedPostItem post)
-            BindTipDisplay(host, post);
-#endif   // PAYMENTS
-    }
-
-    /// <summary>Per-card <c>SoldPostTeaserHost</c> fill — the sold-post buyer teaser
-    /// (gap (2c), monetization.md § Per-post pay-to-unlock), <see cref="TipDisplayHost_Loaded"/>'s
-    /// shape and for the same reasons.</summary>
-    private void SoldPostTeaserHost_Loaded(object sender, RoutedEventArgs e)
-    {
-#if PAYMENTS
-        if (sender is ContentControl host && host.DataContext is FeedPostItem post)
-            BindSoldPostTeaser(host, post);
-#endif   // PAYMENTS
-    }
-
-#if PAYMENTS
-    /// <summary>Fill (or first-create) one realized post-card's <c>SoldPostTeaserHost</c>
-    /// with a bound <see cref="Views.Payments.SoldPostTeaser"/> — <see cref="BindTipDisplay"/>'s
-    /// twin. Idempotent: the control is created once per host and re-bound thereafter.</summary>
-    private void BindSoldPostTeaser(ContentControl host, FeedPostItem post)
-    {
-        if (host.Content is not Views.Payments.SoldPostTeaser teaser)
-        {
-            teaser = new Views.Payments.SoldPostTeaser();
-            teaser.PaymentLinkRequested += (_, item) => OpenUnlockOfferPaymentLink(item);
-            teaser.BuyRequested += (_, item) => BuyUnlockOffer(item);
-            host.Content = teaser;
-        }
-        teaser.Bind(post);
-    }
-
-    /// <summary>Open the sold-post offer's external payment_url (the teaser's payment
-    /// link) — mirrors <c>ProfilePage.OpenOfferPaymentLink</c>, plus the shared
-    /// <c>uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl</c> guard (F-CL2
-    /// anti-phishing-redirect class — the nest/author-supplied url is
-    /// untrusted): a non-https url shows <c>subscriptions/unsafe_payment_url</c> on
-    /// `error-message` instead of launching.</summary>
-    private void OpenUnlockOfferPaymentLink(FeedPostItem post)
-    {
-        if (string.IsNullOrEmpty(post.UnlockOfferPaymentUrl)) return;
-        if (!uniffi.fauna_core.FaunaCoreMethods.IsSafePaymentUrl(post.UnlockOfferPaymentUrl))
-        {
-            var msg = S.Get("subscriptions/unsafe_payment_url");
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-            return;
-        }
-        FaunaApp.Services.UrlOpener.Open(post.UnlockOfferPaymentUrl, "Feed");
-    }
-
-    /// <summary>Buy the sold post's unlock tier off the resolved teaser offer (the teaser's
-    /// buy button) — the existing subscribe flow against the resolved offer's tier, queued
-    /// pending the author's own §2 approve. A successful call mutates the manager's own
-    /// snapshot + notifies (mirrors <see cref="DispatchTrainAsync"/>'s error-surfacing
-    /// convention).</summary>
-    private async void BuyUnlockOffer(FeedPostItem post)
-    {
-        if (_viewModel is null) return;
-        try
-        {
-            await _viewModel.BuyUnlockOfferAsync(post.PostId);
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("feed/error_buy_unlock", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>Fill both per-card payments hosts of one realized card's template root —
-    /// what <see cref="RefreshCardPayments"/> and the dormant virtualizing path share.</summary>
-    private void BindCardPayments(FrameworkElement root, FeedPostItem post)
-    {
-        if (root.FindName("TipDisplayHost") is ContentControl tipHost) BindTipDisplay(tipHost, post);
-        if (root.FindName("SoldPostTeaserHost") is ContentControl teaserHost) BindSoldPostTeaser(teaserHost, post);
-    }
-
-    /// <summary>Fill (or first-create) one realized post-card's <c>TipDisplayHost</c>
-    /// with a bound <see cref="Views.Payments.PostTipDisplay"/> — the per-card twin of
-    /// <c>ProfilePage.Page_Loaded</c>'s single <c>PaymentsSectionsHost</c> fill, done
-    /// per container because the plane is per-card rather than a single page section.
-    /// Idempotent: the control is created once per host and re-bound thereafter.</summary>
-    private void BindTipDisplay(ContentControl host, FeedPostItem post)
-    {
-        if (host.Content is not Views.Payments.PostTipDisplay display)
-        {
-            display = new Views.Payments.PostTipDisplay();
-            display.OpenTipListRequested += (_, item) => OpenTipList(item);
-            host.Content = display;
-        }
-        display.Bind(post);
-    }
-
-    /// <summary>Re-bind every ALREADY-REALIZED card's tip display and sold-post teaser,
-    /// after a snapshot pass has reconciled <see cref="Posts"/>.
-    ///
-    /// <para>This is the half <c>Loaded</c> cannot cover. <see cref="Views.Payments.PostTipDisplay.Bind"/>
-    /// and <see cref="Views.Payments.SoldPostTeaser.Bind"/> SNAPSHOT their item's values
-    /// into <c>Text</c>/<c>Visibility</c> rather than binding them, and a container on a
-    /// non-recycling panel is loaded exactly once — so a tip state or an unlock offer that
-    /// arrives LATER (the `ResolvePostTipsAsync` / `ResolvePostUnlockOfferAsync` round
-    /// trips in <see cref="SyncPosts"/>, which are the whole live path) would paint nothing
-    /// without a pass like this. Containers not yet generated are simply skipped; their own
-    /// <c>Loaded</c> binds them with the same fresh item.</para></summary>
-    private void RefreshCardPayments()
-    {
-        foreach (var post in Posts)
-        {
-            if (PostsList.ContainerFromItem(post) is not ContentControl container) continue;
-            if (container.ContentTemplateRoot is not FrameworkElement root) continue;
-            BindCardPayments(root, post);
-        }
-    }
-
-    /// <summary>The virtualizing-panel path, kept deliberately and WIRED BUT DORMANT:
-    /// with this list's non-virtualizing <c>ItemsPanel</c> override it does not fire at
-    /// all (that is the defect), and it would be the right seam again the moment
-    /// the panel becomes virtualizing — recycling reuses a container without re-raising
-    /// <c>Loaded</c>. Left in place rather than deleted so a future panel change does not
-    /// silently lose the re-bind; do not read its existence as evidence that it runs.</summary>
-    private void PostsList_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
-    {
-        if (args.Item is not FeedPostItem post) return;
-        if (args.ItemContainer?.ContentTemplateRoot is not FrameworkElement root) return;
-        BindCardPayments(root, post);
-    }
-
-    /// <summary>Open the tip attribution window (monetization.md § Tips) for one
-    /// post — flat, not scoped: exactly one open at a time. An inline Border +
-    /// Visibility toggle, NOT a <c>ContentDialog</c> — the AdminDnsPage RenameSheet
-    /// precedent ("a modal ContentDialog does NOT surface ... to the FlaUI
-    /// is_visible tree") held here too: a ContentDialog shape measured
-    /// 0x0/isOffscreen the moment this row's own e2e checked <c>is_visible</c> right
-    /// after open, with no wait. Shared by the list card's
-    /// <c>post-tip-list-button</c> (via
-    /// <see cref="Views.Payments.PostTipDisplay.OpenTipListRequested"/>) and the
-    /// detail dialog's own tip row. The item's precomputed
-    /// <see cref="FeedPostItem.TipListTitle"/> / <see cref="FeedPostItem.TipSenders"/>
-    /// are set once at construction (Tips is an immutable snapshot field), so this
-    /// just paints them — no fresh read.</summary>
-    private void OpenTipList(FeedPostItem post) => _tipListDialog?.Show(post.TipListTitle, post.TipSenders);
-#endif
-
-    // ── Trained-topic training verbs (post-card ⋯ overflow;
-    //    topic-factors.md § Training signals) ─────────────────────────────
-
-    /// <summary>Open post's ⋯ overflow (<c>feed-post-actions-button</c> →
-    /// <c>feed-post-actions-menu</c>): the two training verbs, own-post delete, and
-    /// the own-post web-publishing verbs (web-content-hosting.md § Published-post
-    /// management), checked against the post's current example marker for the
-    /// feed's in-context training target (<c>FeedManager::train_target_factor</c> —
-    /// a feed whose composition singles out one trained factor trains it directly;
-    /// otherwise the verb opens the factor-target sheet). Mirrors
-    /// <c>DmMessageBubble.ShowDeleteConfirm</c>'s explicit <c>ShowAt</c> (not a
-    /// pre-assigned <c>Button.Flyout</c> — this menu's content depends on state
-    /// read fresh at open time).
-    ///
-    /// <c>async</c> so the web verbs' origin (whether the actor has a serving
-    /// address to build copy links on) is resolved BEFORE the menu paints — tui's
-    /// trap #2: painting a *disabled* copy verb off unread state tells a creator
-    /// with a working address that they have none, and a <c>MenuFlyoutItem</c>'s
-    /// state can't be live-patched once shown the way a data-bound row can.</summary>
-    private async void PostActionsButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is null || sender is not Button { Tag: FeedPostItem post } btn) return;
-        var manager = _viewModel.Manager;
-        var targetFactor = manager.TrainTargetFactor();
-
-        // Own-post gates (feed.md § State & data shape → Post deletion, IDs
-        // user-approved 2026-07-16; web-content-hosting.md § Published-post
-        // management) — gated to the local actor's own post, the same shape
-        // linux (client.actor_id() == post.author) and web (isOwn derived from
-        // $identity) already ship. FeedPostItem carries only the author's hex
-        // actor id (no is_own flag from the FFI snapshot), so the comparison
-        // happens here against the page's own ICryptoService.
-        var ownActorHex = _crypto?.HasKey == true ? _crypto.ActorIdHex : null;
-        var isOwn = ownActorHex is not null && post.AuthorHex == ownActorHex;
-
-        // Resolve the site-link origin ONLY when this own post could show a copy
-        // verb (already published — WebSlug set). An unpublished post's sole verb
-        // (Publish to web) needs no origin, so this round trip is skipped for the
-        // common case of opening the menu on an ordinary own post.
-        uniffi.fauna_client_web.SiteLinkView? siteLink = null;
-        if (isOwn && post.WebSlug is { Length: > 0 } && _rpc is not null && _account is not null)
-        {
-            try
-            {
-                var web = await GetWebClientAsync();
-                var handle = _account.Handle;
-                var resolved = await WebOrigin.ResolveAsync(web, handle);
-                siteLink = resolved.SiteLink;
-            }
-            catch (Exception)
-            {
-                siteLink = null; // treat a failed resolve as "no origin" — dead, not silently live
-            }
-        }
-
-        var menu = new MenuFlyout();
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(menu, Ids.FeedPostActionsMenu);
-        // Copy verbs must survive their own Click without the flyout auto-dismissing
-        // (a MenuFlyoutItem click always closes its parent MenuFlyout — see
-        // ShowDeletePostConfirm's doc comment below) so the e2e can read the
-        // `copied` attr right after clicking, the same "menu stays open after a
-        // copy" shape web's PostCard.svelte uses (only publish/unpublish close it).
-        var suppressClose = false;
-        menu.Closing += (_, args) =>
-        {
-            if (!suppressClose) return;
-            args.Cancel = true;
-            suppressClose = false;
-        };
-
-        void AddVerb(TrainVerb verb, string labelKey, string id)
-        {
-            var marked = targetFactor is { } f && manager.ExampleLabelFor(post.PostId, f) == verb;
-            var item = new MenuFlyoutItem { Text = S.Get(labelKey) };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(item, id);
-            // The checked marker rides HelpText (get_attr(item, "state") maps any
-            // non-disabled/non-name attr to HelpText — reference_windows_flaui_state_attr_helptext).
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(item, marked ? "on" : "off");
-            item.Click += async (_, _) =>
-            {
-                if (targetFactor is { } factor)
-                    await DispatchTrainAsync(post.PostId, factor, verb, marked);
-                else
-                    OpenTrainTargetSheet(btn, post.PostId, verb);
-            };
-            menu.Items.Add(item);
-        }
-
-        AddVerb(TrainVerb.MoreLikeThis, "feed/more_like_this", "feed-post-more-like-this");
-        AddVerb(TrainVerb.LessLikeThis, "feed/less_like_this", "feed-post-less-like-this");
-
-        // The report verb (moderation.md § User-initiated reporting → App surface),
-        // gated !is_own: nobody reports their own post. The target is built by the
-        // shared report_post_target, which carries the sealed rule once (a gated or
-        // room post is sealed — the nest holds no readable bytes for it).
-        if (!isOwn && _rpc is not null)
-        {
-            var report = new MenuFlyoutItem { Text = S.Get("feed/report_post") };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(report, Ids.FeedPostReportButton);
-            report.Click += async (_, _) => await OpenReportSheetAsync(post);
-            menu.Items.Add(report);
-        }
-
-        if (isOwn)
-        {
-            var del = new MenuFlyoutItem { Text = S.Get("feed/delete_post") };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(del, Ids.FeedPostDeleteButton);
-            del.Click += (_, _) => ShowDeletePostConfirm(btn, post.PostId);
-            menu.Items.Add(del);
-
-            BuildWebPublishVerbs(menu, post, siteLink, () => suppressClose = true);
-        }
-
-        menu.ShowAt(btn);
-    }
-
-    /// <summary>Open the shared report sheet on <paramref name="post"/> (the ⋯ menu's
-    /// <c>feed-post-report-button</c>). A landed report is acknowledged OUTSIDE the
-    /// closed sheet (<c>report-status</c>); its reporter-side hide has already been
-    /// stored by the sheet, so the re-sync below makes the card read "You reported
-    /// this" at once. A failed send keeps the sheet open and reports on
-    /// <c>error-message</c>; a failed block/hide lands there BESIDE the
-    /// acknowledgement (moderation.md § Corollary — never silent).</summary>
-    private async Task OpenReportSheetAsync(FeedPostItem post)
-    {
-        if (_rpc is null) return;
-        ReportStatusText.Visibility = Visibility.Collapsed;
-        var target = FaunaFfiMethods.ReportPostTarget(
-            post.PostId, post.AuthorHex, post.BodyText,
-            post.GatedTier is { Length: > 0 } || !string.IsNullOrEmpty(post.RoomLabel));
-        var outcome = await Controls.ReportSheetDialog.OpenAsync(
-            this.XamlRoot, _rpc, target, ReportPageError);
-        if (outcome is null) return;
-        ReportStatusText.Text = outcome.Acknowledgement ?? "";
-        ReportStatusText.Visibility = Visibility.Visible;
-        if (outcome.FollowUpError is { } followUp) ReportPageError(followUp);
-        // The hide list changed: re-read the rows (each verdict is read at construction).
-        Refresh();
-    }
-
-    /// <summary>The own-post web-publishing verbs (web-content-hosting.md
-    /// § Published-post management; presence rules ui/feed.md § User actions).
-    ///
-    /// Everything here is state-derived off the post the snapshot already holds —
-    /// <see cref="FeedPostItem.WebSlug"/> / <see cref="FeedPostItem.GatedTier"/> —
-    /// never a per-row query. <paramref name="siteLink"/> is the caller's already-
-    /// resolved origin (or null — no origin, or not an own published post, in
-    /// which case the copy verbs are simply not offered a live link).
-    ///
-    /// <paramref name="markCopyPending"/> is called by a copy verb's Click just
-    /// before it writes to the clipboard, so the caller's <c>Closing</c> handler
-    /// keeps the menu open long enough for the `copied` attr to be read.</summary>
-    private void BuildWebPublishVerbs(
-        MenuFlyout menu, FeedPostItem post, uniffi.fauna_client_web.SiteLinkView? siteLink,
-        Action markCopyPending)
-    {
-        if (post.WebSlug is not { Length: > 0 } slug)
-        {
-            // Unpublished: one verb, no link affordances for a page that does not
-            // exist. A default slug is the nest's to mint, so this needs no origin.
-            var publish = new MenuFlyoutItem { Text = S.Get("web_publish/publish_to_web") };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(publish, Ids.FeedPostPublishWebButton);
-            publish.Click += async (_, _) => await DispatchWebPublishAsync(post.PostId);
-            menu.Items.Add(publish);
-            return;
-        }
-
-        var origin = siteLink?.@origin;
-        // Said once for the menu rather than per verb, and only when the paywall
-        // affordance is actually present below (monetization.md § Pillar 2 →
-        // Creator comp-link surface: the ratified ~10-minute validity).
-        if (post.GatedTier is { Length: > 0 } && origin is not null)
-            menu.Items.Add(new MenuFlyoutItem { Text = S.Get("web_publish/paywall_link_note"), IsEnabled = false });
-        // Why the copy verbs below are dead, in the user's own terms — the ⋯ menu
-        // cannot say "the toggle above" (that control is on another page).
-        if (origin is null)
-            menu.Items.Add(new MenuFlyoutItem { Text = S.Get("web_publish/menu_no_link_reason"), IsEnabled = false });
-
-        var copyWeb = new MenuFlyoutItem
-        {
-            Text = S.Get("web_publish/copy_web_link"),
-            IsEnabled = origin is not null,
-        };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(copyWeb, Ids.FeedPostCopyWebLinkButton);
-        copyWeb.Click += (_, _) =>
-        {
-            if (origin is not { } o) return;
-            markCopyPending();
-            var url = FaunaFfiMethods.WebPostPageUrl(o, slug);
-            FaunaApp.Helpers.ClipboardHelper.CopyText(url);
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(copyWeb, url);
-        };
-        menu.Items.Add(copyWeb);
-
-        // Gated rows only: an ungated post has no paywalled body, so the mint
-        // would hand out a token for nothing.
-        if (post.GatedTier is { Length: > 0 })
-        {
-            var copyPaywall = new MenuFlyoutItem
-            {
-                Text = S.Get("web_publish/copy_paywall_link"),
-                IsEnabled = origin is not null,
-            };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(copyPaywall, Ids.FeedPostCopyPaywallLinkButton);
-            copyPaywall.Click += async (_, _) =>
-            {
-                if (origin is not { } o) return;
-                markCopyPending();
-                await DispatchCopyPaywallLinkAsync(copyPaywall, post.PostId, slug, o);
-            };
-            menu.Items.Add(copyPaywall);
-        }
-
-        var unpublish = new MenuFlyoutItem { Text = S.Get("web_publish/unpublish") };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(unpublish, Ids.FeedPostUnpublishWebButton);
-        unpublish.Click += async (_, _) => await DispatchWebUnpublishAsync(post.PostId);
-        menu.Items.Add(unpublish);
-    }
-
-    /// <summary>Lazily build the shared <c>FfiWebClient</c> over the session's
-    /// shared, auto-reconnecting WS-RPC connection (mirrors
-    /// <c>SettingsWebPage.EnsureViewModelAsync</c> — never a per-open one-shot
-    /// connection).</summary>
-    private async Task<uniffi.fauna_ffi.FfiWebClient> GetWebClientAsync()
-    {
-        if (_webClient is not null) return _webClient;
-        if (_rpc is null) throw new InvalidOperationException("no RPC client");
-        _webClient = await _rpc.BuildWebClientAsync();
-        return _webClient;
-    }
-
-    /// <summary>Publish a post as a web page from the ⋯ menu (the nest mints the
-    /// default slug — this menu offers no client-chosen slug). A successful call
-    /// re-reads the current feed so the card's WebSlug (which drives the whole
-    /// verb family) repaints from the nest's own answer, same as the section's own
-    /// non-optimistic pattern.</summary>
-    private async Task DispatchWebPublishAsync(string postIdHex)
-    {
-        if (_viewModel is null) return;
-        try
-        {
-            var web = await GetWebClientAsync();
-            await web.PublishSet(Convert.FromHexString(postIdHex), null);
-            await _viewModel.Manager.RefreshCurrentFeed();
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("web_publish/error_publish", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>Take a published page down from the ⋯ menu. One tap, no confirm
-    /// step — unlike delete, a takedown is idempotent and reversible.</summary>
-    private async Task DispatchWebUnpublishAsync(string postIdHex)
-    {
-        if (_viewModel is null) return;
-        try
-        {
-            var web = await GetWebClientAsync();
-            await web.PublishUnset(Convert.FromHexString(postIdHex));
-            await _viewModel.Manager.RefreshCurrentFeed();
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("web_publish/error_unpublish", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>Mint + copy a short-lived full-access paywall link. A fresh mint
-    /// per click: the token is short-lived by ratified design and re-minting is
-    /// free, so re-copying always yields a link that works from now rather than a
-    /// cached one that already expired.</summary>
-    private async Task DispatchCopyPaywallLinkAsync(MenuFlyoutItem button, string postIdHex, string slug, string origin)
-    {
-        try
-        {
-            var web = await GetWebClientAsync();
-            var minted = await web.PaywallMintToken(new uniffi.fauna_client_web.PaywallTarget.PostSlug(slug));
-            var url = FaunaFfiMethods.WebTokenedUrl(origin, minted.@path, minted.@token);
-            FaunaApp.Helpers.ClipboardHelper.CopyText(url);
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, url);
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("web_publish/error_paywall_link", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>Open the delete-confirm step (<c>feed-post-delete-confirm-button</c>) as a
-    /// sub-flyout anchored to the ⋯ button — mirrors
-    /// <c>DmMessageBubble.ShowDeleteConfirm</c>'s established reveal-in-flyout shape
-    /// verbatim (title + a single always-enabled confirm Button in its own
-    /// <c>Flyout</c>): a <c>MenuFlyoutItem</c> click always closes its parent
-    /// <c>MenuFlyout</c>, so the confirm step needs its own flyout rather than a
-    /// second item toggled visible inside <c>menu</c>.</summary>
-    private void ShowDeletePostConfirm(FrameworkElement anchor, string postId)
-    {
-        var panel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 8, MinWidth = 180 };
-        panel.Children.Add(new TextBlock
-        {
-            Text = S.Get("feed/delete_post_confirm_title"),
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            TextWrapping = TextWrapping.Wrap,
-        });
-        var confirm = new Button
-        {
-            Content = S.Get("feed/delete_post_confirm"),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-        };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(confirm, Ids.FeedPostDeleteConfirmButton);
-        confirm.Click += async (_, _) =>
-        {
-            _postDeleteConfirmFlyout?.Hide();
-            await DispatchDeletePostAsync(postId);
-        };
-        panel.Children.Add(confirm);
-
-        _postDeleteConfirmFlyout = new Flyout { Content = panel };
-        _postDeleteConfirmFlyout.ShowAt(anchor);
-    }
-
-    private Flyout? _postDeleteConfirmFlyout;
-
-    /// <summary>Delete an own post via the shared <c>FeedManager::delete_post</c>
-    /// (mirrors <see cref="DispatchTrainAsync"/>'s error-surfacing convention). A
-    /// successful call mutates the manager's own snapshot + notifies, so
-    /// <see cref="Refresh"/> drops the row via the normal observer path — no direct
-    /// re-render call here (same as the training verbs above).</summary>
-    private async Task DispatchDeletePostAsync(string postId)
-    {
-        if (_viewModel is null) return;
-        try
-        {
-            await _viewModel.Manager.DeletePost(postId);
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("feed/error_delete", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>Run a training gesture: the marked verb again ⇒ un-train (the
-    /// inverse delta), anything else ⇒ train (the manager applies forward/flip
-    /// semantics — no UI-side duplicate guard, <c>TrainResult.DuplicateSignal</c>
-    /// writes nothing). A successful call mutates the manager's own snapshot +
-    /// notifies, so <see cref="Refresh"/> rebuilds the row via the normal observer
-    /// path — no direct re-render call here.</summary>
-    private async Task DispatchTrainAsync(string postId, string factor, TrainVerb verb, bool alreadyMarked)
-    {
-        if (_viewModel is null) return;
-        try
-        {
-            if (alreadyMarked) await _viewModel.Manager.UntrainPost(postId, factor);
-            else await _viewModel.Manager.TrainPost(postId, factor, verb);
-        }
-        catch (Exception ex)
-        {
-            var msg = S.Format("feed/error_train", ex.Message);
-            ErrorBar.Message = msg; ErrorBar.IsOpen = true;
-            App.CurrentErrorMessage = msg;
-        }
-    }
-
-    /// <summary>The factor-target sheet (<c>feed-post-train-target-sheet</c>):
-    /// shown when the current feed's composition does not single out one trained
-    /// topic. Lists the user's trained factors from the sealed registry — the
-    /// picker's stable key rides <c>AutomationProperties.Name</c> (the
-    /// task-delegation Content/Name split), its display is the user's chosen
-    /// name — and trains the picked one. Also offers a "New trained topic…" link
-    /// out to the Personalization home (ui.yaml's ratified "existing factors +
-    /// New trained topic…" shape) rather than duplicating the create-form inline
-    /// — the sheet shape every app shares, priority #4.</summary>
-    private void OpenTrainTargetSheet(FrameworkElement anchor, string postId, TrainVerb verb)
-    {
-        var panel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 8, MinWidth = 220 };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(panel, Ids.FeedPostTrainTargetSheet);
-        panel.Children.Add(new TextBlock
-        {
-            Text = S.Get("feed/train_target_title"),
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            TextWrapping = TextWrapping.Wrap,
-        });
-
-        var combo = new ComboBox { MinWidth = 180, HorizontalAlignment = HorizontalAlignment.Stretch };
-        panel.Children.Add(combo);
-
-        var trainButton = new Button
-        {
-            Content = S.Get("common/save"),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-        };
-        panel.Children.Add(trainButton);
-
-        var flyout = new Flyout { Content = panel };
-        trainButton.Click += async (_, _) =>
-        {
-            if (combo.SelectedItem is ComboBoxItem { Tag: string factor })
-            {
-                flyout.Hide();
-                await DispatchTrainAsync(postId, factor, verb, alreadyMarked: false);
-            }
-        };
-
-        var createLink = new HyperlinkButton
-        {
-            Content = S.Get("personalization/trained_factor_create"),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Padding = new Thickness(0),
-        };
-        createLink.Click += (_, _) =>
-        {
-            flyout.Hide();
-            MainPage.Current?.NavigateToSettingsSubPage(SettingsNavigation.Personalization);
-        };
-        panel.Children.Add(createLink);
-
-        flyout.ShowAt(anchor);
-        // Populate async after opening — the sheet appears immediately, options
-        // land when the sealed-registry read resolves (mirrors linux).
-        _ = PopulateTrainTargetComboAsync(combo);
-    }
-
-    private async Task PopulateTrainTargetComboAsync(ComboBox combo)
-    {
-        if (_rpc is null) return;
-        try
-        {
-            var rows = await _rpc.TrainedTopicsListAsync();
-            foreach (var row in rows)
-            {
-                if (row.factorKey is not { } key) continue;
-                var item = new ComboBoxItem { Content = row.name, Tag = key };
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, key);
-                combo.Items.Add(item);
-            }
-            if (combo.Items.Count > 0) combo.SelectedIndex = 0;
-        }
-        catch (Exception ex)
-        {
-            ShellLog.Warn(nameof(FeedPage), $"trained-topics fetch for target sheet failed: {ex.Message}");
-        }
-    }
-
-    // Opens the post_detail dialog for the clicked card (ui.yaml feed transition
-    // `click post-card → post_detail`). The post-card DataTemplate root is a
-    // transparent Button (the event-card/addressbook-item/media-item idiom): a bare
-    // Grid/StackPanel root exposes no UIA invocation pattern, so the FlaUI bridge's
-    // physical-click fallback lands but never fires the open (reference_winui_clickable
-    // _row_needs_button_root). Unlike event-card, the card's own interactive children
-    // (feed-post-actions-button, load-remote-content-button, the like/reply/repost/quote
-    // bar, feed-post-muted-reveal-button) stay NESTED inside this Button rather than
-    // moved out as siblings — the feed e2e scopes several of them under `post-card[i]`
-    // (feed.py reveal_remote_content / open_post_actions; test_feed_link_preview), and
-    // WalkScope confines a scoped lookup to the post-card element's own subtree
-    // (flaui-bridge/ElementFinder.cs). Each nested child keeps its own InvokePattern, so
-    // FlaUI drives it directly; the outer Button's Invoke opens the detail without
-    // double-firing (Invoke is direct, not pointer-routed). The ListView carries no
-    // IsItemClickEnabled, so this Click is the sole open path (no ItemClick double-open).
-    private async void PostCard_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: FeedPostItem item }) return;
-        // A REPOST ROW's own detail would be blank (the repost post is empty by
-        // construction) — activation opens the ORIGINAL's detail instead (feed.md
-        // § Interaction bar → Repost, ratified 2026-08-10), mirroring linux/web/apple.
-        // OpenPostDetailByIdAsync resolves through the same deep-link door a search
-        // hit uses, so an original outside the loaded window still opens with real
-        // content instead of degrading to a no-op.
-        if (item.IsRepostRow)
-        {
-            await OpenPostDetailByIdAsync(item.RepostedPostId!);
-            return;
-        }
-        await ShowPostDetailDialogAsync(item);
-    }
 
     /// <summary>
     /// The `SearchNav.Post` deep-link door (search.md § User actions) — opens
@@ -1600,7 +822,7 @@ public sealed partial class FeedPage : Page
     /// (<see cref="ResolveAndFillPostDetailAsync"/>), the same in-place-repaint
     /// idiom <see cref="UnlockGatedDetailAsync"/> already uses on this page.
     /// </summary>
-    private async Task OpenPostDetailByIdAsync(string postId)
+    private async Task OpenPostDetailByIdAsync(string postId, string? homeNestUrl = null)
     {
         if (_viewModel is null) return;
 
@@ -1627,7 +849,7 @@ public sealed partial class FeedPage : Page
         await Controls.Dialogs.ShowAsync(dialog, prepare: () =>
         {
             TrackDetailDialog(dialog);
-            _ = ResolveAndFillPostDetailAsync(dialog, postId);
+            _ = ResolveAndFillPostDetailAsync(dialog, postId, homeNestUrl);
         });
     }
 
@@ -1649,19 +871,26 @@ public sealed partial class FeedPage : Page
     /// never crash, the same posture every pre-existing stale-id open takes
     /// for a deleted/quarantined post.
     /// </summary>
-    private async Task ResolveAndFillPostDetailAsync(ContentDialog dialog, string postId)
+    private async Task ResolveAndFillPostDetailAsync(
+        ContentDialog dialog, string postId, string? homeNestUrl = null)
     {
         if (_viewModel is null) return;
         try
         {
-            await _viewModel.Manager.ResolvePost(postId);
+            // A post found in a room homed on another nest resolves through the
+            // deep-link door's `from` form — the room's recorded home, never a guess;
+            // otherwise this nest (`room-search.md` § The surface → Opening a hit).
+            if (homeNestUrl is { Length: > 0 })
+                await _viewModel.Manager.ResolvePostFrom(postId, homeNestUrl);
+            else
+                await _viewModel.Manager.ResolvePost(postId);
             if (FindRenderedPost(postId) is { } resolved)
             {
                 var resolvedItem = new FeedPostItem(resolved, _viewModel.Manager, _viewModel.BridgeRoster);
                 var panel = BuildPostDetailPanel(resolvedItem, out var bodyText, out var postImageInsertIndex);
                 dialog.Content = new ScrollViewer { Content = panel, MaxHeight = 400 };
                 if (resolvedItem.GatedTier is { Length: > 0 } && !resolvedItem.GatedUnlocked
-                    && !resolvedItem.ShowRegionPlaceholder)
+                    && !resolvedItem.DetailWithholdsBody)
                     _ = UnlockGatedDetailAsync(postId, bodyText, panel, postImageInsertIndex);
             }
             // Unavailable / no snapshot hit: leave the loading placeholder up — the
@@ -1682,6 +911,56 @@ public sealed partial class FeedPage : Page
     /// <c>FeedViewModel.Snapshot</c> (see <see cref="UnlockGatedDetailAsync"/>'s
     /// note on why) — a fresh read is required right after
     /// <c>ResolvePost</c> populates <c>deepLinkedPost</c>.</summary>
+    /// <summary>The repaint of the open post detail's <c>content-label-badge</c>, or
+    /// <c>null</c> when no detail is open. Run on every feed tick (<see cref="Refresh"/>),
+    /// because the room labeler's verdict reaches the post after the dialog was built.</summary>
+    private Action? _repaintDetailLabel;
+
+    /// <summary>The detail dialog's <c>content-label-badge</c>: Collapsed — absent — until the
+    /// post carries a label, then styled entirely from the shared <c>content_label_style</c>
+    /// map through <see cref="FeedPostItem"/>'s own badge properties (the list card's source),
+    /// never a category string or colour of this file's.</summary>
+    private Border BuildDetailLabelBadge(string postId)
+    {
+        var icon = new TextBlock { FontSize = 10, VerticalAlignment = VerticalAlignment.Center };
+        var text = new TextBlock { FontSize = 10, VerticalAlignment = VerticalAlignment.Center };
+        var badge = new Border
+        {
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(4, 1, 4, 1),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Visibility = Visibility.Collapsed,
+            Child = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 3,
+                Children = { icon, text },
+            },
+        };
+        AutomationProperties.SetAutomationId(badge, Ids.ContentLabelBadge);
+
+        void Repaint()
+        {
+            if (_viewModel is null || FindRenderedPost(postId) is not { } post) return;
+            var labelled = new FeedPostItem(post, _viewModel.Manager, _viewModel.BridgeRoster);
+            if (!labelled.HasContentLabel)
+            {
+                badge.Visibility = Visibility.Collapsed;
+                return;
+            }
+            icon.Text = labelled.ContentLabelIcon;
+            text.Text = labelled.ContentLabelText;
+            text.Foreground = HexColorToBrushConverter.FromHex(labelled.ContentLabelAccent);
+            badge.Background = HexColorToBrushConverter.FromHex(labelled.ContentLabelTint, 38);
+            AutomationProperties.SetName(badge, labelled.ContentLabelText);
+            badge.Visibility = Visibility.Visible;
+        }
+
+        Repaint();
+        _repaintDetailLabel = Repaint;
+        return badge;
+    }
+
     private PostSummary? FindRenderedPost(string postId)
     {
         if (_viewModel is null) return null;
@@ -1694,6 +973,7 @@ public sealed partial class FeedPage : Page
     // post-card → post_detail`) for either open path — the ordinary
     // post-card-click (<see cref="ShowPostDetailDialogAsync"/>) or the
     // search-nav deep link (<see cref="ResolveAndFillPostDetailAsync"/>).
+
     private StackPanel BuildPostDetailPanel(FeedPostItem item, out TextBlock bodyText, out int postImageInsertIndex)
     {
         var panel = new StackPanel { Spacing = 8 };
@@ -1701,8 +981,29 @@ public sealed partial class FeedPage : Page
         // Convention 17's verdict side for this surface: the item's composed verdict,
         // registered off the dialog's own root whatever arm paints below.
         var witnessKey = "detail:" + item.PostId;
-        panel.Loaded += (_, _) => RegionPlaneHost.WitnessBlocked(witnessKey, item.IsRegionBlocked);
-        panel.Unloaded += (_, _) => RegionPlaneHost.Forget(witnessKey);
+        panel.Loaded += (_, _) =>
+        {
+            RegionPlaneHost.WitnessBlocked(witnessKey, item.IsRegionBlocked);
+            NestRulesHost.WitnessBlocked(witnessKey, item.IsNestBlocked);
+        };
+        panel.Unloaded += (_, _) =>
+        {
+            RegionPlaneHost.Forget(witnessKey);
+            NestRulesHost.Forget(witnessKey);
+        };
+
+        // A collapse's reveal (region, nest or family — one shared reveal set)
+        // repaints this dialog in place: rebuild the panel for the now-revealed item
+        // and move its children across, keeping this root (and its witness hooks).
+        void RevealInPlace()
+        {
+            item.RevealContent();
+            var fresh = BuildPostDetailPanel(item, out _, out _);
+            var children = fresh.Children.ToList();
+            fresh.Children.Clear();
+            panel.Children.Clear();
+            foreach (var child in children) panel.Children.Add(child);
+        }
 
         // Legal-takedown tombstone (moderation.md § Categories & enforcement item 1):
         // the nest withheld this post's body under a legal obligation — surface the
@@ -1727,6 +1028,26 @@ public sealed partial class FeedPage : Page
             return panel;
         }
 
+        // Admin-blocked post (takedown-and-block.md § Admin block of a reported item):
+        // for any viewer but its author the nest withheld the body, so the shared
+        // notice stands in the body area exactly as the tombstone above does (tui's
+        // post-detail arm). The author's own read keeps the body; the notice then
+        // paints right after it, below.
+        if (item.AdminBlockNotice is { } blockedNotice && item.IsAdminBlockedInPlace)
+        {
+            bodyText = new TextBlock
+            {
+                Text = blockedNotice,
+                TextWrapping = TextWrapping.Wrap,
+                FontStyle = Windows.UI.Text.FontStyle.Italic,
+                Opacity = 0.6,
+            };
+            AutomationProperties.SetAutomationId(bodyText, Ids.FeedPostDetailBody);
+            panel.Children.Add(bodyText);
+            postImageInsertIndex = panel.Children.Count;
+            return panel;
+        }
+
         // Region placeholder (region-blocking.md § The blocked render): the region
         // content policy withholds this post — its frame, authority and reason VERBATIM
         // in place of the whole post (body, media, tags), ahead of every other arm
@@ -1735,19 +1056,47 @@ public sealed partial class FeedPage : Page
         // reveals through the shared reveal set and repaints the dialog in place.
         if (item.Region is { } region && item.ShowRegionPlaceholder)
         {
-            var placeholder = RegionPlaceholderPanel.Build(region, onReveal: () =>
-            {
-                item.RevealContent();
-                var fresh = BuildPostDetailPanel(item, out _, out _);
-                var children = fresh.Children.ToList();
-                fresh.Children.Clear();
-                panel.Children.Clear();
-                foreach (var child in children) panel.Children.Add(child);
-            });
+            var placeholder = RegionPlaceholderPanel.Build(region, onReveal: RevealInPlace);
             placeholder.Loaded += (_, _) => RegionPlaneHost.WitnessPainted(witnessKey, region.IsBlock);
             panel.Children.Add(placeholder);
             // No feed-post-detail-body: the body is withheld. The out param still needs
             // an element; the callers skip the gated-unlock repaint for a withheld post.
+            bodyText = new TextBlock();
+            postImageInsertIndex = panel.Children.Count;
+            return panel;
+        }
+
+        // Nest placeholder (nest-rules.md § The nest source in the engine): a rule of
+        // the nest this post was read through withholds it — the frame naming the
+        // nest, its domain and the admin's reason VERBATIM in place of the whole post,
+        // right after the region arm exactly as on the list card. A `collapse`
+        // reveals through the shared reveal set; a `block` has no reveal.
+        if (item.Nest is { } nest && item.ShowNestPlaceholder)
+        {
+            var placeholder = NestPlaceholderPanel.Build(nest, onReveal: RevealInPlace);
+            placeholder.Loaded += (_, _) => NestRulesHost.WitnessPainted(witnessKey, nest.IsBlock);
+            panel.Children.Add(placeholder);
+            bodyText = new TextBlock();
+            postImageInsertIndex = panel.Children.Count;
+            return panel;
+        }
+
+        // The family arm composes here too (family-safety.md § Content policy;
+        // nest-rules.md § Implementation status today — web, linux, android and apple
+        // each closed this hole): a guardian-withheld post opened from its card paints
+        // the same placeholder — the fixed frame, the guardian rule's reason beside it
+        // (`content-policy-blocked-reason`) — never its body. A `block` has no reveal;
+        // a `collapse` shares the card's reveal set. The detail arm leaves out the
+        // card's muted collapse: the viewer opened this post on purpose.
+        var detailArm = item.DetailArm;
+        if (detailArm is SocialRenderArm.ContentBlocked or SocialRenderArm.ContentCollapsed)
+        {
+            var collapsed = detailArm == SocialRenderArm.ContentCollapsed;
+            panel.Children.Add(ContentPolicyPlaceholderPanel.Build(
+                collapsed,
+                collapsed ? S.Get("family/content_collapsed_notice") : item.ContentBlockedNoticeText,
+                item.GuardianReason,
+                onReveal: RevealInPlace));
             bodyText = new TextBlock();
             postImageInsertIndex = panel.Children.Count;
             return panel;
@@ -1765,6 +1114,19 @@ public sealed partial class FeedPage : Page
         AutomationProperties.SetAutomationId(bodyText, Ids.FeedPostDetailBody);
         DocumentPainter.Apply(bodyText, item.Document);
         panel.Children.Add(bodyText);
+        // The author's own blocked post keeps its body; the shared notice paints right
+        // after it, with no id of its own (none approved — tui rides it as chrome).
+        if (item.AdminBlockNotice is { } authorNotice)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = authorNotice,
+                TextWrapping = TextWrapping.Wrap,
+                FontStyle = Windows.UI.Text.FontStyle.Italic,
+                Opacity = 0.6,
+                FontSize = 12,
+            });
+        }
 
         if (DocumentRenderer.HasBlockedRemoteImage(item.Document))
         {
@@ -1796,6 +1158,14 @@ public sealed partial class FeedPage : Page
         DocumentPainter.ApplyRemoteImages(remoteImagesPanel, item.RemoteImages);
         panel.Children.Add(remoteImagesPanel);
 
+        // Content-label badge (`content-label-badge`, moderation.md § Per-row badge data
+        // path) — the detail twin of the list card's badge. A post opened through the
+        // deep-link door has no post-card, so the detail is where a member of the room
+        // sees the room labeler's verdict, and the verdict is merged only once the post
+        // unseals — so the badge is repainted from the manager's own snapshot on every feed
+        // tick while this dialog is open (RepaintDetailLabel), not painted once.
+        panel.Children.Add(BuildDetailLabelBadge(item.PostId));
+
         // Post image (post-image) — painted from the folded `Image` block in the document
         // (render-model.md § D6), the same media the list card shows, via the shared blob
         // loader attached property (async, non-blocking; the bytes load stays client glue —
@@ -1804,7 +1174,7 @@ public sealed partial class FeedPage : Page
         // postImageInsertIndex marks the slot so UnlockGatedDetailAsync can insert the SAME
         // element once the unlock lands.
         postImageInsertIndex = panel.Children.Count;
-        if (BuildPostDetailImageElement(item.Document) is { } postImage)
+        if (BuildPostDetailImageElement(item.Document, item.BlobHome) is { } postImage)
             panel.Children.Add(postImage);
 
         // Video thumbnail (video-thumbnail) — the D6b `Video` sibling of `Image`
@@ -1819,6 +1189,7 @@ public sealed partial class FeedPage : Page
             var video = new Controls.VideoThumbnailView
             {
                 Block = videoBlock,
+                Home = item.BlobHome,
                 Margin = new Thickness(0, 4, 0, 0),
             };
             AutomationProperties.SetAutomationId(video, Ids.VideoThumbnail);
@@ -1831,7 +1202,21 @@ public sealed partial class FeedPage : Page
         // sentence; the time sits beside it. (It was one hand-rolled English line,
         // "by ‹author› · ‹time›", which no other app's detail painted.)
         var authorRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        var authorText = new TextBlock { Text = item.AuthorLabel, Opacity = 0.6 };
+        // The author activates their profile (ui.yaml `click feed-post-detail-author →
+        // profile`; the id stays `type: text`) — a borderless link so UIA offers Invoke.
+        var authorText = new HyperlinkButton
+        {
+            Content = item.AuthorLabel,
+            Opacity = 0.6,
+            Padding = new Thickness(0),
+            MinHeight = 0,
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
+        };
+        authorText.Click += (_, _) =>
+        {
+            _detailDialog?.Hide();
+            _cards.OpenAuthorProfile(item.AuthorHex, item.HomeNestUrl);
+        };
         // Dedicated detail-dialog author id (see feed-post-detail-body above) — matches
         // the e2e post_detail_author() reader and ui.yaml `post_detail` element scope.
         AutomationProperties.SetAutomationId(authorText, Ids.FeedPostDetailAuthor);
@@ -1870,7 +1255,7 @@ public sealed partial class FeedPage : Page
                 VerticalAlignment = VerticalAlignment.Center,
             };
             AutomationProperties.SetAutomationId(tipListButton, Ids.PostTipListButton);
-            tipListButton.Click += (_, _) => OpenTipList(item);
+            tipListButton.Click += (_, _) => _cards.OpenTipList(item);
             tipRow.Children.Add(tipListButton);
             panel.Children.Add(tipRow);
         }
@@ -1883,6 +1268,11 @@ public sealed partial class FeedPage : Page
                 Opacity = 0.5,
                 FontSize = 12,
             });
+
+        // Reaction pills (feed.md ruling 4): the same per-emoji pills the list card paints,
+        // unscoped here in post_detail.
+        if (item.HasReactionPills)
+            panel.Children.Add(_cards.BuildDetailReactionPills(item));
 
         // Tag chips (post_detail mirrors the list card's tags).
         if (item.Tags.Count > 0)
@@ -1966,9 +1356,10 @@ public sealed partial class FeedPage : Page
     /// blob: an Image with no picture has no size, so UIA would read the slot offscreen for
     /// exactly as long as the placeholder stands in. The Button has no click: the lightbox
     /// is a page overlay, which the dialog covers.</para></summary>
-    private static FrameworkElement? BuildPostDetailImageElement(uniffi.fauna_core.RenderDocument document)
+    private static FrameworkElement? BuildPostDetailImageElement(
+        uniffi.fauna_core.RenderDocument document, object? home = null)
     {
-        if (GetImageLoader() is not { } loader) return null;
+        if (PostCardBind.GetImageLoader() is not { } loader) return null;
         var mediaHash = DocumentRenderer.MediaImageHash(document);
         var proxiedPath = mediaHash is null ? DocumentRenderer.MediaProxiedPath(document) : null;
         if (mediaHash is null && proxiedPath is null) return null;
@@ -1984,6 +1375,7 @@ public sealed partial class FeedPage : Page
         {
             postImage.Margin = new Thickness(0, 4, 0, 4);
             AutomationProperties.SetAutomationId(postImage, Ids.PostImage);
+            ImageHashBind.SetHome(postImage, home);
             ImageHashBind.SetHash(postImage, mediaHash);
             return postImage;
         }
@@ -2060,7 +1452,7 @@ public sealed partial class FeedPage : Page
             // live element in the shown dialog, so the async repaint lands on the open dialog.
             // Fire-once: skip if already unlocked (feed.md § Encryption at rest — detail-open
             // unlock).
-            if (item.GatedTier is { Length: > 0 } && !item.GatedUnlocked && !item.ShowRegionPlaceholder)
+            if (item.GatedTier is { Length: > 0 } && !item.GatedUnlocked && !item.DetailWithholdsBody)
                 _ = UnlockGatedDetailAsync(item.PostId, bodyText, panel, postImageInsertIndex);
         });
     }
@@ -2110,7 +1502,18 @@ public sealed partial class FeedPage : Page
             }
 
             step = "fetch the sealed blob";
-            var blob = await nest.GetBlobAsync(hash);
+            // The sealed body rests on the post's own home: through the shared plane
+            // with the home read off the post, unchanged (transport-trust.md § The
+            // post arm) — this nest's own plane when the post has no foreign home.
+            var hosts = Core.PostBlobHostsHost.Current;
+            var home = FindRenderedPost(postId) is { } homed
+                ? uniffi.fauna_ffi.FaunaFfiMethods.PostBlobHome(homed)
+                : null;
+            var blob = hosts is not null
+                ? await hosts.Get(home, hash)
+                : home is null
+                    ? await nest.GetBlobAsync(hash)
+                    : throw new System.InvalidOperationException("no post-blob plane for a foreign-homed post");
 
             step = "decrypt under a held period key";
             await _viewModel.UnlockGatedPostAsync(postId, blob);
@@ -2122,8 +1525,10 @@ public sealed partial class FeedPage : Page
             // PRE-unlock PostSummary when this continuation resumes, and the guard below
             // reads `gatedUnlocked: false` for a post the manager has already unsealed. The
             // manager's own Snapshot() is the authoritative post-mutation read.
-            var updated = _viewModel.Manager.Snapshot().posts
-                .FirstOrDefault(p => p.postId == postId);
+            // A post opened through the deep-link door (a room-search hit) lives in the
+            // snapshot's `deepLinkedPost` slot, not `posts` — so the union lookup, which
+            // reads the manager's own Snapshot() all the same.
+            var updated = FindRenderedPost(postId);
             if (updated is not { gatedUnlocked: true })
             {
                 // unlock_gated_post returns Ok(()) WITHOUT notifying when the post is absent
@@ -2138,7 +1543,7 @@ public sealed partial class FeedPage : Page
             // The pre-unlock teaser carried no Image block, so BuildPostDetailPanel added no
             // post-image element for it; insert the same element it would have built, at the
             // slot it would have taken, now that the unsealed document folds one in.
-            if (BuildPostDetailImageElement(updated.document) is { } postImage)
+            if (BuildPostDetailImageElement(updated.document, home) is { } postImage)
                 panel.Children.Insert(System.Math.Min(postImageInsertIndex, panel.Children.Count), postImage);
         }
         catch (System.Exception ex)
@@ -2755,130 +2160,6 @@ public sealed partial class FeedPage : Page
         }
     }
 
-    public static Visibility BoolToVisibility(bool value)
-        => value ? Visibility.Visible : Visibility.Collapsed;
-
-    /// <summary>Hide an interaction count when 0 (feed.md § Interaction bar — count
-    /// hidden at 0, a clean icon-only button until the post has activity), uniform
-    /// across all seven apps.</summary>
-    public static Visibility CountToVisibility(long count)
-        => count > 0 ? Visibility.Visible : Visibility.Collapsed;
-
-    /// <summary>Lit-state visual for the like toggle — the same AccentButtonStyle swap
-    /// idiom as the Trending pseudo-entry's selected state (SyncFeeds, above): a lit
-    /// feed-like-button means the next tap un-likes (feed.md § Interaction bar → Repost).</summary>
-    public static Style? LikedToButtonStyle(bool liked)
-        => liked ? (Style)Application.Current.Resources["AccentButtonStyle"] : null;
-
-    /// <summary>Lit-state visual for the repost toggle — the repost twin of
-    /// <see cref="LikedToButtonStyle"/>: a lit <c>feed-repost-button</c> means the next tap
-    /// un-reposts (feed.md § Interaction bar → Repost, ratified 2026-08-10), matching
-    /// linux's <c>.reposted</c> CSS class and web's <c>viewer_reposted</c> lit state.</summary>
-    public static Style? RepostedToButtonStyle(string? viewerRepostId)
-        => viewerRepostId is { Length: > 0 } ? (Style)Application.Current.Resources["AccentButtonStyle"] : null;
-
-    /// <summary>Suppress an element on a REPOST ROW — its own interaction bar renders
-    /// nothing (a repost's own counters are structurally dark; feed.md § Interaction bar →
-    /// Repost, ratified 2026-08-10), mirroring tui/linux/web's <c>if !is_repost_row</c>.</summary>
-    public static Visibility HideOnRepostRow(bool isRepostRow)
-        => isRepostRow ? Visibility.Collapsed : Visibility.Visible;
-
-    // ── Post-card withholding arms: muted collapse (topic-factors.md § Scoring —
-    //    a mute collapses everywhere; mirrors the dm-message-muted precedent) and
-    //    content policy (family-safety.md § Content policy). WHICH arm wins is
-    //    decided once in FaunaApp.Core (FeedPostItem.RenderArm → SocialRenderGate,
-    //    shared with the conversation bubble and unit-tested there) — this page
-    //    only paints the already-resolved gates. ──
-
-    /// <summary>The post-card's accessible Name: the placeholder of whichever arm
-    /// is withholding the body — NEVER the body it hides (a blocked or collapsed
-    /// body must not leak into the accessibility tree) — else the body itself.
-    /// Takes the resolved gates, so the block-beats-muted ordering is not
-    /// re-derived here (it lives in <c>SocialRenderGate</c>).</summary>
-    public static string PostCardAccessibleName(
-        string regionNotice, bool showContentBlockedNotice, string contentBlockedNotice,
-        bool showMutedCollapse, bool showContentCollapse, string bodyText)
-    {
-        // The region arm paints ahead of every other (region-blocking.md § The
-        // blocked render), so its frame is the Name whenever it is withholding.
-        if (regionNotice.Length > 0) return regionNotice;
-        // The notice's own words: the family-policy sentence, or "You reported this"
-        // when the viewer's report hid the post (FeedPostItem.ContentBlockedNoticeText).
-        if (showContentBlockedNotice) return contentBlockedNotice;
-        if (showMutedCollapse) return S.Get("feed/post_muted_placeholder");
-        if (showContentCollapse) return S.Get("family/content_collapsed_notice");
-        return bodyText;
-    }
-
-    /// <summary>Reveal a muted post for the session (the mute itself persists —
-    /// only un-muting the word stops future collapse). Mutates <c>Revealed</c> in
-    /// place on the bound <see cref="FeedPostItem"/> so x:Bind re-renders this row
-    /// without a full Reconcile-triggered replace.</summary>
-    private void MutedRevealButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: FeedPostItem item }) return;
-        item.Revealed = true;
-    }
-
-    /// <summary>Reveal a content-policy <b>collapsed</b> post for the session
-    /// (family-safety.md § Content policy — the floor itself persists; only the
-    /// guardian relaxing it stops future collapse). Unlike the muted reveal this
-    /// marks the id-keyed session set in <c>ContentPolicyCache</c>, so the reveal
-    /// survives an observer tick that rebuilds this row into a new item. A
-    /// <c>block</c> has no such button: the gate resolves block ahead of the
-    /// reveal set, so the collapse arm never paints for one.</summary>
-    private void ContentRevealButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: FeedPostItem item }) return;
-        item.RevealContent();
-    }
-
-    // ── Convention 17's "a region Block never renders silent" walk
-    //    (RegionPlaneHost.BlockRenderState, published as `region_block_render`).
-    //    The two sides are registered from DIFFERENT elements on purpose: the
-    //    card root carries the verdict side (its item's composed verdict, whatever
-    //    arm painted), the placeholder panel the painted side (only when it is
-    //    actually shown for a block). An arm that drops or hides the placeholder
-    //    then reads as placeholders < blocked. ──
-
-    private static string FeedWitnessKey(FeedPostItem item) => "feed:" + item.PostId;
-
-    private void PostCard_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { Tag: FeedPostItem item })
-            RegionPlaneHost.WitnessBlocked(FeedWitnessKey(item), item.IsRegionBlocked);
-    }
-
-    private void PostCard_Unloaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { Tag: FeedPostItem item })
-            RegionPlaneHost.WitnessBlocked(FeedWitnessKey(item), false);
-    }
-
-    private void RegionPlaceholder_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { Tag: FeedPostItem item } panel)
-            RegionPlaneHost.WitnessPainted(
-                FeedWitnessKey(item),
-                panel.Visibility == Visibility.Visible && item.Region is { IsBlock: true });
-    }
-
-    private void RegionPlaceholder_Unloaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { Tag: FeedPostItem item })
-            RegionPlaneHost.WitnessPainted(FeedWitnessKey(item), false);
-    }
-
-    /// <summary>Reveal a <b>region</b>-collapsed post for the session
-    /// (region-blocking.md § The blocked render — <c>collapse</c> keeps the item one
-    /// reveal away). It shares the content-policy reveal set, the family reveal the
-    /// design names, so the same tap lifts the composed <c>collapse</c> verdict
-    /// whichever source drove it. A region <c>block</c> has no such button.</summary>
-    private void RegionRevealButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: FeedPostItem item }) return;
-        item.RevealContent();
-    }
 
     private async void BridgeFeedSubscribe_Click(object sender, RoutedEventArgs e)
     {
@@ -2915,60 +2196,4 @@ public sealed partial class FeedPage : Page
         await _viewModel.UnsubscribeBridgeAsync(id);
     }
 
-    public void ShowImageLightbox(Microsoft.UI.Xaml.Media.Imaging.BitmapImage image)
-    {
-        LightboxImage.Source = image;
-        ImageLightboxDialog.Visibility = Visibility.Visible;
-    }
-
-    private void ImageLightboxDialog_Click(object sender, RoutedEventArgs e)
-    {
-        // Click bubbles from the ScrollViewer/Image too; only dismiss when the
-        // ORIGINAL source is the backdrop Button itself.
-        if (!ReferenceEquals(e.OriginalSource, sender)) return;
-        ImageLightboxDialog.Visibility = Visibility.Collapsed;
-        LightboxImage.Source = null;
-    }
-
-    // UIA Invoke on a nested Button is direct, not pointer-routed (post-card's own
-    // comment on load-remote-content-button/feed-post-actions-button), so this never
-    // double-fires the post-card's own Click. Reuses the already-loaded bitmap — no
-    // second fetch, matching how the card itself painted the image. The Image sits in
-    // a Grid beside the bridged-picture placeholder; with no bitmap loaded (that
-    // placeholder standing in) there is nothing to enlarge and the click does nothing.
-    private void PostImage_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Content: Panel content }
-            && content.Children.OfType<Image>().FirstOrDefault()
-                is { Source: Microsoft.UI.Xaml.Media.Imaging.BitmapImage bmp })
-        {
-            ShowImageLightbox(bmp);
-        }
-    }
-}
-
-public class SourceToColorConverter : IValueConverter
-{
-    // Windows's platform-specific post-source color map, keyed off the stable
-    // SourceKind id from the shared fauna-feed classifier (PostSourceBadge.Id) —
-    // the label text comes from the shared classifier, this only picks a fill
-    // (docs/goal/ui/feed.md § Where logic lives).
-    public object Convert(object value, System.Type targetType, object parameter, string language)
-    {
-        return (value as string) switch
-        {
-            "fauna" => Brush(45, 184, 75),         // 🌿 leaf green (matches web's fauna badge)
-            "bluesky" => Brush(0, 133, 255),       // Bluesky blue
-            "nostr" => Brush(139, 92, 246),        // Nostr purple
-            "activitypub" => Brush(99, 100, 255),  // Fediverse indigo (#6364FF)
-            "email" => Brush(245, 158, 11),        // amber
-            _ => Brush(0, 0, 0, 0),                // unknown ("other"): transparent, label only
-        };
-    }
-
-    private static Microsoft.UI.Xaml.Media.SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255)
-        => new(Windows.UI.Color.FromArgb(a, r, g, b));
-
-    public object ConvertBack(object value, System.Type targetType, object parameter, string language)
-        => throw new System.NotSupportedException();
 }

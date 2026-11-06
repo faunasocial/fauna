@@ -186,7 +186,7 @@ private fun ScanQrTab() {
 private fun PasteKeyTab(vm: IdentityImportVM, navController: NavController) {
     var secretInput by remember { mutableStateOf("") }
     val invalidMessage = stringResource(R.string.onboarding_identity_import_invalid_secret)
-    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_successor)
+    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_identity)
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),

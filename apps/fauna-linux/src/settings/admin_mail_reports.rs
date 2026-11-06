@@ -466,52 +466,11 @@ pub fn build_admin_mail_reports_page() -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_client_mail_settings::dmarc_reports::{
-        DmarcOpenedReport, DmarcReportsStatus, DmarcWindowTotals,
+    use fauna_client_mail_settings::dmarc_reports::DmarcOpenedReport;
+
+    use fauna_client_mail_settings::testing::{
+        a_dmarc_report_row as row, a_dmarc_reports_snapshot as snapshot,
     };
-
-    fn snapshot(reports: Vec<DmarcReportRowView>) -> DmarcReportsSnapshot {
-        DmarcReportsSnapshot {
-            window_days: 30,
-            our_domain: None,
-            local_domains: vec!["a.test".into()],
-            loaded: true,
-            totals: DmarcWindowTotals {
-                message_count: 10,
-                report_count: reports.len() as u64,
-                submitter_count: 1,
-                dmarc_pass: 9,
-                dmarc_pass_percent: 90,
-                ..Default::default()
-            },
-            sources: vec![DmarcCountRow {
-                value: "192.0.2.1".into(),
-                count: 10,
-            }],
-            senders: vec![DmarcCountRow {
-                value: "a.test".into(),
-                count: 10,
-            }],
-            reports,
-            truncated: false,
-            opened: None,
-            status: DmarcReportsStatus::Idle,
-            error: None,
-        }
-    }
-
-    fn row() -> DmarcReportRowView {
-        DmarcReportRowView {
-            our_domain: "a.test".into(),
-            submitter: "Peer <r@peer.test>".into(),
-            report_id: "r-1".into(),
-            begin_at: 1_760_000_000,
-            end_at: 1_760_086_400,
-            received_at: 1_760_090_000,
-            message_count: 10,
-            dmarc_pass: 9,
-        }
-    }
 
     fn noop() -> Dispatch {
         Rc::new(|_| {})

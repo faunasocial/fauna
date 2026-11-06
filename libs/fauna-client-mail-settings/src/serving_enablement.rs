@@ -11,10 +11,10 @@
 //! is finished" from "the glue has not run yet". This module owns both halves:
 //!
 //! - [`plan`] — the ordered step list the four intents imply, including the
-//!   one-MSEK-mint-path gates (`caldav-server.md` / `carddav-server.md`
-//!   § Independent enablement): the CalDAV-only mailbox mint fires only with
-//!   email off, the CardDAV-only one only with email and CalDAV both off, so
-//!   exactly one mint path writes the mail custody at first setup.
+//!   one-MSEK-mint-path gate (`mail-credentials.md` § Trigger taxonomy, *The
+//!   calendar-only credential*): the DAV mailbox mint fires only with a DAV
+//!   intent on and email off, so exactly one mint path writes the mail
+//!   custody at first setup.
 //! - [`apply_serving_enablement`] — runs the plan to the end, one step after
 //!   another, and records each run against its actor — `{actor_id, decided,
 //!   completed}` — which [`serving_enablement_json`] renders for
@@ -27,7 +27,8 @@
 //! The mail-provision step runs on EVERY `LoggedIn` handoff, whatever the
 //! intents: on a non-admin (invite-redeem) first setup it is the new-user
 //! mailbox auto-mint (`mail-credentials.md` § Auto-enable for new users), which
-//! the email intent does not gate. A sign-in reaches the step too, and there it
+//! the email intent does not gate — on a deployment serving CalDAV or CardDAV
+//! with mail off it mints the read recipe. A sign-in reaches the step too, and there it
 //! is a no-op for an admin (email intent OFF by the claim gate) and an
 //! idempotent no-op for a user who already has a mailbox.
 
@@ -64,12 +65,11 @@ pub enum ServingEnablementStep {
     ProvisionMail { admin_enable_email: bool },
     /// `fauna.bridges.set_caldav_enabled(true)`.
     SetCalDavEnabled,
-    /// The CalDAV-only admin mailbox mint (email off).
-    ProvisionCalDavMailbox,
     /// `fauna.bridges.set_carddav_enabled(true)`.
     SetCardDavEnabled,
-    /// The CardDAV-only admin mailbox mint (email and CalDAV off).
-    ProvisionCardDavMailbox,
+    /// The admin's calendar-only credential: the DAV mailbox mint (a DAV
+    /// intent on, email off).
+    ProvisionDavMailbox,
     /// `fauna.bridges.set_webdav_enabled(true)`. WebDAV has no per-actor
     /// mailbox, so there is no companion mint.
     SetWebDavEnabled,
@@ -84,15 +84,12 @@ pub fn plan(intents: ServingEnablementIntents) -> Vec<ServingEnablementStep> {
     }];
     if intents.caldav {
         steps.push(SetCalDavEnabled);
-        if !intents.email {
-            steps.push(ProvisionCalDavMailbox);
-        }
     }
     if intents.carddav {
         steps.push(SetCardDavEnabled);
-        if !intents.email && !intents.caldav {
-            steps.push(ProvisionCardDavMailbox);
-        }
+    }
+    if (intents.caldav || intents.carddav) && !intents.email {
+        steps.push(ProvisionDavMailbox);
     }
     if intents.webdav {
         steps.push(SetWebDavEnabled);
@@ -214,59 +211,30 @@ mod runs {
     }
 }
 
-/// Which first-setup mailbox mint [`provision_mailbox_at_first_setup`] runs.
-/// The CalDAV and CardDAV arms differ only in the enable method and the label.
-pub enum FirstSetupMailboxKind {
-    CalDav,
-    CardDav,
-}
-
-impl FirstSetupMailboxKind {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::CalDav => "CalDAV",
-            Self::CardDav => "CardDAV",
-        }
-    }
-}
-
-/// First-setup CalDAV/CardDAV admin mailbox auto-mint. On the **admin claim**,
-/// mint the admin's shared MSEK + `default` credential so a
-/// calendar/contacts-only deployment has the per-actor key material its store
-/// seals under. **Admin-only** — a non-admin auto-mint policy is unbuilt
-/// (`SetupStatusReply` carries no `{caldav,carddav}_enabled` /
-/// `auto_enable_*_for_new_users` fields today), so a non-admin first setup
-/// no-ops. Callers gate the call on being the only mint path live ([`plan`]).
-pub async fn provision_mailbox_at_first_setup<R: RpcRequester>(
+/// The admin's calendar-only credential at claim: on a box serving CalDAV or
+/// CardDAV with mail off, mint the admin's shared MSEK + `default` read
+/// credential ([`MailSettingsMachine::enable_dav_mailbox_with_generated_password`]).
+/// **Admin-only** — every other user's comes from the new-user arm of
+/// [`provision_mail_at_first_setup`]. Callers gate the call on being the only
+/// mint path live ([`plan`]).
+pub async fn provision_dav_mailbox_at_first_setup<R: RpcRequester>(
     nest: R,
     machine: MailSettingsMachine,
-    kind: FirstSetupMailboxKind,
 ) {
     let account = fauna_client_account::AccountClient::new(nest);
     let is_admin = account.am_i_admin().await.map(|r| r.admin).unwrap_or(false);
     if !is_admin {
         return;
     }
-    let result = match kind {
-        FirstSetupMailboxKind::CalDav => machine
-            .enable_caldav_mailbox_with_generated_password("Default".to_string())
-            .await
-            .map(drop),
-        FirstSetupMailboxKind::CardDav => machine
-            .enable_carddav_mailbox_with_generated_password("Default".to_string())
-            .await
-            .map(drop),
-    };
-    match result {
-        Ok(()) => tracing::info!(
-            "onboarding: {}-only admin mailbox auto-minted (shared MSEK; \
-             generated password on the mail-settings page)",
-            kind.label()
+    match machine
+        .enable_dav_mailbox_with_generated_password("Default".to_string())
+        .await
+    {
+        Ok(_password) => tracing::info!(
+            "onboarding: calendar-only admin credential auto-minted (shared MSEK; \
+             generated password on the mail-settings page)"
         ),
-        Err(e) => tracing::error!(
-            "provision_{}_mailbox_at_first_setup(admin): {e:?}",
-            kind.label().to_lowercase()
-        ),
+        Err(e) => tracing::error!("provision_dav_mailbox_at_first_setup(admin): {e:?}"),
     }
 }
 
@@ -275,10 +243,11 @@ pub async fn provision_mailbox_at_first_setup<R: RpcRequester>(
 /// - **Admin claim**: iff `admin_enable_email`, mint the admin's own mailbox via
 ///   [`MailSettingsMachine::enable_mail_with_generated_password`], whose final
 ///   step fires `set_mail_enabled(true)`.
-/// - **New (non-admin) user**: auto-mint the user's own mailbox iff the
-///   deployment policy allows — `fauna.setup.status`'s `email_enabled &&
-///   auto_enable_mail_for_new_users`, no mailbox yet
-///   ([`MailSettingsMachine::auto_enable_mail_for_new_user`]).
+/// - **New (non-admin) user**: auto-mint the user's own credential iff the
+///   deployment policy allows — `fauna.setup.status`'s
+///   `auto_enable_mail_for_new_users`, no MSEK yet — the full mailbox when
+///   `email_enabled`, the read recipe when only `caldav_enabled` /
+///   `carddav_enabled` ([`MailSettingsMachine::auto_enable_mail_for_new_user`]).
 pub async fn provision_mail_at_first_setup<R: RpcRequester + Clone>(
     nest: R,
     machine: MailSettingsMachine,
@@ -311,13 +280,14 @@ pub async fn provision_mail_at_first_setup<R: RpcRequester + Clone>(
         match machine
             .auto_enable_mail_for_new_user(
                 status.email_enabled,
+                status.caldav_enabled || status.carddav_enabled,
                 status.auto_enable_mail_for_new_users,
                 "Default".to_string(),
             )
             .await
         {
             Ok(Some(_password)) => tracing::info!(
-                "first setup: mailbox auto-minted for new user \
+                "first setup: bridge credential auto-minted for new user \
                  (generated password on the mail-settings page)"
             ),
             Ok(None) => {}
@@ -361,24 +331,12 @@ where
             SetCalDavEnabled => {
                 toggle(BridgeApprovalAction::SetCalDavEnabled { enabled: true }).await
             }
-            ProvisionCalDavMailbox => {
-                provision_mailbox_at_first_setup(
-                    self.nest.clone(),
-                    (self.build_mail_machine)(),
-                    FirstSetupMailboxKind::CalDav,
-                )
-                .await
-            }
             SetCardDavEnabled => {
                 toggle(BridgeApprovalAction::SetCardDavEnabled { enabled: true }).await
             }
-            ProvisionCardDavMailbox => {
-                provision_mailbox_at_first_setup(
-                    self.nest.clone(),
-                    (self.build_mail_machine)(),
-                    FirstSetupMailboxKind::CardDav,
-                )
-                .await
+            ProvisionDavMailbox => {
+                provision_dav_mailbox_at_first_setup(self.nest.clone(), (self.build_mail_machine)())
+                    .await
             }
             SetWebDavEnabled => {
                 toggle(BridgeApprovalAction::SetWebDavEnabled { enabled: true }).await
@@ -429,8 +387,8 @@ mod tests {
         );
     }
 
-    /// The companion mints fire exactly when no earlier protocol minted the
-    /// shared MSEK — over every combination, at most one mint step.
+    /// One DAV mint, fired exactly when a DAV intent is on and email off —
+    /// over every combination, at most one mint step.
     #[test]
     fn exactly_one_mint_path_whenever_any_mailbox_protocol_is_on() {
         for bits in 0..16u8 {
@@ -443,13 +401,17 @@ mod tests {
                         s,
                         ProvisionMail {
                             admin_enable_email: true
-                        } | ProvisionCalDavMailbox
-                            | ProvisionCardDavMailbox
+                        } | ProvisionDavMailbox
                     )
                 })
                 .count();
             let expected = usize::from(i.email || i.caldav || i.carddav);
             assert_eq!(mints, expected, "{i:?} → {steps:?}");
+            assert_eq!(
+                steps.contains(&ProvisionDavMailbox),
+                (i.caldav || i.carddav) && !i.email,
+                "{i:?}"
+            );
             assert_eq!(steps.contains(&SetCalDavEnabled), i.caldav, "{i:?}");
             assert_eq!(steps.contains(&SetCardDavEnabled), i.carddav, "{i:?}");
             assert_eq!(steps.contains(&SetWebDavEnabled), i.webdav, "{i:?}");
@@ -509,7 +471,7 @@ mod tests {
         }
         let fut =
             apply_serving_enablement("cc".into(), ServingEnablementIntents::default(), &Parked);
-        let mut fut = Box::pin(fut);
+        let mut fut = std::pin::pin!(fut);
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
         assert!(fut.as_mut().poll(&mut cx).is_pending());

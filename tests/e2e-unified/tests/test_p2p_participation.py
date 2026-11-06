@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from helpers.app_surface import app_name, declared_absence, skip_unbuilt
+from helpers.app_surface import app_name, declared_absence, require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -71,12 +71,6 @@ def _require_participation_toggle(driver) -> None:
                        "request-off arm)",
             doc="p2p.md § Per-device participation → Web",
         )
-    skip_unbuilt(
-        driver,
-        surface="device-p2p-participation-toggle on the devices page",
-        detail="tui, macOS, windows, iOS, linux and android render it",
-        tracked="p2p.md § Implementation status today",
-    )
 
 
 def _require_share_plane(driver) -> None:
@@ -89,23 +83,8 @@ def _require_share_plane(driver) -> None:
     starts no share plane, so it paints no ``share-serve-status``; linux runs
     the plane (``share_glue.rs``) and runs the whole journey."""
     app = app_name(driver)
-    if app == "android":
-        skip_unbuilt(
-            driver,
-            surface="share-serve-status (the share plane) on the folders page",
-            detail="android renders device-p2p-participation-toggle (2026-10-06) but "
-                   "never starts the share plane, so no share-serve-status paints",
-            tracked="p2p.md § Implementation status today",
-        )
-    if app == "ios":
-        skip_unbuilt(
-            driver,
-            surface="share-serve-status (the share plane) on the folders page",
-            detail="iOS hosts the account runtime and its own row writes the "
-                   "device-local row, but its phone-peer leg (the share plane) is "
-                   "unbuilt, so no share-serve-status paints",
-            tracked="p2p-shared-set-build.md § Cross-user shared-set transfer → Phone peers — design",
-        )
+    require_surface(driver, "share-serve-status")
+    require_surface(driver, "share-serve-status")
 
 
 def _own_card(driver) -> str:

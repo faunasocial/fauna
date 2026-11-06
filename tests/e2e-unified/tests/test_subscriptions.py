@@ -57,7 +57,7 @@ from nacl.signing import SigningKey
 from actions import ActionLayer
 from actions.api_actor import ApiActor
 from common.auth import create_actor_and_register
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.e2e_session import login_as
 from i18n.strings import S
 
@@ -117,24 +117,7 @@ def test_subscription_approve_grants_keyblob(app, subs_nest):
     # `set_state({"nav":{"stack":[{"view":"profile"}]}})` no-op) is FIXED by
     # apple (the in-process reducer now routes the SELF
     # profile via MoreView→ProfileView) — all GREEN. tui lifted §§1–5 in the
-    # tui Tiers author track, so all 7 apps now run this — the gate stays only
-    # so a future 8th surface declares itself rather than failing opaquely.
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_web()
-        or app.driver.is_android()
-        or app.driver.is_windows()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the subscriptions Slice-A author page (tiers-tab create-tier flow)",
-            detail="all 7 apps have it. android --client e2e is "
-            "host-emulator-gated fleet-wide (internal dev note)",
-            tracked="monetization.md",
-        )
+    # tui Tiers author track, so all 7 apps now run this.
 
     admin_sk = _as_signing_key(subs_nest["admin"]["signing_key"])
     # Author (drives the UI) + subscriber (headless), both regular registered
@@ -319,10 +302,10 @@ def subs_author_app(request, app, subs_nest):
     single-app), mirroring ``second_real_faunamls_app``; convention 10 gives each
     launch its own isolated world, so the two apps share nothing but the nest.
 
-    Native-only. The env probe behind ``FAUNA_SUBS_POLL_SECS`` is native by
-    construction (a browser has no environment — ``author_poll_secs()``), so web
-    would run this at the 30 s constant; and only the two direct-Rust apps
-    (tui — the lead — and linux) are cheap to launch twice on one machine.
+    The author seat is native: the env probe behind ``FAUNA_SUBS_POLL_SECS`` is
+    native by construction (a browser has no environment — ``author_poll_secs()``).
+    tui (the lead), linux, macos, windows and ios launch the second seat (iOS on a
+    second simulator); a web subscriber gets a tui author.
     """
     from conftest import _build_app_config
     from drivers import create_driver
@@ -332,15 +315,29 @@ def subs_author_app(request, app, subs_nest):
         app_name = "tui"
     elif subscriber_driver.is_linux():
         app_name = "linux"
+    elif subscriber_driver.is_macos():
+        # apple's per-launch isolation gives the second seat for free, as for
+        # `_launch_second_real_faunamls_app`; FaunaKit's
+        # `SubscriptionsAuthorCadence` reads the same shared env probe.
+        app_name = "macos"
+    elif subscriber_driver.is_windows():
+        # Every windows launch is already isolated (the driver defaults
+        # `data_dir` to a per-instance mkdtemp — convention 10), so a second,
+        # concurrently live seat shares nothing with the subscriber's but the
+        # nest; `SubscriptionsAuthorPump` reads the cadence from the same shared
+        # env probe (`subscriptions_author_poll_secs()`).
+        app_name = "windows"
+    elif subscriber_driver.is_ios():
+        app_name = "ios"
+    elif subscriber_driver.is_web():
+        # The subscriber is a browser; the author seat is the lead native app.
+        # The browser has no environment for `FAUNA_SUBS_POLL_SECS`, but it is
+        # the SUBSCRIBER here — the pump under test runs on the author's side.
+        # (A web author pumps at the e2e agent's 2 s cadence on its own,
+        # `subscriptionsAuthor.ts` → `pollIntervalMs()`.)
+        app_name = "tui"
     else:
-        skip_unbuilt(
-            subscriber_driver,
-            surface="a second, author-side GUI client with a settable pump cadence",
-            detail="the FAUNA_SUBS_POLL_SECS probe is native-only (a browser has "
-            "no environment), and the two-GUI launch is proven on the direct-Rust "
-            "apps tui (lead) + linux",
-            tracked="monetization.md",
-        )
+        require_surface(subscriber_driver, "author-seat-pump-cadence")
 
     admin_sk = _as_signing_key(subs_nest["admin"]["signing_key"])
     author = create_actor_and_register(
@@ -348,6 +345,17 @@ def subs_author_app(request, app, subs_nest):
     )
 
     config = _build_app_config(app_name, subs_nest, request)
+    if app_name == "ios":
+        # A second, concurrently-live iOS app cannot share the subscriber's
+        # simulator (launch()'s uninstall+install would tear it down).
+        from conftest import _get_ios_second_seat_udid
+
+        second_udid = _get_ios_second_seat_udid()
+        if second_udid is None:
+            from helpers.app_surface import skip_environment
+
+            skip_environment("could not allocate a second iOS simulator for the author's seat")
+        config["udid"] = second_udid
     config.setdefault("environment", {})
     config["environment"]["FAUNA_SUBS_POLL_SECS"] = str(AUTHOR_PUMP_POLL_SECS)
 
@@ -646,12 +654,6 @@ def test_subscription_settings_lists_active_subscription_and_unsubscribes(app, s
     conftest deselects clients not available on the current machine (android e2e
     is host-emulator-gated fleet-wide; internal dev note). Apple render-confirm
     is entrusted to the apple in-process driver render-gate."""
-    # The page gate is kept though every app now passes it: it names a PAGE
-    # distinct from the Tiers-tab author management (`monetization.md` § Pillar
-    # 1), so a regression or an eighth surface reports as "this app lacks the
-    # consumer page" rather than dying at the API precondition above and hiding
-    # *which* of the two reasons it failed for.
-    app.subscriptions.require_consumer_subscriptions_page()
     admin_sk = _as_signing_key(subs_consumer_nest["admin"]["signing_key"])
     # `with_handle=False` is load-bearing for the creator-column assertion
     # below: this test exercises the empty-handle→hex fallback, so the author

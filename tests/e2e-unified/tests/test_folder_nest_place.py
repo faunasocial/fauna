@@ -51,11 +51,13 @@ pytestmark = [
     # 5-slice `just apple-ffi` xcframework an `--app ios` run needs. A macOS host
     # trickle-down pass carries that build anyway, so the run is now cheap here.
     pytest.mark.ios,
-    # NOT here yet, and the absence names its reason rather than reading as an
-    # unbuilt app — the ledger only means "visible lag" if the entries are honest:
-    #   * android — BUILT 2026-08-16, proven by Robolectric
-    #     (`FoldersContentTest`); android has no e2e path on the Linux dev machine
-    #     at all, so this marker is gated on the host emulator, not on the leg.
+    # 2026-10-28: android carries every id the journey drives
+    # (`folder-nest-snapshots-select`, `-quiet-input`, `-retention-*`,
+    # `folder-version-retention-*`, `folder-nest-save-button` in
+    # `FoldersScreen.kt`) and was BUILT 2026-08-16, proven by
+    # Robolectric (`FoldersContentTest`). The device e2e run waits on the emulator host
+    # emulator venue, so the marker records the witness, not a green run.
+    pytest.mark.android,
 ]
 
 

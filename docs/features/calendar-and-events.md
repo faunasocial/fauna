@@ -48,6 +48,7 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_events_locale_week_start_web.py::test_web_month_grid_opens_on_the_locale_week_start`
    - `tests/e2e-unified/tests/test_events_locale_week_start_apple.py::test_apple_month_grid_opens_on_the_locale_week_start`
    - `tests/e2e-unified/tests/test_events_locale_week_start_windows.py::test_windows_week_grid_opens_on_the_locale_week_start`
+   - `tests/e2e-unified/tests/test_events_locale_week_start_android.py::test_android_month_grid_opens_on_the_locale_week_start`
 9. [app] A calendar or event added from another app appears while you stay on the page — `docs/goal/ui/events.md` § Where logic lives
    - `tests/e2e-unified/tests/test_caldav_external_appears.py::test_external_caldav_calendar_and_event_appear_while_on_page`
 10. [app] An invitation sent to you from another calendar lands on your events page — `docs/goal/behavior/caldav-server.md` § Server-side auto-schedule
@@ -73,47 +74,48 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
-| android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| web | ✅ full | 0.1.5-dev+1c9a6a26 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
+| windows | ⚠ partial | 0.1.5-dev+ea6766b3 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+17b5832c standalone |
+| android | 🚧 unbuilt | |
+| tui | ✅ full | 0.1.5 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_create_and_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_description_location_and_time_reach_the_detail_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_detail_back_returns_to_the_list` | web (linux): skipped, linux (linux): skipped, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_month_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_week_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_month_navigation` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_double_click_day_cell_opens_new_event_prefilled` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_day_view_empty_slot_click_opens_quick_create_prefilled` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_events.py::test_week_view_empty_slot_click_opens_quick_create_with_slot_time` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_rsvp` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_card_rsvp` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_events.py::test_event_invite_attendee` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_events.py::test_event_reminder` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): failed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_create_and_delete` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_description_location_and_time_reach_the_detail_surface` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_events.py::test_event_detail_back_returns_to_the_list` | web (linux): skipped, linux (linux): skipped, windows (windows): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_month_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_week_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_switch_to_day_view` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_month_navigation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_moves_one_visible_range_per_view` — requires `caltime-pan-visible-range` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_events.py::test_pan_is_inert_in_the_date_unfiltered_agenda` — requires `caltime-pan-visible-range` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_day_cell_click_opens_day_view` — requires `events-day-cell` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_month_double_click_day_cell_opens_new_event_prefilled` — requires `events-day-cell` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_day_view_empty_slot_click_opens_quick_create_prefilled` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_events.py::test_week_view_empty_slot_click_opens_quick_create_with_slot_time` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_rsvp` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_events.py::test_event_card_rsvp` — requires `event-card-rsvp` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_events.py::test_event_invite_attendee` — requires `email-attendee-encrypted-caldav` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_events.py::test_event_reminder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start.py::test_tui_month_grid_opens_on_the_locale_week_start` | tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start_linux.py::test_linux_month_grid_opens_on_the_locale_week_start` | linux (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start_web.py::test_web_month_grid_opens_on_the_locale_week_start` | web (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start_apple.py::test_apple_month_grid_opens_on_the_locale_week_start` | macos (macos): passed, ios (macos): passed |
 | 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start_windows.py::test_windows_week_grid_opens_on_the_locale_week_start` | windows (windows): passed |
+| 8 | app | `tests/e2e-unified/tests/test_events_locale_week_start_android.py::test_android_month_grid_opens_on_the_locale_week_start` | — |
 | 9 | app | `tests/e2e-unified/tests/test_caldav_external_appears.py::test_external_caldav_calendar_and_event_appear_while_on_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_mailbox_less_attendee_materializes_invite_on_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): failed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_no_calendar_picked_shows_every_calendar_and_picking_one_narrows` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): error |
-| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_exported_to_a_file_imports_into_another_calendar` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_import_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_events.py::test_day_timeline_bands_all_day_events_and_sets_clashes_side_by_side` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_no_calendar_picked_shows_every_calendar_and_picking_one_narrows` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_exported_to_a_file_imports_into_another_calendar` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_import_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_events.py::test_day_timeline_bands_all_day_events_and_sets_clashes_side_by_side` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

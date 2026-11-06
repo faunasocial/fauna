@@ -9,6 +9,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -124,6 +125,8 @@ fun DevicesRosterScreen(
             localDeviceId = vm.localDeviceId,
             actorId = vm.actorId,
             onRemoveDevice = vm::removeDevice,
+            onRenameDevice = vm::renameDevice,
+            deviceName = vm::deviceName,
             onSetP2pParticipation = vm::setP2pParticipation,
             statusLabel = { online ->
                 resolveLocalized(context, com.fauna.ffi.deviceStatusLabel(online)).orEmpty()
@@ -169,6 +172,10 @@ fun DevicesRosterContent(
     // page-level `peer-actor-id-copy-btn` below.
     actorId: String?,
     onRemoveDevice: (Int) -> Unit,
+    // `device-rename-confirm-button`'s gesture — `(deviceId, text)`, keyed by the card's id
+    // (`devices.md` § Device names); `deviceName` is the input's prefill.
+    onRenameDevice: (String, String) -> Unit = { _, _ -> },
+    deviceName: (String) -> String? = { null },
     // `device-p2p-participation-toggle[index]`'s click — `(index, on)`, the
     // machine's one gesture (it picks the arm; `p2p.md` § Per-device
     // participation).
@@ -241,9 +248,17 @@ fun DevicesRosterContent(
         if (devices.isEmpty()) {
             EmptyHint(stringResource(R.string.devices_no_devices))
         } else {
+            // ONE rename editor, keyed by `device_id` — never the painted index.
+            var renamingId by remember { mutableStateOf<String?>(null) }
+            if (renamingId != null && devices.none { it.deviceId == renamingId }) renamingId = null
             devices.forEachIndexed { index, device ->
                 DeviceCard(
                     device, index, localDeviceId, onRemoveDevice, onSetP2pParticipation,
+                    renaming = renamingId == device.deviceId,
+                    onOpenRename = { renamingId = device.deviceId },
+                    onCloseRename = { renamingId = null },
+                    onRenameDevice = onRenameDevice,
+                    deviceName = deviceName,
                     statusLabel, placeLabel,
                     keyless = device.principal?.let { it in keylessPrincipals } == true,
                     ownFingerprint = snapshot?.ownFingerprint,
@@ -661,6 +676,11 @@ private fun DeviceCard(
     localDeviceId: String?,
     onRemoveDevice: (Int) -> Unit,
     onSetP2pParticipation: (Int, Boolean) -> Unit,
+    renaming: Boolean,
+    onOpenRename: () -> Unit,
+    onCloseRename: () -> Unit,
+    onRenameDevice: (String, String) -> Unit,
+    deviceName: (String) -> String?,
     statusLabel: (Boolean) -> String,
     placeLabel: (Boolean, Boolean, Boolean) -> String,
     keyless: Boolean = false,
@@ -792,8 +812,37 @@ private fun DeviceCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (renaming) {
+                // The editor opens prefilled with the machine's opened name (no ` · code`).
+                var text by remember(device.deviceId) { mutableStateOf(deviceName(device.deviceId).orEmpty()) }
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text(stringResource(R.string.devices_rename_label)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.DEVICE_RENAME_INPUT),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = onCloseRename,
+                        modifier = Modifier.testTag(Ids.DEVICE_RENAME_CANCEL_BUTTON),
+                    ) { Text(stringResource(R.string.common_cancel)) }
+                    TextButton(
+                        onClick = {
+                            onCloseRename()
+                            onRenameDevice(device.deviceId, text)
+                        },
+                        modifier = Modifier.testTag(Ids.DEVICE_RENAME_CONFIRM_BUTTON),
+                    ) { Text(stringResource(R.string.devices_rename_confirm)) }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Spacer(Modifier.weight(1f))
+                IconButton(
+                    onClick = onOpenRename,
+                    modifier = Modifier.testTag(Ids.DEVICE_RENAME_BUTTON),
+                ) { Icon(Icons.Default.Edit, stringResource(R.string.devices_rename)) }
                 IconButton(
                     onClick = { showRemoveDialog = true },
                     modifier = Modifier.testTag(Ids.DEVICE_REMOVE_BUTTON),

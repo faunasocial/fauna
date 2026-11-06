@@ -83,10 +83,12 @@ class LogsActions:
         "level · time · target · message" string. Lets a test assert a specific
         captured event is present (e.g. a producer-logged displayed error,
         observability.md § Log on the *event*, not the *paint*)."""
-        return [
-            self.driver.get_text("log-entry", index=i) or ""
-            for i in range(self.entry_count())
-        ]
+        # One bulk read, never a per-index loop: the nest ring holds up to
+        # thousands of lines, and a loop of N element reads (each its own
+        # whole-tree find on a native bridge) outlasts a wait budget on a full
+        # page, so a poll's first read could still be the list from before the
+        # page refetched — the order-dependent admin-logs reds on linux.
+        return self.driver.get_texts("log-entry")
 
     def rows(self) -> list[tuple[str, str, str, str]]:
         """The rendered rows as ``(level, time, target, message)``, top to

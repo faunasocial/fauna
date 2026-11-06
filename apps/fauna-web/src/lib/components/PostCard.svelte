@@ -2,6 +2,7 @@
   import C2paImage from './C2paImage.svelte';
   import ContentLabelBadge from './ContentLabelBadge.svelte';
   import InteractionBar from './InteractionBar.svelte';
+  import ReactionPills from './ReactionPills.svelte';
   import ProtocolBadge from './ProtocolBadge.svelte';
   import UnverifiedSourceBadge from './UnverifiedSourceBadge.svelte';
   import DelegatedOriginBadge from './DelegatedOriginBadge.svelte';
@@ -11,7 +12,10 @@
   import VideoThumbnail from './VideoThumbnail.svelte';
   import TipSurface from './payments/TipSurface.svelte';
   import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
+  import PurchasePendingLine from './payments/PurchasePendingLine.svelte';
   import RegionPlaceholder from './RegionPlaceholder.svelte';
+  import { goto } from '$app/navigation';
+  import { profileHref } from '#lib/profile-nav';
   import { markdownToHtml } from '#lib/markdown';
   import { liveStatusClass } from '#lib/feed-utils';
   import { contactOverlays, contactsRevision } from '#lib/conversations';
@@ -53,7 +57,7 @@
      *  `mediaUrl`'s reason: the card cannot reach the feed manager. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     playbackUrl?: (block: any, post?: unknown) => Promise<string | null>;
-    oninteract: (post_id: string, action: string) => void;
+    oninteract: (post_id: string, action: string, emoji?: string) => void;
     contentLabel?: string;
     /** Open the post-detail view (ui.yaml feed transition `click post-card → post_detail`). */
     onselect?: () => void;
@@ -284,6 +288,10 @@
     ).primary;
   });
 
+  // Only a Fauna actor id (64 hex) opens a Profile; a bridged author (a DID, a
+  // handle) has no profile page here, so its line stays plain text.
+  let authorIsActor = $derived(/^[0-9a-f]{64}$/i.test(post.author ?? ''));
+
   // The quoted-post + media-image embeds, painted from the post `document`
   // (render-model.md § D6): the feed manager folds a `QuotedPost` / `Image` block
   // into `post.document` once `resolve_quoted_post` / `resolve_media` resolves, so
@@ -419,7 +427,19 @@
          this post as the account. Beside the unverified badge, the order every
          app paints these two in. -->
     <DelegatedOriginBadge authoringOrigin={post.authoring_origin} />
-    <span class="post-author" data-testid={IDS.POST_AUTHOR}>{authorName}</span>
+    {#if authorIsActor}
+      <!-- `click post-author → profile` (feed.md § User actions): the author's
+           Profile, carrying the post's home so a remote author opens through
+           their own nest. -->
+      <button
+        type="button"
+        class="post-author post-author-link"
+        data-testid={IDS.POST_AUTHOR}
+        onclick={(e) => { e.stopPropagation(); void goto(profileHref(post.author, post.home_nest_url)); }}
+      >{authorName}</button>
+    {:else}
+      <span class="post-author" data-testid={IDS.POST_AUTHOR}>{authorName}</span>
+    {/if}
     <!-- The attribution marker beside the author (id user-approved 2026-08-11):
          what lets an e2e tell a repost card from an empty-commentary quote card
          BY ELEMENT, instead of inferring it from the harness state dump. -->
@@ -477,7 +497,7 @@
          `unlock_purchase_pending` marker, never set while the offer is and
          kept off an opened post. Same payments gate as the buy button. -->
     {#if __FAUNA_PAYMENTS__ && !post.unlock_offer && post.unlock_purchase_pending && !post.gated_unlocked}
-      <span class="muted" data-testid={IDS.GATED_POST_PURCHASE_PENDING}>{t.feed.post.purchase_pending}</span>
+      <PurchasePendingLine />
     {/if}
     {#if ontrain || showDelete || showWebPublish || showReport}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to
@@ -767,6 +787,18 @@
     {#if __FAUNA_PAYMENTS__}
       <TipSurface tips={post.tips} />
     {/if}
+    <!-- The folded archive comments — owner-only context from the owner's own
+         imported archive, never published (archive-import.md § What each
+         category becomes). The shared `PostSummary.archive_comments` is filled
+         only on the owner's own archive-origin posts; anything else paints
+         nothing. One "author: text" line each, the line every app paints. -->
+    {#if post.archive_comments?.length}
+      <div class="archive-comments muted" data-testid={IDS.POST_ARCHIVE_COMMENTS}>
+        {#each post.archive_comments as c (c.external_id)}
+          <p class="archive-comment" data-testid={IDS.POST_ARCHIVE_COMMENT_ITEM}>{c.author_name}: {c.text}</p>
+        {/each}
+      </div>
+    {/if}
   </div>
   {#if !isRepostRow}
     <InteractionBar
@@ -778,6 +810,12 @@
       viewer_liked={post.viewer_liked}
       viewer_reposted={!!post.viewer_repost_id}
       {oninteract}
+    />
+    <ReactionPills
+      post_id={post.post_id}
+      source={post.source ?? ''}
+      reactions={post.reactions ?? []}
+      onreact={(id, emoji) => oninteract(id, 'react', emoji)}
     />
   {/if}
 {/if}
@@ -845,9 +883,26 @@
   }
   .post-card.selectable { cursor: pointer; }
   .post-author { font-weight: 600; }
+  .post-author-link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: inherit;
+    cursor: pointer;
+  }
+  .post-author-link:hover { text-decoration: underline; }
   .post-time { margin-left: auto; }
   .post-body { font-size: 0.85rem; line-height: 1.5; }
   .post-content { margin: 0; white-space: pre-wrap; }
+  .archive-comments {
+    margin-top: 0.5rem;
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--border);
+    font-size: 0.8rem;
+  }
+  .archive-comment { margin: 0.125rem 0; white-space: pre-wrap; }
   .muted { color: var(--text-muted); }
 
   .post-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.5rem; }

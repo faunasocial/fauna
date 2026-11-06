@@ -5,24 +5,43 @@ new helper doesn't have to rediscover them (or silently omit one — the
 `login_as_nest_admin` `device_id` omission that made apple's mail machine a
 silent no-op for two sessions started exactly that way).
 
-Mirrors conftest's private `_E2E_LOGIN_DEVICE_ID` — helpers can't import conftest,
-which is why the value lives in both places; keep them in step.
+The login device id is the single home here ([`e2e_login_device_id`]);
+conftest's patches call it too.
 """
 
 from __future__ import annotations
 
 import time
 
-# A valid 64-char-hex (32-byte) device id for an injected e2e session. Real device
-# ids ARE hex (linux `hex::encode(device_id())`), and the shared `MediaMachine`
-# upload gesture hex-decodes `device_id`, so a non-hex placeholder fails
-# `invalid device_id hex` on any client that reads it for an upload.
+# The device id an injected e2e session signs in under — ONE PER APP.
 #
-# Every `session` patch that sets `authenticated: True` should carry this (or
-# another valid hex id): the macOS/iOS test agents build the authenticated
-# `FaunaClient` from node_url + secret_hex + device_id, and a client-less
-# authenticated shell renders fine while every nest-backed VM silently no-ops.
-E2E_LOGIN_DEVICE_ID = "0123456789abcdef" * 4
+# Valid 64-char hex (32 bytes): real device ids ARE hex (linux
+# `hex::encode(device_id())`), and the shared `MediaMachine` upload gesture
+# hex-decodes `device_id`, so a non-hex placeholder fails `invalid device_id hex`
+# on any client that reads it for an upload. Every `session` patch that sets
+# `authenticated: True` carries one: the macOS/iOS test agents build the
+# authenticated `FaunaClient` from node_url + secret_hex + device_id, and a
+# client-less authenticated shell renders fine while every nest-backed VM
+# silently no-ops.
+#
+# Per app because the session nest and its test user are shared by every app in
+# a run, and a `sync_devices` row carries ONE renewal grant (`sync-agent-
+# credentials.md` § Credential model): two apps patched onto one id are two
+# machines claiming one row, and each one's registration replaces the other's
+# grant — its bearer renewal answers `fauna.auth.not_registered` and its change
+# records `fauna.sync.signature_invalid` until it registers back. A sign-in or a
+# nest restart (which voids the other app's latch) is enough to set the two
+# ping-ponging; that kept files-on-demand outcome 5 red on tui and linux.
+def e2e_login_device_id(app) -> str:
+    """This app's login device id — `app` is an `ActionLayer`, a driver, or the
+    app name (`helpers/app_surface.py::app_name`). Stable across a run and
+    distinct per app."""
+    import hashlib
+
+    from helpers.app_surface import app_name
+
+    name = app_name(getattr(app, "driver", app))
+    return hashlib.blake2b(f"fauna-e2e-login-device/{name}".encode(), digest_size=32).hexdigest()
 
 # Generous, latency-independent budget (convention 14) for an actor switch to
 # reach the LIVE session: the switch tears the authenticated shell down and

@@ -1,6 +1,6 @@
 //! Integration round-trip for the device-sync control surface —
 //! `fauna.sync.{register,changes.{list,record},status,files,backup_status,
-//! devices.{list,delete}}`. A behavior-preserving transport migration of the
+//! devices.{list,delete,rename}}`. A behavior-preserving transport migration of the
 //! bearer-authed device-sync routes (`sync_routes`); the handlers reuse the
 //! same `CacheDb` methods the twins call. These tests exercise the WS-RPC
 //! layer: request decode, reply shapes, the `User | Admin` allowlist, the
@@ -31,13 +31,13 @@ use fauna_protocol::{
         SyncBackupStatusReply, SyncBackupStatusRequest, SyncChangeRecordReply,
         SyncChangeRecordRequest, SyncChangesListReply, SyncChangesListRequest,
         SyncChangesSupersedeReply, SyncChangesSupersedeRequest, SyncDeviceDeleteReply,
-        SyncDeviceDeleteRequest, SyncDevicesListReply, SyncDevicesListRequest, SyncFilesReply,
-        SyncFilesRequest, SyncRegisterReply, SyncRegisterRequest, SyncStatusReply,
-        SyncStatusRequest,
+        SyncDeviceDeleteRequest, SyncDeviceRenameRequest, SyncDevicesListReply,
+        SyncDevicesListRequest, SyncFilesReply, SyncFilesRequest, SyncRegisterReply,
+        SyncRegisterRequest, SyncStatusReply, SyncStatusRequest,
     },
 };
 
-const ALL_KINDS: [&str; 9] = [
+const ALL_KINDS: [&str; 10] = [
     "fauna.sync.register",
     "fauna.sync.changes.list",
     "fauna.sync.changes.record",
@@ -47,6 +47,7 @@ const ALL_KINDS: [&str; 9] = [
     "fauna.sync.backup_status",
     "fauna.sync.devices.list",
     "fauna.sync.devices.delete",
+    "fauna.sync.devices.rename",
 ];
 
 async fn router_and_state() -> (RpcRouter, Arc<AppState>) {
@@ -296,6 +297,270 @@ async fn a_keyless_re_register_clears_the_seal_it_cannot_re_mint() {
         d.label_sealed, None,
         "a stale seal opening to \"Old name\" would be worse than none — S8 re-stamps this row"
     );
+}
+
+/// Rule (b) of `devices.md` § Device names: a machine-authored label never
+/// displaces a user-chosen one. The engine host and the provisioner re-register
+/// the machine under its app default on every start; without (b) each start
+/// would rename the machine back. And rule (a) still holds beside it: an app
+/// default over the `fauna` placeholder supersedes it.
+#[tokio::test]
+async fn an_app_default_re_register_keeps_a_user_chosen_seal_and_supersedes_the_placeholder() {
+    let (router, state) = router_and_state().await;
+    let actor = [23u8; 32];
+    let device_id = [0xb4u8; 32];
+    let dev = hex::encode(device_id);
+    let owner = fauna_core::crypto::BackupKey::from_bytes([7u8; 32]);
+    let root = fauna_core::path_crypto::LabelRoot::owner_of(&owner);
+    let sealed = fauna_core::label_custody::seal_device_label(&root, &device_id, "my-phone")
+        .unwrap()
+        .unwrap();
+
+    let register = |dev: String, label: &'static str, seal: Option<Vec<u8>>| {
+        dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.sync.register",
+            encode(&SyncRegisterRequest {
+                device_id: dev,
+                label: label.into(),
+                label_sealed: seal.map(fauna_protocol::ByteBuf::from),
+                ..Default::default()
+            }),
+        )
+    };
+    let list = || {
+        dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.sync.devices.list",
+            encode(&SyncDevicesListRequest {
+                extra: Default::default(),
+            }),
+        )
+    };
+    let devices_of = |reply: bytes::Bytes| -> Vec<_> {
+        let list: SyncDevicesListReply = decode(&reply).unwrap();
+        list.devices
+    };
+
+    // (b): sealed "my-phone", then the app default the engine host passes.
+    register(dev.clone(), "my-phone", Some(sealed.clone()))
+        .await
+        .expect("register ok");
+    register(dev.clone(), "fauna-ios", None)
+        .await
+        .expect("register ok");
+    let devices = devices_of(list().await.expect("list ok"));
+    let d = devices.iter().find(|d| d.device_id == dev).unwrap();
+    assert_eq!(
+        d.label_sealed.as_ref().map(|b| b.to_vec()),
+        Some(sealed),
+        "an app default must never displace the user's name"
+    );
+    assert_eq!(
+        fauna_core::label_custody::render_device_label(
+            &fauna_core::file_download::FileDownloadKeys::owner(owner),
+            d.label_sealed.as_ref().map(|b| &b[..]),
+            &d.label,
+            &device_id,
+        ),
+        fauna_core::path_crypto::SealedLabelRender::Sealed("my-phone".into()),
+    );
+
+    // (a): a row born under the `fauna` placeholder takes the app default, which
+    // rests plaintext like every synthetic label.
+    let other = hex::encode([0xb5u8; 32]);
+    register(
+        other.clone(),
+        fauna_core::label_custody::SELF_REGISTER_LABEL,
+        None,
+    )
+    .await
+    .expect("register ok");
+    register(other.clone(), "fauna-ios", None)
+        .await
+        .expect("register ok");
+    let devices = devices_of(list().await.expect("list ok"));
+    let d = devices.iter().find(|d| d.device_id == other).unwrap();
+    assert_eq!(d.label, "fauna-ios");
+    assert_eq!(d.label_sealed, None);
+}
+
+// ── devices.rename ─────────────────────────────────────────────────────────────
+
+fn rename(device_id: String, label_sealed: Vec<u8>) -> bytes::Bytes {
+    encode(&SyncDeviceRenameRequest {
+        device_id,
+        label_sealed: ByteBuf::from(label_sealed),
+        extra: Default::default(),
+    })
+}
+
+/// Rule (1) of `devices.md` § Device names: the owner names a row through
+/// `fauna.sync.devices.rename`, the list opens the new name under the owner
+/// key, nothing but the label pair moves — and the app default the engine
+/// host re-registers on its next start keeps it (rule (b)).
+#[tokio::test]
+async fn a_rename_opens_under_the_owner_key_and_survives_a_synthetic_re_register() {
+    let (router, state) = router_and_state().await;
+    let actor = [24u8; 32];
+    let device_id = [0xc4u8; 32];
+    let dev = hex::encode(device_id);
+    let owner = fauna_core::crypto::BackupKey::from_bytes([8u8; 32]);
+    let root = fauna_core::path_crypto::LabelRoot::owner_of(&owner);
+    let sealed = fauna_core::label_custody::seal_device_label(&root, &device_id, "kitchen tablet")
+        .unwrap()
+        .unwrap();
+    register_device(&router, &state, actor, &dev, "fauna-android").await;
+    let list = || async {
+        let reply: SyncDevicesListReply = decode(
+            &dispatch(
+                &router,
+                Arc::clone(&state),
+                actor,
+                "fauna.sync.devices.list",
+                encode(&SyncDevicesListRequest {
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .expect("list ok"),
+        )
+        .unwrap();
+        reply
+            .devices
+            .into_iter()
+            .find(|d| d.device_id == dev)
+            .unwrap()
+    };
+    let before = list().await;
+
+    dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.devices.rename",
+        rename(dev.clone(), sealed.clone()),
+    )
+    .await
+    .expect("rename ok");
+    let after = list().await;
+    assert_eq!(after.label, "", "a user-chosen name rests sealed-only");
+    assert_eq!(
+        after.label_sealed.as_ref().map(|b| b.to_vec()),
+        Some(sealed.clone())
+    );
+    assert_eq!(
+        fauna_core::label_custody::render_device_label(
+            &fauna_core::file_download::FileDownloadKeys::owner(owner),
+            after.label_sealed.as_ref().map(|b| &b[..]),
+            &after.label,
+            &device_id,
+        ),
+        fauna_core::path_crypto::SealedLabelRender::Sealed("kitchen tablet".into()),
+    );
+    assert_eq!(after.capabilities, before.capabilities);
+    assert_eq!(after.registered_at, before.registered_at);
+
+    // Rule (b): the engine host's next start re-registers the app default.
+    register_device(&router, &state, actor, &dev, "fauna-android").await;
+    let again = list().await;
+    assert_eq!(
+        again.label_sealed.as_ref().map(|b| b.to_vec()),
+        Some(sealed),
+        "the app default must not rename the row back"
+    );
+}
+
+/// Actor-scoped like `devices.delete`: another actor's row — and an id no
+/// row carries — answers `not_found`, and the row is left as it was.
+#[tokio::test]
+async fn a_rename_of_another_actors_row_is_not_found() {
+    let (router, state) = router_and_state().await;
+    let (owner_actor, stranger) = ([25u8; 32], [26u8; 32]);
+    let device_id = [0xc5u8; 32];
+    let dev = hex::encode(device_id);
+    register_device(&router, &state, owner_actor, &dev, "fauna-tui").await;
+    let root = fauna_core::path_crypto::LabelRoot::owner_of(
+        &fauna_core::crypto::BackupKey::from_bytes([9u8; 32]),
+    );
+    let sealed = fauna_core::label_custody::seal_device_label(&root, &device_id, "stolen name")
+        .unwrap()
+        .unwrap();
+
+    for (actor, id) in [(stranger, dev.clone()), (owner_actor, id_hex(0xc6))] {
+        let err = dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.sync.devices.rename",
+            rename(id, sealed.clone()),
+        )
+        .await
+        .expect_err("no such row of this actor");
+        assert_eq!(err.code, "fauna.sync.not_found");
+    }
+    let reply: SyncDevicesListReply = decode(
+        &dispatch(
+            &router,
+            Arc::clone(&state),
+            owner_actor,
+            "fauna.sync.devices.list",
+            encode(&SyncDevicesListRequest {
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply.devices[0].label, "fauna-tui");
+    assert_eq!(reply.devices[0].label_sealed, None);
+}
+
+/// The two nest-authored pseudo-devices are never the user's to name, and
+/// bytes that are no sealed-label envelope are refused rather than rested as a
+/// name no app can render.
+#[tokio::test]
+async fn a_rename_refuses_pseudo_devices_and_a_malformed_seal() {
+    let (router, state) = router_and_state().await;
+    let actor = [27u8; 32];
+    let root = fauna_core::path_crypto::LabelRoot::owner_of(
+        &fauna_core::crypto::BackupKey::from_bytes([10u8; 32]),
+    );
+    let webdav = fauna_core::label_custody::webdav_pseudo_device_id(&actor);
+    let reseed = fauna_core::label_custody::reseed_pseudo_device_id(&actor);
+    for pseudo in [webdav, reseed] {
+        let sealed = fauna_core::label_custody::seal_device_label(&root, &pseudo, "mine")
+            .unwrap()
+            .unwrap();
+        let err = dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.sync.devices.rename",
+            rename(hex::encode(pseudo), sealed),
+        )
+        .await
+        .expect_err("pseudo-device refused");
+        assert_eq!(err.code, "fauna.sync.invalid_request");
+    }
+
+    let dev = id_hex(0xc7);
+    register_device(&router, &state, actor, &dev, "fauna-linux").await;
+    let err = dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.devices.rename",
+        rename(dev, b"plain words".to_vec()),
+    )
+    .await
+    .expect_err("not an envelope");
+    assert_eq!(err.code, "fauna.sync.invalid_request");
 }
 
 #[tokio::test]

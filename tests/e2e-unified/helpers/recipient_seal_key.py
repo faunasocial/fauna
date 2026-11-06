@@ -4,7 +4,10 @@ A recipient's standing seal key has two public halves, both derived from the
 account's MSEK: the X25519 key and the ML-KEM-768 encapsulation key. The wire
 call that publishes them (``fauna.bridges.provision_recipient_mls_pubkey``)
 requires both, as every app sends them, so mail to the recipient is sealed
-under the hybrid suite. Every harness caller provisions through this module, so
+under the hybrid suite — and requires the same two halves of the recipient's
+calendar and card keypairs beside them (the three-pair registration,
+``owner-key-material.md`` § Path B-sibling-5 → *Registration*), which this
+module derives from the same MSEK. Every harness caller provisions through this module, so
 no test can publish a shape the apps never do.
 
 The halves come from the test-only seal helper, which wraps the same shared-Rust
@@ -36,6 +39,10 @@ class RecipientSealKey:
     msek: bytes
     mls_pubkey: bytes
     mlkem_ek: bytes
+    calendar_pubkey: bytes
+    calendar_mlkem_ek: bytes
+    card_pubkey: bytes
+    card_mlkem_ek: bytes
 
     def request(self, actor_id: bytes) -> dict:
         """The provision request publishing this key for ``actor_id``."""
@@ -43,6 +50,10 @@ class RecipientSealKey:
             "actor_id": actor_id,
             "mls_pubkey": self.mls_pubkey,
             "mlkem_ek": self.mlkem_ek,
+            "calendar_pubkey": self.calendar_pubkey,
+            "calendar_mlkem_ek": self.calendar_mlkem_ek,
+            "card_pubkey": self.card_pubkey,
+            "card_mlkem_ek": self.card_mlkem_ek,
         }
 
 
@@ -57,17 +68,28 @@ def _session_seal_helper() -> SealHelper:
 def derive_recipient_seal_key(
     msek: bytes | None = None, *, run_seal_helper: SealHelper | None = None
 ) -> RecipientSealKey:
-    """Derive both public halves from ``msek`` (a fresh random one when absent)."""
+    """Derive every public half from ``msek`` (a fresh random one when absent)."""
     run = run_seal_helper or _session_seal_helper()
     msek = msek if msek is not None else secrets.token_bytes(32)
     params = {"msek_b64": base64.b64encode(msek).decode()}
     mls_pubkey = run("derive-recipient-pubkey", params)
     mlkem_ek = run("derive-recipient-mlkem-ek", params)
+    dav = run("derive-recipient-dav-pubkeys", params)
     assert len(mls_pubkey) == 32, f"recipient pubkey must be 32 bytes, got {len(mls_pubkey)}"
     assert len(mlkem_ek) == MLKEM_EK_LEN, (
         f"recipient ML-KEM ek must be {MLKEM_EK_LEN} bytes, got {len(mlkem_ek)}"
     )
-    return RecipientSealKey(msek=msek, mls_pubkey=mls_pubkey, mlkem_ek=mlkem_ek)
+    pair = 32 + MLKEM_EK_LEN
+    assert len(dav) == 2 * pair, f"calendar and card pairs must be {2 * pair} bytes, got {len(dav)}"
+    return RecipientSealKey(
+        msek=msek,
+        mls_pubkey=mls_pubkey,
+        mlkem_ek=mlkem_ek,
+        calendar_pubkey=dav[:32],
+        calendar_mlkem_ek=dav[32:pair],
+        card_pubkey=dav[pair : pair + 32],
+        card_mlkem_ek=dav[pair + 32 :],
+    )
 
 
 def provision_recipient_seal_key(

@@ -13,7 +13,8 @@ use fauna_feed::{PostSummary, ThreadPage, ThreadPostView, ThreadStatus};
 use super::post_list::build_tip_row;
 use super::post_list::{
     append_tag_chips, build_post_image, build_post_proxied_image, build_post_video,
-    build_reply_dialog, engagement_indicator_content, format_timestamp, post_video_block,
+    build_reaction_pills, build_reply_dialog, engagement_indicator_content, format_timestamp,
+    post_video_block,
 };
 use crate::i18n::strings::{common, feed};
 use crate::views::document;
@@ -339,6 +340,12 @@ pub fn build_post_detail<F: Fn() + 'static>(
     }
 
     content.append(&actions);
+
+    // The same per-emoji reaction pills the list card paints, unscoped here
+    // (`feed.md` § Reaction posts count and paint).
+    if let Some(pills) = build_reaction_pills(post, manager, client) {
+        content.append(&pills);
+    }
 
     // Wire Reply button.
     {

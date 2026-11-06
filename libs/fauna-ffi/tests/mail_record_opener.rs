@@ -551,3 +551,106 @@ fn a_classical_only_snapshot_cannot_open_hybrid_sealed_collection_metadata() {
         .open(envelope_bytes)
         .expect("the hybrid leaf keypair opens what the MDA sealed");
 }
+
+/// A DAV session's opener (`MlsCapability::new_record_opener`) **dispatches on
+/// the envelope kind** (`owner-key-material.md` § Path B-sibling-5 / -6): a
+/// calendar record opens through the calendar ring — its current generation
+/// from the session MSEK, a prior one from the snapshot's
+/// `calendar_grace_roots` — a card record through the card ring, a mail record
+/// through the leaf keypairs; a calendar record sealed to the MAIL key opens
+/// under nothing. An opener with no session MSEK (`MailRecordOpener::new`)
+/// refuses a DAV record outright and still opens mail.
+#[test]
+fn a_record_opener_dispatches_on_the_envelope_kind() {
+    use fauna_ffi::{
+        FfiRecordKind, derive_recipient_dav_material, seal_record_to_recipient,
+        seal_record_to_recipient_xwing,
+    };
+    let current = [0x51u8; 32];
+    let prior = [0x52u8; 32];
+    let snapshot = build_mls_snapshot_plaintext(&[current, prior], &[])
+        .to_canonical_bytes()
+        .expect("encode snapshot");
+
+    let blob = seal_wrapped_msek(
+        &current,
+        &ACTOR,
+        CRED_ID,
+        &CredentialInput::Plain(b"correct-password"),
+        small_argon2id(),
+    )
+    .expect("seal wrapped msek")
+    .to_canonical_bytes()
+    .expect("encode wrapped msek blob");
+    let cap = unwrap_msek_blob(
+        blob,
+        b"correct-password".to_vec(),
+        ACTOR.to_vec(),
+        CRED_ID.into(),
+        KdfKind::Argon2id,
+    )
+    .expect("unwrap msek blob");
+    let opener = cap
+        .new_record_opener(snapshot.clone())
+        .expect("new_record_opener");
+
+    let now = derive_recipient_dav_material(current.to_vec()).expect("material");
+    let then = derive_recipient_dav_material(prior.to_vec()).expect("material");
+    let xwing = |ek: &[u8], pk: &[u8]| [ek, pk].concat();
+
+    // The session's own seal keys are the current generation's public halves.
+    let own = cap.dav_seal_pubkeys().expect("dav_seal_pubkeys");
+    assert_eq!(own.calendar_pubkey, now.calendar_pubkey);
+    assert_eq!(own.calendar_mlkem_ek, now.calendar_mlkem_ek);
+    assert_eq!(own.card_pubkey, now.card_pubkey);
+    assert_eq!(own.card_mlkem_ek, now.card_mlkem_ek);
+
+    let event_now = seal_record_to_recipient_xwing(
+        FfiRecordKind::Calendar,
+        b"VEVENT now".to_vec(),
+        xwing(&now.calendar_mlkem_ek, &now.calendar_pubkey),
+    )
+    .expect("seal calendar");
+    let event_then = seal_record_to_recipient(
+        FfiRecordKind::Calendar,
+        b"VEVENT then".to_vec(),
+        then.calendar_pubkey.clone(),
+    )
+    .expect("seal calendar, prior generation");
+    let card_now = seal_record_to_recipient_xwing(
+        FfiRecordKind::Card,
+        b"VCARD".to_vec(),
+        xwing(&now.card_mlkem_ek, &now.card_pubkey),
+    )
+    .expect("seal card");
+    let (_, mail_pk) = derive_recipient_hpke_keypair(&current);
+    let mail = seal_to_recipient(b"RFC 5322".to_vec(), mail_pk.to_vec()).expect("seal mail");
+    let calendar_to_mail_key =
+        seal_record_to_recipient(FfiRecordKind::Calendar, b"x".to_vec(), mail_pk.to_vec())
+            .expect("seal a calendar record to the mail key");
+
+    assert_eq!(
+        opener.open(event_now.clone()).expect("calendar now"),
+        b"VEVENT now"
+    );
+    assert_eq!(
+        opener.open(event_then).expect("calendar grace"),
+        b"VEVENT then"
+    );
+    assert_eq!(opener.open(card_now).expect("card"), b"VCARD");
+    assert_eq!(opener.open(mail.clone()).expect("mail"), b"RFC 5322");
+    let err = opener
+        .open(calendar_to_mail_key)
+        .expect_err("a calendar record never meets the mail key");
+    assert!(err.to_string().contains("no calendar-record key"), "{err}");
+
+    let plain = MailRecordOpener::new(snapshot).expect("new");
+    let err = plain
+        .open(event_now)
+        .expect_err("no session MSEK, no calendar ring");
+    assert!(err.to_string().contains("no calendar-record ring"), "{err}");
+    assert_eq!(plain.open(mail).expect("mail still opens"), b"RFC 5322");
+
+    opener.zeroize();
+    assert!(opener.open(b"anything".to_vec()).is_err());
+}

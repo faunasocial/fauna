@@ -401,6 +401,11 @@ pub struct OnboardingMachine {
     /// read only by that outcome's Continue arm (`onboarding.md` § 3b-ter).
     handle_check_first_sign_in: std::sync::atomic::AtomicBool,
     invite_request: Mutex<InviteRequestSnapshot>,
+    /// The `PendingReview` state a recheck in flight replaced with `Rechecking`,
+    /// so [`Self::pending_invite_slot`] still answers for the request under
+    /// recheck. Written at that transition BEFORE the snapshot, and read only
+    /// while the snapshot reads `Rechecking`, so the reader never sees a stale one.
+    rechecking_from: Mutex<Option<crate::snapshots::InviteRequestState>>,
     /// The age band the verified OOB code carries (`InviteCodeVerification::
     /// age_band`), held beside `invite_request` rather than on
     /// `OobCodeState::Valid` — a new field on a UniFFI enum variant breaks the
@@ -640,10 +645,13 @@ pub struct OnboardingMachine {
     /// True while the update-channel availability probe is in flight, so
     /// Back/Continue does not start a second one.
     channel_probe_in_flight: std::sync::atomic::AtomicBool,
-    /// The location `vps.server_types` was last listed for (`verify_vps` or
-    /// [`Self::refresh_vps_offers`]), so a re-select of the same location —
-    /// a picker restoring its selection on re-render — lists nothing again.
-    vps_offers_listed_for: std::sync::Mutex<Option<String>>,
+    /// The nest rules the joining surfaces show ([`Self::joining_nest_rules`]),
+    /// read before sign-in from the nest the flow is joining.
+    joining_rules: Mutex<JoiningRules>,
+    /// Which location the offers were last listed for and which one a
+    /// listing is in flight for ([`VpsOffersListing`]), so each location
+    /// change lists exactly once.
+    vps_offers_listing: std::sync::Mutex<VpsOffersListing>,
 }
 
 /// Rust-only injection of the loopback nest port — deliberately NOT a UniFFI
@@ -676,20 +684,13 @@ impl OnboardingMachine {
     }
 
     /// Start [`Self::probe_channel_availability`] in the background on entering
-    /// `vps_config`: `tokio::spawn` when a runtime is current, `spawn_local` on
-    /// web. A native caller with no runtime on its thread starts nothing — the
-    /// page keeps the Stable default, as before the probe existed — and can
-    /// await the probe on a runtime of its own.
+    /// `vps_config` ([`crate::background::spawn_background`]: the machine's own
+    /// runtime, whatever the caller's).
     pub(crate) fn spawn_channel_probe(&self) {
         let Some(me) = self.self_ref.upgrade() else {
             return;
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(me.probe_channel_availability());
-        }
-        #[cfg(target_arch = "wasm32")]
-        wasm_bindgen_futures::spawn_local(me.probe_channel_availability());
+        crate::background::spawn_background(me.probe_channel_availability());
     }
 
     /// Read every update channel's head from the registry and rest the result
@@ -743,19 +744,14 @@ impl OnboardingMachine {
     }
 
     /// Start [`Self::refresh_vps_offers`] in the background on a location
-    /// change, exactly as [`Self::spawn_channel_probe`] starts its probe: a
-    /// native caller with no runtime on its thread starts nothing and awaits
-    /// the refresh on a runtime of its own.
+    /// change, exactly as [`Self::spawn_channel_probe`] starts its probe — so a
+    /// UniFFI shell's setter, called from a UI thread with no runtime, re-lists
+    /// too.
     fn spawn_vps_offers_refresh(&self) {
         let Some(me) = self.self_ref.upgrade() else {
             return;
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(me.refresh_vps_offers());
-        }
-        #[cfg(target_arch = "wasm32")]
-        wasm_bindgen_futures::spawn_local(me.refresh_vps_offers());
+        crate::background::spawn_background(me.refresh_vps_offers());
     }
 
     /// Re-list the curated offers for `vps.selected_location_id` and rest them
@@ -763,7 +759,12 @@ impl OnboardingMachine {
     /// (`registry.md` § Server offers follow the location). Nothing to do
     /// before verify, or when the offers are already this location's; a
     /// listing a later location change has superseded is dropped.
-    pub async fn refresh_vps_offers(self: Arc<Self>) {
+    ///
+    /// Each location change lists at most once: a refresh for the location
+    /// already listed, or for the one a listing is in flight for, lists
+    /// nothing. Crate-private: [`Self::select_vps_location`] is the one way in,
+    /// so no caller can await a second listing beside the setter's own.
+    pub(crate) async fn refresh_vps_offers(self: Arc<Self>) {
         use fauna_provisioning::vps::VpsProvider;
         let (pid, creds, location) = match self.with_state(|s| {
             (
@@ -776,9 +777,25 @@ impl OnboardingMachine {
             (true, Some(pid), creds, Some(location)) => (pid, creds, location),
             _ => return,
         };
-        if self.vps_offers_listed_for.lock().unwrap().as_deref() == Some(location.as_str()) {
+        if !self
+            .vps_offers_listing
+            .lock()
+            .unwrap()
+            .begin(location.as_str())
+        {
             return;
         }
+        // Cleared however the listing ends — including a runtime dropped under it.
+        struct InFlight<'a>(&'a std::sync::Mutex<VpsOffersListing>, &'a str);
+        impl Drop for InFlight<'_> {
+            fn drop(&mut self) {
+                let mut l = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                if l.in_flight.as_deref() == Some(self.1) {
+                    l.in_flight = None;
+                }
+            }
+        }
+        let _in_flight = InFlight(&self.vps_offers_listing, location.as_str());
         let Some(vps_dispatch) = self.vps_dispatch_for(&pid, creds) else {
             return;
         };
@@ -802,7 +819,7 @@ impl OnboardingMachine {
                     if !kept {
                         s.vps.selected_server_type_id = None;
                     }
-                    *self.vps_offers_listed_for.lock().unwrap() = Some(location.clone());
+                    self.vps_offers_listing.lock().unwrap().listed_for = Some(location.clone());
                 }
                 Err(e) => s.set_error(format!("Server type list failed: {e}")),
             }
@@ -976,6 +993,7 @@ impl OnboardingMachine {
             handle_check: Mutex::new(HandleCheckSnapshot::idle()),
             handle_check_first_sign_in: std::sync::atomic::AtomicBool::new(false),
             invite_request: Mutex::new(InviteRequestSnapshot::idle()),
+            rechecking_from: Mutex::new(None),
             oob_age_band: Mutex::new(None),
             claim_code: Mutex::new(ClaimCodeSnapshot::idle()),
             nat_mode: Mutex::new(NatModeSnapshot::idle()),
@@ -1006,7 +1024,8 @@ impl OnboardingMachine {
             claimed_box_identity: RwLock::new(None),
             self_ref: self_ref.clone(),
             channel_probe_in_flight: std::sync::atomic::AtomicBool::new(false),
-            vps_offers_listed_for: std::sync::Mutex::new(None),
+            joining_rules: Mutex::new(JoiningRules::default()),
+            vps_offers_listing: std::sync::Mutex::new(VpsOffersListing::default()),
         })
     }
 
@@ -1212,6 +1231,7 @@ impl OnboardingMachine {
         // of the process's life, so the user never reaches identity-choice again.
         // Pinned by `tests/awaiting_manual_dns.rs::reset_clears_the_wizard_outcome`.
         *self.outcome.lock().unwrap() = None;
+        self.clear_joining_rules();
         *self.provisioning.lock().unwrap() = ProvisioningSnapshot::idle();
         *self.claim_code.lock().unwrap() = crate::snapshots::ClaimCodeSnapshot::idle();
         self.provisioning_cancel.reset();
@@ -2621,13 +2641,13 @@ impl OnboardingMachine {
 
     /// The i18n key of `channel`'s row description: the no-build wording when
     /// the registry has no build on it, else the compat line's wording at the
-    /// running product major (`UpdateChannel::description_key_for`). Apps look
+    /// running product version (`UpdateChannel::description_key_for`). Apps look
     /// the string up by this key rather than choosing per row themselves.
     pub fn update_channel_description_key_for_row(
         &self,
         channel: fauna_provisioning::cloud_init::UpdateChannel,
     ) -> String {
-        let major = fauna_provisioning::update_channel::availability::product_version().major;
+        let version = fauna_provisioning::update_channel::availability::product_version();
         self.with_state(|s| {
             let build = s
                 .vps
@@ -2635,7 +2655,7 @@ impl OnboardingMachine {
                 .iter()
                 .find(|a| a.channel == channel)
                 .map(|a| &a.build);
-            channel.description_key_for(major, build).to_string()
+            channel.description_key_for(&version, build).to_string()
         })
     }
 
@@ -2826,7 +2846,7 @@ impl OnboardingMachine {
             }
         };
 
-        *self.vps_offers_listed_for.lock().unwrap() = Some(list_location);
+        self.vps_offers_listing.lock().unwrap().listed_for = Some(list_location);
         self.mutate(|s| {
             s.vps.verified = true;
             s.vps.server_types = types.into_iter().take(5).collect();
@@ -3548,6 +3568,7 @@ impl OnboardingMachine {
             s.step = OnboardingStep::InviteRequest;
         });
         *self.invite_request.lock().unwrap() = InviteRequestSnapshot::idle();
+        self.spawn_joining_rules_read();
         self.observer.on_changed();
     }
 
@@ -4006,6 +4027,117 @@ impl OnboardingMachine {
     }
 }
 
+// ── The nest's rules at joining ─────────────────────────────────────────────
+//
+// `nest-rules.md` § Acceptance at joining: joining is acceptance, so
+// `invite_request`, and `handle_entry` while its Continue signs in, show the
+// nest's rules above the terms notice. Read before sign-in over the anonymous
+// connection, verified through the same `NestRulesBook` the signed-in app keeps,
+// summarised once here — the apps paint the rows. The getter is exported over
+// UniFFI (the `uniffi` feature forwards `fauna-client-policy/uniffi`, whose
+// record it returns) and to the wasm onboarding chunk as `joiningNestRulesJson`.
+
+/// The rules the joining surfaces show, and which read they came from.
+#[derive(Debug, Default)]
+pub(crate) struct JoiningRules {
+    /// Bumped by every read started and every clear, so a read a later one
+    /// superseded — a second handle check, a reset — never lands.
+    generation: u64,
+    accepted: Option<fauna_client_policy::AcceptedNestRules>,
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl OnboardingMachine {
+    /// The nest's rules for the joining surface of the current step, in
+    /// `lang`, or `None` when it shows none: on `invite_request`, and on
+    /// `handle_entry` exactly while the terms notice shows
+    /// (`terms_notice_visible`, `onboarding.md` § 2 — Continue signs in); never
+    /// before the verified read has landed; and never for an applied empty
+    /// document ([`fauna_client_policy::NestRulesSummary::is_shown`] — a
+    /// document none of which applies here is shown, rules listed or not).
+    pub fn joining_nest_rules(&self, lang: &str) -> Option<fauna_client_policy::NestRulesSummary> {
+        let on_joining_surface = match self.with_state(|s| s.step) {
+            OnboardingStep::InviteRequest => true,
+            OnboardingStep::HandleEntry => self.handle_check_snapshot().terms_notice_visible,
+            _ => false,
+        };
+        if !on_joining_surface {
+            return None;
+        }
+        let summary = self
+            .joining_rules
+            .lock()
+            .unwrap()
+            .accepted
+            .as_ref()?
+            .summary(lang);
+        summary.is_shown().then_some(summary)
+    }
+}
+
+impl OnboardingMachine {
+    /// Forget the joining rules and drop any read in flight.
+    pub(crate) fn clear_joining_rules(&self) {
+        let mut rules = self.joining_rules.lock().unwrap();
+        rules.generation += 1;
+        rules.accepted = None;
+    }
+
+    /// Read the joining nest's rules in the background
+    /// ([`crate::background::spawn_background`]), replacing any earlier read's.
+    pub(crate) fn spawn_joining_rules_read(&self) {
+        self.clear_joining_rules();
+        let Some(me) = self.self_ref.upgrade() else {
+            return;
+        };
+        let generation = self.joining_rules.lock().unwrap().generation;
+        let base_url = self.effective_nest_url();
+        crate::background::spawn_background(me.read_joining_rules(generation, base_url));
+    }
+
+    /// One read: the nest's self-description over the anonymous connection,
+    /// its rules verified against the identity the connection proved. A read
+    /// that fails leaves the surfaces showing nothing — there are no last-known
+    /// rules before sign-in, and the next entry reads again.
+    async fn read_joining_rules(self: Arc<Self>, generation: u64, base_url: String) {
+        let answer = match self.nest_api.read_nest_rules(&base_url).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!("onboarding: the joining nest's rules could not be read: {e:?}");
+                return;
+            }
+        };
+        let signed = answer
+            .content_policy
+            .as_ref()
+            .map(|s| fauna_client_policy::SignedNestRules {
+                document: &s.document,
+                sequence: s.sequence,
+                issued_at: s.issued_at,
+                signature: &s.signature,
+            });
+        let mut book = fauna_client_policy::NestRulesBook::default();
+        if let fauna_client_policy::NestRulesRead::Refused(why) =
+            book.read(&answer.nest_id, &answer.domain, signed)
+        {
+            tracing::warn!("onboarding: the joining nest's rules were refused: {why:?}");
+            return;
+        }
+        let Some(accepted) = book.get(&answer.nest_id).cloned() else {
+            // The nest publishes no rules: nothing to show.
+            return;
+        };
+        {
+            let mut rules = self.joining_rules.lock().unwrap();
+            if rules.generation != generation {
+                return;
+            }
+            rules.accepted = Some(accepted);
+        }
+        self.observer.on_changed();
+    }
+}
+
 // ── DNS-provider eligibility: the one computation behind both answers ───────
 //
 // Deliberately OUTSIDE the `uniffi::export` block above: these are the shared
@@ -4335,6 +4467,28 @@ impl OnboardingMachine {
                 .await;
         use fauna_provisioning::probe::NestHealthState;
         match health.state {
+            // A local target with nothing listening is not a domain someone
+            // could set a nest up on by controlling its DNS — nobody controls
+            // DNS for `localhost`, a LAN IP or a `.local` name. Say no nest is
+            // running there, with no control checkbox and so no DNS-config
+            // route (onboarding.md § 2, Local / self-hosted targets).
+            NestHealthState::ConnectionRefused if !target.is_public_dns_name => {
+                let mut snap = HandleCheckSnapshot::idle();
+                snap.phase = HandleCheckPhase::Complete;
+                snap.outcome = HandleCheckOutcome::ProbeError {
+                    phase: HandleCheckPhase::NestProbe,
+                    transient: true,
+                    cause: "connection refused".into(),
+                };
+                snap.message = LocalizedText {
+                    key: "onboarding.handle_check.outcome.local_no_nest".into(),
+                    args: HashMap::from([("domain".to_string(), domain.clone())]),
+                };
+                snap.continue_enabled = false;
+                *self.handle_check.lock().unwrap() = snap;
+                self.observer.on_changed();
+                return;
+            }
             NestHealthState::ConnectionRefused => {
                 let mut snap = HandleCheckSnapshot::idle();
                 snap.phase = HandleCheckPhase::Complete;
@@ -4602,6 +4756,14 @@ impl OnboardingMachine {
                 | HandleCheckOutcome::NestRunningUserUnregistered
                 | HandleCheckOutcome::UnregisteredUnclaimedNest
         );
+        // The two outcomes whose page shows the nest's rules: `AlreadyOnNest`
+        // (`handle_entry` while Continue signs in) and the claimed nest the
+        // user is not on (Continue → `invite_request`).
+        let joins = matches!(
+            outcome,
+            HandleCheckOutcome::AlreadyOnNest { .. }
+                | HandleCheckOutcome::NestRunningUserUnregistered
+        );
         let mut snap = self.handle_check.lock().unwrap();
         self.handle_check_first_sign_in
             .store(first_sign_in, std::sync::atomic::Ordering::SeqCst);
@@ -4613,6 +4775,11 @@ impl OnboardingMachine {
         };
         snap.continue_enabled = continue_enabled;
         drop(snap);
+        if joins {
+            self.spawn_joining_rules_read();
+        } else {
+            self.clear_joining_rules();
+        }
         self.observer.on_changed();
     }
 
@@ -4983,7 +5150,8 @@ impl OnboardingMachine {
         // the request id here: the `Rechecking` transition below overwrites the
         // state that carries it, and the not-found probe needs it to restore
         // this pending state when it cannot reach a verdict.
-        let pending_request_id = match &self.invite_request.lock().unwrap().state {
+        let pending = self.invite_request.lock().unwrap().state.clone();
+        let pending_request_id = match &pending {
             InviteRequestState::PendingReview { request_id, .. } => request_id.clone(),
             _ => return self.state.lock().unwrap().step,
         };
@@ -5006,6 +5174,11 @@ impl OnboardingMachine {
         // operation must not abort this one; only a cancel raised after this
         // point (`cancel_invite_op`) does.
         self.cancel.reset();
+        // The request under recheck is still pending: keep its state for
+        // `pending_invite_slot`, BEFORE the snapshot stops naming it. The page
+        // starts this recheck on the very tick the submit's `PendingReview`
+        // raises, so an app's submit continuation can read the slot here.
+        *self.rechecking_from.lock().unwrap() = Some(pending);
         self.invite_request.lock().unwrap().state = InviteRequestState::Rechecking;
         self.observer.on_changed();
 
@@ -5258,6 +5431,8 @@ impl OnboardingMachine {
             OobCodeState::Valid { invite_id, .. } => Some(invite_id.clone()),
             _ => return self.state.lock().unwrap().step, // nothing to do
         };
+        // A retry starts clean: the last attempt's refusal is not this one's.
+        self.clear_error();
 
         // No setup-status probe here, and no consent branch: invite redemption
         // proceeds straight to `register`. The plaintext-mode consent page is
@@ -5271,25 +5446,13 @@ impl OnboardingMachine {
         let secret = match self.effective_secret() {
             Some(s) => s,
             None => {
-                return {
-                    use crate::snapshots::ErrorContext;
-                    self.invite_error(ErrorContext::Redeeming, false, "no identity".into());
-                    self.state.lock().unwrap().step
-                };
+                return self.redeem_error(false, "no identity".into());
             }
         };
         let signing_key = match parse_signing_key(&secret) {
             Some(k) => k,
             None => {
-                return {
-                    use crate::snapshots::ErrorContext;
-                    self.invite_error(
-                        ErrorContext::Redeeming,
-                        false,
-                        "invalid identity secret".into(),
-                    );
-                    self.state.lock().unwrap().step
-                };
+                return self.redeem_error(false, "invalid identity secret".into());
             }
         };
         let actor_id_bytes = signing_key.verifying_key().to_bytes();
@@ -5337,19 +5500,26 @@ impl OnboardingMachine {
                 // clearest instance of § 3b-ter's "joining user's first login".
                 self.leave_for_logged_in(nest_url, handle, TrustOffer::Offer)
             }
-            Err(crate::nest_api::RegisterError::Failed { cause: _ }) => {
-                // Preserve the legacy cause string ("redeem failed") so the
-                // i18n key the wizard surfaces to clients doesn't shift.
-                use crate::snapshots::ErrorContext;
-                self.invite_error(ErrorContext::Redeeming, true, "redeem failed".into());
-                self.state.lock().unwrap().step
+            Err(crate::nest_api::RegisterError::Failed { cause }) => {
+                tracing::warn!(target: "fauna_onboarding", "redeem register failed: {cause}");
+                self.redeem_error(true, crate::snapshots::UNREACHABLE_CAUSE.into())
+            }
+            // The typed `signature_failed` means the address is on a domain the
+            // nest does not host (`DOMAIN_NOT_HOSTED_CAUSE`); any other refusal
+            // carries the nest's reason already in words. Terminal either way.
+            Err(crate::nest_api::RegisterError::Refused { code, message }) => {
+                let cause = if code == "fauna.account.signature_failed" {
+                    crate::snapshots::DOMAIN_NOT_HOSTED_CAUSE.to_string()
+                } else {
+                    // The terminal frame adds its own full stop.
+                    message.trim_end_matches('.').to_string()
+                };
+                self.redeem_error(false, cause)
             }
             // The typed identity verdict (security.md § Pre-claim surfacing):
             // terminal — a retry re-signs a doomed handshake.
             Err(crate::nest_api::RegisterError::IdentityMismatch { reason }) => {
-                use crate::snapshots::ErrorContext;
-                self.invite_error(ErrorContext::Redeeming, false, reason);
-                self.state.lock().unwrap().step
+                self.redeem_error(false, reason)
             }
         }
     }
@@ -5393,6 +5563,7 @@ impl OnboardingMachine {
             s.error_message = None;
         });
         *self.invite_request.lock().unwrap() = InviteRequestSnapshot::idle();
+        self.spawn_joining_rules_read();
     }
 
     /// Lands the wizard on `ClaimCode` with `nest_url` + `handle`
@@ -5486,10 +5657,13 @@ impl OnboardingMachine {
             age_notice: None,
             supervised_notice: None,
         };
+        self.spawn_joining_rules_read();
     }
 
     /// The pending-invite resume slot for the current state, or `None` when
-    /// there is nothing to resume.
+    /// there is nothing to resume. A request is resumable while it is pending:
+    /// in `PendingReview`, or in `Rechecking` — a recheck in flight answers with
+    /// the `PendingReview` it is checking.
     ///
     /// **This replaced `submit_invite_request_continue()` (retired 2026-08-12).**
     /// That method existed to *exit* the wizard with
@@ -5507,7 +5681,18 @@ impl OnboardingMachine {
     pub fn pending_invite_slot(&self) -> Option<crate::snapshots::PendingInviteSlot> {
         use crate::snapshots::InviteRequestState;
         let snap = self.invite_request.lock().unwrap().clone();
-        let InviteRequestState::PendingReview { ref request_id, .. } = snap.state else {
+        // A recheck in flight has not changed the request: it is still pending,
+        // under the `PendingReview` the recheck replaced. Every app starts its
+        // first recheck on the observer tick the submit's own `PendingReview`
+        // raises, which can run before the app's continuation of the submit await
+        // reads this — and an empty slot there left the submit unregistered
+        // (measured on windows 2026-11-04).
+        let pending = match snap.state {
+            InviteRequestState::PendingReview { .. } => snap.state,
+            InviteRequestState::Rechecking => self.rechecking_from.lock().unwrap().clone()?,
+            _ => return None,
+        };
+        let InviteRequestState::PendingReview { ref request_id, .. } = pending else {
             return None;
         };
         // state.nest_url, NOT effective_nest_url(): this URL is persisted as the
@@ -5522,8 +5707,27 @@ impl OnboardingMachine {
             // Opaque to the app (`onboarding.md` § Long-term store contract:
             // "Don't validate the JSON"). Degrade to empty rather than strand
             // the request — the wizard falls back to `PendingReview` on reseed.
-            status_json: serde_json::to_string(&snap.state).unwrap_or_default(),
+            // The pending state, never `Rechecking`: the slot is a resume point.
+            status_json: serde_json::to_string(&pending).unwrap_or_default(),
         })
+    }
+
+    /// A failed redeem, on both of the page's channels: the invite snapshot
+    /// (`invite-request-status`) and the shared `error_message` every app's
+    /// `error-message` reads (e2e convention 2). The status line alone left
+    /// `error-message` empty on a refused register. Both carry the one
+    /// sentence [`crate::snapshots::invite_request::message_for`] resolves,
+    /// through the generated string table — never a wire code.
+    fn redeem_error(&self, transient: bool, cause: String) -> OnboardingStep {
+        use crate::snapshots::{ErrorContext, InviteRequestState};
+        let line = crate::snapshots::invite_request::message_for(&InviteRequestState::Error {
+            transient,
+            context: ErrorContext::Redeeming,
+            cause: cause.clone(),
+        })
+        .resolve(fauna_i18n::strings::lookup);
+        self.mutate(|s| s.set_error(line));
+        self.invite_error(ErrorContext::Redeeming, transient, cause)
     }
 
     fn invite_error(
@@ -6592,9 +6796,9 @@ impl OnboardingMachine {
     /// locality AND NAT axis), no checkbox (`onboarding.md` § 3b).
     ///
     /// The per-app launch glue calls `MailAdminClient::set_carddav_enabled(true)`
-    /// on it at `LoggedIn` and, when neither email nor CalDAV minted the shared
-    /// MSEK, provisions the CardDAV-only mailbox
-    /// (`enable_carddav_mailbox_with_generated_password`). Per
+    /// on it at `LoggedIn` and, with email off, the shared serving-enablement
+    /// plan's one DAV mailbox mint provisions the calendar-only credential
+    /// (`enable_dav_mailbox_with_generated_password`). Per
     /// `docs/goal/behavior/carddav-server.md` § Independent enablement.
     pub fn carddav_enable_requested(&self) -> bool {
         self.claim_completed()
@@ -9996,67 +10200,7 @@ mod free_method_tests {
 mod tests {
     use super::*;
     use crate::observer::CountingObserver;
-
-    /// Minimal capturing `tracing::Layer` — mirrors
-    /// `fauna_provisioning::progress`'s own test-only copy; small enough (and
-    /// crate-local enough) that duplicating it beats a cross-crate test-only
-    /// dependency. Runs `f` under a subscriber that filters at `info` (matching
-    /// `fauna-log`'s real default, `EnvFilter::new("info")`), so a `debug!` line
-    /// is exercised exactly the way it is invisible in production.
-    ///
-    /// exposure check: this helper's
-    /// only two callers below are the sole callers of `nest_probe_client_resolving`
-    /// in this test binary — the two other tests that drive `run_provisioning_inner`
-    /// (`recovery`/custody-mismatch cases) set `dns.buy_domain = false` or error
-    /// out before the buy-domain branch that reaches the probe closure, so no
-    /// sibling test can hit `nest_probe_client_resolving`'s `tracing::warn!`/
-    /// `info!` callsites with no subscriber installed. Demonstrated unexposed;
-    /// the thread-local `with_default` here is not a defect.
-    fn capture_tracing_at_info<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
-        use tracing_subscriber::prelude::*;
-
-        struct CaptureLayer(Arc<Mutex<Vec<String>>>);
-
-        #[derive(Default)]
-        struct MessageOnly(String);
-
-        impl tracing::field::Visit for MessageOnly {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-
-        impl<S> tracing_subscriber::Layer<S> for CaptureLayer
-        where
-            S: tracing::Subscriber,
-        {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                let mut visitor = MessageOnly::default();
-                event.record(&mut visitor);
-                let line = format!(
-                    "[{}][{}] {}",
-                    event.metadata().level(),
-                    event.metadata().target(),
-                    visitor.0
-                );
-                self.0.lock().unwrap().push(line);
-            }
-        }
-
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::new("info"))
-            .with(CaptureLayer(Arc::clone(&captured)));
-        let out = tracing::subscriber::with_default(subscriber, f);
-        let lines = captured.lock().unwrap().clone();
-        (out, lines)
-    }
+    use fauna_test_tracing::capture_tracing_at_info;
 
     /// Regression guard for the question a live windows provisioning run could not answer: was the poll reaching the
     /// box via its captured-IP DNS override, or had it silently fallen back to
@@ -12944,6 +13088,81 @@ mod tests {
             );
     }
 
+    /// A refused redeem must reach the page's `error-message`, in words.
+    ///
+    /// The register arms used to write only the invite snapshot (shown on
+    /// `invite-request-status`), never the machine's `error_message` — the
+    /// channel every app's `error-message` reads — and the refusal arm threw
+    /// the nest's cause away for a fixed "redeem failed". A handle typed under
+    /// a domain the nest does not host is refused as
+    /// `fauna.account.signature_failed` (the nest verifies the signature only
+    /// over its own domains), so on tui the user sat on the invite page with
+    /// an empty `error-message` and no reason given. Both channels now carry
+    /// the same resolved sentence, and neither carries the wire code.
+    #[tokio::test]
+    async fn a_refused_redeem_names_the_refusal_on_error_message() {
+        use crate::nest_api::{InviteCodeVerification, RegisterError};
+        use crate::observer::NullObserver;
+        use fauna_i18n::strings::onboarding::invite::error as e;
+
+        async fn redeem_refused_with(err: RegisterError) -> (Option<String>, String) {
+            let fake = std::sync::Arc::new(crate::nest_api::FakeNestApi::new());
+            fake.set_verify_invite_code_response(Ok(InviteCodeVerification {
+                invite_id: "inv-1".into(),
+                supervised_by: None,
+                age_band: None,
+            }));
+            fake.set_register_response(Err(err));
+            let observer =
+                std::sync::Arc::new(NullObserver) as std::sync::Arc<dyn OnboardingObserver>;
+            let machine = OnboardingMachine::with_nest_api(
+                observer,
+                fake.clone() as std::sync::Arc<dyn crate::nest_api::NestApi>,
+            );
+            machine.seed_identity("01".repeat(32));
+            machine.navigate_to_invite_request_for_known_nest(
+                "https://nest.example".into(),
+                "alice@unhosted.test".into(),
+            );
+            machine.verify_oob_invite_code("code-123".into()).await;
+            machine.redeem_invite().await;
+            let status = crate::snapshots::invite_request::message_for(
+                &machine.invite_request_snapshot().state,
+            )
+            .resolve(fauna_i18n::strings::lookup);
+            (machine.error_message(), status)
+        }
+
+        let (error, status) = redeem_refused_with(RegisterError::Refused {
+            code: "fauna.account.signature_failed".into(),
+            message: "unused for this code".into(),
+        })
+        .await;
+        assert_eq!(error.as_deref(), Some(e::DOMAIN_NOT_HOSTED));
+        assert_eq!(
+            status,
+            e::DOMAIN_NOT_HOSTED,
+            "the status line says the same"
+        );
+
+        let (error, _) = redeem_refused_with(RegisterError::Refused {
+            code: "fauna.account.registration_closed".into(),
+            message: "This nest is closed.".into(),
+        })
+        .await;
+        let error = error.expect("any other refusal reaches error-message too");
+        assert!(
+            error.contains("This nest is closed") && !error.contains("fauna.account"),
+            "the nest's localized refusal, never the wire code: {error:?}"
+        );
+
+        let (error, _) = redeem_refused_with(RegisterError::Failed {
+            cause: "connection reset".into(),
+        })
+        .await;
+        assert_eq!(error.as_deref(), Some(e::UNREACHABLE));
+    }
+
     /// The invite-request twin of the register pin above. The submit door
     /// runs `validate_handle` (no '@') before anything else and verifies the
     /// signature over the bare lowercased handle with no domain
@@ -12994,5 +13213,31 @@ mod tests {
             .verifying_key()
             .verify_strict(&expected, &signature)
             .expect("the submit signature must cover the bare local part the body carries");
+    }
+}
+
+/// The offer listing's bookkeeping (`registry.md` § Server offers follow the
+/// location): the location `vps.server_types` was last listed for (by
+/// `verify_vps` or a refresh) and the one a refresh is listing now, so a
+/// re-select of the listed location — a picker restoring its selection on
+/// re-render — or a second change to the location already being listed
+/// lists nothing.
+#[derive(Default)]
+struct VpsOffersListing {
+    listed_for: Option<String>,
+    in_flight: Option<String>,
+}
+
+impl VpsOffersListing {
+    /// Mark a listing for `location` begun, unless it is already listed or
+    /// being listed — then `false`, and the caller lists nothing.
+    fn begin(&mut self, location: &str) -> bool {
+        if self.listed_for.as_deref() == Some(location)
+            || self.in_flight.as_deref() == Some(location)
+        {
+            return false;
+        }
+        self.in_flight = Some(location.to_string());
+        true
     }
 }

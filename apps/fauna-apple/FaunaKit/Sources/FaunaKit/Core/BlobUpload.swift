@@ -47,6 +47,17 @@ func mimeType(forPath path: String) -> String {
     contentTypeForFilename(filename: path)
 }
 
+/// Decode the nest's reply to a primary blob POST and refuse one that names a
+/// different blob than the `primaryBytes` the shell just sent. The returned
+/// ``BlobResponse`` carries the hash this client computed (shared-Rust
+/// `verifyBlobUploadEcho`), never the echo, because callers sign over it
+/// (`docs/goal/architecture/security.md` § Signed-envelope shape). Twin of
+/// android's `uploadPublicPostBlob` and web's `assertEchoedBlobHash`.
+func checkedBlobResponse(reply: Data, primaryBytes: Data) throws -> BlobResponse {
+    let echoed = try JSONDecoder().decode(BlobResponse.self, from: reply)
+    return BlobResponse(hash: try verifyBlobUploadEcho(echoed: echoed.hash, bytes: primaryBytes))
+}
+
 /// Build the `multipart/form-data` body for `POST /api/v1/blob` — exactly two
 /// parts, `sidecar` (`application/cbor`, DAG-CBOR `UploadSidecar`) + `bytes`
 /// (`application/octet-stream`, sealed bytes), in that order. Matches the nest's

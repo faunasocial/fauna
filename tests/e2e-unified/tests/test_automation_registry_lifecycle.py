@@ -112,6 +112,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.set_names import addressed
 
 # apple-only: `_AutomationRegister` is FaunaKit's. The other five apps (including tui) have
 # their own registries and are not exposed to this defect class.
@@ -442,13 +443,25 @@ def test_calendar_date_label_survives_the_events_gesture_sequence(
     #     split-view while ios leaves it to the system nav bar per HIG
     #     (ui/events.md § Element IDs, user-approved 2026-08-14). So this probe keeps
     #     using navigate() permanently — there is no future id here to switch to.
-    step("open-detail(push)", lambda: app.events.open_event_detail(0))
+    #
+    #     Since the window-attachment lifecycle the count DURING the push is not the
+    #     property: an iOS push over the root is one of the states that must read
+    #     absent (apple-e2e-automation.md § Architecture, item 1: detach + `.onDisappear`
+    #     together hide the slot), so an iOS trace reads open-detail(push)=0 and a
+    #     split-view macOS one reads 1. Both are correct. The self-unregister is the
+    #     label NOT COMING BACK, which is what the two steps after this one measure.
+    covered_step = "open-detail(push)"
+    step(covered_step, lambda: app.events.open_event_detail(0))
     step("leave-detail", app.events.navigate)
 
     # (d) ...and a second navigate still cannot bring it back.
     step("re-navigate", app.events.navigate)
 
-    dropped = [s for s in trace if s.endswith("=0") or "gesture failed" in s]
+    dropped = [
+        s
+        for s in trace
+        if "gesture failed" in s or (s.endswith("=0") and not s.startswith(f"{covered_step}="))
+    ]
     assert not dropped, (
         "SELF-UNREGISTER — `calendar-date-label` fell out of the automation registry and "
         f"did not come back.\n  count by step: {' → '.join(trace)}\n  FIRST DROP: "
@@ -563,6 +576,8 @@ def test_flat_index_resolves_same_id_rows_in_screen_order(
     # modules' "count grows on create" polls don't push their new rows below a
     # lazy list's realization fold (a snapshot-less sync set deletes cleanly —
     # cleanup is fixture work, so the API shortcut is legitimate; e2e rule 8b).
+    # By hash: an app-created set rests no plaintext name, so `{"name": ...}` answers
+    # `fauna.folders.not_found` (`helpers.set_names.addressed`).
     client = WsRpcAdminClient(
         nest_url,
         actor_id=bytes(test_user["signing_key"].verify_key),
@@ -570,7 +585,7 @@ def test_flat_index_resolves_same_id_rows_in_screen_order(
     )
     with client:
         for name in created:
-            client.call("fauna.folders.delete", {"name": name})
+            client.call("fauna.folders.delete", addressed(name))
     # Remount the page so the deletion lands in the registry before the next test.
     b.navigate_devices()
     b.navigate_folders()

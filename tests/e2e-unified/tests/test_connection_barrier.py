@@ -223,3 +223,55 @@ def test_the_offline_word_list_has_exactly_one_owner():
         "OFFLINE_STATE_WORDS; wait on the published `online` boolean instead "
         f"(helpers/connection.py): {offenders}"
     )
+
+
+class _LoginSeamDriver(_FakeDriver):
+    """:class:`_FakeDriver` plus the two calls the admin login seam makes, each
+    recorded, so a test reads the seam's order rather than its outcome."""
+
+    def __init__(self, values, *, app="tui"):
+        super().__init__(values, app=app)
+        self.calls = []
+
+    def get_state(self, path=None, **kwargs):
+        value = super().get_state(path, **kwargs)
+        self.calls.append(("connection", value))
+        return value
+
+    def set_state(self, state):
+        self.calls.append(("set_state", sorted(state)))
+
+    def wait_for(self, element_id, **_kwargs):
+        self.calls.append(("wait_for", element_id))
+
+
+def test_the_dedicated_nest_admin_login_is_online_before_it_returns(monkeypatch):
+    """`login_as_nest_admin` is a login seam, so it owes the barrier on every app.
+
+    It held it on web only, and returned on tui once `admin-dashboard-heading`
+    painted, which says nothing about the transport. `enable_mail_plain` then
+    reached `mail-add-credential-submit-button`, whose write is `OnlineOnly`, on
+    a word still offline, and the click was refused as disabled (convention 11)
+    on a page that paints the button enabled.
+    """
+    from types import SimpleNamespace
+
+    from helpers import mail_dedicated_nest
+
+    monkeypatch.setattr(mail_dedicated_nest, "e2e_login_device_id", lambda _app: "device")
+    driver = _LoginSeamDriver(
+        [
+            {"state": "connecting", "online": False},
+            {"state": "connected", "online": True},
+        ]
+    )
+    nest = {"admin": {"signing_key": SimpleNamespace(encode=lambda: b"\x01")}}
+
+    mail_dedicated_nest.login_as_nest_admin(
+        SimpleNamespace(driver=driver), nest, "http://127.0.0.1:1"
+    )
+
+    assert ("connection", {"state": "connected", "online": True}) in driver.calls, (
+        f"the seam returned without seeing the transport online: {driver.calls}"
+    )
+    assert driver.calls[0][0] == "set_state", driver.calls

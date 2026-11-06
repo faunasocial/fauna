@@ -73,8 +73,8 @@ import secrets
 
 import pytest
 
-from common.auth import register_handled_actor
-from helpers.app_surface import skip_unbuilt
+from helpers.admin_wire import admit_adult
+from helpers.app_surface import require_surface
 from helpers.budgets import MLS_HANDSHAKE_S
 from helpers.waiting import wait_until
 from tests.api import conv_api
@@ -94,17 +94,10 @@ def test_fauna_mls_cross_nest_receive(
     channel log never leaves nest A, so the body proves the cross-nest fetch."""
     bob_app = real_faunamls_app
     driver = bob_app.driver
-    if not (driver.is_web() or driver.is_tui() or driver.is_linux()):
-        skip_unbuilt(
-            driver,
-            surface="the real-wire cross-nest FaunaMls receive seam",
-            detail="the real FaunaMlsBackend activates here only behind the "
-            "launch-time gate with no client-side readiness signal, so a run "
-            "would silently prove nothing (see `real_faunamls_app`'s docstring)",
-            tracked="`docs/goal/behavior/direct-messages.md` § Implementation "
-            "status today (Track E, the same gate "
-            "`test_fauna_mls_cross_nest_roundtrip` carries)",
-        )
+    # macos + ios: the fixture witnesses the real rail from the app's own log
+    # (`helpers/real_rail_control.witness_real_rail`, since 2026-09-22), the
+    # readiness signal this gate used to wait for.
+    require_surface(driver, "cross-nest-mls-receive-seam")
 
     nest_b = nest_instance  # bob's home — the nest his GUI is logged into
     nest_a = cross_nest_foreign  # alice's home — and the channel's home
@@ -112,12 +105,7 @@ def test_fauna_mls_cross_nest_receive(
     body = f"hi bob across nests {secrets.token_hex(3)}"
 
     # ── alice: a handled actor on nest A (the far nest) ───────────────────────
-    alice = register_handled_actor(
-        nest_a["port"],
-        handle="xnalice" + secrets.token_hex(3),
-        domain=nest_a["authority"],
-        base_url=nest_a["url"],
-    )
+    alice = admit_adult(nest_a, "xnalice" + secrets.token_hex(3), domain=nest_a["authority"], token=True)
 
     # ── 1. bob's GUI engine has published a key package on his own nest ───────
     # The real-backend opt-in fires `ensureKeypackages` fire-and-forget, so the

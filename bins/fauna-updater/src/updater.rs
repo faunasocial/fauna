@@ -214,15 +214,12 @@ pub async fn check_once<E: Engine>(
         if name.ends_with(OLD_SUFFIX) {
             continue;
         }
-        let reference = container["Config"]["Image"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let (container_repo, tag) = split_reference(&reference);
-        if container_repo != repo {
+        let reference = image_reference(&container).to_string();
+        if !is_managed(&container, repo) {
             tracing::warn!("{name}: runs {reference:?}, not {repo} — left alone");
             continue;
         }
+        let (_, tag) = split_reference(&reference);
         let Some(tag) = tag.map(str::to_string) else {
             tracing::info!("{name}: runs a digest reference — pinned");
             continue;
@@ -344,6 +341,21 @@ pub async fn check_once<E: Engine>(
     Ok(Pass::Working)
 }
 
+/// The image reference a container was created from.
+fn image_reference(container: &Value) -> &str {
+    container["Config"]["Image"].as_str().unwrap_or("")
+}
+
+/// Whether this updater manages `container`, which carries the label: it does
+/// when the container comes from the one repository it follows. The label alone
+/// is not enough, because an engine can hold containers of another repository
+/// with an updater of their own. Every walk over the label — the check, the
+/// reconcile and the report alike — keeps to this one answer, so a re-create in
+/// a sibling's hands is never settled from here.
+fn is_managed(container: &Value, repo: &str) -> bool {
+    split_reference(image_reference(container)).0 == repo
+}
+
 /// What a pass leaves the updater as.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Pass {
@@ -384,7 +396,12 @@ async fn follow_the_nest<E: Engine>(
 
 /// Report `event` into every managed container (not one left aside): the
 /// events that belong to the updater rather than to one container's pass.
-pub async fn report_to_managed<E: Engine>(engine: &E, reporter: &mut Reporter, event: Event) {
+pub async fn report_to_managed<E: Engine>(
+    engine: &E,
+    reporter: &mut Reporter,
+    repo: &str,
+    event: Event,
+) {
     let Ok(ids) = engine.labelled(UPDATE_LABEL, "true").await else {
         return;
     };
@@ -392,7 +409,7 @@ pub async fn report_to_managed<E: Engine>(engine: &E, reporter: &mut Reporter, e
         let Ok(container) = engine.inspect_container(&id).await else {
             continue;
         };
-        if !container_name(&container).ends_with(OLD_SUFFIX) {
+        if is_managed(&container, repo) && !container_name(&container).ends_with(OLD_SUFFIX) {
             reporter.emit(engine, &id, event.clone()).await;
         }
     }
@@ -494,8 +511,9 @@ pub fn apply_failed(e: &anyhow::Error, digest: &Digest) -> Event {
 /// Settle a re-create interrupted by a crash or a restart: a container still
 /// aside whose successor runs is removed; one whose successor is missing or
 /// never started is put back under its name and started. Each is reported to
-/// the container left running.
-pub async fn reconcile<E: Engine>(engine: &E, reporter: &mut Reporter) -> Result<()> {
+/// the container left running. A container of another repository is left alone
+/// ([`is_managed`]): what looks unfinished there may be its own updater at work.
+pub async fn reconcile<E: Engine>(engine: &E, reporter: &mut Reporter, repo: &str) -> Result<()> {
     let mut by_name = HashMap::new();
     for id in engine.labelled(UPDATE_LABEL, "true").await? {
         let inspect = engine.inspect_container(&id).await?;
@@ -505,6 +523,11 @@ pub async fn reconcile<E: Engine>(engine: &E, reporter: &mut Reporter) -> Result
         let Some(base) = name.strip_suffix(OLD_SUFFIX) else {
             continue;
         };
+        if !is_managed(aside, repo) {
+            let reference = image_reference(aside);
+            tracing::warn!("{name}: runs {reference:?}, not {repo} — left alone");
+            continue;
+        }
         let aside_id = aside["Id"].as_str().unwrap_or("");
         match by_name.get(base) {
             Some(successor) if successor["State"]["Running"].as_bool() == Some(true) => {
@@ -676,6 +699,8 @@ mod tests {
         );
     }
 
+    const REPO: &str = "ghcr.io/faunasocial/nest";
+
     fn nest(id: &str, name: &str, running: bool) -> Value {
         json!({
             "Id": id, "Name": format!("/{name}"), "Image": "sha256:oldconfig",
@@ -785,7 +810,9 @@ mod tests {
             containers: vec![nest("old", "fauna-nest-fauna-updater-old", false)],
             ..Default::default()
         };
-        reconcile(&orphan, &mut Reporter::default()).await.unwrap();
+        reconcile(&orphan, &mut Reporter::default(), REPO)
+            .await
+            .unwrap();
         assert_eq!(
             orphan.calls(),
             [
@@ -803,7 +830,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        reconcile(&finished, &mut Reporter::default())
+        reconcile(&finished, &mut Reporter::default(), REPO)
             .await
             .unwrap();
         assert_eq!(
@@ -819,7 +846,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        reconcile(&stillborn, &mut Reporter::default())
+        reconcile(&stillborn, &mut Reporter::default(), REPO)
             .await
             .unwrap();
         assert_eq!(
@@ -831,5 +858,25 @@ mod tests {
                 "put /var/lib/fauna-updater on old"
             ]
         );
+    }
+
+    /// A second updater on one engine, following another repository, starts
+    /// while this one's re-create is under way: its nest is aside and its
+    /// successor is being created. Putting that nest back under its name is what
+    /// answered the running re-create's create with 409, name already in use.
+    #[tokio::test]
+    async fn reconcile_leaves_another_repositorys_containers_alone() {
+        let mut aside = nest("theirs", "other-nest-fauna-updater-old", false);
+        aside["Config"]["Image"] = json!("localhost:5001/faunasocial/nest:test");
+        let mut stillborn = nest("new-theirs", "other-nest", false);
+        stillborn["Config"]["Image"] = json!("localhost:5001/faunasocial/nest:test");
+        let engine = Fake {
+            containers: vec![aside, stillborn],
+            ..Default::default()
+        };
+        reconcile(&engine, &mut Reporter::default(), REPO)
+            .await
+            .unwrap();
+        assert!(engine.calls().is_empty(), "{:?}", engine.calls());
     }
 }

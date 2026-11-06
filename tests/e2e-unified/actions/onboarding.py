@@ -20,6 +20,73 @@ class OnboardingActions:
     def __init__(self, driver: PlatformDriver):
         self.driver = driver
 
+    # One element only its own page paints, for each wizard page a run can stall
+    # on between `identity_choice` and the signed-in handoff (ui.yaml
+    # `onboarding.*`), in wizard order.
+    _PAGE_MARKERS = {
+        "launch_retry": "launch-retry-button",
+        "identity_choice": "create-identity-button",
+        "identity_created": "secret-key-display",
+        "recovery_kit": "recovery-kit-skip-button",
+        "identity_import": "paste-secret-field",
+        "recovery_entry": "recovery-entry-submit-button",
+        "handle_entry": "handle-input",
+        "invite_request": "invite-request-submit-button",
+        "claim_code": "claim-code-input",
+        "nat_mode_choice": "nat-mode-confirm-button",
+        "trust_prompt": "trust-box-grant-button",
+    }
+    # A marker another page paints too, so a match names both.
+    _MARKER_ALSO_ON = {"paste-secret-field": "emergency_lockout_entry"}
+
+    def page_on_screen(self) -> str:
+        """Name the onboarding page the app is showing, for a failure message.
+
+        A wait that times out on one page's element says only that the element
+        is missing; this says where the app IS, so the failure tells a skipped
+        wizard step (a page the test did not expect) from a signed-in shell (a
+        leftover session) from a blank frame (convention 6). Probes each page's
+        marker, then the shared signed-in-shell markers
+        (`helpers.authenticated_shell.SHELL_MARKERS`), with `is_visible`, which
+        never raises for a missing element, and reads the app's
+        `session.authenticated`. Failure path only: it costs a bridge round trip
+        per marker.
+        """
+        from helpers.authenticated_shell import SHELL_MARKERS
+
+        pages = []
+        probes = [(page, marker) for page, marker in self._PAGE_MARKERS.items()]
+        probes += [("the signed-in shell", marker) for marker in SHELL_MARKERS]
+        for page, marker in probes:
+            try:
+                if self.driver.is_visible(marker):
+                    also = self._MARKER_ALSO_ON.get(marker)
+                    name = f"{page} or {also}" if also else page
+                    pages.append(f"{name} ({marker})")
+            except Exception as e:  # noqa: BLE001 — diagnostic only; never mask the timeout
+                pages.append(f"<{marker}: {type(e).__name__}>")
+        try:
+            authenticated = self.driver.get_state("session.authenticated")
+        except Exception as e:  # noqa: BLE001 — diagnostic only
+            authenticated = f"<{type(e).__name__}>"
+        where = ", ".join(pages) if pages else "no wizard page"
+        return f"{where} (session.authenticated={authenticated!r})"
+
+    def wait_for_page(self, page: str, timeout: float = 15) -> None:
+        """Wait for wizard `page` (its marker in `_PAGE_MARKERS`); on timeout,
+        the failure names the page the app is on instead (`page_on_screen`)."""
+        try:
+            self.driver.wait_for(self._PAGE_MARKERS[page], timeout=timeout)
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"onboarding page {page} never appeared: the app is on "
+                f"{self.page_on_screen()}; {e}"
+            ) from None
+
+    def wait_for_handle_entry(self, timeout: float = 15) -> None:
+        """`wait_for_page("handle_entry")` — the page most journeys wait on."""
+        self.wait_for_page("handle_entry", timeout=timeout)
+
     def navigate_to_status(self) -> None:
         """Wait until the identity choice screen is showing.
 
@@ -92,7 +159,7 @@ class OnboardingActions:
             time.sleep(0.5)
         if self.driver.is_visible("import-identity-button"):
             self.import_key(secret_hex)
-        self.driver.wait_for("handle-input", timeout=15)
+        self.wait_for_handle_entry(timeout=15)
 
     # Removed 2026-05-31 (S5 nest_connect deprecation): continue_to_nest_choice,
     # is_on_nest_choice, claim_local_nest, connect_and_register, request_invite.
@@ -214,14 +281,14 @@ class OnboardingActions:
         """"I've saved it" — keeps the minted root for the signed-in handoff
         and advances to `handle_entry`."""
         self.driver.click("recovery-kit-confirm-button")
-        self.driver.wait_for("handle-input", timeout=15)
+        self.wait_for_handle_entry(timeout=15)
 
     def skip_recovery_kit(self) -> None:
         """Decline the kit: one click, never blocks onboarding. The minted root
         is dropped, so nothing registers at the handoff and Settings' standing
         never-created warning tells the truth."""
         self.driver.click("recovery-kit-skip-button")
-        self.driver.wait_for("handle-input", timeout=15)
+        self.wait_for_handle_entry(timeout=15)
 
     # -- sign-out residue (account-scoping.md § Erasure follows scope → the
     # residue surface) — what a sign-out's erase could not remove, painted on
@@ -290,7 +357,7 @@ class OnboardingActions:
         secret = secret_hex or self._IMPORT_KEY_FOR_HANDLE_TESTS
         self.navigate_to_status()
         self.import_key(secret)
-        self.driver.wait_for("handle-input", timeout=15)
+        self.wait_for_handle_entry(timeout=15)
 
     # NOTE (no-modes retirement, ratified 2026-07-12): the former
     # encryption_mode_choice page's four deployment-toggle checkboxes
@@ -493,7 +560,7 @@ class OnboardingActions:
         Assumes the test has already landed on handle_entry (e.g. via
         ``go_to_handle_entry``). Clears any existing value first.
         """
-        self.driver.wait_for("handle-input", timeout=10)
+        self.wait_for_handle_entry(timeout=10)
         self.driver.clear_and_type("handle-input", handle)
 
     def submit_handle(self) -> None:
@@ -523,7 +590,10 @@ class OnboardingActions:
         test); the phase sentences end in ``…``, the outcome and error ones
         do not.
         """
-        self.driver.wait_for("handle-check-button", timeout=10)
+        # Visible is not clickable: the button is disabled until the typed handle
+        # has been taken in, so wait for it enabled (the bridge refuses a click
+        # on a disabled control, convention 11).
+        self.driver.wait_until_enabled("handle-check-button", timeout=10)
         self.driver.click("handle-check-button")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:  # deadline-ok: documented below — a timeout leaves Continue disabled, the caller's own next step
@@ -691,17 +761,9 @@ class OnboardingActions:
         remaining native apps (apple / windows / android) gain the same
         under a fake-cloud provisioning follow-up, Track 2 (then this guard widens to them).
         """
-        if not (self.driver.is_web() or self.driver.is_linux()):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="set_provider_base_urls + the call_machine_method DNS "
-                        "dispatch (select_dns_provider / set_dns_cred / verify_dns)",
-                detail="fake-cloud provider redirection; web + linux implement it, "
-                       "the other five apps do not",
-                tracked="the fake-cloud provisioning follow-up, Track 2",
-            )
+        require_surface(self.driver, "dns-provider-machine-dispatch")
         # Override ONLY "dns" — pointed at the provider-shaped stub (Hetzner
         # DNS has a different wire envelope than Cloudflare). Do NOT override
         # "nest": the anonymous WsNestApi makes a "nest" override win for every
@@ -726,6 +788,21 @@ class OnboardingActions:
         drv.call_machine_method("continue_from_dns")
         drv.wait_for("vps-config-back-button", timeout=15)
 
+    def require_offers_follow_the_location(self) -> None:
+        """Skip unless a location change on this app re-lists the server
+        types (``registry.md`` § Server offers follow the location).
+
+        The shared ``select_vps_location`` re-lists on whatever runtime its
+        caller has, or on the machine's own when a UniFFI shell calls it from a
+        UI thread with none (``native-async-execution.md`` § Implementation
+        status today). Witnessed on linux, tui, macos, ios and windows;
+        android shares the fix but has not run these journeys yet. Web omits
+        the picker."""
+        d = self.driver
+        from helpers.app_surface import require_surface
+
+        require_surface(d, "server-offers-follow-location")
+
     def go_to_vps_config_with_verified(self,
                                        provider_id: str,
                                        creds: dict,
@@ -743,22 +820,18 @@ class OnboardingActions:
         locations + server_types endpoints (redirected via
         ``provider_base_urls["vps"]``) and populates the server-type radios.
 
-        Web + linux + tui (see ``go_to_vps_config_with_dns_provider``). Here
+        Web + linux + tui + macos + ios + windows (macos/ios: FaunaKit's VPS section
+        calls the shared ``verifyVps``; see ``go_to_vps_config_with_dns_provider``;
+        windows routes ``set_provider_base_urls`` through its TestAgent's async
+        ``call_machine_method`` dispatcher). Here
         the VPS verify is driven by a real ``vps-verify-button`` UI click —
         linux's button drives the async ``verify_vps`` on a worker runtime via
         ``run_on_tokio``, tui's on its own tokio loop — so this helper needs
         only ``set_provider_base_urls`` (tui's comes from ``HttpBridgeDriver``).
         """
-        if not (self.driver.is_web() or self.driver.is_linux() or self.driver.is_tui()):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="set_provider_base_urls",
-                detail="fake-cloud provider redirection for the VPS verify; web + "
-                       "linux + tui implement it, the other four apps do not",
-                tracked="the fake-cloud provisioning follow-up, Track 2",
-            )
+        require_surface(self.driver, "set-provider-base-urls")
         # Override ONLY "vps". Overriding "nest" would make the anonymous
         # WsNestApi route the handle-check probe (in go_to_vps_config →
         # go_to_dns_config) at the non-WS fake nest → transient failure; this

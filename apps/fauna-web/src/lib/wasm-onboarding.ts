@@ -1,5 +1,5 @@
 import { asset } from '$app/paths';
-import { registerIdentityStoreChunk } from './identity-store';
+import { joinChunk } from './chunk-join';
 import type { LocalizedText } from '#lib/i18n/localized';
 
 let wasmModule: typeof import('../../static/fauna_wasm_onboarding.js') | null = null;
@@ -17,9 +17,8 @@ export function ensureOnboardingWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_onboarding.js');
       await mod.default(asset('fauna_wasm_onboarding_bg.wasm'));
-      // The identity store's key, if this page holds it, goes in before
-      // anything reads the registry through this chunk (identity-store.ts).
-      registerIdentityStoreChunk(mod);
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;

@@ -215,6 +215,11 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
 /// because a SHARED set's serve flip moves only custody's stamps — its group
 /// and generations stay put — and the engine's reader exempts the owner's
 /// pseudo-device rows on the window it was built with.
+/// A **group set's tip** (`p2p-shared-set-build.md` § Build design — the group
+/// set, decision 7) is included because its engine seals under the ring its
+/// build read: a new tip — a generation minted after a removal — moves
+/// nothing else in the stamp, so without it the engine kept sealing under the
+/// generation the removed member still holds.
 type EngineStamp = (
     Option<Vec<u8>>,
     Option<u64>,
@@ -225,6 +230,7 @@ type EngineStamp = (
     Option<u64>,
     Option<[u8; 32]>,
     bool,
+    Option<[u8; 32]>,
 );
 
 ///
@@ -250,6 +256,7 @@ fn engine_stamp(
             .map(|k| k.current_version()),
         keys.set_nonce,
         keys.webdav_served(),
+        keys.group_tip,
     ))
 }
 
@@ -501,14 +508,13 @@ impl EngineSpec for LocationEngineSpec {
             let nest_rpc =
                 crate::bridge::agent_control_plane(capability, nest_base_url, actor_id, device_id);
             // The machine's change-record signer: the principal writer key the
-            // app's enrollment ceremony certified with `SyncWrite`. Load-only —
+            // app's enrollment ceremony certified with `SyncWrite`, from the
+            // agent's one source (`SyncServiceState::change_signer`). Load-only —
             // absent (not enrolled yet, or a `[RenewBearer]`-only grant) the
             // engine records unsigned and says so once.
-            let change_signer = fauna_sync_engine::principal_bundle::load_change_signer(
-                &fauna_sync_engine::account_runtime::production_credential_store(),
-                &actor_id,
-            )
-            .map(Arc::new);
+            let change_signer = state_for_wake
+                .upgrade()
+                .and_then(|state| state.change_signer(&actor_id));
             // A linux on-demand root is built over its REACH, opened before the
             // build because the engine's `watch_dir` is fixed there.
             let mount_report = MountReport::new(state_for_wake.clone(), &path);
@@ -678,6 +684,12 @@ async fn run_relay_seat(seat: Arc<RelaySeat>, client: Arc<NestClient>, device_id
                     () = seat.run(&client, &device_id_hex) => {}
                     () = stopped => {}
                 }
+            }
+            // Parked on the identity verdict (`NestClient::identity_park`):
+            // nothing is dialled, and the dial that reached it logged it at
+            // `error` once; the seat holds until the app's re-trust moves the pin.
+            Err(e @ fauna_client::NestClientError::NestIdentityChanged { .. }) => {
+                tracing::debug!(error = %e, "relay seat: parked on the nest identity verdict");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "relay seat: control-plane connect failed; retrying");
@@ -3472,6 +3484,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
         };
         let mapping = |folder: &str, mode| EngineMapping {
@@ -3521,6 +3534,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert_eq!(full_teardown_location(&always, None), None);
         assert_eq!(

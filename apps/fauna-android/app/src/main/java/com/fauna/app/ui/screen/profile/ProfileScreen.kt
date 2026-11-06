@@ -116,6 +116,10 @@ fun ProfileScreen(
         vm.refreshHeader()
         // OTHER profile: seed the Block⇄Unblock toggle from the current edge.
         if (!vm.isSelf) vm.refreshBlockState()
+        // OTHER header holds no handle: re-read the contact roster now so a
+        // contact accepted a moment ago is named by the roster's handle
+        // (`value-formatting.md` § Peer display label → *the roster handle*).
+        if (!vm.isSelf) overlaysVm.overlays().refreshRoster()
     }
     // A page error shows on `error-message`; when this page's own error is
     // retired (a landed knock or guardian ask retires the refusal) the banner

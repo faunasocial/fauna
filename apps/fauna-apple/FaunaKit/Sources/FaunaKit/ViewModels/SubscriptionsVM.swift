@@ -93,6 +93,9 @@ public final class SubscriptionsVM {
     public var selectedClaimTier = ""
     /// `true` while a mint round-trip is in flight (disables the button).
     public private(set) var mintingClaim = false
+    /// The claim code whose Void button is armed (first press); a second press
+    /// on the same code sends the void. Any landed re-read disarms it.
+    public var claimVoidArmed: String?
     #endif
 
     // ── shared page-level error (`error-message`) ───────────────────────
@@ -152,6 +155,7 @@ public final class SubscriptionsVM {
         claims = []
         selectedClaimTier = ""
         mintingClaim = false
+        claimVoidArmed = nil
         #endif
         errorMessage = nil
     }
@@ -224,6 +228,7 @@ public final class SubscriptionsVM {
             #if !FAUNA_EXCISE_PAYMENTS
             providers = loadedProviders
             claims = loadedClaims
+            claimVoidArmed = nil
             #endif
             errorMessage = nil
             // Repopulate §3/§5, preserving the prior selection by name.
@@ -465,6 +470,30 @@ public final class SubscriptionsVM {
         mintingClaim = false
         await hydrate()
     }
+
+    /// Two-press Void for one claim row: the first press arms `code`, the
+    /// second on the same code calls `fauna.payments.claims.void` and
+    /// re-reads. A `claim_not_found` means the list is what is stale, so the
+    /// re-read repaints it instead of erroring (mirrors linux `Action::VoidClaim`).
+    public func pressVoidClaim(code: String) async {
+        guard let api else { return }
+        guard claimVoidArmed == code else {
+            claimVoidArmed = code
+            return
+        }
+        claimVoidArmed = nil
+        do {
+            try await api.voidPaymentClaim(code: code)
+            errorMessage = nil
+        } catch {
+            let message = DisplayError.message(error)
+            errorMessage = (message?.contains("claim_not_found") ?? false) ? nil : message
+        }
+        await hydrate()
+    }
+
+    /// Disarm the Keep button's row (no nest round-trip).
+    public func keepClaim() { claimVoidArmed = nil }
     #endif
 }
 

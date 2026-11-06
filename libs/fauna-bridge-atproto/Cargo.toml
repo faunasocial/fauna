@@ -30,7 +30,6 @@ client = [
     "dep:atrium-identity",
     "dep:atrium-oauth",
     "dep:atrium-xrpc",
-    "dep:atrium-xrpc-client",
     "dep:jose-jwk",
     "dep:p256",
     "dep:reqwest",
@@ -41,6 +40,11 @@ client = [
     "dep:anyhow",
     "dep:url",
     "dep:urlencoding",
+    "dep:fauna-nest-http",
+    # The resolve-and-pin half of the dial guard (`dial_guard`), shared with
+    # the nest's SSRF guard and the Nostr relay dialer. fauna-nest, the one
+    # consumer of `client`, enables `network` on its own edge already.
+    "fauna-core/network",
 ]
 
 [dependencies]
@@ -82,7 +86,6 @@ atrium-common = { workspace = true, optional = true }
 atrium-identity = { workspace = true, optional = true }
 atrium-oauth = { workspace = true, optional = true }
 atrium-xrpc = { workspace = true, optional = true }
-atrium-xrpc-client = { workspace = true, optional = true }
 jose-jwk = { workspace = true, optional = true }
 p256 = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["stream"], optional = true }
@@ -100,6 +103,11 @@ unicode-segmentation.workspace = true
 uniffi = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 urlencoding = { workspace = true, optional = true }
+# The shared bounded body read (`capped::read_capped`): every reply the
+# consume-side client reads comes from a PDS a linked account's DID names — a
+# server any local user may run — so it is read under a ceiling, the same
+# reader the nest reads every caller-supplied URL's body through.
+fauna-nest-http = { path = "../fauna-nest-http", default-features = false, features = ["client"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

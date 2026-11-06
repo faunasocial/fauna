@@ -319,6 +319,16 @@ impl HydrationHost for RealNestHost {
     async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
         Vec::new()
     }
+
+    // The real engine's own sibling pass: a harness engine holds no sibling
+    // registry, so it pulls nothing and its admission arm stays pending.
+    async fn pull_siblings(&self, folder: &str) {
+        HydrationHost::pull_siblings(&self.engine, folder).await
+    }
+
+    fn sibling_admissions(&self) -> Option<watch::Receiver<u64>> {
+        HydrationHost::sibling_admissions(&self.engine)
+    }
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
     async fn answer_engine_command(&self, cmd: fauna_sync_engine::always_resident::EngineCommand) {
         HydrationHost::answer_engine_command(&self.engine, cmd).await

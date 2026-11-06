@@ -67,6 +67,11 @@ public record DmMessageView(
     // ContentPolicyCache.RenderFor call, painted ahead of every family arm. A public
     // Core record, so this public view carries no UniFFI-internal type.
     RegionPlaceholderModel? Region = null,
+    // The region placeholder owes the sealed-item sentence (`region.sealed_note`,
+    // region-blocking.md § Implementation status today): an end-to-end thread's
+    // bubble, the region drove it, Notify did not count it — the shared rule's
+    // answer (RegionRenderDecision.SealedNoteOwed), painted after the frame.
+    bool RegionSealedNote = false,
     // The `SearchNav.Mail` deep-link marker (conversations.md § The selected
     // message — built 2026-08-10, tui lead; windows closes the set): read-time-resolved on
     // `ThreadDetail.selectedMessageId`, painted as the shared `selected`
@@ -80,7 +85,49 @@ public record DmMessageView(
     bool Reported = false,
     // Whether the ⋯ menu offers `dm-message-report-button`: a RECEIVED message with a
     // plane identity to report it against (mail and bridged messages have none).
-    bool CanReport = false);
+    bool CanReport = false,
+    // MessageSnapshot.scanResultLines, already resolved through the app's string
+    // pipeline by ConversationsPage.ToMessageView (LocalizedText is UniFFI-internal):
+    // the received mail message's own scan verdict (mail-content-scanning.md § User
+    // sees their own message's row). Empty/null → no dm-message-scan-result row.
+    IReadOnlyList<string>? ScanResultLines = null,
+    // MessageSnapshot.deliveredTo, already worded by shared Rust: the alias a received
+    // mail message arrived on (mail-aliases.md § Label). Null → no
+    // dm-message-delivered-to-alias row.
+    string? DeliveredTo = null,
+    // MessageSnapshot.undelivered: an own message the bridge never took (conversations.md
+    // § A bridged room no bridge serves, and a Sent message the bridge never took) —
+    // one dm-message-undelivered line under the kept body, no resend.
+    bool Undelivered = false,
+    // MessageSnapshot.adminBlockReason, already worded through the shared
+    // admin_block_notice face by ConversationsPage.ToMessageView (takedown-and-block.md
+    // § Admin block of a reported item): the nest's admin blocked this message after a
+    // report. Null → not blocked.
+    string? AdminBlockNotice = null,
+    // Whether that notice stands IN PLACE of the bubble (the nest withheld the record:
+    // the document is empty — Rust MessageSnapshot::admin_block_in_place) rather than
+    // beside the author's own kept body (decision 4's two shapes).
+    bool AdminBlockInPlace = false,
+    // The nest placeholder when a rule of the nest this message was read through
+    // drove ContentVerdict (nest-rules.md § The nest source in the engine) — from the
+    // same one ContentPolicyCache.RenderFor call, painted right after the region arm.
+    // A public Core record, like Region.
+    NestPlaceholderModel? Nest = null,
+    // The guardian rule's reason, verbatim, beside the family-policy frame
+    // (content-policy-blocked-reason) on the block and the collapse arm alike; null
+    // when a floor, the viewer's own threshold or a report drove the verdict
+    // (nest-rules.md § The shared rule editor → The reason is the member's to read).
+    string? GuardianReason = null,
+    // MessageSnapshot.withheld, already resolved by ConversationsPage.ToMessageView: the
+    // viewer's OWN message the nest withholds, matched to their queue row
+    // (takedown-and-block.md § Legal takedown → App render, the fourth surface). Null →
+    // no dm-message-withheld-badge.
+    WithheldBadgeView? Withheld = null,
+    // MessageSnapshot.warmupHold, already worded by ConversationsPage.ToMessageView
+    // through the shared warmup_deferred_text (mail-deliverability.md § Enforcement at
+    // submission time): the user's own sent mail the fresh-IP warm-up holds. Null — no
+    // hold, or its release has passed → no dm-message-warmup-deferred row.
+    string? WarmupDeferred = null);
 
 /// <summary>
 /// One reaction group projected from the shared <c>MessageSnapshot.reactions</c>
@@ -150,6 +197,22 @@ public sealed partial class DmMessageBubble : UserControl
     }
 
     /// <summary>
+    /// Whether the thread can take a send at all — set by the page to the shared
+    /// <c>ThreadCapabilities.canSend</c> (false on a bridged room no bridge serves).
+    /// Disables <c>dm-reply-button</c> / <c>dm-reply-all-button</c> (they stay in view; the
+    /// driver reads <c>disabled</c>), as apple's <c>replyAllowed</c>.
+    /// </summary>
+    public bool ReplyAllowed
+    {
+        get => ReplyButton.IsEnabled;
+        set
+        {
+            ReplyButton.IsEnabled = value;
+            ReplyAllButton.IsEnabled = value;
+        }
+    }
+
+    /// <summary>
     /// Whether this thread supports emoji reactions — set by the page to the
     /// thread's <c>supports_reactions</c> capability (FaunaMls = true). Gates the
     /// ⋯ flyout's quick-set <c>dm-reaction-option</c> items + the
@@ -196,6 +259,12 @@ public sealed partial class DmMessageBubble : UserControl
     /// Reaches a human with authority, where mark-as-spam only trains the reporter's
     /// own model.</summary>
     public Action<DmMessageView>? ReportRequested;
+
+    /// <summary>Raised when the user taps <c>dm-message-withheld-badge</c> on their own
+    /// withheld message (<see cref="DmMessageView.Withheld"/>; takedown-and-block.md §
+    /// Legal takedown → <i>App render</i>). The page moves to the Moderation page with
+    /// the badge's <c>ContentId</c>, where the queue row's own appeal opens.</summary>
+    public Action<DmMessageView>? WithheldAppealRequested;
 
     /// <summary>Raised when user taps an attachment image.</summary>
     public Action<BitmapImage>? ImageClicked;
@@ -256,7 +325,11 @@ public sealed partial class DmMessageBubble : UserControl
         // registrations when it leaves the tree; a bubble that returns re-binds.
         Unloaded += (_, _) =>
         {
-            if (_witnessed is { } key) RegionPlaneHost.Forget(key);
+            if (_witnessed is { } key)
+            {
+                RegionPlaneHost.Forget(key);
+                NestRulesHost.Forget(key);
+            }
             _witnessed = null;
         };
         Loaded += (_, _) =>
@@ -271,17 +344,24 @@ public sealed partial class DmMessageBubble : UserControl
     private string? _witnessed;
 
     /// <summary>Convention 17's "a region Block never renders silent" walk for this
-    /// bubble (<c>RegionPlaneHost.BlockRenderState</c>): the verdict side from the
-    /// message's composed decision, registered before any arm paints; the painted
-    /// side only by the region arm itself, when it shows a block. A bubble is reused
-    /// across re-binds, so the previous message's registrations go first.</summary>
+    /// bubble (<c>RegionPlaneHost.BlockRenderState</c>) and its nest twin
+    /// (<c>NestRulesHost.BlockRenderState</c>): the verdict side from the message's
+    /// composed decision, registered before any arm paints; the painted side only by
+    /// the region or nest arm itself, when it shows a block. A bubble is reused across
+    /// re-binds, so the previous message's registrations go first.</summary>
     private void WitnessRegion(DmMessageView msg)
     {
         var key = WitnessKey(msg);
-        if (_witnessed is { } prev && prev != key) RegionPlaneHost.Forget(prev);
+        if (_witnessed is { } prev && prev != key)
+        {
+            RegionPlaneHost.Forget(prev);
+            NestRulesHost.Forget(prev);
+        }
         _witnessed = key;
         RegionPlaneHost.WitnessBlocked(key, msg.Region is { IsBlock: true });
         RegionPlaneHost.WitnessPainted(key, false);
+        NestRulesHost.WitnessBlocked(key, msg.Nest is { IsBlock: true });
+        NestRulesHost.WitnessPainted(key, false);
     }
 
     /// <summary>
@@ -322,7 +402,9 @@ public sealed partial class DmMessageBubble : UserControl
         // revealed past the guardian's floor (family-safety.md § Content policy).
         var arm = SocialRenderGate.Decide(
             msg.ContentVerdict, msg.ContentRevealed, msg.Muted, msg.Deleted, msg.LegalTakedownRef,
-            regionVerb: msg.Region?.Verb);
+            regionVerb: msg.Region?.Verb,
+            adminBlockInPlace: msg.AdminBlockNotice is not null && msg.AdminBlockInPlace,
+            nestVerb: msg.Nest?.Verb);
         WitnessRegion(msg);
 
         // Deleted tombstone (conversations.md § Reactions & message delete): show the
@@ -352,6 +434,19 @@ public sealed partial class DmMessageBubble : UserControl
             LegalTakedownPlaceholder.Visibility = Visibility.Visible;
             return;
         }
+        // Admin-block notice IN PLACE (takedown-and-block.md § Admin block of a reported
+        // item, decision 4): the nest withheld this record after its admin blocked it, so
+        // the bubble collapses like the tombstone above and paints the shared notice in
+        // the body's place — no dedicated id (it rides the bubble, as FaunaKit's and
+        // tui's do). The author's own kept body paints the notice beside it, below.
+        if (arm == SocialRenderArm.AdminBlocked)
+        {
+            CollapseAllArms();
+            AdminBlockNoticeText.Text = msg.AdminBlockNotice!;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(AdminBlockNoticeText, msg.AdminBlockNotice!);
+            AdminBlockNoticeText.Visibility = Visibility.Visible;
+            return;
+        }
         // REGION placeholder (region-blocking.md § The blocked render): the region
         // content policy withholds this message — frame, authority, reason verbatim,
         // in place of the body; a `collapse` adds the reveal. Checked ahead of the
@@ -359,12 +454,17 @@ public sealed partial class DmMessageBubble : UserControl
         if (arm == SocialRenderArm.RegionWithheld && msg.Region is { } region)
         {
             CollapseAllArms();
-            RegionNoticeText.Text = region.NoticeText;
+            // A sealed bubble's notice is the frame, then the sealed-item sentence on
+            // its own line (the shared rule decided it; the feed card never carries it).
+            var notice = msg.RegionSealedNote
+                ? region.NoticeText + "\n" + FaunaApp.Core.Services.Strings.Get("region/sealed_note")
+                : region.NoticeText;
+            RegionNoticeText.Text = notice;
             RegionAuthorityText.Text = region.AuthorityName;
             RegionReasonText.Text = region.Reason;
             // Name beside the AutomationId, or FlaUI does not realize the peer
             // (reference_winui_flaui_datatemplate_name) — set per bind, never static.
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(RegionNoticeText, region.NoticeText);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(RegionNoticeText, notice);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(RegionAuthorityText, region.AuthorityName);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(RegionReasonText, region.Reason);
             RegionRevealButton.Visibility = region.IsBlock ? Visibility.Collapsed : Visibility.Visible;
@@ -372,8 +472,30 @@ public sealed partial class DmMessageBubble : UserControl
             RegionPlaneHost.WitnessPainted(WitnessKey(msg), region.IsBlock);
             return;
         }
-        // Content-policy BLOCK (family-safety.md § Content policy): the guardian's
-        // per-category floor blocks this message's labels. Collapse like the tombstones
+        // NEST placeholder (nest-rules.md § The nest source in the engine): a rule of
+        // the nest this message was read through withholds it — the frame naming the
+        // nest, its domain, the admin's reason verbatim, in place of the body; a
+        // `collapse` adds the reveal, a `block` has none (never loosenable).
+        if (arm == SocialRenderArm.NestWithheld && msg.Nest is { } nest)
+        {
+            CollapseAllArms();
+            var noticeText = nest.NoticeText;
+            NestNoticeText.Text = noticeText;
+            NestDomainText.Text = nest.Domain;
+            NestReasonText.Text = nest.Reason;
+            // Name beside the AutomationId, or FlaUI does not realize the peer — set
+            // per bind, never static; the `verdict` attribute rides HelpText.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(NestNoticeText, noticeText);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(NestNoticeText, nest.Verb);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(NestDomainText, nest.Domain);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(NestReasonText, nest.Reason);
+            NestRevealButton.Visibility = nest.IsBlock ? Visibility.Collapsed : Visibility.Visible;
+            NestPlaceholderPanel.Visibility = Visibility.Visible;
+            NestRulesHost.WitnessPainted(WitnessKey(msg), nest.IsBlock);
+            return;
+        }
+        // Content-policy BLOCK (family-safety.md § Content policy): a guardian rule
+        // blocks this message's labels. Collapse like the tombstones
         // above and paint the policy-NAMING notice — a blocked message never silently
         // disappears — with NO reveal button, unlike the two collapse arms below.
         // Mirrors linux message_bubble.rs's content_verdict == Block early-return.
@@ -389,6 +511,7 @@ public sealed partial class DmMessageBubble : UserControl
             ContentBlockedPlaceholder.Text = blockedText;
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentBlockedPlaceholder, blockedText);
             ContentBlockedPlaceholder.Visibility = Visibility.Visible;
+            PaintGuardianReason(msg.GuardianReason);
             return;
         }
         // Muted-word collapse (moderation.md § Muted keywords;
@@ -406,12 +529,14 @@ public sealed partial class DmMessageBubble : UserControl
             return;
         }
         // Content-policy COLLAPSE: the same revealable shape as the muted arm but its
-        // OWN session set (ContentPolicyCache, keyed on the message id). Presentation
-        // only — no ui.yaml id, matching the linux leg (v1 e2e drives the block case).
+        // OWN session set (ContentPolicyCache, keyed on the message id), painted as
+        // content-policy-blocked-notice in state "collapsed" beside
+        // content-policy-collapsed-reveal-button.
         if (arm == SocialRenderArm.ContentCollapsed)
         {
             CollapseAllArms();
             ContentCollapsedPlaceholder.Visibility = Visibility.Visible;
+            PaintGuardianReason(msg.GuardianReason);
             ContentRevealButton.Visibility = Visibility.Visible;
             return;
         }
@@ -438,8 +563,99 @@ public sealed partial class DmMessageBubble : UserControl
         RenderQuote();
         RenderLinkPreview();
         RenderContentLabel();
+        RenderDeliveredTo(msg);
+        RenderScanResult(msg);
+        RenderUndelivered(msg);
+        RenderWarmupDeferred(msg);
+        RenderAdminBlockBeside(msg);
+        RenderWithheldBadge(msg);
         RenderReactionPills(msg);
         BuildActionsFlyout(msg);
+    }
+
+    /// <summary>The guardian rule's reason beside the family-policy frame
+    /// (<c>content-policy-blocked-reason</c>, nest-rules.md § The shared rule editor →
+    /// <i>The reason is the member's to read</i>), verbatim; left Collapsed — no UIA
+    /// peer — when no guardian rule drove the verdict. Called by the two family arms
+    /// only, after <see cref="CollapseAllArms"/> hid it.</summary>
+    private void PaintGuardianReason(string? reason)
+    {
+        if (reason is not { Length: > 0 }) return;
+        GuardianReasonText.Text = reason;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(GuardianReasonText, reason);
+        GuardianReasonText.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The author's own admin-blocked message keeps its body; the shared notice
+    /// paints right after it (takedown-and-block.md § Admin block of a reported item,
+    /// decision 4) — no new id — unless the withheld badge below already carries it
+    /// (a <c>Blocked</c> ground), so the bubble says it once
+    /// (<see cref="WithheldBadgeView.BesideBlockNotice"/>, unit-tested in Core).
+    /// Collapsed otherwise, so no UIA peer exists.</summary>
+    private void RenderAdminBlockBeside(DmMessageView msg)
+    {
+        if (WithheldBadgeView.BesideBlockNotice(msg.AdminBlockNotice, msg.Withheld) is not { } notice)
+        {
+            AdminBlockBesideText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        AdminBlockBesideText.Text = notice;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(AdminBlockBesideText, notice);
+        AdminBlockBesideText.Visibility = Visibility.Visible;
+    }
+
+    /// <summary><c>dm-message-withheld-badge</c>: after the kept body of the viewer's own
+    /// message the nest withholds, the shared lines side by side (already resolved into
+    /// <see cref="WithheldBadgeView.Text"/>); a tap raises
+    /// <see cref="WithheldAppealRequested"/>. Collapsed otherwise, so no UIA peer exists.
+    /// Name beside the AutomationId, or FlaUI does not realize the peer.</summary>
+    private void RenderWithheldBadge(DmMessageView msg)
+    {
+        if (msg.Withheld is not { } badge)
+        {
+            WithheldBadgeButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+        WithheldBadgeButton.Content = badge.Text;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(WithheldBadgeButton, badge.Text);
+        WithheldBadgeButton.Visibility = Visibility.Visible;
+    }
+
+    private void WithheldBadgeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_message is { Withheld: not null } msg) WithheldAppealRequested?.Invoke(msg);
+    }
+
+    /// <summary>A Sent message the bridge never took: the shared
+    /// <c>MessageSnapshot.undelivered</c> line, collapsed otherwise so no UIA peer exists.
+    /// Name beside the AutomationId, or FlaUI does not realize the peer.</summary>
+    private void RenderUndelivered(DmMessageView msg)
+    {
+        if (!msg.Undelivered)
+        {
+            UndeliveredText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var text = Strings.Get("conversations/unified/dm_message_undelivered");
+        UndeliveredText.Text = text;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(UndeliveredText, text);
+        UndeliveredText.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The user's own sent mail the fresh-IP warm-up holds: the shared
+    /// <c>warmup_deferred_text</c> line, already worded into
+    /// <see cref="DmMessageView.WarmupDeferred"/>; collapsed otherwise so no UIA peer
+    /// exists. Name beside the AutomationId, or FlaUI does not realize the peer.</summary>
+    private void RenderWarmupDeferred(DmMessageView msg)
+    {
+        if (msg.WarmupDeferred is not { Length: > 0 } text)
+        {
+            WarmupDeferredText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        WarmupDeferredText.Text = text;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(WarmupDeferredText, text);
+        WarmupDeferredText.Visibility = Visibility.Visible;
     }
 
     /// <summary>Collapse EVERY placeholder and every live surface — the shared prelude
@@ -455,6 +671,11 @@ public sealed partial class DmMessageBubble : UserControl
         QuoteCard.Visibility = Visibility.Collapsed;
         LinkPreviewCards.Children.Clear();
         ContentLabelBadgeBorder.Visibility = Visibility.Collapsed;
+        DeliveredToText.Visibility = Visibility.Collapsed;
+        UndeliveredText.Visibility = Visibility.Collapsed;
+        WarmupDeferredText.Visibility = Visibility.Collapsed;
+        ScanResultText.Visibility = Visibility.Collapsed;
+        WithheldBadgeButton.Visibility = Visibility.Collapsed;
         LoadRemoteContentButton.Visibility = Visibility.Collapsed;
         AttachmentsList.Children.Clear();
         ReactionPillsList.Children.Clear();
@@ -467,8 +688,13 @@ public sealed partial class DmMessageBubble : UserControl
     {
         RegionPlaceholderPanel.Visibility = Visibility.Collapsed;
         RegionRevealButton.Visibility = Visibility.Collapsed;
+        NestPlaceholderPanel.Visibility = Visibility.Collapsed;
+        NestRevealButton.Visibility = Visibility.Collapsed;
+        GuardianReasonText.Visibility = Visibility.Collapsed;
         DeletedPlaceholder.Visibility = Visibility.Collapsed;
         LegalTakedownPlaceholder.Visibility = Visibility.Collapsed;
+        AdminBlockNoticeText.Visibility = Visibility.Collapsed;
+        AdminBlockBesideText.Visibility = Visibility.Collapsed;
         ContentBlockedPlaceholder.Visibility = Visibility.Collapsed;
         MutedPlaceholder.Visibility = Visibility.Collapsed;
         MutedRevealButton.Visibility = Visibility.Collapsed;
@@ -498,6 +724,41 @@ public sealed partial class DmMessageBubble : UserControl
         ContentLabelBadgeBorder.Background = HexColorToBrushConverter.FromHex(style.tint, 38);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentLabelBadgeBorder, text);
         ContentLabelBadgeBorder.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The alias a received mail message arrived on (mail-aliases.md § Label):
+    /// the shared <c>MessageSnapshot.deliveredTo</c> text, painted as is. Collapsed when
+    /// there is none, so no UIA peer exists. Name beside the AutomationId, or FlaUI does
+    /// not realize the peer.</summary>
+    private void RenderDeliveredTo(DmMessageView msg)
+    {
+        if (string.IsNullOrEmpty(msg.DeliveredTo))
+        {
+            DeliveredToText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        DeliveredToText.Text = msg.DeliveredTo;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeliveredToText, msg.DeliveredTo);
+        DeliveredToText.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>The received mail message's own scan verdict (mail-content-scanning.md §
+    /// User sees their own message's row): one <c>dm-message-scan-result</c> element
+    /// carrying the shared lines in order, one per visual line. The lines are already
+    /// resolved text from <c>MessageSnapshot.scanResultLines</c> — nothing derived
+    /// here. Collapsed when empty so no UIA peer exists (the e2e reads 0).
+    /// Name beside the AutomationId, or FlaUI does not realize the peer.</summary>
+    private void RenderScanResult(DmMessageView msg)
+    {
+        if (msg.ScanResultLines is not { Count: > 0 } lines)
+        {
+            ScanResultText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var text = string.Join("\n", lines);
+        ScanResultText.Text = text;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ScanResultText, text);
+        ScanResultText.Visibility = Visibility.Visible;
     }
 
     // ── Reactions & message delete (conversations.md § Reactions & message delete) ──
@@ -1171,6 +1432,15 @@ public sealed partial class DmMessageBubble : UserControl
         // render) and shares the content-policy reveal set, so it rides the same
         // page callback: the page marks ContentPolicyCache.Reveal(messageId) and
         // re-renders. Never reachable on a region `block` (no button is painted).
+        if (_message is not null)
+            ContentRevealRequested?.Invoke(_message);
+    }
+
+    private void NestRevealButton_Click(object sender, RoutedEventArgs e)
+    {
+        // A nest `collapse` is one reveal away (nest-rules.md § Additive, never
+        // loosenable) and shares the content-policy reveal set, like the region's:
+        // the same page callback. Never reachable on a nest `block`.
         if (_message is not null)
             ContentRevealRequested?.Invoke(_message);
     }

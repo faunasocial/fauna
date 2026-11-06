@@ -56,7 +56,7 @@ async fn run() -> Result<()> {
     let mut checks = updater::Checks::default();
     let mut reporter = report::Reporter::default();
     let mut tick = tokio::time::interval(NEST_POLL_INTERVAL);
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut term = Terminate::new()?;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
@@ -69,12 +69,12 @@ async fn run() -> Result<()> {
                 Ok(handoff::Settled::Working) => {}
                 Ok(handoff::Settled::Retired) => {
                     let done = catalogue::Event::SelfUpdateCompleted;
-                    updater::report_to_managed(&engine, &mut reporter, done).await;
+                    updater::report_to_managed(&engine, &mut reporter, &repository, done).await;
                 }
                 Ok(handoff::Settled::TookNameBack) => {
                     let found = catalogue::Settled::HandOffTakenBack;
                     let settled = catalogue::Event::ReconcileSettled { found };
-                    updater::report_to_managed(&engine, &mut reporter, settled).await;
+                    updater::report_to_managed(&engine, &mut reporter, &repository, settled).await;
                 }
                 Ok(handoff::Settled::Superseded) => parked = true,
                 Err(e) => tracing::warn!("settle: {e:#}"),
@@ -84,7 +84,7 @@ async fn run() -> Result<()> {
         // working — never by a predecessor about to be retired.
         if !parked && !reconciled {
             reconciled = true;
-            if let Err(e) = updater::reconcile(&engine, &mut reporter).await {
+            if let Err(e) = updater::reconcile(&engine, &mut reporter, &repository).await {
                 tracing::warn!("reconcile at start: {e:#}");
             }
         }
@@ -123,6 +123,30 @@ async fn run() -> Result<()> {
                 }
             }
         }
+    }
+}
+
+/// The container's stop: SIGTERM. The updater runs only in the nest image's
+/// Linux container; on a non-unix target — the workspace's windows-target
+/// check compiles it — it never fires, and ctrl-c alone ends the loop.
+struct Terminate(#[cfg(unix)] tokio::signal::unix::Signal);
+
+impl Terminate {
+    fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        let term = Self(tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )?);
+        #[cfg(not(unix))]
+        let term = Self();
+        Ok(term)
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        self.0.recv().await;
+        #[cfg(not(unix))]
+        std::future::pending::<()>().await;
     }
 }
 

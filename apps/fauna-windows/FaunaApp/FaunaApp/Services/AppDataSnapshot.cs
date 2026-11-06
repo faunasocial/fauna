@@ -1,17 +1,31 @@
+#if DEBUG || FAUNA_E2E_AGENT
 using System.Text.Json;
-using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
-using FaunaApp.Core.ViewModels;
 using uniffi.fauna_ffi;
+#endif
+using FaunaApp.Core.Models;
+using FaunaApp.Core.ViewModels;
+using uniffi.fauna_devices_machine;
 
 namespace FaunaApp.Services;
 
 /// <summary>
 /// Thread-safe snapshot of app data for state protocol serialization.
-/// ViewModels push data here after loading; SerializeState reads it on any thread.
+/// Pages push their loaded items here; SerializeState reads it on any thread.
+///
+/// <para><b>The whole store is e2e surface</b> (convention 15,
+/// e2e-automation-surface-gating.md): its only reader is the agent's state
+/// serializer, so the fields, the snapshot records, the projection of each page's
+/// items into them and the <c>Get*ForState</c> readers all compile under
+/// <c>#if DEBUG || FAUNA_E2E_AGENT</c>. A Release build keeps only same-signature
+/// no-op setters — the <see cref="Core.Services.E2eLoudSurfaces"/> shape — so the
+/// production call sites stay unconditional and a Release build builds and stores
+/// nothing. Each setter takes the page's own item type and projects it here,
+/// behind the gate, rather than at the call site.</para>
 /// </summary>
 internal static class AppDataSnapshot
 {
+#if DEBUG || FAUNA_E2E_AGENT
     private static readonly object _lock = new();
 
     private static List<FeedPostSnapshot>? _feedPosts;
@@ -24,7 +38,7 @@ internal static class AppDataSnapshot
 
     /// <summary>
     /// Push feed posts after body decoding is complete.
-    /// Called from FeedViewModel on the UI thread.
+    /// Called from FeedPage on the UI thread.
     /// </summary>
     internal static void SetFeedPosts(IEnumerable<FeedPostItem> items)
     {
@@ -45,6 +59,15 @@ internal static class AppDataSnapshot
             RepostedPostId: item.RepostedPostId,
             QuotedPostId: item.QuotedPostId,
             ViewerRepostId: item.ViewerRepostId,
+            // The remote author's face — null until the resolve answered (the shared
+            // `author_display` state key, `fauna_feed::manager`).
+            AuthorDisplay: item.HasAuthorFace
+                ? new Dictionary<string, object?>
+                {
+                    ["handle"] = item.AuthorFaceHandle,
+                    ["display_name"] = item.AuthorFaceDisplayName,
+                }
+                : null,
             // Every link preview in the body with its state, in body order, off the
             // shared face (`RenderDocument::link_previews` — render-model.md § D4,
             // FeedPostItem.LinkPreviewStates). A card is absent while a preview is
@@ -66,7 +89,7 @@ internal static class AppDataSnapshot
     }
 
     /// <summary>
-    /// Set unread notification count. Called from NotificationsPage or WebSocket handler.
+    /// Set unread notification count. Called from MainPage's view-model handler.
     /// </summary>
     internal static void SetUnreadCount(int count)
     {
@@ -118,6 +141,7 @@ internal static class AppDataSnapshot
                 // The quote carrier: an empty-commentary quote's card text is only its
                 // folded embed, so a test finds it by the post it quotes. tui's key.
                 ["quoted_post_id"] = p.QuotedPostId,
+                ["author_display"] = p.AuthorDisplay,
                 // `{url, state}` per link preview (see SetFeedPosts) — tui's key.
                 ["link_previews"] = p.LinkPreviews,
             }).ToList();
@@ -139,7 +163,9 @@ internal static class AppDataSnapshot
     }
 
     /// <summary>
-    /// Push conversations after loading. Called from ConversationsViewModel.
+    /// Push conversations after loading. No caller today: the unified page's rows
+    /// are read through <see cref="GetConversationsThreadsForState"/> instead, so
+    /// <c>data.conversations</c> reads null ("not implemented").
     /// </summary>
     internal static void SetConversations(IEnumerable<ConversationSnapshot> items)
     {
@@ -147,35 +173,40 @@ internal static class AppDataSnapshot
     }
 
     /// <summary>
-    /// Push contacts after loading. Called from ContactsViewModel.
+    /// Push contacts after loading. Called from ContactsPage.
     /// </summary>
-    internal static void SetContacts(IEnumerable<ContactSnapshot> items)
+    internal static void SetContacts(IEnumerable<ContactInfo> items)
     {
-        lock (_lock) { _contacts = items.ToList(); }
+        var snapshot = items.Select(c => new ContactSnapshot(c.ActorId, c.Handle, c.Status.ToString())).ToList();
+        lock (_lock) { _contacts = snapshot; }
     }
 
     /// <summary>
-    /// Push knocks after loading. Called from ContactsViewModel.
+    /// Push knocks after loading. Called from ContactsPage.
     /// </summary>
-    internal static void SetKnocks(IEnumerable<KnockSnapshot> items)
+    internal static void SetKnocks(IEnumerable<KnockInfo> items)
     {
-        lock (_lock) { _knocks = items.ToList(); }
+        var snapshot = items.Select(k => new KnockSnapshot(k.ActorId, k.Summary, k.Timestamp)).ToList();
+        lock (_lock) { _knocks = snapshot; }
     }
 
     /// <summary>
-    /// Push events after loading. Called from EventsViewModel.
+    /// Push events after loading. Called from EventsPage.
     /// </summary>
-    internal static void SetEvents(IEnumerable<EventSnapshot> items)
+    internal static void SetEvents(IEnumerable<EventInfo> items)
     {
-        lock (_lock) { _events = items.ToList(); }
+        var snapshot = items.Select(e => new EventSnapshot(
+            e.Id, e.Summary, e.Start.ToString("o"), e.End.ToString("o"), e.RsvpStatus)).ToList();
+        lock (_lock) { _events = snapshot; }
     }
 
     /// <summary>
-    /// Push sync files after loading. Called from SyncViewModel.
+    /// Push the Folders page's rows after each render. Called from FoldersPage.
     /// </summary>
-    internal static void SetSyncFiles(IEnumerable<SyncFileSnapshot> items)
+    internal static void SetSyncFiles(IEnumerable<FolderSummary> folders)
     {
-        lock (_lock) { _syncFiles = items.ToList(); }
+        var snapshot = folders.Select(f => new SyncFileSnapshot(f.name, f.name, "")).ToList();
+        lock (_lock) { _syncFiles = snapshot; }
     }
 
     /// <summary>
@@ -422,6 +453,7 @@ internal static class AppDataSnapshot
         string? RepostedPostId,
         string? QuotedPostId,
         string? ViewerRepostId,
+        Dictionary<string, object?>? AuthorDisplay,
         List<Dictionary<string, object?>> LinkPreviews);
 
     internal record ConversationSnapshot(
@@ -452,4 +484,18 @@ internal static class AppDataSnapshot
         string Path,
         string Folder,
         string State);
+
+#else
+
+    // Production twins. Same signatures, no-ops — the serializer that would read
+    // what they store is itself compiled out of a Release build.
+    internal static void SetFeedPosts(IEnumerable<FeedPostItem> items) { }
+    internal static void SetUnreadCount(int count) { }
+    internal static void SetContacts(IEnumerable<ContactInfo> items) { }
+    internal static void SetKnocks(IEnumerable<KnockInfo> items) { }
+    internal static void SetEvents(IEnumerable<EventInfo> items) { }
+    internal static void SetSyncFiles(IEnumerable<FolderSummary> folders) { }
+    internal static void Clear() { }
+
+#endif
 }

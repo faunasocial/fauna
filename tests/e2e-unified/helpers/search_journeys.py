@@ -210,9 +210,18 @@ def reset_search_page(app) -> None:
     `search-cancel-button` resets the page to its pre-search snapshot — the
     filter back on All (`SearchSnapshot::default`) and the error cleared. The
     manager outlives the test, so a narrowed filter or a failed-search error
-    left behind would steer the next test's query."""
+    left behind would steer the next test's query.
+
+    Cancel only while it is enabled: the Apple apps keep the button in the
+    toolbar and disable it before any search (`isEnabled: hasSearched`), and
+    on macOS choosing a page already takes cancel's own act
+    (`dismissSearchForPageChange`), so after a test that opened a found row
+    the page is pre-search again and the bridge refuses a click on the
+    disabled control."""
     app.search.navigate()
-    if app.driver.is_visible("search-cancel-button"):
+    if app.driver.is_visible("search-cancel-button") and app.driver.is_enabled(
+        "search-cancel-button"
+    ):
         app.search.cancel()
 
 

@@ -159,6 +159,13 @@ fauna-sync-engine = { workspace = true, features = ["account-runtime", "engine-l
 # app-dead too; `account_host.rs` wraps `fauna_iroh::peer_leg_transport`, the
 # same one-closure shape tui carries).
 fauna-iroh = { workspace = true, features = ["quic"] }
+# The peer leg's own crates, named for the e2e probe arm (`peer_probe`), which
+# dials as this device outside the runtime's passes: the transport seam, the
+# channel, and the peer-sync wire and chunk pull. All three already sit in this
+# binary's graph through `fauna-sync-engine`'s `account-runtime` feature.
+fauna-transport.workspace = true
+fauna-peer-channel.workspace = true
+fauna-peer-sync.workspace = true
 fauna-ipc.workspace = true
 # Bearer-only nest auth for the on-demand hydration host (no identity keypair).
 fauna-client.workspace = true
@@ -205,9 +212,10 @@ fauna-nest-http = { path = "../../libs/fauna-nest-http" }
 fauna-ws-substrate = { workspace = true }
 async-trait = "0.1"
 tokio.workspace = true
-# `FuturesUnordered` — the on-demand root's hydration batch runs several
-# downloads at once on the driving thread (`bridge::serve_materialize_batch`);
-# the engines it drives are `!Sync`, so a spawned task set cannot hold them.
+# `FuturesUnordered` — the on-demand root's serve loop answers several fetches,
+# listings and downloads at once on the driving thread, alongside its own waits
+# (`bridge::PlatformRequests::answer_while`); the engines it drives are `!Sync`,
+# so a spawned task set cannot hold them.
 # Already in the graph through `fauna-sync-engine`.
 futures-util.workspace = true
 anyhow.workspace = true

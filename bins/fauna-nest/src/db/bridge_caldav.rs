@@ -453,6 +453,58 @@ impl CacheDb {
         Ok(ProvisionOutcome::Updated)
     }
 
+    /// Every actor that owns at least one calendar — the pre-split boot pass's
+    /// walk (`crate::dav_pre_split`).
+    pub async fn caldav_actor_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT actor_id FROM bridge_caldav_calendars ORDER BY actor_id")
+            .context("prepare caldav_actor_ids")?;
+        let rows = stmt
+            .query_map([], |row| blob_col_to_array(row.get(0)?, 0, "actor_id"))
+            .context("query caldav_actor_ids")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect caldav_actor_ids")?;
+        Ok(rows)
+    }
+
+    /// Whether the pre-split DAV tombstoning is still owed (the mark schema
+    /// 158's step sets on a database written before the calendar and card key
+    /// split; `crate::dav_pre_split`).
+    pub async fn dav_pre_split_tombstone_pending(&self) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dav_pre_split_tombstone_pending",
+                [],
+                |row| row.get(0),
+            )
+            .context("read dav_pre_split_tombstone_pending")?;
+        Ok(n > 0)
+    }
+
+    /// Clear the pre-split DAV tombstoning's pending mark — the pass's last
+    /// act, once every record it owed is gone.
+    pub async fn clear_dav_pre_split_tombstone_pending(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute("DELETE FROM dav_pre_split_tombstone_pending", [])
+            .context("clear dav_pre_split_tombstone_pending")?;
+        Ok(())
+    }
+
+    /// Set the pending mark by hand — the test seam for the pass, standing in
+    /// for schema 158's step on a database the test built fresh.
+    #[cfg(test)]
+    pub async fn set_dav_pre_split_tombstone_pending(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO dav_pre_split_tombstone_pending (id) VALUES (1)",
+            [],
+        )
+        .context("set dav_pre_split_tombstone_pending")?;
+        Ok(())
+    }
+
     /// List every calendar belonging to `actor`, ordered by `created_at` ASC.
     pub async fn list_bridge_caldav_calendars(&self, actor: &[u8; 32]) -> Result<Vec<CalendarRow>> {
         let actor = *actor;
@@ -548,6 +600,35 @@ impl CacheDb {
         )
         .context("floor_bridge_caldav_calendar_counter")?;
         Ok(())
+    }
+
+    /// Take the next change number of `(actor, calendar_id)` in one step: the
+    /// counter (and `ctag`, in lockstep) becomes the greater of one past its
+    /// current value and `floor`, and that value is returned. `None` for a
+    /// calendar that is not provisioned.
+    ///
+    /// The flip's re-filing numbers a resource with it (`backup-destinations.md`
+    /// § *the in-flight marker*): its doors stay open while it runs, so a number
+    /// worked out from a counter read earlier could be minted by a PUT in
+    /// between; one statement under the connection lock cannot.
+    pub async fn take_bridge_caldav_calendar_change_number(
+        &self,
+        actor: &[u8; 32],
+        calendar_id: &[u8; 32],
+        floor: i64,
+    ) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "UPDATE bridge_caldav_calendars \
+             SET highestmodseq = MAX(highestmodseq + 1, ?1), \
+                 ctag = MAX(ctag, highestmodseq + 1, ?1) \
+             WHERE actor_id = ?2 AND calendar_id = ?3 \
+             RETURNING highestmodseq",
+            rusqlite::params![floor, &actor[..], &calendar_id[..]],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("take_bridge_caldav_calendar_change_number")
     }
 
     /// What the target holds of one resource `(calendar_id, uid_hash)`: the
@@ -1904,6 +1985,62 @@ mod tests {
         assert_eq!(rows[0].highestmodseq, 1, "fresh calendar has hms=1");
         assert_eq!(rows[1].calendar_id, cal_b);
         assert_eq!(rows[1].encrypted_metadata, b"B");
+    }
+
+    // ── take_bridge_caldav_calendar_change_number ────────────────────────────
+
+    /// The flip's re-filing works out a floor from a counter it read earlier;
+    /// a door write that lands in between must not leave both holding one
+    /// change number.
+    #[tokio::test]
+    async fn a_taken_change_number_is_above_one_a_door_minted_after_the_read() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(12);
+        let cal = make_calendar_id(13);
+        db.insert_bridge_caldav_calendar(&actor, &cal, b"m", 1_700_000_000)
+            .await
+            .unwrap();
+        let read = db
+            .caldav_calendar_highestmodseq(&actor, &cal)
+            .await
+            .unwrap()
+            .unwrap();
+        // A door mints read + 1 after the re-filing's read.
+        db.update_bridge_caldav_calendar_metadata(&actor, &cal, b"renamed")
+            .await
+            .unwrap();
+        let door = db
+            .caldav_calendar_highestmodseq(&actor, &cal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(door, read + 1);
+        let taken = db
+            .take_bridge_caldav_calendar_change_number(&actor, &cal, read + 1)
+            .await
+            .unwrap();
+        assert_eq!(taken, Some(door + 1), "never the number the door minted");
+        assert_eq!(
+            db.caldav_calendar_highestmodseq(&actor, &cal)
+                .await
+                .unwrap(),
+            taken,
+            "the door's next mint goes above it"
+        );
+        // A floor above the counter is taken as it stands.
+        assert_eq!(
+            db.take_bridge_caldav_calendar_change_number(&actor, &cal, 50)
+                .await
+                .unwrap(),
+            Some(50)
+        );
+        assert_eq!(
+            db.take_bridge_caldav_calendar_change_number(&actor, &make_calendar_id(99), 1)
+                .await
+                .unwrap(),
+            None,
+            "no calendar, no number"
+        );
     }
 
     // ── caldav_calendar_highestmodseq ────────────────────────────────────────

@@ -6,6 +6,7 @@
     xmlns:local="using:FaunaApp.Views"
     xmlns:loc="using:FaunaApp.Markup"
     xmlns:logs="using:FaunaApp.Core.Logs"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
     xmlns:controls="using:FaunaApp.Controls"
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
@@ -78,6 +79,39 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+
+            <!-- The admin audit log (admin.md § The admin audit log on admin-logs),
+                 below the log lines: one admin-audit-entry per row, newest first
+                 (local time, then the shared row text), the chain check's one
+                 line, and the more button, enabled while the shared view has a
+                 more cursor. Every word and the check are AdminLogsViewModel's
+                 shared FfiAuditLog view; lifted from tui's audit_elements.
+                 Named, or the container is pruned from UIA. -->
+            <StackPanel x:Name="AuditSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminAuditSection}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/logs_page/audit_title}"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/logs_page/audit_title}" />
+                <ItemsControl x:Name="AuditList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AuditRowItem">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminAuditEntry}"
+                                       Text="{x:Bind Line}"
+                                       TextWrapping="Wrap"
+                                       Padding="0,4" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="AuditIntegrityText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminAuditIntegrityStatus}"
+                           TextWrapping="Wrap" Opacity="0.8" />
+                <Button x:Name="AuditMoreButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminAuditMoreButton}"
+                        IsEnabled="False"
+                        Click="AuditMoreButton_Click"
+                        Content="{loc:Localize Key=admin/logs_page/audit_more}" />
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

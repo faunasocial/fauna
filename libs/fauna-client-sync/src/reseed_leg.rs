@@ -64,6 +64,14 @@ pub struct ReseedReport {
     /// Sum of the delivered paths' **plaintext** sizes: what the custody rows
     /// declare, matching the nest coordinator's own `size_bytes`.
     pub plaintext_bytes: u64,
+    /// Sets the leg refused before recording a byte of them — the nest-held
+    /// pull-back's ledger and acceptance checks
+    /// ([`fauna_client_backup::reseed::DeliveredCorpus::refused`]).
+    pub refused_sets: Vec<fauna_client_backup::reseed::SetResult>,
+    /// Rows a holder listed that the set's sealed ledger does not name,
+    /// `<set>/<path>` — neither landed nor recorded
+    /// ([`fauna_client_backup::reseed::DeliveredCorpus::unanchored_rows`]).
+    pub unanchored_rows: Vec<String>,
 }
 
 impl ReseedReport {
@@ -77,6 +85,8 @@ impl ReseedReport {
         self.chunks_deduped += other.chunks_deduped;
         self.manifests_uploaded += other.manifests_uploaded;
         self.plaintext_bytes = self.plaintext_bytes.saturating_add(other.plaintext_bytes);
+        self.refused_sets.extend(other.refused_sets);
+        self.unanchored_rows.extend(other.unanchored_rows);
     }
 }
 

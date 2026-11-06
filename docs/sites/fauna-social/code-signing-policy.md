@@ -35,8 +35,8 @@ script ourselves. Every other released file carries a signature from the same
 workflow's own identity; the release notes explain how to verify both.
 
 The Microsoft Store package is signed by the Store itself and is not part of
-this policy. The [official apps](/official-apps) page lists every identity a
-Fauna app or release is published under.
+this policy. The [apps](/apps) page says where official
+downloads come from and how to check one.
 
 ## Who may sign
 
@@ -56,8 +56,9 @@ pull requests, are reviewed by a team member before they are merged.
 
 ## Privacy
 
-Fauna's apps transfer no information to other networked systems beyond those
-our [privacy policy](/privacy) names, and there is no telemetry.
+Fauna's apps, and the nest (the server program the Windows installer can
+optionally set up), transfer no information to other networked systems beyond
+those our [privacy policy](/privacy) names, and there is no telemetry.
 
 ## How to check a signature
 

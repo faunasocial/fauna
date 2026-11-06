@@ -143,9 +143,14 @@
             <TextBlock x:Name="ConfirmSummary"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportConfirmSummary}"
                        TextWrapping="Wrap" />
-            <TextBlock Text="{loc:Localize Key=mail_export/confirm_estimate_unavailable}"
+            <!-- Only when the selection holds messages the nest reports no sizes for
+                 (MailExportViewModel.ConfirmEstimateUnavailable); otherwise the summary
+                 above carries the estimated bytes and time. -->
+            <TextBlock x:Name="ConfirmEstimateUnavailable"
+                       Text="{loc:Localize Key=mail_export/confirm_estimate_unavailable}"
                        Style="{StaticResource CaptionTextBlockStyle}"
-                       TextWrapping="Wrap" />
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
                         Content="{loc:Localize Key=mail_export/back}" Click="Back_Click" />
@@ -179,6 +184,16 @@
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportCancelButton}"
                         Content="{loc:Localize Key=mail_export/cancel_button}"
                         Click="Cancel_Click" />
+                <!-- A failed export is a record, not a run (mail-export.md § A failed
+                     export is a record the wizard shows until the user moves on): its
+                     one control is the Done step's own discard under its own label, in
+                     place of Pause / Resume / Cancel. The id is shared with the Done
+                     group's button; the step gating paints only one of them. -->
+                <Button x:Name="DismissFailedButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportDiscardButton}"
+                        Content="{loc:Localize Key=mail_export/dismiss_failed_button}"
+                        Visibility="Collapsed"
+                        Click="Discard_Click" />
             </StackPanel>
             <TextBlock x:Name="ErrorLog"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportErrorLog}"

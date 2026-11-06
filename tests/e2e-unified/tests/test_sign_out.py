@@ -44,6 +44,7 @@ import pytest
 from common.cred_store import attach_account_store, attach_cred_store
 from common.scope_store import attach_scope_store
 from helpers import app_surface
+from helpers.relaunch import pin_store_across_relaunch
 from helpers.waiting import await_account_runtime_assembled
 from i18n.strings import S
 
@@ -81,7 +82,6 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.windows,
     pytest.mark.linux,
-    pytest.mark.web,
     pytest.mark.android,
     pytest.mark.ios,
     pytest.mark.macos,
@@ -121,11 +121,44 @@ def _await_residue_line(app, expected: str, read=None) -> str:
 # Two seats still cannot run every journey here, for where the fault can be
 # injected rather than for what they paint: web has no on-disk scope directory
 # (its package is driven by `test_sign_out_web.py`, through a held IndexedDB
-# connection — `_require_residue_surface` declares the absence), and android's
+# connection, so the journeys below are MARKED for the native seats:
+# feature-catalog.md § Cell semantics, the marked-witness rule), and android's
 # scope directories are on-device, out of the host's reach
 # (`_skip_android_host_fault_injection`; its paint gate, record, retry and launch
 # re-check are pinned by the Robolectric tests `AccountStoresEraseTest` and
 # `SignOutResidueViewTest`).
+
+
+# What a sign-out's stop says, in the app's and the sync agent's own log lines,
+# about who still held the account store when the erase ran: the agent's
+# un-provision receipt (or its refusal, or a push that never landed), the app's
+# own runtime stop (or its elapsed budget), the agent's mount coming down — or
+# up again — and the sweep's verdict on each scope. A wrong residue line is the
+# erase's outcome; these lines are its cause, and they leave with the launch's
+# temporary directory (e2e-conventions.md convention 6).
+_SIGN_OUT_TRACE_MARKERS = (
+    "teardown push",
+    "un-provision",
+    "un-provisioned",
+    "account host",
+    "[account-runtime]",
+    "erase:",
+    "sign-out",
+)
+
+
+def _sign_out_trace(app) -> str:
+    """The sign-out's own log lines, distinct, in first-seen order."""
+    try:
+        text = app.driver.app_stderr_text() or ""
+    except Exception as e:  # pragma: no cover - diagnostic only
+        return f"(the app log could not be read: {e!r})"
+    lines = dict.fromkeys(
+        line[:400]
+        for line in text.splitlines()
+        if any(marker in line for marker in _SIGN_OUT_TRACE_MARKERS)
+    )
+    return "\n".join(list(lines)[-80:]) or "(no sign-out line in the app log)"
 
 
 def _residue_surface(app, expected: str):
@@ -139,33 +172,21 @@ def _require_residue_surface(app, client: str) -> None:
     the seats whose fault can be injected from here — declared, never a bare
     skip (convention 7). Web paints the package and still cannot run these
     journeys: their fault is a read-only scope directory, and web's residue is an
-    account store in IndexedDB (the web paragraph's decision 4). Its twins are
-    `test_sign_out_web.py`'s retry journey and later-load journey."""
-    if client == "web":
-        app_surface.declared_absence(
-            app.driver,
-            capability="on-disk account-scoped state directory",
-            doc="docs/goal/architecture/long-term-store.md § Implementation status today",
-        )
+    account store in IndexedDB (the web paragraph's decision 4). So they are
+    marked for the native seats; web's twins are `test_sign_out_web.py`'s retry
+    and reload journeys."""
 
 
 def _skip_android_host_fault_injection(app) -> None:
     """android paints the residue package (`AccountStores.recordResidue` →
     `AppState.signOutResidue` → `identity_choice`'s `sign-out-residue` view),
     but every residue journey injects its fault from the host, and android's
-    scoped directories are on-device — declared, not a bare skip."""
-    app_surface.skip_unbuilt(
-        app.driver,
-        surface="host-side account-scope fault injection",
-        detail=(
-            "android's residue surface LANDED (pinned by AccountStoresEraseTest and "
-            "SignOutResidueViewTest), but its scoped directories are on-device in the "
-            "app's own filesDir, so the host cannot chmod one to inject the fault — "
-            "reading them back is possible (AndroidScopeStore), making them unwritable "
-            "from outside the app is not"
-        ),
-        tracked="docs/goal/architecture/long-term-store.md § Implementation status today",
-    )
+    scoped directories are on-device — the registry's
+    `host-account-scope-fault-injection` (android's residue surface LANDED,
+    pinned by AccountStoresEraseTest and SignOutResidueViewTest; reading the
+    directories back is possible, making them unwritable from outside the app
+    is not)."""
+    app_surface.require_surface(app.driver, "host-account-scope-fault-injection")
 
 
 def _seeded_scope(app, client: str, test_user):
@@ -188,25 +209,69 @@ def _seeded_scope(app, client: str, test_user):
     return seeded[0]
 
 
+def _on_the_rollback_journal(path) -> bool:
+    """Whether `path` is a SQLite database on the rollback journal: the header's
+    magic string, then bytes 18 and 19 (the file-format write and read
+    versions) both 1. A WAL database carries 2 there (the SQLite file format,
+    § The database header)."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(20)
+    except OSError:
+        return False
+    return header[:16] == b"SQLite format 3\x00" and header[18:20] == b"\x01\x01"
+
+
 def _sqlite_file_to_hold(scope):
-    """The SQLite file inside `scope` the windows fault holds open, or None.
+    """The SQLite file inside `scope` the held-lock fault holds open, or None.
 
     A real SQLite file specifically — `_held_open_no_share` needs one to connect
     to (mirroring "a live SQLite connection", the actual holder the fault
-    reproduces), not just any regular file."""
+    reproduces), not just any regular file. And one on the ROLLBACK JOURNAL
+    only: connecting to a WAL database creates its `-wal`/`-shm` siblings, which
+    moves the scope's fingerprint, and the re-sweep then drops the scope from
+    the record untouched (`_undeletable_scope`). tui's flat scope holds both
+    kinds — `device.db` (the sync DB, WAL) sorts before `mls_state.db` (the MLS
+    store, on the rollback journal by a ratified tripwire:
+    `libs/fauna-mls/src/storage.rs`, `prepare`) — so the first `.db` by name is
+    the wrong one there."""
     return next(
-        (p for p in sorted(scope.rglob("*")) if p.is_file() and p.suffix in (".db", ".sqlite")),
+        (
+            p
+            for p in sorted(scope.rglob("*"))
+            if p.is_file() and p.suffix in (".db", ".sqlite") and _on_the_rollback_journal(p)
+        ),
         None,
     )
 
 
+def _scope_in_this_launch(app, client: str, scope, roots_before):
+    """`scope` where the CURRENT launch keeps it: the same name under the same
+    base, among the roots this launch resolved.
+
+    A relaunch can hand the app its at-rest state under a fresh path — iOS's
+    `simctl install` over the existing install keeps the data container but
+    may move it — so a path taken before the relaunch can name nothing after
+    it while the scope is still on the device. `roots_before` are the scope
+    store's roots when `scope` was taken; everywhere the store did not move
+    this is `scope` itself."""
+    roots_now = attach_scope_store(client, app.driver).scope_roots()
+    return roots_now[roots_before.index(scope.parent)] / scope.name
+
+
 @contextlib.contextmanager
-def _undeletable_scope(scope, client: str):
-    """Make `scope` survive an erase while it stays readable, in this seat's
-    platform shape (the docstring of
+def _undeletable_scope(scope, *, now=None):
+    """Make `scope` survive an erase while it stays readable, in the HOST OS's
+    shape (the docstring of
     `test_a_sign_out_that_cannot_erase_everything_says_so` says why each shape
     is the only one that proves anything on its platform). The body after the
     `with` is the fault LIFTED.
+
+    The shape follows the host OS, never the app: what makes an erase fail is
+    the filesystem's rule, so tui on windows needs the windows shape exactly as
+    the windows app does — the read-only directory below is no fault there, and
+    keyed by app it left tui-on-windows skipping as though it ran as
+    root.
 
     * **windows: a held SQLite lock on one file inside the scope**
       (`_held_open_no_share`). Lifting it must leave the scope directory exactly
@@ -214,23 +279,26 @@ def _undeletable_scope(scope, client: str):
       whose fingerprint — every entry's name, length and mtime, the whole tree
       down — moved since (`fauna_client_accounts::sign_out_residue`, rule 3 — a
       later sign-in re-creating or adopting the store) and would then drop the
-      scope from the record untouched. It does: the store is on the rollback
-      journal, and an `BEGIN EXCLUSIVE` that never writes never creates the
-      journal file, so neither taking nor releasing the lock adds or removes an
-      entry or writes to a file anywhere under the scope.
+      scope from the record untouched. It does: the held file is one on the
+      rollback journal (`_sqlite_file_to_hold`), and a `BEGIN EXCLUSIVE` that
+      never writes never creates the journal file, so neither taking nor
+      releasing the lock adds or removes an entry or writes to a file anywhere
+      under the scope.
     * **POSIX: a read-only scope DIRECTORY.** Probes the injection
       non-destructively and skips as an ENVIRONMENT fact when this process
       writes through mode 0o555 (root), because a test that silently proves
       nothing is worse than none. Restores the mode on exit (a mode change moves
       the directory's ctime, never its mtime — and the fingerprint reads no
-      ctime).
+      ctime) — on `now()` when given, the scope's path in the current launch
+      (`_scope_in_this_launch`), for a body that relaunched the app.
     """
-    if client == "windows":
+    if os.name == "nt":
         held = _sqlite_file_to_hold(scope)
         assert held is not None, (
-            f"precondition: {scope} must contain at least one SQLite file to hold "
-            "open — an empty scope has nothing for the held-lock fault to attach "
-            f"to (contents={[p.name for p in scope.rglob('*') if p.is_file()]})"
+            f"precondition: {scope} must contain at least one SQLite file on the "
+            "rollback journal to hold open — the held-lock fault has nothing else "
+            "it can attach to without moving the scope's fingerprint "
+            f"(contents={[p.name for p in scope.rglob('*') if p.is_file()]})"
         )
         with _held_open_no_share(held):
             yield
@@ -255,7 +323,7 @@ def _undeletable_scope(scope, client: str):
     finally:
         # Restore before the harness's own teardown tries to remove the tree.
         with contextlib.suppress(FileNotFoundError):
-            os.chmod(scope, original_mode)
+            os.chmod(now() if now else scope, original_mode)
 
 
 def _await_residue_gone(app, scope) -> tuple[bool, bool]:
@@ -271,7 +339,38 @@ def _await_residue_gone(app, scope) -> tuple[bool, bool]:
             return view_gone, scope_gone
 
 
+def _sign_in_through_the_wizard(app, self_signed_nest) -> str:
+    """Sign a fresh nest-registered account in through the onboarding wizard
+    (not the state protocol), returning its actor id hex."""
+    import secrets
+    from urllib.parse import urlsplit
+
+    from nacl.signing import SigningKey
+
+    from common.auth import register_user
+    from conftest import _relaunch_trusting_nest
+    from helpers.org_account_session import sign_in_as
+
+    _relaunch_trusting_nest(app.driver, self_signed_nest)
+    app.driver.reset()
+    # Fixture setup arranging a precondition (convention 8): the nest knows the
+    # actor, so the wizard signs in rather than claims.
+    secret_hex = secrets.token_bytes(32).hex()
+    handle = f"e2e-wizard-out-{secret_hex[:10]}"
+    register_user(
+        self_signed_nest["port"],
+        bytes(SigningKey(bytes.fromhex(secret_hex)).verify_key).hex(),
+        base_url=self_signed_nest["url"],
+        admin_signing_key=self_signed_nest["admin"]["signing_key"],
+        handle=handle,
+    )
+    where = urlsplit(self_signed_nest["url"]).netloc
+    sign_in_as(app, secret_hex, f"{handle}@{where}", handle, where)
+    return bytes(SigningKey(bytes.fromhex(secret_hex)).verify_key).hex()
+
+
 @pytest.mark.feature("account")
+@pytest.mark.web
 def test_sign_out_returns_to_onboarding(logged_in_app):
     app = logged_in_app
 
@@ -302,7 +401,142 @@ def test_sign_out_returns_to_onboarding(logged_in_app):
     )
 
 
+@pytest.mark.web
+def test_sign_out_after_a_wizard_sign_in_returns_to_onboarding(app, self_signed_nest):
+    """The same landing after a sign-in through the wizard, not the state protocol.
+
+    `logged_in_app` injects its session, so the wizard never runs and the test
+    above never sees a wizard left at the end of a sign-in. The Apple apps did
+    leave theirs there: the signed-out root remounted it at `.done`, its exit ran
+    again, re-persisted the identity just erased and relaunched into it. The
+    store reviewer seeding's sign-out landed on the signed-in main window that
+    way (2026-10-29). `create-identity-button` showing is the witness: a wizard
+    still at `.done` never renders identity_choice.
+    """
+    _sign_in_through_the_wizard(app, self_signed_nest)
+
+    app.settings.sign_out()
+
+    assert app.is_visible("create-identity-button"), (
+        "a sign-out after a wizard sign-in must re-root onboarding at identity_choice; "
+        f"create-identity-button not visible. error={app.error_text()!r}"
+    )
+    assert not app.driver.get_state("session.authenticated"), (
+        "identity_choice is showing, yet the session reads authenticated"
+    )
+
+
+def _exclusive_try_fails(path: str) -> bool:
+    """Whether an exclusive, non-blocking lock on `path` is refused — the same
+    question the erase guard asks (`account-scoping.md` § Concurrent instances →
+    *An erase refuses while a sibling serves the account*). POSIX: `flock`,
+    which the seats' `fs2`/std locks are. windows: `msvcrt.locking` over the
+    first byte, a `LockFile` range that overlaps the whole-file `LockFileEx` a
+    seat holds, shared or exclusive."""
+    if os.name == "nt":
+        import msvcrt
+
+        with open(path, "r+b") as f:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            return False
+    import fcntl
+
+    with open(path, "rb") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+
+
+def _serving_locks(driver, actor: str) -> list[tuple[str, str]]:
+    """The two locks a native seat serves `actor` under, as (name, path): the
+    instance lock at the seat's own install base, and the serving lock at the
+    shared account-store root every app on the OS login resolves alike
+    (`account-scoping.md` § Concurrent instances → *The guard sees every app*).
+    Each driver knows its seat's install base: tui `<XDG_CONFIG_HOME>/fauna-tui`,
+    linux `<XDG_CONFIG_HOME>/fauna`, windows `BackupPaths.DataDir` (the driver's
+    `data_dir()`), macOS `<Application Support>/Fauna`."""
+    app = app_surface.app_name(driver)
+    if app == "tui":
+        base = os.path.join(driver.config_home, "fauna-tui")
+    elif app == "linux":
+        base = os.path.join(driver.config_home, "fauna")
+    elif app == "windows":
+        base = driver.data_dir()
+    else:
+        base = os.path.join(driver.app_support_dir(), "Fauna")
+    store_root = getattr(driver, "_resolved_store_root", None)
+    assert store_root, f"{app}: the driver published no account-store root for this launch"
+    return [
+        ("instance lock", os.path.join(base, f"instance-{actor}.lock")),
+        ("serving lock", os.path.join(store_root, f"serving-{actor}.lock")),
+    ]
+
+
+@pytest.mark.web
+def test_a_signed_out_window_no_longer_holds_the_account(app, self_signed_nest):
+    """After sign-out this window serves nothing, so it holds neither lock on
+    the account it left — the instance lock at its install base, nor the
+    serving lock at the shared store root (`account-scoping.md` § Concurrent
+    instances → *An erase refuses while a sibling serves the account*).
+
+    A lock left up is a sibling the next session's sign-out probe cannot tell
+    from a real one. macOS kept its lock across a sign-out, and an earlier
+    session's lock object kept alive in the process made the store reviewer
+    journey's third tester sign-out refuse with "another Fauna window is using
+    this account" on a one-window Mac (2026-10-29); tui, linux and windows kept
+    their process-global holder the same way. The lock files are the
+    observable: the test process takes an exclusive lock on each, which fails
+    while any holder in the app still has it — asserted held first, so the
+    released reading is never a lock that was never taken.
+
+    iOS and android admit one instance per app and share a store with nobody,
+    so they take neither lock; web's analogue is the conversations-engine role
+    Web Lock, released with the tab's teardown (`account-scoping.md`
+    § Concurrent instances, the *Seats* and *Web owes the same refusal*
+    bullets).
+    """
+    if app_surface.app_name(app.driver) in ("ios", "android", "web"):
+        app_surface.declared_absence(
+            app.driver,
+            capability="per-account instance or serving lock file",
+            doc=(
+                "apps/account-scoping.md § Concurrent instances → *The guard sees every "
+                "app* (ios and android admit one instance per app; web's analogue is "
+                "the engine-role Web Lock)"
+            ),
+        )
+    app_surface.require_surface(app.driver, "sign-out-releases-instance-lock")
+    actor = _sign_in_through_the_wizard(app, self_signed_nest)
+    locks = _serving_locks(app.driver, actor)
+    for name, path in locks:
+        assert os.path.exists(path) and _exclusive_try_fails(path), (
+            f"precondition: the signed-in window holds its {name} at {path}; "
+            f"error={app.error_text()!r}"
+        )
+
+    app.settings.sign_out()
+
+    assert app.is_visible("create-identity-button"), (
+        f"sign-out must land on identity_choice; error={app.error_text()!r}"
+    )
+    still_held = [f"{name} ({path})" for name, path in locks if _exclusive_try_fails(path)]
+    assert not still_held, (
+        f"the signed-out window still holds {', '.join(still_held)} on {actor[:12]}… — "
+        "the next sign-in of that account will find its own leftover as 'another "
+        "Fauna window' at sign-out"
+    )
+
+
 @pytest.mark.feature("account")
+@pytest.mark.web
 def test_sign_out_erases_the_credential_namespace(logged_in_app):
     """Sign out ⇒ the client's credential namespace reads empty — AND the
     shared account-store namespace beside it does too.
@@ -443,12 +677,6 @@ def test_sign_out_erases_the_account_scoped_state_directory(logged_in_app, test_
     app = logged_in_app
     client = app_surface.app_name(app.driver)
 
-    if client == "web":
-        app_surface.declared_absence(
-            app.driver,
-            capability="on-disk account-scoped state directory",
-            doc="docs/goal/architecture/long-term-store.md § Implementation status today",
-        )
 
     store = attach_scope_store(client, app.driver)
     actor = test_user["actor_id_hex"]
@@ -496,10 +724,12 @@ def test_a_sign_out_that_cannot_erase_everything_says_so(logged_in_app, test_use
     no defect on our side at all. Every instance so far was caught by an e2e test;
     in production each would have painted a clean "Signed out".
 
-    **The fault injection is PLATFORM-SPECIFIC, and the choice on each is
-    load-bearing — neither shape proves anything on the other platform:**
+    **The fault injection is PLATFORM-SPECIFIC — the host OS's, not the app's
+    (tui runs on both) — and the choice on each is load-bearing: neither shape
+    proves anything on the other platform** (`_undeletable_scope`):
 
-    * **POSIX (tui/linux/macOS/iOS): a read-only SCOPE DIRECTORY.** A held
+    * **POSIX hosts (linux/macOS/iOS, tui on linux or macOS): a read-only SCOPE
+      DIRECTORY.** A held
       handle is the WRONG shape here — POSIX `unlink` removes an open file
       happily, which is exactly why this defect stayed invisible outside
       Windows for as long as it existed. A read-only PARENT of the scope
@@ -513,9 +743,10 @@ def test_a_sign_out_that_cannot_erase_everything_says_so(logged_in_app, test_use
       was caught. Denying the write bit on
       the scope's own directory is what makes real, readable user data
       survive.
-    * **Windows: a HELD HANDLE on one file inside the scope**, opened with
-      `dwShareMode=0` — the restrictive kind a live SQLite connection
-      actually holds, established by
+    * **Windows hosts (the windows app, tui on windows): a HELD SQLite LOCK on
+      one file inside the scope** (`_held_open_no_share`; the file one on the
+      rollback journal, `_sqlite_file_to_hold`) — the kind a live SQLite
+      connection actually holds, established by
       `libs/fauna-ffi/src/account_state.rs`'s
       `an_undeletable_app_scope_does_not_spare_the_store_root` unit test. A
       read-only directory is the WRONG shape here: Windows' `remove_dir_all`
@@ -534,12 +765,6 @@ def test_a_sign_out_that_cannot_erase_everything_says_so(logged_in_app, test_use
     # Web's twin of this journey holds the account store's IndexedDB database
     # open instead of a file under a directory web does not have:
     # `test_sign_out_web.py::test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishes`.
-    if client == "web":
-        app_surface.declared_absence(
-            app.driver,
-            capability="on-disk account-scoped state directory",
-            doc="docs/goal/architecture/long-term-store.md § Implementation status today",
-        )
     if client == "android":
         _skip_android_host_fault_injection(app)
     store = attach_scope_store(client, app.driver)
@@ -560,51 +785,21 @@ def test_a_sign_out_that_cannot_erase_everything_says_so(logged_in_app, test_use
     )
     scope = seeded[0]
 
-    if client == "windows":
-        pinned = _sqlite_file_to_hold(scope)
-        assert pinned is not None, (
-            f"precondition: {scope} must contain at least one SQLite file to pin "
-            f"open — an empty scope has nothing for the held-handle fault to "
-            f"attach to (client={client}, actor={actor}, "
-            f"contents={[p.name for p in scope.rglob('*') if p.is_file()]})"
-        )
-        with _held_open_no_share(pinned):
-            app.settings.sign_out()
-
-            assert pinned.exists(), (
-                "precondition: the held-open file is what makes the user's data "
-                f"survive the erase, but {pinned} is gone — the fault was not "
-                "injected, so the assertion below would be meaningless"
-            )
-
-            # sign_out()'s own wait targets create-identity-button, which
-            # OnboardingPage attaches at CONSTRUCTION time — before
-            # OnNavigatedTo hands the residue to the view a few ms later.
-            expected, read, where = _residue_surface(
-                app, S.settings.sign_out_residue(count="1")
-            )
-            actual = _await_residue_line(app, expected, read)
-            assert actual and expected in actual, (
-                "a sign-out that could not remove the user's data must SAY so, on "
-                "the surface it hands the user — proceeding is not the defect, "
-                "proceeding while looking identical to succeeding is "
-                f"(account-scoping.md § Erasure follows scope). {where} reads "
-                f"{actual!r}, expected to contain {expected!r}. {pinned} is still "
-                "held open, so the residue is real; if this app logged a warning "
-                "instead, that is precisely the finding: a log is not an "
-                "affordance."
-            )
-        return
-
-    with _undeletable_scope(scope, client):
+    # The fault's shape follows the host OS (`_undeletable_scope`): tui on
+    # windows takes the held-lock shape the windows app does.
+    with _undeletable_scope(scope):
         app.settings.sign_out()
 
         assert scope.is_dir() and any(scope.iterdir()), (
-            "precondition: the read-only scope is what makes the user's data "
+            "precondition: the injected fault is what makes the user's data "
             f"survive the erase, but {scope} is gone or empty — the fault was not "
             "injected, so the assertion below would be meaningless"
         )
 
+        # sign_out()'s own wait targets create-identity-button, which some seats
+        # attach before the residue reaches the view (windows' OnboardingPage at
+        # CONSTRUCTION time, a few ms before OnNavigatedTo) — so the line is
+        # deadline-polled, never read once.
         expected, read, where = _residue_surface(app, S.settings.sign_out_residue(count="1"))
         actual = _await_residue_line(app, expected, read)
         assert actual and expected in actual, (
@@ -633,8 +828,14 @@ def _credential_erase_refused(cred_dir: str):
       readable. That is exactly the outcome a read-back must catch: the delete
       reported nothing, the key is still there.
     * **Windows: the read-only ATTRIBUTE on each file.** Windows mode bits on a
-      directory do not deny entry creation, but a read-only file can be neither
-      deleted nor replaced by a rename.
+      directory do not deny entry creation, but a read-only file cannot be
+      replaced by a rename, so every per-key rewrite is refused. It CAN be
+      unlinked: the wholesale wipe's `std::fs::remove_file` deletes a read-only
+      file on windows (measured 2026-11-02: tui logged `namespace wipe failed:
+      false` while the account-store namespace's per-key rewrites were each
+      refused). So on windows the app's own namespace file may go and the
+      refused half is the account-store namespace beside it — which is why the
+      caller reads its survivors across both.
 
     Probes the injection non-destructively on POSIX and skips as an ENVIRONMENT
     fact when this process writes through a read-only directory (root), because
@@ -707,25 +908,7 @@ def test_a_sign_out_whose_credentials_cannot_be_erased_says_so(logged_in_app):
     app = logged_in_app
     client = app_surface.app_name(app.driver)
 
-    if client == "web":
-        app_surface.declared_absence(
-            app.driver,
-            capability="credential half of the sign-out residue (localStorage removal cannot fail)",
-            doc="docs/goal/architecture/apps/account-scoping.md § Erasure follows scope",
-        )
-    if client == "android":
-        app_surface.skip_unbuilt(
-            app.driver,
-            surface="host-side credential fault injection",
-            detail=(
-                "android's credential file is written by the on-device bridge into the "
-                "app's own filesDir, so the host can neither read it back nor deny it "
-                "writes — the same gap attach_cred_store documents. The seat's wiring "
-                "(registry.clearAll → secureStorage.clear → reverifyErase → "
-                "AccountStores.reportResidue) is pinned by its unit tests"
-            ),
-            tracked="docs/goal/architecture/long-term-store.md § Implementation status today",
-        )
+    app_surface.require_surface(app.driver, "host-credential-fault-injection")
 
     store = attach_cred_store(client, app.driver)
     before = store.stored_accounts()
@@ -742,14 +925,22 @@ def test_a_sign_out_whose_credentials_cannot_be_erased_says_so(logged_in_app):
         f"(client={client})"
     )
 
+    # Both namespaces live in `cred_dir`, and on windows the fault refuses the
+    # account-store namespace's per-key rewrites while the app's own namespace
+    # file can still be unlinked wholesale (`_credential_erase_refused`), so the
+    # residue is read across both. web has no account-store namespace.
+    account_store = None if client == "web" else attach_account_store(client, app.driver)
+
     with _credential_erase_refused(cred_dir):
         app.settings.sign_out()
 
-        survivors = store.stored_accounts()
+        survivors = store.stored_accounts() | (
+            account_store.stored_accounts() if account_store else set()
+        )
         assert survivors, (
             "precondition: the refused erase is what keeps the credentials on this "
-            f"device, but the namespace under {cred_dir} reads empty — the fault was "
-            "not injected, so the assertion below would be meaningless "
+            f"device, but both namespaces under {cred_dir} read empty — the fault "
+            "was not injected, so the assertion below would be meaningless "
             f"(before={sorted(before)})"
         )
 
@@ -761,7 +952,9 @@ def test_a_sign_out_whose_credentials_cannot_be_erased_says_so(logged_in_app):
             "that asks only the filesystem sweep paints nothing here "
             f"(account-scoping.md § Erasure follows scope). {where} reads "
             f"{actual!r}, expected to contain {expected!r}. These credential slots "
-            f"are still on disk, so the residue is real: {sorted(survivors)}."
+            f"are still on disk, so the residue is real: {sorted(survivors)}. "
+            f"The sign-out's stop, as the app and the agent logged it:\n"
+            f"{_sign_out_trace(app)}"
         )
 
 
@@ -784,7 +977,7 @@ def test_the_sign_out_residue_retry_finishes_the_erase(logged_in_app, test_user)
     scope = _seeded_scope(app, client, test_user)
     expected = S.settings.sign_out_residue(count="1")
 
-    with _undeletable_scope(scope, client):
+    with _undeletable_scope(scope):
         app.settings.sign_out()
         actual = _await_residue_line(app, expected, app.onboarding.sign_out_residue_text)
         assert actual and expected in actual, (
@@ -836,17 +1029,15 @@ def test_the_sign_out_residue_outlives_the_app(logged_in_app, test_user):
     app = logged_in_app
     client = app_surface.app_name(app.driver)
     _require_residue_surface(app, client)
-    if not app.driver.preserve_state_across_relaunch():
-        app_surface.skip_unbuilt(
-            app.driver,
-            surface="a relaunch that keeps the client's install-scoped state",
-            detail="without it the record the sign-out wrote is thrown away on relaunch",
-            tracked="docs/goal/architecture/apps/account-scoping.md § Erasure follows scope",
-        )
+    pin_store_across_relaunch(app.driver)
     scope = _seeded_scope(app, client, test_user)
+    roots = attach_scope_store(client, app.driver).scope_roots()
     expected = S.settings.sign_out_residue(count="1")
 
-    with _undeletable_scope(scope, client):
+    def here():
+        return _scope_in_this_launch(app, client, scope, roots)
+
+    with _undeletable_scope(scope, now=here):
         app.settings.sign_out()
         actual = _await_residue_line(app, expected, app.onboarding.sign_out_residue_text)
         assert actual and expected in actual, (
@@ -860,17 +1051,17 @@ def test_the_sign_out_residue_outlives_the_app(logged_in_app, test_user):
         assert actual and expected in actual, (
             "a residue still on the disk must still be on the screen after a "
             f"relaunch — sign-out-residue-message reads {actual!r}, expected "
-            f"{expected!r}, while {scope} still holds "
-            f"{sorted(p.name for p in scope.iterdir())}. A window-scoped line tells a "
-            "user who closed the app nothing at all."
+            f"{expected!r}, while the scope reads "
+            f"{_describe_survivors([here()]) if here().exists() else f'gone from {here()}'}. "
+            "A window-scoped line tells a user who closed the app nothing at all."
         )
 
     assert app.driver.recover(), "relaunch after lifting the fault failed"
     app.driver.wait_for("create-identity-button", timeout=30.0)
-    view_gone, scope_gone = _await_residue_gone(app, scope)
+    view_gone, scope_gone = _await_residue_gone(app, here())
     assert scope_gone, (
         "a signed-out launch must re-sweep the recorded residue silently, but "
-        f"{scope} still holds {_describe_survivors([scope])} "
+        f"{here()} still holds {_describe_survivors([here()])} "
         f"(view={app.onboarding.sign_out_residue_text()!r})"
     )
     assert view_gone, (

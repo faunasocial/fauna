@@ -149,22 +149,29 @@ public class LocationBindingsControllerTests
         Assert.Empty(none);
     }
 
-    /// <summary>Mode is agent truth, so an unseen row renders the windows fresh-binding
-    /// default — on-demand, what the agent's <c>AddLocation</c> gives a new path (user
-    /// ruling 2026-09-26) — rather than inventing one, and the agent's report moves it.</summary>
+    /// <summary>Mode is agent truth, read off the shared model's rendered row (its
+    /// agent-mirrored <c>BindingRow::mode</c>; ui/folders.md, <c>folder-location-mode-toggle[i]</c>)
+    /// — the windows app keeps no per-path copy. A row the agent has not reported yet
+    /// renders the windows fresh-binding default, on-demand, what the agent's
+    /// <c>AddLocation</c> gives a new path (user ruling 2026-09-26), and the agent's
+    /// report moves it. A pending bind the unreachable agent never confirmed still
+    /// carries that default.</summary>
     [Fact]
-    public async Task ModeFor_DefaultsToOnDemand_UntilTheAgentReportsOtherwise()
+    public async Task RenderedMode_DefaultsToOnDemand_UntilTheAgentReportsOtherwise()
     {
+        var unreachable = new LocationBindingsController();
+        await unreachable.AddAsync(@"C:\Users\alice\Docs", "documents", "ref-documents");
+        Assert.Equal("on-demand", Assert.Single(unreachable.Rendered()).@mode);
+
         var fake = new FakeLocationControlChannel();
         var controller = new LocationBindingsController();
         controller.SetChannel(fake);
 
         await controller.AddAsync(@"C:\Users\alice\Docs", "documents", "ref-documents");
-        Assert.Equal("on-demand", controller.ModeFor(@"C:\Users\alice\Docs"));
-        Assert.Equal(InMemoryLocationControlChannel.FreshBindingMode, controller.ModeFor(@"C:\Users\alice\Docs"));
+        Assert.Equal("on-demand", Assert.Single(controller.Rendered()).@mode);
 
         await controller.SetModeAsync(@"C:\Users\alice\Docs", "always");
-        Assert.Equal("always", controller.ModeFor(@"C:\Users\alice\Docs"));
+        Assert.Equal("always", Assert.Single(controller.Rendered()).@mode);
         Assert.Contains(@"mode:C:\Users\alice\Docs:always", fake.Calls);
     }
 
@@ -410,5 +417,103 @@ public class LocationBindingsControllerTests
 
         Assert.Equal(new[] { "list", @"bind:C:\Users\alice\Docs:documents:ref-documents" }, fake.Calls);
         Assert.Equal(@"C:\Users\alice\Docs", Assert.Single(fake.Bound).Path);
+    }
+
+    // ── A group set's review list (group-set.md § Build design — the group set,
+    // decision 9): re-read on the app's ~10s status-poll tick, because the fold records a
+    // row inside the agent and no gesture here produces it. ──
+
+    /// <summary>The page repaints when the agent says the lists moved, and only then: a
+    /// repaint rebuilds the rows under the user's cursor.</summary>
+    [Fact]
+    public async Task PollSetConflicts_SignalsOnlyWhenTheAgentSaysTheListsMoved()
+    {
+        var fake = new FakeLocationControlChannel { SetConflictsMoved = true };
+        var controller = new LocationBindingsController();
+        controller.SetChannel(fake);
+        var signals = 0;
+        controller.SetConflictsChanged += () => signals++;
+
+        await controller.PollSetConflictsAsync();
+        Assert.Equal(1, signals);
+
+        fake.SetConflictsMoved = false;
+        await controller.PollSetConflictsAsync();
+        Assert.Equal(1, signals);
+        Assert.Equal(new[] { "set-conflicts", "set-conflicts" }, fake.Calls);
+    }
+
+    /// <summary>An agent that cannot answer folds nothing and signals nothing; the rows the
+    /// page shows stay as last read. The poll never throws into the tick.</summary>
+    [Fact]
+    public async Task PollSetConflicts_AnUnreachableAgent_SignalsNothing()
+    {
+        var controller = new LocationBindingsController();
+        var signals = 0;
+        controller.SetConflictsChanged += () => signals++;
+
+        // No session yet: the throwing channel.
+        await controller.PollSetConflictsAsync();
+
+        controller.SetChannel(new FakeLocationControlChannel { Reachable = false, SetConflictsMoved = true });
+        await controller.PollSetConflictsAsync();
+
+        Assert.Equal(0, signals);
+    }
+
+    /// <summary>The gesture is keyed by the set's <c>FolderRef</c> and the row id, sent to the
+    /// agent, and the lists are re-read at once so the used row leaves the page.</summary>
+    [Fact]
+    public async Task RestoreRetainedVersion_SendsTheSetAndRow_ThenRereadsTheLists()
+    {
+        var fake = new FakeLocationControlChannel { SetConflictsMoved = true };
+        var controller = new LocationBindingsController();
+        controller.SetChannel(fake);
+        var signals = 0;
+        controller.SetConflictsChanged += () => signals++;
+
+        var refusal = await controller.RestoreRetainedVersionAsync("group:aa", 7);
+
+        Assert.Null(refusal);
+        Assert.Equal(new[] { "restore:group:aa#7", "set-conflicts" }, fake.Calls);
+        Assert.Equal(1, signals);
+    }
+
+    /// <summary>A refusal is handed back for the page's error-message, and nothing else
+    /// moves: the agent wrote nothing and the row stands.</summary>
+    [Fact]
+    public async Task RestoreRetainedVersion_ARefusal_IsReturned_AndNothingIsReread()
+    {
+        var fake = new FakeLocationControlChannel { RefuseRestore = true, SetConflictsMoved = true };
+        var controller = new LocationBindingsController();
+        controller.SetChannel(fake);
+        var signals = 0;
+        controller.SetConflictsChanged += () => signals++;
+
+        var refusal = await controller.RestoreRetainedVersionAsync("group:aa", 7);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("the retained version is gone", refusal!.Message);
+        Assert.Equal(new[] { "restore:group:aa#7" }, fake.Calls);
+        Assert.Equal(0, signals);
+    }
+
+    /// <summary>No session at all is a refusal too, never a silent success.</summary>
+    [Fact]
+    public async Task RestoreRetainedVersion_NoSession_IsARefusal()
+    {
+        var controller = new LocationBindingsController();
+
+        Assert.NotNull(await controller.RestoreRetainedVersionAsync("group:aa", 7));
+    }
+
+    /// <summary>The rows come off the shared model through the shared mapping; a set the
+    /// agent never reported has none.</summary>
+    [Fact]
+    public void SetReviewRows_ASetNeverRead_HasNoRows()
+    {
+        var controller = new LocationBindingsController();
+
+        Assert.Empty(controller.SetReviewRows("group:aa", "Holiday"));
     }
 }

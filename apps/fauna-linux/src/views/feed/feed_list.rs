@@ -31,6 +31,12 @@ pub struct FeedListHandles {
     /// "no feeds configured" placeholder, no feed-id index mapping); mutual
     /// selection with `feeds_list` is coordinated in `build_feed_view`.
     pub trending_list: gtk::ListBox,
+    /// The single-row list holding the built-in **Local** entry
+    /// (`feed-local-item`, directly below Trending — `feed.md` § Layout & flow,
+    /// region 1). A `Single`-mode `ListBox` never deselects on click, so this is
+    /// the user-reachable way back to the nest's local feed
+    /// (`select_feed(None)`); coordinated in `build_feed_view`.
+    pub local_list: gtk::ListBox,
     pub feeds_list: gtk::ListBox,
     pub bridge_list: gtk::ListBox,
     /// The "subscribe to bridge feed" button — shown only when the nest supports
@@ -90,6 +96,16 @@ pub fn build_feed_list_with_boxes(
     trending_list.set_margin_top(12);
     trending_list.append(&build_trending_row());
     scroll_content.append(&trending_list);
+
+    // --- Local (built-in entry, directly below Trending) ---
+    let local_list = gtk::ListBox::new();
+    local_list.set_selection_mode(gtk::SelectionMode::Single);
+    local_list.add_css_class("boxed-list");
+    local_list.set_margin_start(8);
+    local_list.set_margin_end(8);
+    local_list.set_margin_top(8);
+    local_list.append(&build_local_row());
+    scroll_content.append(&local_list);
 
     // --- Feeds section ---
     let feeds_label = gtk::Label::new(Some(feed::list::TITLE));
@@ -172,6 +188,7 @@ pub fn build_feed_list_with_boxes(
 
     let handles = FeedListHandles {
         trending_list,
+        local_list,
         feeds_list,
         bridge_list,
         subscribe_btn,
@@ -198,6 +215,27 @@ fn build_trending_row() -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&hbox));
     crate::testid::set_test_id(&row, ids::FEED_TRENDING_ITEM);
+    row
+}
+
+/// Build the built-in **Local** selector row (`feed-local-item`, `feed.md`
+/// § Layout & flow, region 1) — label-only; selection drives the shared
+/// `FeedManager::select_feed(None)` in `build_feed_view`.
+fn build_local_row() -> gtk::ListBoxRow {
+    let name_label = gtk::Label::new(Some(feed::list::LOCAL));
+    name_label.set_halign(gtk::Align::Start);
+    name_label.set_hexpand(true);
+
+    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    hbox.set_margin_top(8);
+    hbox.set_margin_bottom(8);
+    hbox.set_margin_start(12);
+    hbox.set_margin_end(12);
+    hbox.append(&name_label);
+
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&hbox));
+    crate::testid::set_test_id(&row, ids::FEED_LOCAL_ITEM);
     row
 }
 

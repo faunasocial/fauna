@@ -143,6 +143,7 @@ pub fn job_from_state(state: CustodianReseedState) -> ReseedJob {
             sidecarless_segments: report.sidecarless_segments,
             folder_paths_without_seal: report.folder_paths_without_seal,
             plaintext_bytes: report.plaintext_bytes,
+            ..DeliveredCorpus::default()
         },
         sets,
     })
@@ -483,6 +484,7 @@ mod tests {
                 sidecarless_segments: vec![3],
                 folder_paths_without_seal: vec!["p".into()],
                 plaintext_bytes: 42,
+                ..DeliveredCorpus::default()
             },
             sets: vec![
                 SetResult {

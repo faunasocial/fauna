@@ -395,10 +395,9 @@ pub struct FfiTakedownPrefill {
 /// `report::takedown_prefill` — `None` for an account or an unknown subject.
 #[uniffi::export]
 pub fn report_takedown_prefill(subject: FfiReportSubject) -> Option<FfiTakedownPrefill> {
-    use fauna_client_moderation::takedown::TakedownContentType;
     report::takedown_prefill(&subject.into()).map(|form| FfiTakedownPrefill {
         content_id: form.content_id,
-        conversation: form.content_type == TakedownContentType::Conversation,
+        conversation: form.content_type.is_conversation(),
     })
 }
 

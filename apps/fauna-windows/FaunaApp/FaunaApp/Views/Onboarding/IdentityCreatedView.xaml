@@ -5,12 +5,31 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FaunaApp.Controls"
     xmlns:loc="using:FaunaApp.Markup"
     mc:Ignorable="d"
     xmlns:ids="using:FaunaApp.UiIds">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <Grid Padding="48" HorizontalAlignment="Center" MaxWidth="600">
-            <StackPanel Spacing="12" VerticalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- The wizard's one way back onto this screen with something to say:
+                 a confirm whose identity the store did not keep. The key is still
+                 here, and this is the only place the person learns it is saved
+                 nowhere (long-term-store.md § Save-failure handling). -->
+            <controls:CopyableInfoBar
+                Grid.Row="0"
+                x:Name="ErrorBar"
+                Severity="Error"
+                IsOpen="{Binding HasError, Mode=OneWay}"
+                Message="{Binding ErrorMessage, Mode=OneWay}"
+                IsClosable="True"
+                Margin="0,0,0,16" />
+
+            <StackPanel Grid.Row="1" Spacing="12" VerticalAlignment="Center">
                 <TextBlock Text="{loc:Localize Key=onboarding/identity_created/title}"
                            Style="{StaticResource TitleTextBlockStyle}"
                            HorizontalAlignment="Center" />

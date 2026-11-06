@@ -26,6 +26,11 @@ public class ContactsVM {
     /// state reads from. Optional: a host that has none renders the just-asked flag
     /// only.
     private var familyStatus: FamilyStatusStore?
+    /// The account's archive links (`FaunaClient.archiveLinks`): every roster
+    /// read re-reads the rows' link views with it (`archive-import.md`
+    /// § Linking and merging, ruling 8 — tui loads them with the roster).
+    /// Optional: a host without one paints no link affordances.
+    private var archiveLinks: ArchiveLinksStore?
 
     public init() {}
 
@@ -50,6 +55,7 @@ public class ContactsVM {
         api = nil
         actorId = nil
         familyStatus = nil
+        archiveLinks = nil
         knocks = []
         contacts = []
         findQuery = ""
@@ -61,11 +67,13 @@ public class ContactsVM {
         contactAsk.reset()
     }
 
-    public func configure(api: APIClient, actorId: String, familyStatus: FamilyStatusStore? = nil) {
+    public func configure(api: APIClient, actorId: String, familyStatus: FamilyStatusStore? = nil,
+                          archiveLinks: ArchiveLinksStore? = nil) {
         if let current = self.api, current !== api { reset() }
         self.api = api
         self.actorId = actorId
         self.familyStatus = familyStatus
+        self.archiveLinks = archiveLinks
     }
 
     public func refresh() async {
@@ -74,6 +82,12 @@ public class ContactsVM {
         defer { isLoading = false }
         errorMessage = nil
 
+        // A guardian's policy change is an async event: re-read the app-root family
+        // store beside the knocks, so each row's `knock-guardian-pending` follows
+        // the ward's policy as of this read rather than the post-auth snapshot (the
+        // Bridges page's open-time re-read; android folds the same read at its
+        // `familyStatus()` choke point).
+        await familyStatus?.refresh(api: api)
         do {
             async let k = api.fetchKnocks(actorId: actorId)
             async let c = api.fetchContacts(actorId: actorId)
@@ -91,6 +105,9 @@ public class ContactsVM {
             guard self.api === api else { return }
             errorMessage = DisplayError.http(error)
         }
+        #if !FAUNA_KIDS
+        await archiveLinks?.refresh()
+        #endif
     }
 
     public func acceptKnock(peerId: String) async {
@@ -197,6 +214,11 @@ public class ContactsVM {
         }
     }
 
+    /// Whether each knock row paints `knock-guardian-pending` — the family
+    /// store's shared verdict (``FamilyStatusStore/knocksAwaitGuardian``); no
+    /// store, no guardian to wait on.
+    public var knocksAwaitGuardian: Bool { familyStatus?.knocksAwaitGuardian ?? false }
+
     /// What the Find User result's ask row shows for `peerId`
     /// (``ContactAsk/state(peer:store:)``) — the ask button after a guardian-refused
     /// knock, the pending label once one is outstanding, nothing otherwise.
@@ -247,7 +269,9 @@ public class ContactsVM {
 
     /// The roster (`docs/goal/ui/contacts.md` § Contact roster filter, § The
     /// private overlay → *Labels and the roster filter*): the contacts grouped
-    /// by status in `ContactStatusBadge.displayOrder`, narrowed by the
+    /// by status in the shared order (`contactRosterGroupOrder` —
+    /// `fauna_core::format::contact_roster_group_order`, § Where logic lives →
+    /// Roster status grouping), narrowed by the
     /// `contacts-search-field` query, each row carrying its names. One door for
     /// macOS and iOS, so neither the grouping nor the flat index can diverge.
     ///
@@ -259,7 +283,7 @@ public class ContactsVM {
         searchFilter: String, overlays: FfiContactOverlays
     ) -> [(status: String, rows: [RosterRow])] {
         var index = 0
-        return ContactStatusBadge.displayOrder.compactMap { status in
+        return contactRosterGroupOrder(statuses: contacts.map(\.status)).compactMap { status in
             let rows = contactsByStatus(status)
                 .filter {
                     overlays.matchesFilter(query: searchFilter, handle: $0.handle,

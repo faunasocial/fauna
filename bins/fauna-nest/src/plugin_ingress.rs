@@ -37,7 +37,11 @@
 //! forced too: the plugin answers on the origin where the web app keeps the
 //! user's secrets, so whatever it serves renders in an opaque origin and can
 //! never script that origin — a hosted plugin is headless (`third-party.md`
-//! § The runner contract, TP2). On a claimed whole name no sandbox is forced:
+//! § The runner contract, TP2). There the reply keeps only the
+//! representation headers of [`NEST_HOST_REPLY_HEADERS`] and
+//! `access-control-*`: a header the browser applies to the whole origin
+//! (`Clear-Site-Data`, `Alt-Svc`, `Strict-Transport-Security`, …) is withheld,
+//! because the sandbox does not reach it. On a claimed whole name no sandbox is forced:
 //! the name is its own origin, where the nest serves nothing — the posture a
 //! user's `<handle>.<apex>` site already has (`web-content-hosting.md` §
 //! Same-origin security model). `set-cookie` stays dropped on both: a plugin
@@ -195,10 +199,39 @@ pub async fn whole_name_gate(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
     /// The nest's own host (the path half): `Content-Security-Policy:
-    /// sandbox` is forced.
+    /// sandbox` is forced and the reply keeps only the allowlisted headers.
     NestHost,
     /// A whole name the plugin claimed: its own origin, no forced sandbox.
     OwnName,
+}
+
+/// The reply headers a plugin's answer keeps on the nest's own host: the
+/// representation headers a headless plugin needs, and `access-control-*`.
+/// Everything else is withheld, because the path half answers on the origin
+/// where the web app keeps the user's identity store, and a header the
+/// browser applies to the whole origin — `Clear-Site-Data` above all, which
+/// acts at the fetch layer whatever sandbox the document gets — would reach
+/// it through the forced `Content-Security-Policy: sandbox` (`security.md`
+/// § Co-resident process trust boundary → *Hosted third-party code*).
+const NEST_HOST_REPLY_HEADERS: &[&str] = &[
+    "content-type",
+    "cache-control",
+    "etag",
+    "last-modified",
+    "expires",
+    "vary",
+    "content-language",
+    "content-disposition",
+    "content-encoding",
+    "location",
+    "retry-after",
+    "www-authenticate",
+];
+
+/// Does a plugin's reply header `name` reach the client on the nest's host?
+fn nest_host_reply_keeps(name: &HeaderName) -> bool {
+    let n = name.as_str();
+    NEST_HOST_REPLY_HEADERS.contains(&n) || n.starts_with("access-control-")
 }
 
 fn status_only(status: StatusCode) -> Response<Body> {
@@ -261,20 +294,15 @@ async fn proxy(
     let mut response = Response::new(Body::from(answer.body));
     *response.status_mut() = status;
     let out = response.headers_mut();
-    let dropped: &[HeaderName] = match origin {
-        Origin::NestHost => &[
-            header::SET_COOKIE,
-            header::CONTENT_LENGTH,
-            header::CONTENT_SECURITY_POLICY,
-            header::X_CONTENT_TYPE_OPTIONS,
-        ],
-        Origin::OwnName => &[
-            header::SET_COOKIE,
-            header::CONTENT_LENGTH,
-            header::X_CONTENT_TYPE_OPTIONS,
-        ],
-    };
-    for (n, v) in forwardable(&from_plugin, dropped) {
+    let dropped = [
+        header::SET_COOKIE,
+        header::CONTENT_LENGTH,
+        header::X_CONTENT_TYPE_OPTIONS,
+    ];
+    for (n, v) in forwardable(&from_plugin, &dropped) {
+        if origin == Origin::NestHost && !nest_host_reply_keeps(n) {
+            continue;
+        }
         out.append(n.clone(), v.clone());
     }
     if origin == Origin::NestHost {

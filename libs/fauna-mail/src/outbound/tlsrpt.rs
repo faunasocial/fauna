@@ -650,7 +650,12 @@ pub fn populate_transports(
             // Strip optional `?subject=...&body=...` query (RFC 6068)
             // — we generate our own headers.
             let rcpt = rest.split('?').next().unwrap_or("").to_string();
-            if rcpt.is_empty() {
+            // The address becomes the report's `To:` header and SMTP
+            // recipient, so it must be one plain addr-spec under the same
+            // grammar the DMARC sender applies — a CR/LF, control,
+            // non-ASCII byte, quote or separator is skipped like an
+            // unsupported scheme.
+            if crate::dmarc_uri::check_report_mailbox(&rcpt).is_err() {
                 continue;
             }
             let mime = build_mailto_mime(&rcpt, ctx, &gzipped);
@@ -702,5 +707,55 @@ pub struct NullTlsrptHttpPoster;
 impl TlsrptHttpPoster for NullTlsrptHttpPoster {
     async fn post_tlsrpt(&self, _uri: &str, _gzipped_body: Vec<u8>) -> anyhow::Result<u16> {
         Ok(200)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> ReportDispatchContext<'static> {
+        ReportDispatchContext {
+            our_domain: "our.test",
+            recipient_domain: "peer.test",
+            report_id: "r1",
+            report_date: "2026-11-04",
+            message_id: "m1",
+            rfc2822_date: "Wed, 04 Nov 2026 00:00:00 +0000",
+            boundary: "b1",
+        }
+    }
+
+    fn mailto_rcpts(uri: &str) -> Vec<String> {
+        let mut env = ReportEnvelope {
+            json: b"{}".to_vec(),
+            transports: Vec::new(),
+        };
+        populate_transports(&mut env, &[uri.to_string()], &ctx());
+        env.transports
+            .into_iter()
+            .filter_map(|t| match t {
+                ReportTransport::Mailto { rcpt, .. } => Some(rcpt),
+                ReportTransport::Https { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_peer_rua_mailto_is_one_plain_addr_spec() {
+        for bad in [
+            "mailto:x@evil.example\r\nBcc: victim@else.example",
+            "mailto:x@evil.example\nBcc: victim@else.example",
+            "mailto:x\0@evil.example",
+            "mailto:\"x y\"@evil.example",
+            "mailto:",
+        ] {
+            assert!(mailto_rcpts(bad).is_empty(), "{bad:?}");
+        }
+        assert_eq!(mailto_rcpts("mailto:a@peer.test"), vec!["a@peer.test"]);
+        assert_eq!(
+            mailto_rcpts("mailto:a@peer.test?subject=x"),
+            vec!["a@peer.test"]
+        );
     }
 }

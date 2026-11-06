@@ -29,7 +29,7 @@ Production data flow asserted end-to-end on real binaries:
   actor → `Data` builds + prepends `Received:` → `EncryptToRecipient(raw, mlsPubkey)`
   HPKE-seals the trace-headed RFC 5322 to the recipient's MSEK-derived pubkey →
   `ingest_inbound_mail` stores it → IMAP(993) AUTH PLAIN (AEAD-unwrap-as-auth) →
-  SELECT INBOX (`1 EXISTS`) → `UID FETCH BODY[]` → `fetch_message_ciphertext` →
+  SELECT INBOX → `UID FETCH BODY[]` → `fetch_message_ciphertext` →
   `MlsCapability.OpenMailRecord(envelope, snapshot)` with the SAME MSEK's leaf
   secret → byte-faithful body, `Received:` header and all.
 
@@ -38,7 +38,8 @@ full-stack round-trip (`tests/platform/docker/test_smtp_inbound_to_imap.py`,
 ~9 min, clamd/rspamd sidecars). This is the fast (seconds), CI-friendly
 nest+bridge integration layer over the same seam — defense-in-depth + fast
 feedback. The `mail_bridge_inbound_to_imap` fixture spins one MTA bridge + reuses
-one MDA bridge on a shared domain serving a fresh MSEK recipient (clean INBOX).
+one MDA bridge on a shared domain serving one session-shared MSEK recipient, whose
+INBOX accumulates: every test here picks its own message out by a per-run nonce.
 
 Test taxonomy:
 - `tier_3` (mocking depth): every binary real, real SMTP + IMAP wire end-to-end,
@@ -55,6 +56,7 @@ from helpers.mail_wire import (
     _imap_auth_plain,
     _imap_cmd,
     _imap_seq_fetch_body,
+    _imap_uid_fetch_body,
     _imap_uid_search,
     _imaps_connect,
 )
@@ -92,18 +94,19 @@ def test_inbound_smtp_delivers_and_imap_fetch_decrypts(mail_bridge_inbound_to_im
     """Inbound SMTP DATA → IMAP FETCH decrypts byte-faithfully, Received header and all.
 
     Drives a single real SMTP transaction through the MTA's port-25 STARTTLS
-    listener to a fresh MSEK recipient, then reads it back through the MDA's
-    IMAPS(993) listener and HPKE-opens it — proving the MTA-sealed envelope
+    listener to the session-shared MSEK recipient, then reads it back through the
+    MDA's IMAPS(993) listener and HPKE-opens it — proving the MTA-sealed envelope
     round-trips through `OpenMailRecord`, and that the MTA-prepended `Received:`
-    trace header is inside the decrypted body. The fresh recipient's INBOX starts
-    empty, so the delivered message is the deterministic single `EXISTS`.
+    trace header is inside the decrypted body. Every test on this fixture delivers
+    to the same INBOX, so the message is found by its per-run nonce: exactly one
+    match, wherever in the mailbox it sits.
     """
     handle = mail_bridge_inbound_to_imap
     handle.assert_mta_running()
 
     recipient_addr = handle.recipient_username
-    # Unique markers so the assertions are unambiguous even if this fixture is
-    # ever shared: a nonce body token + a unique Message-ID.
+    # Unique markers, because the fixture IS shared: a nonce body token + a unique
+    # Message-ID.
     nonce = f"inbound2imap{int(time.time() * 1000)}qx"
     message_id = f"<{nonce}@external.test>"
     body_lines = [
@@ -133,27 +136,31 @@ def test_inbound_smtp_delivers_and_imap_fetch_decrypts(mail_bridge_inbound_to_im
             sock, buf, "a1", handle.recipient_username, handle.recipient_password, deadline
         ) == "OK", "AUTH PLAIN must succeed for the provisioned inbound recipient"
 
-        # The ingest is synchronous (250 followed the nest insert), but SELECT
-        # reads the MDA's nest-backed mailbox view; poll briefly for the count to
-        # reach 1 to absorb any mailbox-state propagation.
-        select_deadline = time.monotonic() + 20.0
-        count = _select_inbox_count(sock, buf, "a2", deadline)
-        tag_n = 3
-        while count < 1 and time.monotonic() < select_deadline:
-            time.sleep(0.25)
-            count = _select_inbox_count(sock, buf, f"a{tag_n}", deadline)
-            tag_n += 1
-        assert count == 1, (
-            f"fresh recipient INBOX must hold exactly the one inbound message; "
-            f"got {count} EXISTS (see {handle.bridge_log_hint()})"
-        )
+        sel_status, _ = _imap_cmd(sock, buf, "a2", "SELECT INBOX", deadline)
+        assert sel_status == "OK", f"SELECT INBOX must succeed; got {sel_status}"
 
-        # The clean INBOX holds exactly our message → it is sequence number 1 in
-        # the SELECTed mailbox; fetch it directly (no SEARCH needed).
-        fetch_status, fetched = _imap_seq_fetch_body(sock, buf, f"a{tag_n}", 1, deadline)
+        # The ingest is synchronous (250 followed the nest insert), but poll the
+        # SEARCH to absorb any mailbox-state propagation; it re-reads the nest on
+        # every call, so no re-SELECT is needed.
+        search_deadline = time.monotonic() + 20.0
+        tag_n = 3
+        hit_status, hits = _imap_uid_search(sock, buf, f"a{tag_n}", f'BODY "{nonce}"', deadline)
+        while hit_status == "OK" and not hits and time.monotonic() < search_deadline:
+            time.sleep(0.25)
+            tag_n += 1
+            hit_status, hits = _imap_uid_search(sock, buf, f"a{tag_n}", f'BODY "{nonce}"', deadline)
+        assert hit_status == "OK", f"UID SEARCH must succeed; got {hit_status}"
+        assert len(hits) == 1, (
+            f"the inbound message must be in INBOX exactly once; got UIDs {sorted(hits)} "
+            f"(see {handle.bridge_log_hint()})"
+        )
         tag_n += 1
-        assert fetch_status == "OK", f"FETCH 1 BODY[] must succeed; got {fetch_status}"
-        assert fetched is not None, "FETCH 1 BODY[] must return a literal body"
+
+        uid = next(iter(hits))
+        fetch_status, fetched = _imap_uid_fetch_body(sock, buf, f"a{tag_n}", uid, deadline)
+        tag_n += 1
+        assert fetch_status == "OK", f"UID FETCH BODY[] must succeed; got {fetch_status}"
+        assert fetched is not None, "UID FETCH BODY[] must return a literal body"
 
         # ── The assertions that actually prove inbound→read works ──
         # (1) The MTA-sealed envelope opened via OpenMailRecord and the original

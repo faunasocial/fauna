@@ -713,6 +713,19 @@ mod tests {
     use super::*;
     use crate::imap_client::transport::testing::{FakeClock, block_on};
 
+    /// The web tunnel dials the authority on 443 by this host alone
+    /// (`fauna_protocol::mail_import_tunnel`), so the sign-in must go there.
+    #[test]
+    fn the_authority_is_the_host_the_web_tunnel_admits() {
+        assert_eq!(
+            MICROSOFT.login_host,
+            format!(
+                "https://{}",
+                fauna_protocol::mail_import_tunnel::MICROSOFT_AUTHORITY_HOST
+            )
+        );
+    }
+
     fn client() -> OAuthClient {
         OAuthClient {
             device_code_url: "https://idp.test/devicecode".into(),

@@ -289,8 +289,8 @@ def main() -> None:
         print()
 
     if args.save:
-        json_path = ROOT / "docs" / "todo" / "duplication-findings.json"
-        md_path = ROOT / "docs" / "todo" / "duplication-findings.md"
+        json_path = ROOT / "docs" / "tasks" / "duplication-findings.json"
+        md_path = ROOT / "docs" / "tasks" / "duplication-findings.md"
         merge_save(report, json_path, md_path)
         print(f"Saved to {json_path} and {md_path}")
 

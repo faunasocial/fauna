@@ -97,6 +97,39 @@ pub trait FolderKeyReader: fauna_core::MaybeSendSync {
     async fn recipient_mseks(&self) -> anyhow::Result<Vec<fauna_core::secret::SecretArray32>> {
         Ok(Vec::new())
     }
+
+    /// The writer keys the owner's own signed grant log authorizes to deposit
+    /// into the folder at row `folder_id` on its own nest — every `Mint` or
+    /// `Renew` that ever carried a `deposit` tuple over that folder confined
+    /// to the writer, revoked or not
+    /// (`fauna_core::grant_event::deposit_authorizations` over the succession
+    /// ledger's chain-signed fold; `folder-deposit.md` § The depositor signs,
+    /// the owner's device verifies → *The adopter's check*). The adopter
+    /// admits a parked item only when its signature verifies under a writer
+    /// in this set. Read from the same source as [`Self::recipient_mseks`]; a
+    /// source holding no log answers empty (this default), which licenses
+    /// nothing — the item stays parked.
+    async fn deposit_writers(
+        &self,
+        _folder_id: i64,
+    ) -> anyhow::Result<std::collections::BTreeSet<[u8; 32]>> {
+        Ok(std::collections::BTreeSet::new())
+    }
+
+    /// A **group set**'s content-key ring (`p2p-shared-set-build.md` § Build
+    /// design — the group set, decisions 4 and 7): the scope's held
+    /// generations as `fauna_account_plane::group_set::group_set_keys` — the
+    /// one reader — opens them from the account store's group plane. Not
+    /// folder-key custody, but the same source answers it, as it answers the
+    /// mail MSEKs. `None` = this source holds no group plane (this default —
+    /// a capability host's cold replica), and a group set built over it is
+    /// refused, never keyless.
+    async fn group_set_keys(
+        &self,
+        _scope_id: &[u8; 32],
+    ) -> anyhow::Result<Option<fauna_core::group_content::GroupContentKeys>> {
+        Ok(None)
+    }
 }
 
 /// The replica-local meta key the engine's host stamps a set's re-fetch
@@ -198,6 +231,19 @@ pub trait FolderKeyStore: FolderKeyReader {
     /// it under the identity it runs as.
     async fn minting_identity(&self) -> anyhow::Result<Option<fauna_core::identity::ActorId>> {
         Ok(None)
+    }
+
+    /// Tombstone every cached `fauna.state.share-endpoints` row of the set
+    /// `channel_id` — the other members' last addresses — because this replica
+    /// itself has LEFT the set (`p2p.md` § Cross-user shared-set transfer →
+    /// *A departed member's cached endpoint*, ruling 2's last sentence: the
+    /// positive local event that drops the binding, never a pass that merely
+    /// does not hold the set). The rows live on the same account runtime as
+    /// this custody. Answers how many rows it tombstoned; `0` on a repeat.
+    /// Default `Ok(0)`: a store over no account runtime caches no such row.
+    async fn drop_set_share_endpoints(&self, channel_id: &[u8; 32]) -> anyhow::Result<usize> {
+        let _ = channel_id;
+        Ok(0)
     }
 }
 

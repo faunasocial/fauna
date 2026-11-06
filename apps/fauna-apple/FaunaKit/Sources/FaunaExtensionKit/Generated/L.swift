@@ -478,14 +478,6 @@ public enum L {
     }
 
     public enum onboarding {
-        public enum welcome {
-            public static let title = "Fauna"
-
-            public static let subtitle = "Your personal, private communications nest."
-
-            public static let tagline = "Private messaging and file sync,\nbuilt on your own server."
-        }
-
         public enum terms {
             public static let notice = "By continuing you agree to the Fauna terms and content guidelines"
         }
@@ -495,7 +487,9 @@ public enum L {
 
             public static let useDifferentNest = "Use a different nest"
 
-            public static let launchFailed = "Startup hit a problem. Your data is safe — you can retry, or continue setup below."
+            public static let launchFailed = "Startup hit a problem. Nothing saved on this device was deleted — restart the app to try again."
+
+            public static let lockedSecretMissing = "This device doesn't hold this account's secret key, so it can't replace the identity from here. Add the account back with its secret key or recovery kit, then try again."
 
             public static let identityChangedWarning = "This nest's identity has changed, or it can no longer prove the identity you previously trusted. It may have been re-deployed or had its key rotated — or someone may be impersonating it. Don't continue unless you were expecting this change."
 
@@ -519,7 +513,7 @@ public enum L {
 
             public static let indexMalformed = "Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first."
 
-            public static let indexMalformedResetResidual = "Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it."
+            public static let indexMalformedResetResidual = "Starting over clears this app's list of accounts. Your accounts still exist on your nest — you can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit. Some saved data on this device, which can include sign-in keys, can't be reached to clear it and stays behind."
 
             public static let indexNewerBuildTitle = "Update needed"
 
@@ -527,7 +521,7 @@ public enum L {
 
             public static let indexMalformedReset = "Start over on this device"
 
-            public static let indexMalformedResetConfirm = "Remove everything and start over"
+            public static let indexMalformedResetConfirm = "Clear the list and start over"
 
             public static let indexMalformedResetBlockedOtherWindow = "Nothing was removed — another Fauna window is using an account on this device. Close it, then start over again."
 
@@ -577,7 +571,7 @@ public enum L {
 
             public static let recoverLostBox = "Recover a lost box"
 
-            public static let restoreFromRecoveryKit = "Restore my account from a recovery phrase"
+            public static let restoreFromRecoveryKit = "Restore my account from a recovery kit"
 
             public static let emergencyLockoutEntry = "Lock my account for 24 hours"
         }
@@ -603,9 +597,9 @@ public enum L {
         public enum recoveryKit {
             public static let title = "Your Recovery Kit"
 
-            public static let desc = "This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device."
+            public static let desc = "Your recovery kit is a second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy."
 
-            public static let escrowDeferred = "Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe."
+            public static let escrowDeferred = "Your kit activates when your account comes online at the end of setup — until then, keep it safe and offline."
 
             public static let confirm = "I've saved it — continue"
 
@@ -617,17 +611,17 @@ public enum L {
         public enum recoveryEntry {
             public static let title = "Restore from Recovery Kit"
 
-            public static let phraseLabel = "Recovery phrase"
+            public static let phraseLabel = "Recovery kit"
 
-            public static let desc = "Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow."
+            public static let desc = "Paste your recovery kit (the fauna://recovery link or the 64-character code). Your identity will be restored from the copy of your secret key that only your kit opens."
 
-            public static let accountHint = "If your phrase doesn't name your account, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local."
+            public static let accountHint = "If your kit doesn't say where your account lives, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local."
 
             public static let submit = "Restore"
 
-            public static let invalidKit = "That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key."
+            public static let invalidKit = "That isn't a recovery kit. Paste the fauna://recovery link or the 64-character recovery code — not your secret key."
 
-            public static let accountNeeded = "Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to."
+            public static let accountNeeded = "Enter the handle of the account you're restoring (user@domain) — this kit doesn't say where your account lives."
 
             public static let accountMalformed = "Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10."
 
@@ -635,12 +629,12 @@ public enum L {
                 "No account named \(account) exists on that nest."
             }
 
-            public static let noEscrow = "This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in."
+            public static let noEscrow = "Your kit can't restore this account from here — no copy of your secret key that it opens is available. On a device that's still signed in, open Settings → Account → Recovery Kit. If it offers Restore Kit Recovery, enter this kit and press it; if instead Create Recovery Kit can be pressed, this kit never took effect, so create a new one."
 
             public static let superseded = "This identity was replaced after it was compromised. Import the new identity to continue."
 
             public static func refused(reason: String) -> String {
-                "That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. (\(reason))"
+                "That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. (\(reason))"
             }
 
             public static func unreachable(reason: String) -> String {
@@ -648,7 +642,7 @@ public enum L {
             }
 
             public static func restoredPredecessorsLost(reason: String) -> String {
-                "Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. (\(reason))"
+                "Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. (\(reason))"
             }
         }
 
@@ -665,7 +659,7 @@ public enum L {
                 "Your account is locked until \(until). Nothing was saved on this device."
             }
 
-            public static let invalidSecret = "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase."
+            public static let invalidSecret = "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery kit."
 
             public static let accountNeeded = "Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives."
 
@@ -711,13 +705,13 @@ public enum L {
         public enum recovery {
             public static let title = "Recover a lost box"
 
-            public static let subtitle = "Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online."
+            public static let subtitle = "Choose the box you lost. A new server started with its saved key is the same nest, and Fauna can set one up on a cloud host for you. Your installed Fauna apps then reconnect to it automatically once it's back online, with no warning that its identity changed."
 
             public static let boxListLabel = "Your boxes"
 
-            public static let boxItemHint = "Recovery key custodied"
+            public static let boxItemHint = "Server key saved"
 
-            public static let emptyMessage = "No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer."
+            public static let emptyMessage = "No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest."
 
             public static let methodCloud = "Re-provision on a cloud host"
 
@@ -737,11 +731,11 @@ public enum L {
         public enum retire {
             public static let title = "Retire a server"
 
-            public static let subtitle = "Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved."
+            public static let subtitle = "Delete a server Fauna created in your cloud account since 8 July 2026 — on OVH, any server your credentials reach — and clean up the DNS records that belong to it, or, where your provider can hand it out, get your domain's transfer code. Your cloud token is used for this visit only and is never saved."
 
-            public static let listLabel = "Servers Fauna created in this account"
+            public static let listLabel = "Servers found in this account"
 
-            public static let emptyMessage = "No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard."
+            public static let emptyMessage = "No servers created by Fauna were found in this account. Except on OVH, servers created before 8 July 2026 predate the Fauna marker and are not listed — retire those from your provider's dashboard."
 
             public static let domainLabel = "Domain"
 
@@ -786,7 +780,7 @@ public enum L {
             public static let confirmCurrent = "This is the server you're signed into. This session's nest will stop existing."
 
             public static func confirmDnsRemovals(records: String) -> String {
-                "Before the server is deleted, these DNS records pointing at it are removed: \(records)"
+                "Before the server is deleted, these DNS records belonging to it are removed: \(records)"
             }
 
             public static let confirmDnsNone = "No DNS records will be removed automatically. The records to remove by hand are listed below."
@@ -911,7 +905,7 @@ public enum L {
 
             public static let provisioningComplete = "Provisioning complete"
 
-            public static let time = "This usually takes 2-3 minutes."
+            public static let time = "This usually takes a few minutes."
 
             public static let server = "Provision Server"
 
@@ -1083,13 +1077,13 @@ public enum L {
 
             public static let updateChannelTestDesc = "Numbered releases being accepted by users before they become Stable."
 
-            public static let updateChannelTestDescSameVersion = "Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks."
+            public static let updateChannelTestDescSameVersion = "Numbered releases being accepted by users before they become Stable. Until version 0.2 the server works only with apps of exactly the same version."
 
             public static let updateChannelDevLabel = "Dev"
 
             public static let updateChannelDevDesc = "The newest development builds, before any checking, for people who build the apps from source. Expect breakage."
 
-            public static let updateChannelDevDescSameVersion = "The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage."
+            public static let updateChannelDevDescSameVersion = "The newest development builds, before any checking. Until version 0.2 the server works only with apps built from the same source. Expect breakage."
 
             public static let updateChannelStableDescNoBuild = "No build has been published on this channel yet — choose another channel."
 
@@ -1099,7 +1093,7 @@ public enum L {
 
             public static let mailModeLabel = "Run mail on this box"
 
-            public static let mailModeDesc = "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS."
+            public static let mailModeDesc = "A mail box runs email (SMTP, IMAP), which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box, which runs everything except email and can run on the cheapest 1 GB plan, but cannot add email later: the server would have to be set up again with email, on a plan with 2 GB or more."
 
             public static let sshDoorLabel = "Keep an SSH door to this server"
 
@@ -1206,6 +1200,10 @@ public enum L {
                     "\(domain) resolves but no nest is running. To set one up, confirm you control DNS for this domain."
                 }
 
+                public static func localNoNest(domain: String) -> String {
+                    "No nest is running at \(domain). Start a nest there, then check again."
+                }
+
                 public static func alreadyOnNestHandleMatches(handle: String) -> String {
                     "Welcome back, \(handle)."
                 }
@@ -1279,6 +1277,10 @@ public enum L {
                 public static func transient(cause: String) -> String {
                     "\(cause). Try again."
                 }
+
+                public static let domainNotHosted = "This nest doesn't host addresses on that domain. Go back and choose an address on one of its own domains."
+
+                public static let unreachable = "Couldn't reach the nest to create your account. Try again."
 
                 public static let alreadyRegistered = "This nest already has an account for you, so it won't take a new invite request. Its admin may have suspended your account — contact the admin; if they restore it, sign in again."
 
@@ -1379,7 +1381,7 @@ public enum L {
         public enum trustPrompt {
             public static let title = "Trust this box?"
 
-            public static let summary = "This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there."
+            public static let summary = "This box can do more for you if you let it read your mail and calendar, and the posts of the paid tiers you already have: running its virus and spam checks on your mail again when those checks are updated, reading your calendar for itself, and showing the paid posts you publish on the web to the people who pay for them. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there."
 
             public static let grantButton = "Yes, trust this box"
 
@@ -1418,6 +1420,8 @@ public enum L {
             public static func persistAccount(message: String) -> String {
                 "Couldn't save your new account: \(message)"
             }
+
+            public static let persistIdentity = "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is."
 
             public static func persistSuccessor(message: String) -> String {
                 "Couldn't save your new identity: \(message)"
@@ -1514,6 +1518,8 @@ public enum L {
 
         public static let createPrompt = "There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered."
 
+        public static let keyringLockedNotice = "Your system keyring is locked or not set up, so Fauna can't keep your sign-in keys in it and will encrypt them with a passphrase you choose instead. To use the keyring, unlock it or set it up, then restart Fauna before you choose a passphrase."
+
         public static let passphraseLabel = "Passphrase"
 
         public static let confirmLabel = "Confirm passphrase"
@@ -1585,6 +1591,12 @@ public enum L {
 
     public enum feed {
         public static let composeEmpty = "Post cannot be empty"
+
+        public static func importedNotice(platform: String) -> String {
+            "Showing the posts you imported from \(platform)"
+        }
+
+        public static let importedClear = "Show all posts"
 
         public static let videoExternalOpenConfirmTitle = "Open this video externally?"
 
@@ -1672,10 +1684,6 @@ public enum L {
 
         public static let reportPost = "Report post"
 
-        public static let postMutedPlaceholder = "Muted word"
-
-        public static let postMutedReveal = "Show anyway"
-
         public static func errorMutedKeywords(message: String) -> String {
             "Your muted words are not being applied: \(message)"
         }
@@ -1704,6 +1712,8 @@ public enum L {
             public static let title = "Feeds"
 
             public static let trending = "Trending"
+
+            public static let local = "Local"
 
             public static let noPosts = "No posts yet."
 
@@ -1950,7 +1960,7 @@ public enum L {
             public static let receiveStopped = "New messages stopped arriving because of an internal error. Restart the app (or reload the page) to receive them again."
 
             public static func mailUnopenable(count: String) -> String {
-                "\(count) received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped."
+                "\(count) received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving."
             }
         }
 
@@ -2028,10 +2038,6 @@ public enum L {
             public static let memberUnattestedMark = "Was in this group before you recovered your account. Keep them, or remove them if you don't recognise them."
 
             public static let memberKeep = "Keep"
-
-            public static let mutedWord = "Muted word"
-
-            public static let mutedReveal = "Show anyway"
 
             public static let markAsSpam = "Mark as spam"
 
@@ -2228,6 +2234,8 @@ public enum L {
             public static let recipientResolveError = "Lookup failed — try again"
 
             public static let recipientResolveNotFound = "Not found — check the address"
+
+            public static let recipientResolveNotReachable = "Not reachable yet — they need to open Fauna first"
 
             public static let recipientResolveResolved = "Resolved"
 
@@ -2759,16 +2767,6 @@ public enum L {
         public static let react = "React"
 
         public static let messagePlaceholder = "Type a message..."
-
-        public enum message {
-            public static let encrypted = "Encrypted"
-
-            public static let encryptedTitle = "End-to-end encrypted via MLS"
-
-            public static let signed = "Signed"
-
-            public static let signedTitle = "Sender signature verified — content is plaintext in the nest"
-        }
     }
 
     public enum atprotoSettings {
@@ -2838,7 +2836,7 @@ public enum L {
 
         public static let externalAppsToggle = "Allow external apps"
 
-        public static let externalAppsHint = "When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected."
+        public static let externalAppsHint = "When this is off, every app it affects is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected."
 
         public static let depthHeading = "Integration depth"
 
@@ -2852,7 +2850,7 @@ public enum L {
 
         public static let depthHostedVisibleTitle = "Hosted here — visible"
 
-        public static let depthHostedVisibleDesc = "This nest holds your identity and publishes your public posts to the Bluesky network."
+        public static let depthHostedVisibleDesc = "This nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network."
 
         public static let depthHostedFullTitle = "Hosted here — full access"
 
@@ -2885,8 +2883,6 @@ public enum L {
         public static func handleEitherWay(handle: String) -> String {
             "Your Bluesky handle will be @\(handle) either way."
         }
-
-        public static let historyBackfillLabel = "Also publish my existing public posts."
 
         public static func historyBackfillCountLabel(count: String) -> String {
             "Also publish my \(count) existing public posts."
@@ -3050,7 +3046,7 @@ public enum L {
             "Your identity \(handle) is restored — the same identity you had before, nothing new is created."
         }
 
-        public static let cardPublishConsent = "Your public posts become visible to everyone on the Bluesky network."
+        public static let cardPublishConsent = "Your public posts, apart from posts you imported from another service, become visible to everyone on the Bluesky network."
 
         public static let cardDeactivate = "Publishing stops and the network no longer serves your profile or posts. Your identity is kept — re-enabling restores it exactly."
 
@@ -3070,7 +3066,7 @@ public enum L {
             "Your AT Protocol identity @\(handle) is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity."
         }
 
-        public static let deleteConfirmAppsDisconnected = "Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you."
+        public static let deleteConfirmAppsDisconnected = "Bluesky apps you are signed in to are disconnected. If you have let other apps post as you, that permission is kept — stop it under Posting from other apps."
 
         public static let deleteConfirmLevelOff = "Your Bluesky setting returns to Off."
 
@@ -3095,7 +3091,7 @@ public enum L {
         public static let errorConsentGone = "That request is no longer waiting for an answer — it may have expired, or you may have already answered it on another device. Start the sign-in again from the app that asked."
 
         public static func contestDetailContestable(handle: String) -> String {
-            "A change to your AT Protocol identity \(handle) was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step."
+            "A change to your AT Protocol identity \(handle) was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today."
         }
 
         public static func contestDetailWindowClosed(handle: String) -> String {
@@ -3126,7 +3122,7 @@ public enum L {
             "You are about to undo the change to \(handle), and everything published on top of it, by signing an earlier state of your identity back into place."
         }
 
-        public static let contestConfirmSigns = "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step."
+        public static let contestConfirmSigns = "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you, and Fauna has no way to replace that key today."
 
         public static let contestConfirmDirectoryRules = "The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe."
     }
@@ -3144,18 +3140,18 @@ public enum L {
             "Security alert: the published record of your AT Protocol identity names no handle at all, so nobody can find you at \(domain). Do not trust this identity for anything sensitive, and contact whoever runs your nest."
         }
 
-        public static let recoveryReplacementPending = "Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit."
+        public static let recoveryReplacementPending = "Security alert: someone used your secret key to request a replacement of your recovery kit. If that was not you, someone else has your secret key. Cancel it in Settings → Account → Recovery Kit."
 
         public static func recoveryReplacementPendingDetail(days: String, fingerprint: String) -> String {
             "The replacement takes effect in \(days) days unless cancelled. The pending recovery key begins \(fingerprint) — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit."
         }
 
         public static func domainExpiringAdmin(domain: String, days: String) -> String {
-            "Urgent: \(domain) — the name this deployment runs on — expires in \(days) days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now."
+            "Urgent: \(domain) — the name this deployment runs on — expires in \(days) days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now."
         }
 
         public static func domainExpiringResident(domain: String, days: String) -> String {
-            "Urgent: \(domain) — the name this deployment runs on — expires in \(days) days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address."
+            "Urgent: \(domain) — the name this deployment runs on — expires in \(days) days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address."
         }
 
         public static func domainExpiredAdmin(domain: String) -> String {
@@ -3163,7 +3159,7 @@ public enum L {
         }
 
         public static func domainExpiredResident(domain: String) -> String {
-            "Urgent: \(domain) — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address."
+            "Urgent: \(domain) — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address."
         }
 
         public static func domainLapsingAdmin(domain: String, status: String) -> String {
@@ -3171,7 +3167,7 @@ public enum L {
         }
 
         public static func domainLapsingResident(domain: String, status: String) -> String {
-            "Urgent: the registration for \(domain) — the name this deployment runs on — is being withdrawn (\(status)). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address."
+            "Urgent: the registration for \(domain) — the name this deployment runs on — is being withdrawn (\(status)). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address."
         }
 
         public static func evictionWarning(days: String, suspendAt: String, deleteAt: String) -> String {
@@ -3500,6 +3496,14 @@ public enum L {
             "Edited by \(author)"
         }
 
+        public static func versionAuthorDeposited(app: String, author: String) -> String {
+            "Edited by \(app) via \(author)"
+        }
+
+        public static func versionAuthorDepositedUnknown(author: String) -> String {
+            "Edited by a connected app via \(author)"
+        }
+
         public static let versionRestore = "Restore"
 
         public static let versionsShowPruned = "Show recently pruned"
@@ -3748,6 +3752,12 @@ public enum L {
 
         public static let restoreKindsCalendar = "calendar"
 
+        public static let restoreKindsContacts = "contacts"
+
+        public static let restoreKindsPosts = "posts"
+
+        public static let restoreKindsConversations = "conversations"
+
         public static let restoreConfirmPlaceholder = "Re-type the snapshot id to confirm"
 
         public static let restoreConfirmButton = "Restore"
@@ -3756,9 +3766,9 @@ public enum L {
 
         public static let restoreProgressRunning = "Restoring…"
 
-        public static let restoreProgressDone = "Done — restart the bridge."
+        public static let restoreProgressDone = "Done — restart the mail and calendar service."
 
-        public static let restoreWarningConfigAbsent = "Restored, but the bridge's sign-in keys were not part of the restore — the bridge can't sign in after it restarts until they are restored too."
+        public static let restoreWarningConfigAbsent = "Restored, but this mail and calendar service's sign-in keys were not part of the restore — it can't sign in after it restarts until they are restored too."
 
         public static let restoreNoSnapshots = "No local snapshots available to restore."
 
@@ -3769,7 +3779,7 @@ public enum L {
         public static let restoreNoDestinations = "No backup destinations yet — add one under \"Backup destinations\" above."
 
         public static func restoreDivergenceBanner(count: String) -> String {
-            "\(count) MUAs reconnected with newer state"
+            "\(count) mail or calendar apps reconnected with newer state"
         }
 
         public static let restoreDivergenceModalTitle = "Restore divergence (forensic)"
@@ -3804,7 +3814,7 @@ public enum L {
 
         public static let backupDestinationsTitle = "Backup destinations"
 
-        public static let backupDestinationsDesc = "Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them."
+        public static let backupDestinationsDesc = "Replicate your data to another place — a second nest you control, a friend's nest or one of your own devices. Everything that travels there is encrypted, apart from a folder you have made public — the destination cannot read the rest."
 
         public static let backupDestinationsEmpty = "No backup destinations configured."
 
@@ -3920,7 +3930,7 @@ public enum L {
 
         public static let backupSoleClientDestinationWarning = "Every backup destination you have is one of your own devices. Devices get lost, wiped and replaced — add a nest destination so a copy lives somewhere else."
 
-        public static let backupDestinationCustodianExposure = "This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen."
+        public static let backupDestinationCustodianExposure = "This device will keep an offline copy of everything a backup destination keeps. Anyone who can unlock it can read all of it, not just what is on screen."
 
         public static func backupOrphanedStoreRow(held: String) -> String {
             "This device is still holding \(held) of a backup copy. No destination uses it any more."
@@ -4020,6 +4030,38 @@ public enum L {
 
         public static func reseedGapUnnamedFiles(count: String) -> String {
             "\(count) files arrived without their names, so some files are still missing."
+        }
+
+        public static let reseedRefusedNotAccepted = "You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide."
+
+        public static let reseedRefusedPreflightStale = "The copy changed after you confirmed the restore, so this part was left where it is. Run the restore again to see the copy as it is now."
+
+        public static func reseedNoteUnanchoredRows(count: String) -> String {
+            "\(count) files the other nest offered are not in your own record of the backup, so they were left out."
+        }
+
+        public static func reseedPreflightVouched(set: String, date: String, generation: String) -> String {
+            "\(set): the copy is as new as or newer than what this device last checked on \(date) (version \(generation))."
+        }
+
+        public static func reseedPreflightVouchedUndated(set: String, generation: String) -> String {
+            "\(set): the copy is as new as or newer than what this device last checked (version \(generation))."
+        }
+
+        public static func reseedPreflightRolledBack(set: String, generation: String, pinned: String) -> String {
+            "\(set): the copy is OLDER than what this device last checked (version \(generation), this device saw version \(pinned)). Restoring it brings back that older state."
+        }
+
+        public static func reseedPreflightUnvouched(set: String, generation: String) -> String {
+            "\(set): this device has never checked this copy, so it cannot tell whether it is the newest (version \(generation))."
+        }
+
+        public static func reseedPreflightWithheld(set: String, pinned: String) -> String {
+            "\(set): part of the copy is MISSING — this device last checked version \(pinned) of it, and the other nest no longer offers it. Restoring brings the rest back without it."
+        }
+
+        public static func reseedPreflightFolders(count: String) -> String {
+            "\(count) folders come back as the other nest holds them. This device cannot check that they are complete or the newest."
         }
 
         public static let backupAuditRecoverButton = "Recover what your nest lost"
@@ -4205,13 +4247,17 @@ public enum L {
 
             public static let storageBackend = "Storage Backend"
 
+            public static let compressionLabel = "Compression"
+
+            public static let chunkSizesLabel = "Chunk Sizes"
+
             public static let encryption = "Encryption & Compression"
 
             public static let encryptionAlgo = "ChaCha20-Poly1305"
 
-            public static let compression = "zstd level 3"
+            public static let compression = "zstd"
 
-            public static let chunkSizes = "512 KB - 16 MB avg 4 MB"
+            public static let chunkSizes = "up to 8 MB; larger files split into chunks of 2 MB on average, 8 MB at most"
 
             public static let loadingStats = "Loading statistics..."
         }
@@ -4420,6 +4466,10 @@ public enum L {
             "Limited by \(source)"
         }
 
+        public static let shareTransferStateUnreachable = "Could not reach their device"
+
+        public static let shareTransferStateInterrupted = "Connection lost; retrying"
+
         public static let shareTransferSourceFreeSpace = "free space on this device"
     }
 
@@ -4481,6 +4531,12 @@ public enum L {
         public static let memberNote = "Removing a device here is permanent: there is no undo, and it must sign in again from scratch. A listed device is not necessarily a problem — one that has signed in but not yet registered with the server appears here until it does. Before removing one, compare its fingerprint with the devices you still have: each shows its own on its Devices page, and the one to remove matches none of them. If two appear where you expected one, one of them is a device you hold."
 
         public static let memberRemoveConfirm = "Yes, remove it permanently"
+
+        public static let rename = "Rename"
+
+        public static let renameLabel = "Device name"
+
+        public static let renameConfirm = "Save name"
 
         public static let folders = "Folders"
 
@@ -4544,9 +4600,9 @@ public enum L {
 
         public static let keylessPostureBadge = "Relay only — holds no keys"
 
-        public static let custodyHolderSection = "Custodians — who holds sealed copies of your data"
+        public static let custodyHolderSection = "Custodians — who holds encrypted copies of your data"
 
-        public static let custodyHolderScope = "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone"
+        public static let custodyHolderScope = "Trusted to hold encrypted copies — cannot read them, apart from what you published to everyone"
 
         public static func custodyReceiptFresh(when: String) -> String {
             "Last confirmed \(when)"
@@ -4564,15 +4620,15 @@ public enum L {
 
         public static let custodyRevoke = "Stop trusting this custodian"
 
-        public static let custodyRevokeBoundNote = "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before."
+        public static let custodyRevokeBoundNote = "Stops future copies and serving on honest holders. Copies already held stay where they are, no more readable to the holder than before."
 
-        public static let custodyHeldSection = "Held for others — sealed copies this device keeps"
+        public static let custodyHeldSection = "Held for others — encrypted copies you keep for them"
 
         public static func custodyHeldOwner(owner: String) -> String {
             "Holding for \(owner)"
         }
 
-        public static let custodyHeldScopeAccount = "Their account's sealed data — unreadable on this device, apart from what they published to everyone"
+        public static let custodyHeldScopeAccount = "Their account's encrypted data — unreadable where you hold it, apart from what they published to everyone"
 
         public static func custodyHeldRestoreAddress(address: String) -> String {
             "If they lose every device, they can restore from this nest at \(address) — give them this address yourself."
@@ -4589,10 +4645,10 @@ public enum L {
         public static let custodyRemoveDone = "Removed — the space is free."
 
         public static func custodyOfferTitle(owner: String) -> String {
-            "\(owner) asks this device to hold sealed copies"
+            "\(owner) asks you to hold encrypted copies"
         }
 
-        public static let custodyOfferFloor = "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content."
+        public static let custodyOfferFloor = "Their copies would be stored encrypted wherever you hold them, and could not be read there, apart from what they have published to everyone. Of the rest you would see only the shape: what kinds of their data you hold, how much is stored, and when it changes — never the content."
 
         public static let custodyOfferAccept = "Hold for them"
 
@@ -4606,13 +4662,13 @@ public enum L {
 
         public static let custodyDegradedBadge = "Degraded — some copies were dropped under the budget"
 
-        public static let custodyMintButton = "Ask a friend to hold sealed copies"
+        public static let custodyMintButton = "Ask a friend to hold encrypted copies"
 
         public static let custodyMintHostLabel = "Who to ask"
 
         public static let custodyMintHostPlaceholder = "Choose a contact"
 
-        public static let custodyMintFloor = "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
+        public static let custodyMintFloor = "They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape."
 
         public static let custodyMintConfirm = "Send the request"
 
@@ -4670,13 +4726,13 @@ public enum L {
 
         public static let folderAudienceSharedHint = "This folder is shared with other people, so it can't be made private while it's shared. To make it private, remove the sharing in the section below first — or change who it is shared with there."
 
-        public static let folderAudiencePublicBoundHint = "This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public."
+        public static let folderAudiencePublicBoundHint = "This folder is shared with other people and currently public. Pick Shared to encrypt it again so only those people can read it. Anything published while it was public should still be treated as public."
 
         public static let declassifyTitle = "Make this folder public?"
 
         public static let declassifyBody = "Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file."
 
-        public static let declassifyIrreversible = "Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good."
+        public static let declassifyIrreversible = "Turning it back later encrypts its files again, but anything published while the folder is public may already have been read or copied, so treat it as public for good."
 
         public static let declassifyConfirm = "Make public"
 
@@ -4766,7 +4822,7 @@ public enum L {
 
         public static let serveWebdav = "Serve over WebDAV"
 
-        public static let serveWebdavHint = "Browse and edit this set from any WebDAV client (Finder, GNOME Files, rclone)."
+        public static let serveWebdavHint = "Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone)."
 
         public static let serveWebdavNeedsMail = "Set up mail first — serving over WebDAV uses your mail encryption key."
 
@@ -4775,6 +4831,12 @@ public enum L {
         public static let showOnDemandFiles = "Show in Files"
 
         public static let showOnDemandHint = "Browse this set on demand — files download when opened and can be freed again."
+
+        public static let onDemandNeedsFilesEnable = "Not shown in Files yet — in the Files app open Browse, choose Edit from the ⋯ menu and turn on Fauna."
+
+        public static let onDemandNeedsExtensionEnable = "Not shown in Finder yet — turn on Fauna under System Settings → General → Login Items & Extensions → Extensions."
+
+        public static let onDemandOpenSettings = "Open System Settings"
 
         public static let onDemandBoundHint = "This set syncs to its bound location; remove the binding to show it on demand instead."
 
@@ -4815,6 +4877,14 @@ public enum L {
         }
 
         public static let errorP2pRemoteEnable = "Peer transfers can only be turned on from that device itself. From here you can only turn them off."
+
+        public static func errorRenameDevice(message: String) -> String {
+            "Couldn't rename the device: \(message)"
+        }
+
+        public static let errorRenameNeedsKey = "This app can't rename devices until it holds your account key."
+
+        public static let errorRenameReservedName = "That name is the one an app gives a device you haven't named. Choose another."
 
         public static func errorRemoveFleetDevice(message: String) -> String {
             "Removed the device, but couldn't finish cleanup: \(message)"
@@ -5208,7 +5278,7 @@ public enum L {
 
         public static let revokeNote = "Revoking ends a sign-in and makes whoever held it prove themselves again. It does not sign a device out — a device that holds your secret key or a device grant signs itself straight back in. To end a device for good, remove it under Settings → Devices. If someone else holds your secret key, only your recovery kit ends them (Settings → Account → Recovery Kit → My Identity Was Stolen)."
 
-        public static let lockoutWarning = "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it."
+        public static let lockoutWarning = "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. (On an account that is an admin of its nest, the lock signs every device out but does not stop anyone signing in again.) It does not remove somebody who holds your secret key — they come back when the lock ends, or at once on an account that is an admin of its nest. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use — on a device that holds your secret key, choose My Identity Was Stolen on the Account locked screen (on an account that is an admin of its nest, which is not locked out, under Settings → Account → Recovery Kit). A lock you did not set is itself the sign to use it."
 
         public static let lockoutConfirmPlaceholder = "Type LOCK to confirm"
 
@@ -5247,16 +5317,16 @@ public enum L {
         public enum recoveryKit {
             public static let title = "Recovery Kit"
 
-            public static let desc = "An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device."
+            public static let desc = "A second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy."
 
-            public static let statusNeverCreated = "No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back."
+            public static let statusNeverCreated = "No recovery kit. If every copy of your secret key is lost, your account cannot be recovered, and if someone steals it, you cannot take it back."
 
-            public static let statusRegistered = "Your recovery kit is active, and a sealed copy of your identity secret is stored for it."
+            public static let statusRegistered = "Your recovery kit is active, and the copy of your secret key that only your kit opens is stored."
 
-            public static let statusRegisteredNoEscrow = "Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this."
+            public static let statusRegisteredNoEscrow = "Your recovery kit is active, but the copy of your secret key that only your kit opens is not stored, so the kit cannot recover this account right now. Enter your kit below and press Restore Kit Recovery to fix this."
 
             public static func statusReplacementPending(days: String) -> String {
-                "A replacement of your recovery kit was requested with your identity secret alone, and takes effect in \(days) days. Cancel it below if it was not you."
+                "A replacement of your recovery kit was requested with your secret key alone, and takes effect in \(days) days. Cancel it below if it was not you."
             }
 
             public static let statusLoading = "Checking your recovery kit…"
@@ -5267,7 +5337,7 @@ public enum L {
 
             public static let lost = "I Lost My Kit"
 
-            public static let escrowReseal = "Restore Phrase Recovery"
+            public static let escrowReseal = "Restore Kit Recovery"
 
             public static let sweepRetry = "Finish Moving Your Groups"
 
@@ -5343,9 +5413,9 @@ public enum L {
                 "Could not cancel the pending replacement: \(message)"
             }
 
-            public static let kitPhrasePlaceholder = "Paste your recovery phrase (fauna://recovery link or 64-character code)"
+            public static let kitPhrasePlaceholder = "Paste your recovery kit (fauna://recovery link or 64-character code)"
 
-            public static let kitPhraseRequired = "Paste the recovery phrase for this account first."
+            public static let kitPhraseRequired = "Paste the recovery kit for this account first."
 
             public static let sweepNone = "Your conversations were not running, so your groups still include your old identity, and your new one is not in them. Press Finish Moving Your Groups below to complete it now, or ask another member of each group to remove the old identity and add your new one."
 
@@ -5396,7 +5466,7 @@ public enum L {
             }
 
             public static func reviewRemoveFolderSeats(seats: String) -> String {
-                "They are also in \(seats) shared folder(s). Remove them in each folder's sharing settings — or leave the set, if it is not yours — then choose Remove again."
+                "They are also in \(seats) shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again."
             }
 
             public static func reviewRemoveUnsyncedSeats(seats: String) -> String {
@@ -5499,7 +5569,7 @@ public enum L {
 
             public static let toggle = "Back up identity to iCloud Keychain"
 
-            public static let footer = "When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices."
+            public static let footer = "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place."
         }
 
         public static let checkForUpdates = "Check for Updates"
@@ -5561,7 +5631,7 @@ public enum L {
 
             public static let disableTitle = "Disable mail?"
 
-            public static let disableWarning = "This revokes all your mail credentials and clears your mail encryption key. Third-party mail apps (IMAP/CalDAV) will stop working until you re-enable mail."
+            public static let disableWarning = "Mail apps you connected can no longer send or read mail until you turn mail back on. Calendar, contacts and file apps that sign in with the same password keep working. Your mail keys stay, so your earlier mail stays readable, and turning mail back on needs no new set-up."
 
             public static let disableConfirm = "Disable mail"
 
@@ -5731,7 +5801,7 @@ public enum L {
 
             public static let deleteAccount = "Delete Account"
 
-            public static let deleteConfirmText = "This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail."
+            public static let deleteConfirmText = "This permanently removes your handle and data from this nest. Your key is not affected. Take your data first: Export My Data, in Settings → Account, downloads what your nest holds for you, your mail included; to move your mailbox to another mail service, use Export mailbox, among the mail pages in Settings."
 
             public static let connectedServices = "Connected Services"
 
@@ -6120,7 +6190,7 @@ public enum L {
 
         public static let aboutName = "Fauna for Windows"
 
-        public static let aboutDesc = "Encrypted messaging, contacts, and file sync."
+        public static let aboutDesc = "Your feed, messages, mail, calendar and files, on a server you control."
 
         public static let dangerZoneDesc = "Permanently delete your account and all associated data. This action cannot be undone."
 
@@ -6146,6 +6216,8 @@ public enum L {
             public static let changeHandle = "Failed to change handle"
 
             public static let deleteAccount = "Deletion failed"
+
+            public static let icloudBackup = "The copy to iCloud Keychain could not be made, so the backup stays off"
 
             public static let export = "Export failed"
 
@@ -6182,10 +6254,10 @@ public enum L {
 
         public static let notTrusted = "This nest is not trusted to read any of your content."
 
-        public static let escrowHolderBadge = "Holds your recovery escrow"
+        public static let escrowHolderBadge = "Holds the copy your recovery kit opens"
 
         public static func custodyNestLabel(host: String) -> String {
-            "\(host)'s nest — trusted to hold sealed copies"
+            "\(host)'s nest — trusted to hold encrypted copies"
         }
 
         public static let custodyRestoreButton = "Restore from a custodian nest…"
@@ -6213,12 +6285,14 @@ public enum L {
         }
 
         public static func custodyRestoreSealed(count: String) -> String {
-            "\(count) came back sealed and stay unreadable until this device has their key."
+            "\(count) came back still encrypted and stay unreadable until this device has their key."
         }
 
         public static let custodyRestoreNothingNew = "Nothing new — this device already has everything that nest holds for you."
 
         public static let custodyRestoreMismatch = "Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest."
+
+        public static let custodyRestoreUnchecked = "Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest."
 
         public static let trustedToRead = "Trusted to read:"
 
@@ -6270,7 +6344,7 @@ public enum L {
 
         public static let boundNoteStanding = "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation."
 
-        public static let boundNoteBoundedMail = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail sealed under that period's rotating keys, so content sealed before the schedule caught up may still be unreadable to it."
+        public static let boundNoteBoundedMail = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it."
 
         public static func historyMinted(scope: String, when: String) -> String {
             "Trusted to read \(scope) · \(when)"
@@ -6284,7 +6358,7 @@ public enum L {
             "Trust revoked: \(scope) · \(when)"
         }
 
-        public static let backupScopeSeal = "Backs up your messages for you"
+        public static let backupScopeSeal = "Encrypts and uploads the backups of your mail, calendar, contacts and posts"
 
         public static func backupScopeWriter(destination: String) -> String {
             "Writes your backups to \(destination)"
@@ -6374,13 +6448,13 @@ public enum L {
 
         public static let capabilitiesLabel = "Syncs:"
 
-        public static let capabilityAccountReplica = "sealed copy of your account settings"
+        public static let capabilityAccountReplica = "encrypted copy of your account settings"
 
         public static let expiryLabel = "Expires:"
 
         public static let expiryNever = "Never expires"
 
-        public static let linkRecoveryKeysDiffer = "These two nests hold different recovery keys for this account, so they can't be linked."
+        public static let linkRecoveryKeysDiffer = "These two nests know different recovery kits for this account, so they can't be linked."
 
         public static func forwardQueueSummary(count: String) -> String {
             "\(count) of your posts are waiting to reach your relay."
@@ -6408,7 +6482,7 @@ public enum L {
     public enum logs {
         public static let title = "Logs"
 
-        public static let description = "Recent activity recorded on this device, newest first. No message contents or secrets are ever logged — only what happened, when, and where."
+        public static let description = "Recent activity recorded on this device, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here."
 
         public static let filterLabel = "Severity"
 
@@ -6970,7 +7044,7 @@ public enum L {
 
         public static let microsoftSignInAgain = "Sign in with Microsoft again"
 
-        public static let microsoftUnavailable = "Microsoft sign-in is not available yet."
+        public static let microsoftUnavailable = "Microsoft sign-in is not available in this version of Fauna."
 
         public static let microsoftSessionSignInAgain = "The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept."
 
@@ -7110,7 +7184,7 @@ public enum L {
     public enum archiveImport {
         public static let title = "Import from other services"
 
-        public static let description = "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates and audiences. The archive itself stays in a sealed folder on your nest."
+        public static let description = "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest."
 
         public static let unavailable = "Importing needs a session that holds your identity key; this one does not."
 
@@ -7157,7 +7231,7 @@ public enum L {
         public static let audienceOnlyMe = "Only me"
 
         public static func scopeAudienceSummaryFmt(known: String, unknown: String) -> String {
-            "\(known) posts and albums have a recorded audience and import to it; \(unknown) have none recorded and will be visible only to you."
+            "\(known) posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; \(unknown) have none recorded and will be visible only to you."
         }
 
         public static let scopeAudienceSummaryOnlyMe = "Everything will be visible only to you."
@@ -7182,12 +7256,16 @@ public enum L {
             "\(state) · \(imported) of \(total) · \(skipped) skipped"
         }
 
-        public static func progressTimingFmt(elapsed: String, eta: String) -> String {
-            "\(elapsed) elapsed · about \(eta) left"
-        }
-
         public static func progressTimingEstimatingFmt(elapsed: String) -> String {
             "\(elapsed) elapsed · estimating the time left"
+        }
+
+        public static func progressLineFmt(state: String, imported: String, total: String, skipped: String, elapsed: String, eta: String) -> String {
+            "\(state) · \(imported) of \(total) · \(skipped) skipped · \(elapsed) elapsed · about \(eta) left"
+        }
+
+        public static func progressLineEstimatingFmt(state: String, imported: String, total: String, skipped: String, elapsed: String) -> String {
+            "\(state) · \(imported) of \(total) · \(skipped) skipped · \(elapsed) elapsed · estimating the time left"
         }
 
         public static func progressRowFmt(imported: String, count: String, skipped: String) -> String {
@@ -7218,11 +7296,49 @@ public enum L {
             "\(imported) imported · \(skipped) skipped"
         }
 
+        public static func doneUnplacedCommentsFmt(count: String) -> String {
+            "\(count) comments could not be placed under a post"
+        }
+
+        public static func doneSummaryUnplacedFmt(imported: String, skipped: String, count: String) -> String {
+            "\(imported) imported · \(skipped) skipped · \(count) comments could not be placed under a post"
+        }
+
+        public static func doneSummaryLinksFmt(imported: String, skipped: String, claimed: String, unmatched: String) -> String {
+            "\(imported) imported · \(skipped) skipped · \(claimed) comments and reactions came back from linked contacts · \(unmatched) could not be matched to a post"
+        }
+
+        public static func doneSummaryUnplacedLinksFmt(imported: String, skipped: String, count: String, claimed: String, unmatched: String) -> String {
+            "\(imported) imported · \(skipped) skipped · \(count) comments could not be placed under a post · \(claimed) comments and reactions came back from linked contacts · \(unmatched) could not be matched to a post"
+        }
+
+        public static func linkPromptFmt(contact: String, archivedName: String, platform: String) -> String {
+            "Is \(contact) the “\(archivedName)” from your \(platform) friends?"
+        }
+
+        public static func linkPromptUnnamedFmt(contact: String, platform: String) -> String {
+            "Is \(contact) one of your \(platform) friends?"
+        }
+
+        public static let linkYes = "Yes, link"
+
+        public static let linkNo = "No"
+
+        public static func linkedFmt(platform: String) -> String {
+            "Linked: \(platform)"
+        }
+
+        public static func linkedUnmatchedFmt(platform: String, unmatched: String) -> String {
+            "Linked: \(platform) · \(unmatched) could not be matched to a post"
+        }
+
+        public static let unlink = "Unlink"
+
         public static let viewImportedButton = "View imported posts"
 
         public static let reviewSkippedButton = "Review skipped"
 
-        public static let profilePrefillButton = "Use the archive's profile name and bio"
+        public static let profilePrefillButton = "Use the archive's profile name, bio, links and picture"
 
         public static func folderLinkFmt(folder: String) -> String {
             "Archive folder: \(folder)"
@@ -7395,7 +7511,7 @@ public enum L {
 
             public static let exposeTitle = "Expose content"
 
-            public static let exposeSubtitle = "Allow Nostr users to see your Fauna content"
+            public static let exposeSubtitle = "Serve your public posts, apart from posts you imported from another service, to Nostr users from your nest's relay"
         }
 
         public enum relays {
@@ -7557,11 +7673,11 @@ public enum L {
 
             public static let allowKnock = "Allow Knocks"
 
-            public static let allowKnockDesc = "New contacts must send a knock request first."
+            public static let allowKnockDesc = "New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room."
 
             public static let contactsOnly = "Contacts Only"
 
-            public static let contactsOnlyDesc = "Only confirmed contacts can message you."
+            public static let contactsOnlyDesc = "Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room."
 
             public static let closed = "Closed"
 
@@ -7574,8 +7690,6 @@ public enum L {
             public static func available(count: String) -> String {
                 "\(count) available"
             }
-
-            public static let lowKeys = "Low key packages. Publishing more..."
 
             public static let checking = "Checking encryption status..."
 
@@ -7603,7 +7717,7 @@ public enum L {
 
             public static let title = "Push Notifications"
 
-            public static let contentEncrypted = "Notification content is encrypted end-to-end."
+            public static let contentEncrypted = "Notification content is encrypted end-to-end, apart from a generic alert and the number of unread items, which Apple's notification service carries in the clear."
 
             public static let registered = "Registered with server"
 
@@ -7676,10 +7790,6 @@ public enum L {
             public static let changing = "Changing..."
         }
 
-        public enum dangerZone {
-            public static let deleteHint = "Permanently removes your handle and data from this node. Your key is not affected."
-        }
-
         public enum adminSection {
             public static let title = "Nest Administration"
 
@@ -7696,8 +7806,6 @@ public enum L {
             public static let title = "Build"
 
             public static let commit = "Commit"
-
-            public static let verifyHint = "Verify this build: clone the repo at this commit, build locally, and compare file hashes."
         }
     }
 
@@ -8145,7 +8253,7 @@ public enum L {
 
             public static let retireTitle = "Retire this server"
 
-            public static let retireDesc = "Delete this server at your cloud provider and remove the DNS records that point at it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token."
+            public static let retireDesc = "If Fauna created this server in your cloud account since 8 July 2026, when it began marking the servers it creates, or it is on OVH, delete it there and clean up the DNS records that belong to it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token."
 
             public static let retireButton = "Retire this server…"
 
@@ -8373,7 +8481,7 @@ public enum L {
 
             public static let takedownLabel = "Legal takedown"
 
-            public static let takedownDesc = "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever."
+            public static let takedownDesc = "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever."
 
             public static let takedownContentIdLabel = "Content id"
 
@@ -8394,7 +8502,7 @@ public enum L {
             public static let takedownBlockedNoReference = "A legal reference is required — a takedown without one is refused."
 
             public static func takedownConfirmTakedown(contentType: String, contentId: String, reference: String) -> String {
-                "Take down \(contentType) \(contentId), citing \"\(reference)\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action."
+                "Take down \(contentType) \(contentId), citing \"\(reference)\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit record keeps this action."
             }
 
             public static func takedownConfirmRestore(contentType: String, contentId: String) -> String {
@@ -8409,7 +8517,7 @@ public enum L {
 
             public static let takedownWorking = "Submitting…"
 
-            public static let takedownDone = "Taken down. A tombstone is served in its place and the author of a post can appeal."
+            public static let takedownDone = "Taken down. A tombstone is served in its place and the author can appeal."
 
             public static let takedownRestored = "Restored. The content is served again; the takedown stays on record."
 
@@ -8458,7 +8566,7 @@ public enum L {
             public static let blockItemMessage = "message"
 
             public static func blockConfirmBlock(item: String, contentId: String, reason: String) -> String {
-                "Block \(item) \(contentId) for everyone this nest serves? Reason: \(reason). A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted."
+                "Block \(item) \(contentId) for everyone this nest serves? Reason: \(reason). A notice is shown in its place, the author keeps their view of it — its photos and files are withheld from the author too, and an author on another nest keeps a message only on the devices that already had it — and can appeal, and a permanent audit record keeps this action. Nothing is deleted."
             }
 
             public static func blockConfirmUnblock(item: String, contentId: String, reason: String) -> String {
@@ -8469,7 +8577,7 @@ public enum L {
 
             public static let blockConfirmButtonUnblock = "Confirm unblock"
 
-            public static let blockDone = "Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on."
+            public static let blockDone = "Blocked. A notice is shown in its place, the author can appeal, and the report is recorded as acted on."
 
             public static let blockRestored = "Unblocked. The item is served again; the block stays on record."
 
@@ -8483,7 +8591,7 @@ public enum L {
 
             public static let blockedLabel = "Blocked items"
 
-            public static let blockedDesc = "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was."
+            public static let blockedDesc = "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves except its author — its photos and files from the author too, and an author on another nest keeps a message only on the devices that already had it — with a notice in its place. Unblock serves it again exactly as it was."
 
             public static let blockedLoading = "Loading blocked items…"
 
@@ -8591,11 +8699,11 @@ public enum L {
 
             public static let enabledLabel = "Enable calendar (CalDAV) on this nest"
 
-            public static let enabledSubtitle = "Serve calendar sync (CalDAV) for all users. Needs only a real domain with a public certificate — no email infrastructure — so calendar can run with or without email. The shared mail-and-calendar bridge runs whenever this or Enable mail is on."
+            public static let enabledSubtitle = "Serve calendar sync (CalDAV) for all users. It needs no email infrastructure, so calendar can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on."
 
             public static let caldavPortLabel = "CalDAV port"
 
-            public static let caldavPortDesc = "The port the calendar (CalDAV) server listens on for desktop or IP-only nests that have no domain — reach it at https://this-host:port/. Default 8443. On a domain nest this is ignored: CalDAV is served at mail.your-domain on port 443."
+            public static let caldavPortDesc = "The port calendar, contacts and file apps use when they reach this nest directly at its own address — a nest at home or on a desktop computer. Default 8443. On a server in the cloud with a domain, they are served at your domain's mail server name (mail. followed by your domain) on the standard port, 443, and this setting does not apply."
 
             public static let caldavPortSave = "Save port"
 
@@ -8609,7 +8717,7 @@ public enum L {
 
             public static let enabledLabel = "Enable contacts (CardDAV) on this nest"
 
-            public static let enabledSubtitle = "Serve contact sync (CardDAV) for all users. Rides the same server and certificate as calendar — no email infrastructure — so contacts can run with or without email or calendar. The shared bridge runs whenever this, Enable calendar, or Enable mail is on."
+            public static let enabledSubtitle = "Serve contact sync (CardDAV) for all users. It needs no email infrastructure, so contacts can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on."
         }
 
         public enum filesPage {
@@ -8619,7 +8727,7 @@ public enum L {
 
             public static let enabledLabel = "Enable files (WebDAV) on this nest"
 
-            public static let enabledSubtitle = "Serve file access (WebDAV) for all users. Rides the same server and certificate as calendar and contacts — no email infrastructure — so files can run with or without email, calendar, or contacts. Nothing is served until a user flags a folder for WebDAV. The shared bridge runs whenever this, Enable contacts, Enable calendar, or Enable mail is on."
+            public static let enabledSubtitle = "Serve file access (WebDAV) for all users. It needs no email infrastructure, so files can run with or without email. Nothing is served until a user flags a folder for WebDAV. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on."
         }
 
         public enum inviteRequestsPage {
@@ -8677,7 +8785,7 @@ public enum L {
         public enum logsPage {
             public static let title = "Nest Logs"
 
-            public static let description = "Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where."
+            public static let description = "Recent activity recorded on the nest, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here."
 
             public static let empty = "No nest log entries yet."
 
@@ -8835,7 +8943,7 @@ public enum L {
 
             public static let enabledLabel = "Enable mail"
 
-            public static let enabledSubtitle = "Run the mail subsystem (SMTP / IMAP / CalDAV) for this nest."
+            public static let enabledSubtitle = "Run mail (SMTP and IMAP) for this nest."
 
             public static let healthTitle = "Mail health"
 
@@ -8885,7 +8993,7 @@ public enum L {
 
             public static let healthDelist = "Request removal from the blocklist"
 
-            public static let healthSenderDashboardsNote = "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist)."
+            public static let healthSenderDashboardsNote = "Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and Microsoft run themselves. If you want their view of how your mail is received, sign up with each through its link. Fauna doesn't connect to them."
 
             public static let healthSenderDashboardGmail = "Gmail Postmaster Tools"
 
@@ -8917,11 +9025,11 @@ public enum L {
 
             public static let autoEnableNewUsersLabel = "Auto-enable mail for new users"
 
-            public static let autoEnableNewUsersSubtitle = "New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off."
+            public static let autoEnableNewUsersSubtitle = "New users automatically get a mailbox at their handle on first sign-in — or, while mail is off and calendars or contacts are served, a password for their calendar and contacts apps. Each user can still turn their own mail off."
 
             public static let microsoftGroupTitle = "Microsoft sign-in for the Outlook import"
 
-            public static let microsoftGroupDesc = "The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default."
+            public static let microsoftGroupDesc = "The Outlook import signs in to Microsoft with your organisation's own app registration: enter its application (client) ID and, if you like, its directory. Until one is entered, the import's Sign in with Microsoft does nothing. Clear both fields and save to remove it."
 
             public static let microsoftRequirements = "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory."
 
@@ -8933,7 +9041,7 @@ public enum L {
 
             public static let microsoftSave = "Save Microsoft registration"
 
-            public static let microsoftUsingDefault = "Using the default registration."
+            public static let microsoftUsingDefault = "No registration entered — the Outlook import's Sign in with Microsoft does nothing until one is."
 
             public static let microsoftUsingOwn = "Using your organisation's registration."
 
@@ -9169,7 +9277,7 @@ public enum L {
 
             public static let dmarcGroupTitle = "DMARC reports"
 
-            public static let dmarcGroupDesc = "The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept."
+            public static let dmarcGroupDesc = "The reports peer mail servers send about mail claiming to be from your domains, how long they are kept, and whether your nest sends reports of its own."
 
             public static let dmarcRufPublishLabel = "Ask for forensic reports"
 
@@ -9182,6 +9290,8 @@ public enum L {
             public static let dmarcForensicRetentionLabel = "Keep forensic reports (days, 1–90)"
 
             public static let dmarcForensicRetentionWarning = "Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer."
+
+            public static let dmarcOutboundAggregateLabel = "Send daily DMARC reports to other domains"
 
             public static let dmarcSave = "Save DMARC policy"
         }
@@ -9223,7 +9333,7 @@ public enum L {
 
             public static let addDomainSubmit = "Add"
 
-            public static let addDomainPrimaryWarning = "This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain."
+            public static let addDomainPrimaryWarning = "This becomes your nest's primary domain, which can never be removed, only renamed onto a different domain."
 
             public static let primaryBadge = "Primary"
 
@@ -9549,6 +9659,8 @@ public enum L {
 
             public static let includeTextLabel = "Include the text of this message — the admins will be able to read it"
 
+            public static let includeTextLabelPost = "Include the text of this post — the admins will be able to read it"
+
             public static let blockAuthorLabel = "Also block this person"
 
             public static let submit = "Send report"
@@ -9644,7 +9756,7 @@ public enum L {
     public enum mutedWords {
         public static let title = "Muted words"
 
-        public static let description = "A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it."
+        public static let description = "A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it."
 
         public static let inputPlaceholder = "Add a word to mute"
 
@@ -9708,7 +9820,7 @@ public enum L {
 
         public static let publishNamePlaceholder = "e.g. Small orange cats"
 
-        public static let publishLimitationNote = "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published anonymously: nothing links the list back to you or your account."
+        public static let publishLimitationNote = "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though the posts you choose can still say something about you."
 
         public static let publishExemplarsTitle = "Posts to include"
 
@@ -9740,7 +9852,7 @@ public enum L {
 
         public static let publishNameLabelModel = "Public name for this model"
 
-        public static let publishLimitationNoteModel = "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published anonymously, and it’s built only from posts you marked by hand: nothing you merely read or watched goes into it."
+        public static let publishLimitationNoteModel = "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though someone who compares its word patterns with public posts may be able to guess which of them you marked. It’s built only from posts you marked by hand: nothing you merely read or watched goes into it."
 
         public static func publishCorpusSize(included: String, marked: String) -> String {
             "Built from \(included) public examples of your \(marked) marked posts."
@@ -10529,11 +10641,11 @@ public enum L {
         }
 
         public static func rowSecurityRecoveryReplacementPending(newKey: String, landsAt: String) -> String {
-            "Security: a recovery key replacement was requested (new key \(newKey)) and lands at \(landsAt). If this was not you, veto it within 30 days."
+            "Security: a recovery kit replacement was requested (new key \(newKey)) and lands at \(landsAt). If this was not you, veto it within 30 days."
         }
 
         public static func rowSecurityRecoveryReplacementLanded(newKey: String) -> String {
-            "Security: your recovery key was replaced (new key \(newKey)). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator."
+            "Security: your recovery kit was replaced (new key \(newKey)). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator."
         }
 
         public static func rowSecurityRecoveryReplacementCancelled(cancelledBy: String) -> String {
@@ -10545,11 +10657,11 @@ public enum L {
         }
 
         public static func rowSecurityArchiveExported(ip: String) -> String {
-            "Security: your full account archive was downloaded from \(ip). If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator."
+            "Security: your full account archive was downloaded from \(ip). If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator."
         }
 
         public static func rowSecurityMailboxExportDownloaded(format: String, ip: String) -> String {
-            "Security: a mailbox export (\(format)) was downloaded from \(ip). If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator."
+            "Security: a mailbox export (\(format)) was downloaded from \(ip). If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator."
         }
     }
 
@@ -11065,7 +11177,7 @@ public enum L {
         }
 
         public enum sync {
-            public static let deviceLimitExceeded = "This account already has as many devices as its plan allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier."
+            public static let deviceLimitExceeded = "This account already has as many devices as its tier allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier."
         }
 
         public enum send {
@@ -11116,7 +11228,7 @@ public enum L {
 
         public static let nestTimeout = "Nest did not come online within the expected time"
 
-        public static let snapshotDeviceUnknown = "This snapshot's owning device is unknown, so its files cannot be downloaded."
+        public static let snapshotDownloadNoDeviceId = "This device could not load its own identity, so snapshot files cannot be downloaded here. Restart the app; if that does not help, sign in again."
 
         public static let noIdentity = "No identity configured"
 
@@ -11176,7 +11288,7 @@ public enum L {
 
         public static let recoverySuperseded = "This identity has already been succeeded by another one. Import your new identity to continue."
 
-        public static let recoveryNoEscrow = "No sealed copy of your identity secret is stored for this recovery kit, so it cannot recover this account right now."
+        public static let recoveryNoEscrow = "The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now."
 
         public static let recoveryNotRegistered = "No recovery key is registered for this identity, so there is nothing to recover from."
 
@@ -11381,10 +11493,6 @@ public enum L {
 
             public static let location = "Region"
         }
-
-        public enum managed {
-            public static let disabled = "Managed subdomains on fauna.social are coming soon. For now, pick another option."
-        }
     }
 
     public enum region {
@@ -11395,6 +11503,8 @@ public enum L {
         public static func collapsedNotice(region: String, authority: String) -> String {
             "Hidden in \(region) under the policy of \(authority) — select to show"
         }
+
+        public static let sealedNote = "Hidden from you on this device — nothing was removed, detected or reported"
 
         public static let revealButton = "Show"
 
@@ -11445,6 +11555,14 @@ public enum L {
         public static func collapsedNotice(nest: String) -> String {
             "Hidden on \(nest) under this nest’s rules — select to show"
         }
+
+        public static func joiningHeading(nest: String) -> String {
+            "Rules of \(nest). By continuing you accept them."
+        }
+
+        public static let notAppliedNewerVersion = "These rules were written by a newer version of Fauna, so none of them apply on this device. Update the app to see and apply them."
+
+        public static let notAppliedMalformed = "These rules contain an error, so none of them apply on this device."
 
         public static func changedNotice(nest: String) -> String {
             "\(nest) changed its rules — see what is in force"
@@ -11616,13 +11734,15 @@ public enum L {
 
         public static let scopeNostrSign = "Sign Nostr events with your key"
 
-        public static let scopeMail = "Read and send your mail, and sync your calendar, contacts and files"
+        public static let scopeMail = "Read and send your mail while mail is on, and sync your calendar, contacts and files"
 
         public static let requestsHeading = "Requests"
 
         public static let consentEndsHolder = "This app now uses a new key. Approving ends the access its earlier key was given."
 
         public static let consentEndsWriter = "This app now signs with a new key. Approving ends its earlier key's permission to write."
+
+        public static let consentAssistantReach = "Whatever you allow here, the AI assistant you connect can read or do — and if that assistant runs on a company's servers, that company's service can too. You can disconnect it here at any time."
 
         public static let connectHeading = "Connect an app"
 
@@ -11749,10 +11869,10 @@ public enum L {
         }
 
         public static func oracleOps(count: String) -> String {
-            "Your nest used your keys for this app \(count) times in the current window"
+            "Fauna acted for this app \(count) times in the current window"
         }
 
-        public static let oracleOpsOne = "Your nest used your keys for this app once in the current window"
+        public static let oracleOpsOne = "Fauna acted for this app once in the current window"
 
         public static func oracleRequests(count: String) -> String {
             "\(count) requests answered in all"
@@ -11975,17 +12095,17 @@ private enum _LFlat {
         "admin.bridges_rotate.confirm": "Rotate key",
         "admin.bridges_rotate.title": "Rotate service-user key?",
         "admin.bridges_rotate.warning": "The bridge will be marked revoked and will exit; the supervisor restarts it with a fresh key. On a mail-enabled box the new key is approved automatically.",
-        "admin.calendar_page.caldav_port_desc": "The port the calendar (CalDAV) server listens on for desktop or IP-only nests that have no domain — reach it at https://this-host:port/. Default 8443. On a domain nest this is ignored: CalDAV is served at mail.your-domain on port 443.",
+        "admin.calendar_page.caldav_port_desc": "The port calendar, contacts and file apps use when they reach this nest directly at its own address — a nest at home or on a desktop computer. Default 8443. On a server in the cloud with a domain, they are served at your domain's mail server name (mail. followed by your domain) on the standard port, 443, and this setting does not apply.",
         "admin.calendar_page.caldav_port_invalid": "Enter a port number between 1 and 65535.",
         "admin.calendar_page.caldav_port_label": "CalDAV port",
         "admin.calendar_page.caldav_port_save": "Save port",
         "admin.calendar_page.description": "Calendar (CalDAV) sync for this deployment.",
         "admin.calendar_page.enabled_label": "Enable calendar (CalDAV) on this nest",
-        "admin.calendar_page.enabled_subtitle": "Serve calendar sync (CalDAV) for all users. Needs only a real domain with a public certificate — no email infrastructure — so calendar can run with or without email. The shared mail-and-calendar bridge runs whenever this or Enable mail is on.",
+        "admin.calendar_page.enabled_subtitle": "Serve calendar sync (CalDAV) for all users. It needs no email infrastructure, so calendar can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.",
         "admin.calendar_page.title": "Calendar",
         "admin.contacts_page.description": "Contact (CardDAV) sync for this deployment.",
         "admin.contacts_page.enabled_label": "Enable contacts (CardDAV) on this nest",
-        "admin.contacts_page.enabled_subtitle": "Serve contact sync (CardDAV) for all users. Rides the same server and certificate as calendar — no email infrastructure — so contacts can run with or without email or calendar. The shared bridge runs whenever this, Enable calendar, or Enable mail is on.",
+        "admin.contacts_page.enabled_subtitle": "Serve contact sync (CardDAV) for all users. It needs no email infrastructure, so contacts can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.",
         "admin.contacts_page.title": "Contacts",
         "admin.custody_hosting.active": "Active",
         "admin.custody_hosting.budget": "Budget",
@@ -12040,7 +12160,7 @@ private enum _LFlat {
         "admin.dns.add_credential_submit": "Add",
         "admin.dns.add_domain": "Add domain",
         "admin.dns.add_domain_placeholder": "example.com",
-        "admin.dns.add_domain_primary_warning": "This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.",
+        "admin.dns.add_domain_primary_warning": "This becomes your nest's primary domain, which can never be removed, only renamed onto a different domain.",
         "admin.dns.add_domain_submit": "Add",
         "admin.dns.catch_all_cleared_by_succession": "A succession cleared this domain's catch-all — unmatched mail now bounces. Re-designate below if you want a new one.",
         "admin.dns.catch_all_label": "Catch-all:",
@@ -12124,7 +12244,7 @@ private enum _LFlat {
         "admin.exit": "Exit admin",
         "admin.files_page.description": "File (WebDAV) sync for this deployment.",
         "admin.files_page.enabled_label": "Enable files (WebDAV) on this nest",
-        "admin.files_page.enabled_subtitle": "Serve file access (WebDAV) for all users. Rides the same server and certificate as calendar and contacts — no email infrastructure — so files can run with or without email, calendar, or contacts. Nothing is served until a user flags a folder for WebDAV. The shared bridge runs whenever this, Enable contacts, Enable calendar, or Enable mail is on.",
+        "admin.files_page.enabled_subtitle": "Serve file access (WebDAV) for all users. It needs no email infrastructure, so files can run with or without email. Nothing is served until a user flags a folder for WebDAV. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.",
         "admin.files_page.title": "Files",
         "admin.invite_requests_page.approve": "Approve",
         "admin.invite_requests_page.approve_failed": "Could not approve. Please try again.",
@@ -12149,7 +12269,7 @@ private enum _LFlat {
         "admin.logs_page.audit_title": "Admin actions",
         "admin.logs_page.audit_uncheckable": "The record checks out through the entries shown, except {count} this app cannot check.",
         "admin.logs_page.audit_verified": "The record checks out through the {count} entries shown.",
-        "admin.logs_page.description": "Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where.",
+        "admin.logs_page.description": "Recent activity recorded on the nest, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.",
         "admin.logs_page.empty": "No nest log entries yet.",
         "admin.logs_page.title": "Nest Logs",
         "admin.mail_page.alias_exact_max_label": "Exact aliases per account (max)",
@@ -12167,7 +12287,7 @@ private enum _LFlat {
         "admin.mail_page.auth_group_title": "Authentication enforcement",
         "admin.mail_page.auth_save": "Save authentication policy",
         "admin.mail_page.auto_enable_new_users_label": "Auto-enable mail for new users",
-        "admin.mail_page.auto_enable_new_users_subtitle": "New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.",
+        "admin.mail_page.auto_enable_new_users_subtitle": "New users automatically get a mailbox at their handle on first sign-in — or, while mail is off and calendars or contacts are served, a password for their calendar and contacts apps. Each user can still turn their own mail off.",
         "admin.mail_page.bayesian_full_confidence_samples_label": "Bayesian full-confidence samples",
         "admin.mail_page.bayesian_full_confidence_samples_subtitle": "Samples at which a user's model reaches full weight (default 200). Must be above min samples.",
         "admin.mail_page.bayesian_min_samples_label": "Bayesian min samples",
@@ -12183,15 +12303,16 @@ private enum _LFlat {
         "admin.mail_page.dmarc_fo_spf": "SPF fails",
         "admin.mail_page.dmarc_forensic_retention_label": "Keep forensic reports (days, 1–90)",
         "admin.mail_page.dmarc_forensic_retention_warning": "Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.",
-        "admin.mail_page.dmarc_group_desc": "The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.",
+        "admin.mail_page.dmarc_group_desc": "The reports peer mail servers send about mail claiming to be from your domains, how long they are kept, and whether your nest sends reports of its own.",
         "admin.mail_page.dmarc_group_title": "DMARC reports",
+        "admin.mail_page.dmarc_outbound_aggregate_label": "Send daily DMARC reports to other domains",
         "admin.mail_page.dmarc_ruf_publish_label": "Ask for forensic reports",
         "admin.mail_page.dmarc_ruf_warning": "Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.",
         "admin.mail_page.dmarc_save": "Save DMARC policy",
         "admin.mail_page.dnsbl_label": "DNS blocklists",
         "admin.mail_page.dnsbl_subtitle": "One blocklist host per line, queried during delivery.",
         "admin.mail_page.enabled_label": "Enable mail",
-        "admin.mail_page.enabled_subtitle": "Run the mail subsystem (SMTP / IMAP / CalDAV) for this nest.",
+        "admin.mail_page.enabled_subtitle": "Run mail (SMTP and IMAP) for this nest.",
         "admin.mail_page.enforce_dkim_label": "Enforce DKIM",
         "admin.mail_page.enforce_dmarc_label": "Enforce DMARC reject",
         "admin.mail_page.enforce_dmarc_quarantine_label": "Enforce DMARC quarantine",
@@ -12221,7 +12342,7 @@ private enum _LFlat {
         "admin.mail_page.health_recheck": "Check again",
         "admin.mail_page.health_sender_dashboard_gmail": "Gmail Postmaster Tools",
         "admin.mail_page.health_sender_dashboard_outlook": "Outlook SNDS",
-        "admin.mail_page.health_sender_dashboards_note": "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).",
+        "admin.mail_page.health_sender_dashboards_note": "Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and Microsoft run themselves. If you want their view of how your mail is received, sign up with each through its link. Fauna doesn't connect to them.",
         "admin.mail_page.health_state_blocklisted": "Mail: server address is blocklisted",
         "admin.mail_page.health_state_bridge_down": "Mail: mail service not connected",
         "admin.mail_page.health_state_delivering": "Mail: delivering",
@@ -12261,7 +12382,7 @@ private enum _LFlat {
         "admin.mail_page.max_message_bytes_label": "Max message size (bytes)",
         "admin.mail_page.microsoft_client_id_invalid": "The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.",
         "admin.mail_page.microsoft_client_id_label": "Application (client) ID",
-        "admin.mail_page.microsoft_group_desc": "The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.",
+        "admin.mail_page.microsoft_group_desc": "The Outlook import signs in to Microsoft with your organisation's own app registration: enter its application (client) ID and, if you like, its directory. Until one is entered, the import's Sign in with Microsoft does nothing. Clear both fields and save to remove it.",
         "admin.mail_page.microsoft_group_title": "Microsoft sign-in for the Outlook import",
         "admin.mail_page.microsoft_requirements": "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory.",
         "admin.mail_page.microsoft_save": "Save Microsoft registration",
@@ -12269,7 +12390,7 @@ private enum _LFlat {
         "admin.mail_page.microsoft_tenant_label": "Directory (tenant)",
         "admin.mail_page.microsoft_tenant_needs_client_id": "Enter the application (client) ID that goes with this directory.",
         "admin.mail_page.microsoft_tenant_subtitle": "A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.",
-        "admin.mail_page.microsoft_using_default": "Using the default registration.",
+        "admin.mail_page.microsoft_using_default": "No registration entered — the Outlook import's Sign in with Microsoft does nothing until one is.",
         "admin.mail_page.microsoft_using_own": "Using your organisation's registration.",
         "admin.mail_page.outbound_delay_warning_label": "Delay-warning time (hours)",
         "admin.mail_page.outbound_delay_warning_subtitle": "When a delay-warning notice is sent to the sender.",
@@ -12349,17 +12470,17 @@ private enum _LFlat {
         "admin.nest_page.block_arm_unblock": "Unblock…",
         "admin.nest_page.block_blocked_not_item": "A block is of one post or message. An account report has the account levers — suspension on the users page.",
         "admin.nest_page.block_cancel_button": "Cancel",
-        "admin.nest_page.block_confirm_block": "Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.",
+        "admin.nest_page.block_confirm_block": "Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author keeps their view of it — its photos and files are withheld from the author too, and an author on another nest keeps a message only on the devices that already had it — and can appeal, and a permanent audit record keeps this action. Nothing is deleted.",
         "admin.nest_page.block_confirm_button_block": "Confirm block",
         "admin.nest_page.block_confirm_button_unblock": "Confirm unblock",
         "admin.nest_page.block_confirm_unblock": "Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.",
-        "admin.nest_page.block_done": "Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.",
+        "admin.nest_page.block_done": "Blocked. A notice is shown in its place, the author can appeal, and the report is recorded as acted on.",
         "admin.nest_page.block_failed": "The nest refused the request: {error}",
         "admin.nest_page.block_item_message": "message",
         "admin.nest_page.block_item_post": "post",
         "admin.nest_page.block_restored": "Unblocked. The item is served again; the block stays on record.",
         "admin.nest_page.block_working": "Submitting…",
-        "admin.nest_page.blocked_desc": "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was.",
+        "admin.nest_page.blocked_desc": "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves except its author — its photos and files from the author too, and an author on another nest keeps a message only on the devices that already had it — with a notice in its place. Unblock serves it again exactly as it was.",
         "admin.nest_page.blocked_empty": "Nothing is blocked.",
         "admin.nest_page.blocked_label": "Blocked items",
         "admin.nest_page.blocked_loading": "Loading blocked items…",
@@ -12435,7 +12556,7 @@ private enum _LFlat {
         "admin.nest_page.reports_resolved_acted": "Recorded as acted on. The reporter is told the outcome, nothing more.",
         "admin.nest_page.reports_resolved_dismissed": "Dismissed. The reporter is told the outcome, nothing more.",
         "admin.nest_page.retire_button": "Retire this server…",
-        "admin.nest_page.retire_desc": "Delete this server at your cloud provider and remove the DNS records that point at it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.",
+        "admin.nest_page.retire_desc": "If Fauna created this server in your cloud account since 8 July 2026, when it began marking the servers it creates, or it is on OVH, delete it there and clean up the DNS records that belong to it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.",
         "admin.nest_page.retire_title": "Retire this server",
         "admin.nest_page.rotate_seed_button": "Rotate deployment identity",
         "admin.nest_page.rotate_seed_cancel_button": "Cancel",
@@ -12465,10 +12586,10 @@ private enum _LFlat {
         "admin.nest_page.takedown_confirm_button_restore": "Confirm restore",
         "admin.nest_page.takedown_confirm_button_takedown": "Confirm takedown",
         "admin.nest_page.takedown_confirm_restore": "Overturn the takedown of {content_type} {content_id}? The content serves again; the takedown record remains as history.",
-        "admin.nest_page.takedown_confirm_takedown": "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.",
+        "admin.nest_page.takedown_confirm_takedown": "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit record keeps this action.",
         "admin.nest_page.takedown_content_id_label": "Content id",
-        "admin.nest_page.takedown_desc": "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever.",
-        "admin.nest_page.takedown_done": "Taken down. A tombstone is served in its place and the author of a post can appeal.",
+        "admin.nest_page.takedown_desc": "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever.",
+        "admin.nest_page.takedown_done": "Taken down. A tombstone is served in its place and the author can appeal.",
         "admin.nest_page.takedown_failed": "The nest refused the request: {error}",
         "admin.nest_page.takedown_label": "Legal takedown",
         "admin.nest_page.takedown_reference_label": "Legal reference",
@@ -12667,23 +12788,34 @@ private enum _LFlat {
         "archive_import.category_threads": "Message threads",
         "archive_import.confirm_summary_fmt": "{records} records · about {bytes} to upload",
         "archive_import.confirm_title": "Step 4 — Confirm",
-        "archive_import.description": "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates and audiences. The archive itself stays in a sealed folder on your nest.",
+        "archive_import.description": "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.",
         "archive_import.done_summary_fmt": "{imported} imported · {skipped} skipped",
+        "archive_import.done_summary_links_fmt": "{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post",
+        "archive_import.done_summary_unplaced_fmt": "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post",
+        "archive_import.done_summary_unplaced_links_fmt": "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post",
         "archive_import.done_title": "Step 6 — Done",
+        "archive_import.done_unplaced_comments_fmt": "{count} comments could not be placed under a post",
         "archive_import.error_log_title": "Skipped records",
         "archive_import.folder_link_fmt": "Archive folder: {folder}",
+        "archive_import.link_no": "No",
+        "archive_import.link_prompt_fmt": "Is {contact} the “{archived_name}” from your {platform} friends?",
+        "archive_import.link_prompt_unnamed_fmt": "Is {contact} one of your {platform} friends?",
+        "archive_import.link_yes": "Yes, link",
+        "archive_import.linked_fmt": "Linked: {platform}",
+        "archive_import.linked_unmatched_fmt": "Linked: {platform} · {unmatched} could not be matched to a post",
         "archive_import.next": "Next",
         "archive_import.pause_button": "Pause",
-        "archive_import.profile_prefill_button": "Use the archive's profile name and bio",
+        "archive_import.profile_prefill_button": "Use the archive's profile name, bio, links and picture",
+        "archive_import.progress_line_estimating_fmt": "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · estimating the time left",
+        "archive_import.progress_line_fmt": "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · about {eta} left",
         "archive_import.progress_row_fmt": "{imported} of {count} · {skipped} skipped",
         "archive_import.progress_summary_fmt": "{state} · {imported} of {total} · {skipped} skipped",
         "archive_import.progress_timing_estimating_fmt": "{elapsed} elapsed · estimating the time left",
-        "archive_import.progress_timing_fmt": "{elapsed} elapsed · about {eta} left",
         "archive_import.progress_title": "Step 5 — Importing",
         "archive_import.resume_button": "Resume",
         "archive_import.review_skipped_button": "Review skipped",
         "archive_import.scope_audience_mode_label": "Audience",
-        "archive_import.scope_audience_summary_fmt": "{known} posts and albums have a recorded audience and import to it; {unknown} have none recorded and will be visible only to you.",
+        "archive_import.scope_audience_summary_fmt": "{known} posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; {unknown} have none recorded and will be visible only to you.",
         "archive_import.scope_audience_summary_only_me": "Everything will be visible only to you.",
         "archive_import.scope_categories_label": "Categories",
         "archive_import.scope_category_kept_fmt": "{category} ({count}) — kept in the archive for later",
@@ -12704,6 +12836,7 @@ private enum _LFlat {
         "archive_import.state_running": "Importing",
         "archive_import.title": "Import from other services",
         "archive_import.unavailable": "Importing needs a session that holds your identity key; this one does not.",
+        "archive_import.unlink": "Unlink",
         "archive_import.view_imported_button": "View imported posts",
         "atproto_settings.app_credentials_empty": "No app credentials yet.",
         "atproto_settings.app_credentials_heading": "App credentials",
@@ -12713,7 +12846,7 @@ private enum _LFlat {
         "atproto_settings.card_mint": "A new public identity {handle} is created on the Bluesky network.",
         "atproto_settings.card_no_recall": "Copies of already-published posts held by other servers cannot be recalled.",
         "atproto_settings.card_open_plane": "Third-party Bluesky apps will be able to log in as this identity once you create an app credential.",
-        "atproto_settings.card_publish_consent": "Your public posts become visible to everyone on the Bluesky network.",
+        "atproto_settings.card_publish_consent": "Your public posts, apart from posts you imported from another service, become visible to everyone on the Bluesky network.",
         "atproto_settings.card_reactivate": "Your identity {handle} is restored — the same identity you had before, nothing new is created.",
         "atproto_settings.card_suspend_plane": "Connected apps stop working immediately. Nothing is deleted — your app credentials stay listed, and stepping back up restores them.",
         "atproto_settings.card_unlink": "The link to {account} is removed. The external account itself is untouched — it keeps existing on its own server and is not migrated.",
@@ -12734,11 +12867,11 @@ private enum _LFlat {
         "atproto_settings.contest_card_heading": "Your AT Protocol identity may have been taken over",
         "atproto_settings.contest_confirm_button": "Undo it now",
         "atproto_settings.contest_confirm_directory_rules": "The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe.",
-        "atproto_settings.contest_confirm_signs": "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step.",
+        "atproto_settings.contest_confirm_signs": "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you, and Fauna has no way to replace that key today.",
         "atproto_settings.contest_confirm_undo": "You are about to undo the change to {handle}, and everything published on top of it, by signing an earlier state of your identity back into place.",
         "atproto_settings.contest_deadline": "About {hours} hours left to undo this.",
         "atproto_settings.contest_deadline_soon": "Less than an hour left to undo this.",
-        "atproto_settings.contest_detail_contestable": "A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.",
+        "atproto_settings.contest_detail_contestable": "A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today.",
         "atproto_settings.contest_detail_genesis": "Your AT Protocol identity {handle} was created with a key this device does not hold, so there is no earlier state to return it to. This identity cannot be recovered — create a new one, and contact whoever runs your nest.",
         "atproto_settings.contest_detail_unauthenticated": "The public record of your AT Protocol identity {handle} does not check out: the changes it lists are not signed by keys this identity's own history allows. That points at the record being tampered with, or your connection to it being intercepted — so nothing has been signed or changed from here, and undoing is not offered, because acting on a false record would destroy your real history. Try again from another network, and contact whoever runs your nest.",
         "atproto_settings.contest_detail_window_closed": "A change to your AT Protocol identity {handle} was made with a key this device does not hold, and the time limit for undoing it has passed. The change now stands permanently. Contact whoever runs your nest.",
@@ -12765,7 +12898,7 @@ private enum _LFlat {
         "atproto_settings.delegation_status_expiring_soon": "Expiring soon — re-authorize to keep other apps posting",
         "atproto_settings.delegation_status_never_expires": "No expiry",
         "atproto_settings.delete_cancel_button": "Keep my presence",
-        "atproto_settings.delete_confirm_apps_disconnected": "Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you.",
+        "atproto_settings.delete_confirm_apps_disconnected": "Bluesky apps you are signed in to are disconnected. If you have let other apps post as you, that permission is kept — stop it under Posting from other apps.",
         "atproto_settings.delete_confirm_button": "Delete my presence",
         "atproto_settings.delete_confirm_identity_kept": "Your AT Protocol identity @{handle} is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity.",
         "atproto_settings.delete_confirm_identity_retired": "Your AT Protocol identity @{handle} is also permanently retired once the deletion finishes. This cannot be undone: the identity stops existing on the Bluesky network, and no one — not you, not this nest — can ever restore it. Turning AT Protocol hosting back on later creates a new, different identity.",
@@ -12781,7 +12914,7 @@ private enum _LFlat {
         "atproto_settings.depth_heading": "Integration depth",
         "atproto_settings.depth_hosted_full_desc": "Additionally, other Bluesky apps can log in as you through this nest.",
         "atproto_settings.depth_hosted_full_title": "Hosted here — full access",
-        "atproto_settings.depth_hosted_visible_desc": "This nest holds your identity and publishes your public posts to the Bluesky network.",
+        "atproto_settings.depth_hosted_visible_desc": "This nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network.",
         "atproto_settings.depth_hosted_visible_title": "Hosted here — visible",
         "atproto_settings.depth_linked_desc": "Read, interact, and cross-post through an existing Bluesky account.",
         "atproto_settings.depth_linked_title": "Linked account",
@@ -12809,13 +12942,12 @@ private enum _LFlat {
         "atproto_settings.error_save_local": "Created, but this device could not save a copy — copy the password now, it cannot be shown again later. ({message})",
         "atproto_settings.error_toggle": "Failed to change external app access: {message}",
         "atproto_settings.error_transition": "Failed to change the Bluesky integration level: {message}",
-        "atproto_settings.external_apps_hint": "When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.",
+        "atproto_settings.external_apps_hint": "When this is off, every app it affects is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.",
         "atproto_settings.external_apps_toggle": "Allow external apps",
         "atproto_settings.gate_reason": "Hosting an AT Protocol identity needs a public domain — this nest is reachable at \"{domain}\", which the Bluesky network cannot resolve. Claim a real domain to enable these options.",
         "atproto_settings.gate_reason_pending": "Checking whether this nest has a public domain — hosting an AT Protocol identity needs one.",
         "atproto_settings.handle_either_way": "Your Bluesky handle will be @{handle} either way.",
         "atproto_settings.history_backfill_count_label": "Also publish my {count} existing public posts.",
-        "atproto_settings.history_backfill_label": "Also publish my existing public posts.",
         "atproto_settings.hosted_handle_prefix": "Your Bluesky handle: @{handle}",
         "atproto_settings.hosted_method_prefix": "Method: {method}",
         "atproto_settings.identity_status_active": "Active",
@@ -12852,7 +12984,7 @@ private enum _LFlat {
         "backups.backup_destination_backlog": "{count} queued",
         "backups.backup_destination_capacity_invalid": "Enter a storage limit like \"50 GB\" or \"500 MB\".",
         "backups.backup_destination_capacity_placeholder": "Storage limit, e.g. 50 GB",
-        "backups.backup_destination_custodian_exposure": "This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen.",
+        "backups.backup_destination_custodian_exposure": "This device will keep an offline copy of everything a backup destination keeps. Anyone who can unlock it can read all of it, not just what is on screen.",
         "backups.backup_destination_edit_button": "Edit",
         "backups.backup_destination_edit_different_nest": "That URL points to a different nest. Remove this destination and add the new one.",
         "backups.backup_destination_form_add_title": "Add a backup destination",
@@ -12884,7 +13016,7 @@ private enum _LFlat {
         "backups.backup_destination_usage_uncapped": "{held} held, no limit set",
         "backups.backup_destination_usage_unknown": "Nothing held yet",
         "backups.backup_destination_writer_refused": "Not accepted — this destination keeps your backup from another box",
-        "backups.backup_destinations_desc": "Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them.",
+        "backups.backup_destinations_desc": "Replicate your data to another place — a second nest you control, a friend's nest or one of your own devices. Everything that travels there is encrypted, apart from a folder you have made public — the destination cannot read the rest.",
         "backups.backup_destinations_empty": "No backup destinations configured.",
         "backups.backup_destinations_full": "This box's backup list is full. Remove a destination or a covered folder, then try again.",
         "backups.backup_destinations_title": "Backup destinations",
@@ -13029,8 +13161,10 @@ private enum _LFlat {
         "backups.recover_set_nothing": "{set}: nothing to recover",
         "backups.recover_set_recovered": "{set}: {count} recovered",
         "backups.recover_set_refused": "{set}: not recovered. {remedy}",
-        "backups.repo_stats.chunk_sizes": "512 KB - 16 MB avg 4 MB",
-        "backups.repo_stats.compression": "zstd level 3",
+        "backups.repo_stats.chunk_sizes": "up to 8 MB; larger files split into chunks of 2 MB on average, 8 MB at most",
+        "backups.repo_stats.chunk_sizes_label": "Chunk Sizes",
+        "backups.repo_stats.compression": "zstd",
+        "backups.repo_stats.compression_label": "Compression",
         "backups.repo_stats.dedup_ratio": "Dedup Ratio",
         "backups.repo_stats.encryption": "Encryption & Compression",
         "backups.repo_stats.encryption_algo": "ChaCha20-Poly1305",
@@ -13042,11 +13176,20 @@ private enum _LFlat {
         "backups.repo_stats.total_files": "Total Files",
         "backups.reseed_gap_sidecarless_segments": "{count} parts of your mail arrived without their index, so some mail is still missing. Run the restore again after this device's next backup.",
         "backups.reseed_gap_unnamed_files": "{count} files arrived without their names, so some files are still missing.",
+        "backups.reseed_note_unanchored_rows": "{count} files the other nest offered are not in your own record of the backup, so they were left out.",
+        "backups.reseed_preflight_folders": "{count} folders come back as the other nest holds them. This device cannot check that they are complete or the newest.",
+        "backups.reseed_preflight_rolled_back": "{set}: the copy is OLDER than what this device last checked (version {generation}, this device saw version {pinned}). Restoring it brings back that older state.",
+        "backups.reseed_preflight_unvouched": "{set}: this device has never checked this copy, so it cannot tell whether it is the newest (version {generation}).",
+        "backups.reseed_preflight_vouched": "{set}: the copy is as new as or newer than what this device last checked on {date} (version {generation}).",
+        "backups.reseed_preflight_vouched_undated": "{set}: the copy is as new as or newer than what this device last checked (version {generation}).",
+        "backups.reseed_preflight_withheld": "{set}: part of the copy is MISSING — this device last checked version {pinned} of it, and the other nest no longer offers it. Restoring brings the rest back without it.",
         "backups.reseed_refused_custody_incomplete": "The copy on this nest is not complete yet. Run the restore again.",
         "backups.reseed_refused_custody_unsealed": "Some files arrived without their names. Run the restore again after this device's next backup.",
         "backups.reseed_refused_folder_unnamed": "This device does not know the folder's name, so it was left on the nest without being restored.",
+        "backups.reseed_refused_not_accepted": "You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide.",
         "backups.reseed_refused_not_enrolled": "This nest does not hold your backup key. Run the restore again.",
         "backups.reseed_refused_other": "The nest refused it.",
+        "backups.reseed_refused_preflight_stale": "The copy changed after you confirmed the restore, so this part was left where it is. Run the restore again to see the copy as it is now.",
         "backups.reseed_refused_quota_exceeded": "This nest does not have enough storage for the copy. An admin can raise the limit in the admin app.",
         "backups.reseed_refused_rehome_unsigned": "This device could not sign the folder's files for the restore, so it was left on the nest without being restored. Sign in on this device again, then run the restore again.",
         "backups.reseed_refused_target_missing": "The folder to restore into could not be created on this nest. Run the restore again.",
@@ -13066,7 +13209,7 @@ private enum _LFlat {
         "backups.restore_confirm_button": "Restore",
         "backups.restore_confirm_placeholder": "Re-type the snapshot id to confirm",
         "backups.restore_directory_panel_message": "Choose a directory to restore this snapshot into",
-        "backups.restore_divergence_banner": "{count} MUAs reconnected with newer state",
+        "backups.restore_divergence_banner": "{count} mail or calendar apps reconnected with newer state",
         "backups.restore_divergence_close": "Close",
         "backups.restore_divergence_detail_row": "{collection} · {mua} · client modseq {client} / server modseq {server} · ~{lost} writes lost",
         "backups.restore_divergence_footer": "Lost writes cannot be recovered — they died with the source nest. This list is forensic.",
@@ -13077,18 +13220,21 @@ private enum _LFlat {
         "backups.restore_history_row": "{kinds} from {source} — {when}",
         "backups.restore_into_directory_desc": "Restores every file in this snapshot into the chosen directory.",
         "backups.restore_kinds_calendar": "calendar",
+        "backups.restore_kinds_contacts": "contacts",
+        "backups.restore_kinds_conversations": "conversations",
         "backups.restore_kinds_mail": "mail",
+        "backups.restore_kinds_posts": "posts",
         "backups.restore_local_title": "Restore from a local snapshot",
         "backups.restore_no_destinations": "No backup destinations yet — add one under \"Backup destinations\" above.",
         "backups.restore_no_snapshots": "No local snapshots available to restore.",
-        "backups.restore_progress_done": "Done — restart the bridge.",
+        "backups.restore_progress_done": "Done — restart the mail and calendar service.",
         "backups.restore_progress_idle": "Select a snapshot and re-type its id to restore.",
         "backups.restore_progress_running": "Restoring…",
         "backups.restore_section_title": "Restore history",
         "backups.restore_snapshot_label": "Snapshot",
         "backups.restore_source_label": "Backup destination",
         "backups.restore_source_local": "local snapshot",
-        "backups.restore_warning_config_absent": "Restored, but the bridge's sign-in keys were not part of the restore — the bridge can't sign in after it restarts until they are restored too.",
+        "backups.restore_warning_config_absent": "Restored, but this mail and calendar service's sign-in keys were not part of the restore — it can't sign in after it restarts until they are restored too.",
         "backups.retention.keep_daily": "Keep Daily",
         "backups.retention.keep_daily_count": "Keep Daily: {count}",
         "backups.retention.keep_last": "Keep Last",
@@ -13386,6 +13532,7 @@ private enum _LFlat {
         "connected_apps.connect_hint": "If an app on another device shows you a code, type it here.",
         "connected_apps.connect_placeholder": "Code from the app",
         "connected_apps.connect_submit": "Connect",
+        "connected_apps.consent_assistant_reach": "Whatever you allow here, the AI assistant you connect can read or do — and if that assistant runs on a company's servers, that company's service can too. You can disconnect it here at any time.",
         "connected_apps.consent_ends_holder": "This app now uses a new key. Approving ends the access its earlier key was given.",
         "connected_apps.consent_ends_writer": "This app now signs with a new key. Approving ends its earlier key's permission to write.",
         "connected_apps.created": "Added {time}",
@@ -13425,8 +13572,8 @@ private enum _LFlat {
         "connected_apps.open_ended": "Until you disconnect it",
         "connected_apps.oracle_latest": "Most recent, {time}: {operation} — {detail}",
         "connected_apps.oracle_latest_bare": "Most recent, {time}: {operation}",
-        "connected_apps.oracle_ops": "Your nest used your keys for this app {count} times in the current window",
-        "connected_apps.oracle_ops_one": "Your nest used your keys for this app once in the current window",
+        "connected_apps.oracle_ops": "Fauna acted for this app {count} times in the current window",
+        "connected_apps.oracle_ops_one": "Fauna acted for this app once in the current window",
         "connected_apps.oracle_requests": "{count} requests answered in all",
         "connected_apps.oracle_requests_one": "1 request answered in all",
         "connected_apps.oracle_summary": "{ops} · {requests}",
@@ -13440,7 +13587,7 @@ private enum _LFlat {
         "connected_apps.revoke_prompt": "Disconnect {name}? It will no longer be able to act for you.",
         "connected_apps.roster_heading": "Your connected apps",
         "connected_apps.row_head": "{name} · {badge}",
-        "connected_apps.scope_mail": "Read and send your mail, and sync your calendar, contacts and files",
+        "connected_apps.scope_mail": "Read and send your mail while mail is on, and sync your calendar, contacts and files",
         "connected_apps.scope_nostr_sign": "Sign Nostr events with your key",
         "connected_apps.settings_link": "Plugin settings",
         "connected_apps.signer_pending": "Waiting to connect…",
@@ -13519,15 +13666,13 @@ private enum _LFlat {
         "conversations.detail.message_actions": "More actions",
         "conversations.detail.message_deleted": "This message was deleted",
         "conversations.detail.more_reactions": "More reactions",
-        "conversations.detail.muted_reveal": "Show anyway",
-        "conversations.detail.muted_word": "Muted word",
         "conversations.detail.no_messages": "No messages in this conversation.",
         "conversations.detail.no_subject": "(no subject)",
         "conversations.detail.remote_image_blocked": "Remote image blocked",
         "conversations.detail.report_message": "Report message",
         "conversations.detail.selected_message": "Your search result",
         "conversations.detail.title": "Conversation",
-        "conversations.errors.mail_unopenable": "{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.",
+        "conversations.errors.mail_unopenable": "{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.",
         "conversations.errors.receive_stopped": "New messages stopped arriving because of an internal error. Restart the app (or reload the page) to receive them again.",
         "conversations.errors.served_elsewhere": "Conversations are open in another instance of this app. Use them there — everything else works here.",
         "conversations.errors.state_needs_newer_app": "This version of the app is too old to open the conversations it saved here. They are intact — update the app to see them again.",
@@ -13585,6 +13730,7 @@ private enum _LFlat {
         "conversations.unified.recipient_picker_placeholder": "Type a handle, email, npub, DID, or @user@instance",
         "conversations.unified.recipient_resolve_error": "Lookup failed — try again",
         "conversations.unified.recipient_resolve_not_found": "Not found — check the address",
+        "conversations.unified.recipient_resolve_not_reachable": "Not reachable yet — they need to open Fauna first",
         "conversations.unified.recipient_resolve_resolved": "Resolved",
         "conversations.unified.recipient_resolve_resolving": "Resolving…",
         "conversations.unified.reply_all": "Reply all",
@@ -13657,15 +13803,15 @@ private enum _LFlat {
         "critical_alerts.atproto_handle_unbound": "Security alert: the published record of your AT Protocol identity does not name a handle at {domain}. It is published as {published} instead — people looking for you may be finding someone else. Do not trust this identity for anything sensitive, and contact whoever runs your nest.",
         "critical_alerts.atproto_handle_unbound_none": "Security alert: the published record of your AT Protocol identity names no handle at all, so nobody can find you at {domain}. Do not trust this identity for anything sensitive, and contact whoever runs your nest.",
         "critical_alerts.domain_expired_admin": "Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.",
-        "critical_alerts.domain_expired_resident": "Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.",
-        "critical_alerts.domain_expiring_admin": "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.",
-        "critical_alerts.domain_expiring_resident": "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.",
+        "critical_alerts.domain_expired_resident": "Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address.",
+        "critical_alerts.domain_expiring_admin": "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now.",
+        "critical_alerts.domain_expiring_resident": "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.",
         "critical_alerts.domain_lapsing_admin": "Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.",
-        "critical_alerts.domain_lapsing_resident": "Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.",
+        "critical_alerts.domain_lapsing_resident": "Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.",
         "critical_alerts.eviction_warning": "Your account on this nest is being closed by its admin. Your access ends in {days} days, at {suspend_at} UTC, and your account and everything in it will be deleted at {delete_at} UTC. Until your access ends you can export all your data from Settings → Account → Export My Data.",
         "critical_alerts.eviction_warning_reason": "The admin gave this reason: {reason}",
         "critical_alerts.eviction_warning_undated": "Your account on this nest is being closed by its admin, and it will then be deleted with everything in it. Export all your data now from Settings → Account → Export My Data.",
-        "critical_alerts.recovery_replacement_pending": "Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit.",
+        "critical_alerts.recovery_replacement_pending": "Security alert: someone used your secret key to request a replacement of your recovery kit. If that was not you, someone else has your secret key. Cancel it in Settings → Account → Recovery Kit.",
         "critical_alerts.recovery_replacement_pending_detail": "The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.",
         "devices.access_revoked_warning": "The owner removed your permission to make changes, so this location is no longer syncing. Your local files are untouched.",
         "devices.add_folder": "Add Folder",
@@ -13705,35 +13851,35 @@ private enum _LFlat {
         "devices.custody_held_bytes": "Holding {held} of {cap}",
         "devices.custody_held_owner": "Holding for {owner}",
         "devices.custody_held_restore_address": "If they lose every device, they can restore from this nest at {address} — give them this address yourself.",
-        "devices.custody_held_scope_account": "Their account's sealed data — unreadable on this device, apart from what they published to everyone",
-        "devices.custody_held_section": "Held for others — sealed copies this device keeps",
-        "devices.custody_holder_scope": "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone",
-        "devices.custody_holder_section": "Custodians — who holds sealed copies of your data",
-        "devices.custody_mint_button": "Ask a friend to hold sealed copies",
+        "devices.custody_held_scope_account": "Their account's encrypted data — unreadable where you hold it, apart from what they published to everyone",
+        "devices.custody_held_section": "Held for others — encrypted copies you keep for them",
+        "devices.custody_holder_scope": "Trusted to hold encrypted copies — cannot read them, apart from what you published to everyone",
+        "devices.custody_holder_section": "Custodians — who holds encrypted copies of your data",
+        "devices.custody_mint_button": "Ask a friend to hold encrypted copies",
         "devices.custody_mint_confirm": "Send the request",
-        "devices.custody_mint_floor": "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.",
+        "devices.custody_mint_floor": "They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.",
         "devices.custody_mint_host_label": "Who to ask",
         "devices.custody_mint_host_placeholder": "Choose a contact",
         "devices.custody_mint_no_contacts": "Start a conversation with them first — the request travels over it.",
         "devices.custody_offer_accept": "Hold for them",
         "devices.custody_offer_decline": "Decline",
-        "devices.custody_offer_floor": "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.",
+        "devices.custody_offer_floor": "Their copies would be stored encrypted wherever you hold them, and could not be read there, apart from what they have published to everyone. Of the rest you would see only the shape: what kinds of their data you hold, how much is stored, and when it changes — never the content.",
         "devices.custody_offer_target_device": "This device",
         "devices.custody_offer_target_label": "Where to hold",
         "devices.custody_offer_target_nest": "My nest",
-        "devices.custody_offer_title": "{owner} asks this device to hold sealed copies",
+        "devices.custody_offer_title": "{owner} asks you to hold encrypted copies",
         "devices.custody_receipt_fresh": "Last confirmed {when}",
         "devices.custody_receipt_none": "No confirmation yet",
         "devices.custody_receipt_stale": "Stale — last confirmed {when}. Treat this copy as degraded.",
         "devices.custody_remove": "Remove and free the space",
         "devices.custody_remove_done": "Removed — the space is free.",
         "devices.custody_revoke": "Stop trusting this custodian",
-        "devices.custody_revoke_bound_note": "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before.",
+        "devices.custody_revoke_bound_note": "Stops future copies and serving on honest holders. Copies already held stay where they are, no more readable to the holder than before.",
         "devices.custody_stop": "Stop holding",
         "devices.custody_stopped_bytes_remain": "Stopped — stored bytes remain until removed",
         "devices.declassify_body": "Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file.",
         "devices.declassify_confirm": "Make public",
-        "devices.declassify_irreversible": "Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good.",
+        "devices.declassify_irreversible": "Turning it back later encrypts its files again, but anything published while the folder is public may already have been read or copied, so treat it as public for good.",
         "devices.declassify_title": "Make this folder public?",
         "devices.default_conflict_policy": "Default conflict policy for new sets",
         "devices.delete_confirm_body": "Delete folder \"{name}\"? All data including snapshots will be permanently removed.",
@@ -13768,6 +13914,9 @@ private enum _LFlat {
         "devices.error_remove_own_device": "This is the device you're using, so it wasn't removed. To remove it, sign out on this device.",
         "devices.error_remove_row_mismatch": "This entry doesn't match what the device itself reports, so nothing was removed. Trying again won't change that. If the device is not one you hold, remove it by its key from the signed-in devices without a matching entry, below the list.",
         "devices.error_remove_unverified_device": "Couldn't confirm which of your devices this is, so nothing was removed. Try again in a moment.",
+        "devices.error_rename_device": "Couldn't rename the device: {message}",
+        "devices.error_rename_needs_key": "This app can't rename devices until it holds your account key.",
+        "devices.error_rename_reserved_name": "That name is the one an app gives a device you haven't named. Choose another.",
         "devices.error_resolve_conflict": "Failed to resolve conflict: {message}",
         "devices.error_revoke_custody": "Couldn't stop trusting this custodian: {message}",
         "devices.error_save_paths": "Failed to save paths: {message}",
@@ -13791,7 +13940,7 @@ private enum _LFlat {
         "devices.folder_audience_hint": "Private folders are encrypted so only you can read them. Public folders are readable by anyone on the web.",
         "devices.folder_audience_private": "Private",
         "devices.folder_audience_public": "Public",
-        "devices.folder_audience_public_bound_hint": "This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public.",
+        "devices.folder_audience_public_bound_hint": "This folder is shared with other people and currently public. Pick Shared to encrypt it again so only those people can read it. Anything published while it was public should still be treated as public.",
         "devices.folder_audience_reconfirm": "Confirm public",
         "devices.folder_audience_shared": "Shared",
         "devices.folder_audience_shared_hint": "This folder is shared with other people, so it can't be made private while it's shared. To make it private, remove the sharing in the section below first — or change who it is shared with there.",
@@ -13862,6 +14011,9 @@ private enum _LFlat {
         "devices.not_shared_yet": "Not shared with anyone yet.",
         "devices.offline": "Offline",
         "devices.on_demand_bound_hint": "This set syncs to its bound location; remove the binding to show it on demand instead.",
+        "devices.on_demand_needs_extension_enable": "Not shown in Finder yet — turn on Fauna under System Settings → General → Login Items & Extensions → Extensions.",
+        "devices.on_demand_needs_files_enable": "Not shown in Files yet — in the Files app open Browse, choose Edit from the ⋯ menu and turn on Fauna.",
+        "devices.on_demand_open_settings": "Open System Settings",
         "devices.online": "Online",
         "devices.own_fingerprint": "Key {fingerprint}",
         "devices.p2p_participation": "Peer transfers",
@@ -13896,6 +14048,9 @@ private enum _LFlat {
         "devices.place_three": "{first} · {second} · {third}",
         "devices.place_two": "{first} · {second}",
         "devices.remove_member": "Remove",
+        "devices.rename": "Rename",
+        "devices.rename_confirm": "Save name",
+        "devices.rename_label": "Device name",
         "devices.residency_confirm": "Delete the nest's copy",
         "devices.residency_confirm_body": "The nest's copy of this folder's content is deleted now, and your devices become the only holders. Content moves between your devices only while one of them holding it is online. If your devices lose it, the nest cannot restore it.",
         "devices.residency_confirm_title": "Stop keeping this folder's content on the nest?",
@@ -13904,7 +14059,7 @@ private enum _LFlat {
         "devices.selective_sync": "Selective Sync",
         "devices.serve_webdav": "Serve over WebDAV",
         "devices.serve_webdav_blocked_by_public": "This folder is public, so there is nothing for WebDAV to encrypt. Make it private to serve it over WebDAV.",
-        "devices.serve_webdav_hint": "Browse and edit this set from any WebDAV client (Finder, GNOME Files, rclone).",
+        "devices.serve_webdav_hint": "Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone).",
         "devices.serve_webdav_needs_mail": "Set up mail first — serving over WebDAV uses your mail encryption key.",
         "devices.serve_website": "Serve this folder as your website",
         "devices.serve_website_address_off": "Your site is published from this folder, but your web address is switched off, so nobody can reach it yet. Switch it on in Settings → Web.",
@@ -14048,7 +14203,7 @@ private enum _LFlat {
         "error.send.room_transfer_not_a_member": "The room can only be handed over to one of its other members.",
         "error.send.room_transfer_owner_only": "Only the room's owner can hand the room over.",
         "error.send.room_transfer_superseded": "The room's settings changed while the hand-over was waiting, so it did not go through. Hand the room over again.",
-        "error.sync.device_limit_exceeded": "This account already has as many devices as its plan allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.",
+        "error.sync.device_limit_exceeded": "This account already has as many devices as its tier allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.",
         "error.unexpected": "Something went wrong talking to the nest. Please try again.",
         "errors.api_error": "API error ({status}): {message}",
         "errors.auth_error": "Authentication error: {detail}",
@@ -14077,7 +14232,7 @@ private enum _LFlat {
         "errors.recovery_invalid_nonce": "That recovery request has expired or was already used. Please try again.",
         "errors.recovery_kit_not_current": "This is not your most recently created recovery kit. Enter your newest kit instead.",
         "errors.recovery_malformed": "The nest sent back something unexpected: {detail}",
-        "errors.recovery_no_escrow": "No sealed copy of your identity secret is stored for this recovery kit, so it cannot recover this account right now.",
+        "errors.recovery_no_escrow": "The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.",
         "errors.recovery_not_registered": "No recovery key is registered for this identity, so there is nothing to recover from.",
         "errors.recovery_prior_escrow_unreadable": "Your existing recovery data could not be read ({reason}), so replacing it now would destroy it. Try again from a device and connection that can read it.",
         "errors.recovery_prior_kit_mismatch": "That kit does not match the one currently registered for this identity.",
@@ -14087,7 +14242,7 @@ private enum _LFlat {
         "errors.recovery_superseded": "This identity has already been succeeded by another one. Import your new identity to continue.",
         "errors.recovery_transport": "Connection error: {detail}",
         "errors.secret_key_invalid": "Secret key must be exactly 64 hexadecimal characters",
-        "errors.snapshot_device_unknown": "This snapshot's owning device is unknown, so its files cannot be downloaded.",
+        "errors.snapshot_download_no_device_id": "This device could not load its own identity, so snapshot files cannot be downloaded here. Restart the app; if that does not help, sign in again.",
         "errors.subprotocol_mismatch": "Your app is out of date and can't connect to this nest. Please update to continue.",
         "errors.websocket_error": "WebSocket error: {detail}",
         "events.all_day": "All day",
@@ -14442,11 +14597,14 @@ private enum _LFlat {
         "feed.error_thread": "Could not load the thread: {message}",
         "feed.error_train": "Could not train on this post: {message}",
         "feed.error_trained_factor": "This feed's trained topic could not be applied: {message}",
+        "feed.imported_clear": "Show all posts",
+        "feed.imported_notice": "Showing the posts you imported from {platform}",
         "feed.less_like_this": "Less like this",
         "feed.like_tooltip": "Like",
         "feed.list.bridge_feeds": "Bridge Feeds",
         "feed.list.delete_feed": "Delete feed",
         "feed.list.end_of_feed": "End of feed",
+        "feed.list.local": "Local",
         "feed.list.no_matching_posts": "No matching posts.",
         "feed.list.no_posts": "No posts yet.",
         "feed.list.subscribe_bridge": "Subscribe to Bridge Feed",
@@ -14496,8 +14654,6 @@ private enum _LFlat {
         "feed.post.write_post": "Write a post...",
         "feed.post.write_reply": "Write a reply...",
         "feed.post_actions_tooltip": "More actions",
-        "feed.post_muted_placeholder": "Muted word",
-        "feed.post_muted_reveal": "Show anyway",
         "feed.post_type.classified": "Listing",
         "feed.post_type.community": "Community",
         "feed.quote": "Quote",
@@ -14593,8 +14749,10 @@ private enum _LFlat {
         "folders.share_transfer_section": "Peer transfers",
         "folders.share_transfer_source_free_space": "free space on this device",
         "folders.share_transfer_state_admission_pending": "Waiting to be admitted",
+        "folders.share_transfer_state_interrupted": "Connection lost; retrying",
         "folders.share_transfer_state_limited": "Limited by {source}",
         "folders.share_transfer_state_pulling": "Receiving",
+        "folders.share_transfer_state_unreachable": "Could not reach their device",
         "folders.share_transfer_state_up_to_date": "Up to date",
         "folders.synced_locations": "Synced Locations",
         "folders.title": "Folders",
@@ -14620,10 +14778,6 @@ private enum _LFlat {
         "groups.member_role": "Member",
         "groups.members": "Members",
         "groups.members_title": "Members — {name}",
-        "groups.message.encrypted": "Encrypted",
-        "groups.message.encrypted_title": "End-to-end encrypted via MLS",
-        "groups.message.signed": "Signed",
-        "groups.message.signed_title": "Sender signature verified — content is plaintext in the nest",
         "groups.message_placeholder": "Type a message...",
         "groups.mute_group": "Mute Group",
         "groups.my_groups": "My Groups",
@@ -14675,7 +14829,7 @@ private enum _LFlat {
         "linked_nests.unlink": "Unlink",
         "logs.clear_button": "Clear",
         "logs.copy_button": "Copy",
-        "logs.description": "Recent activity recorded on this device, newest first. No message contents or secrets are ever logged — only what happened, when, and where.",
+        "logs.description": "Recent activity recorded on this device, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.",
         "logs.empty": "No log entries yet.",
         "logs.filter_all": "All",
         "logs.filter_label": "Severity",
@@ -14806,7 +14960,7 @@ private enum _LFlat {
         "mail_import.microsoft_session_sign_in_again": "The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept.",
         "mail_import.microsoft_sign_in_again": "Sign in with Microsoft again",
         "mail_import.microsoft_sign_in_required": "Sign in with Microsoft to connect your Outlook account.",
-        "mail_import.microsoft_unavailable": "Microsoft sign-in is not available yet.",
+        "mail_import.microsoft_unavailable": "Microsoft sign-in is not available in this version of Fauna.",
         "mail_import.microsoft_waiting": "Waiting for you to finish signing in with Microsoft…",
         "mail_import.next": "Next",
         "mail_import.password_session_sign_in_again": "The import stopped: your old provider no longer accepts this password. Try again with new credentials to start a new import — mail already imported is kept.",
@@ -15013,6 +15167,8 @@ private enum _LFlat {
         "media.upload_failed": "Upload failed",
         "media.uploading": "Uploading... {progress}%",
         "media.version_author": "Edited by {author}",
+        "media.version_author_deposited": "Edited by {app} via {author}",
+        "media.version_author_deposited_unknown": "Edited by a connected app via {author}",
         "media.version_pruned_badge": "Pruned",
         "media.version_restore": "Restore",
         "media.version_undelete": "Recover",
@@ -15075,6 +15231,7 @@ private enum _LFlat {
         "moderation.report.failed": "The report could not be sent: {error}",
         "moderation.report.hidden_placeholder": "You reported this",
         "moderation.report.include_text_label": "Include the text of this message — the admins will be able to read it",
+        "moderation.report.include_text_label_post": "Include the text of this post — the admins will be able to read it",
         "moderation.report.ledger_empty": "You have not reported anything.",
         "moderation.report.ledger_routed_to": "Sent to {destinations}",
         "moderation.report.ledger_title": "Your reports",
@@ -15106,7 +15263,7 @@ private enum _LFlat {
         "moderation.total_labels": "Total labels:",
         "muted_words.add": "Mute word",
         "muted_words.collapsed": "Muted word",
-        "muted_words.description": "A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.",
+        "muted_words.description": "A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it.",
         "muted_words.empty": "You haven’t muted any words yet.",
         "muted_words.input_placeholder": "Add a word to mute",
         "muted_words.level_hide": "Hide",
@@ -15127,6 +15284,9 @@ private enum _LFlat {
         "nest_rules.blocked_notice": "Not shown on {nest} — blocked under this nest’s rules",
         "nest_rules.changed_notice": "{nest} changed its rules — see what is in force",
         "nest_rules.collapsed_notice": "Hidden on {nest} under this nest’s rules — select to show",
+        "nest_rules.joining_heading": "Rules of {nest}. By continuing you accept them.",
+        "nest_rules.not_applied_malformed": "These rules contain an error, so none of them apply on this device.",
+        "nest_rules.not_applied_newer_version": "These rules were written by a newer version of Fauna, so none of them apply on this device. Update the app to see and apply them.",
         "nest_rules.reveal_button": "Show",
         "nest_rules.rule_line": "{verdict} · {level} — {reason}",
         "nest_rules.rule_line_no_level": "{verdict} — {reason}",
@@ -15140,18 +15300,18 @@ private enum _LFlat {
         "nests.backup_bound_note_seal": "Stopping this means your nest can no longer make new backups of your messages. Backups it already made stay where they are until the box holding them clears them out.",
         "nests.backup_bound_note_writer": "Stopping this means your nest can no longer send new backups to this destination. Backups already stored there stay until that box clears them out. You can stop it here even if your own nest is misbehaving.",
         "nests.backup_revoke": "Stop backing up",
-        "nests.backup_scope_seal": "Backs up your messages for you",
+        "nests.backup_scope_seal": "Encrypts and uploads the backups of your mail, calendar, contacts and posts",
         "nests.backup_scope_writer": "Writes your backups to {destination}",
         "nests.backup_since": "Trusted since:",
         "nests.backup_status_active": "Active",
         "nests.backup_status_missing": "Not set up to accept your backups",
         "nests.backup_status_unreachable": "Could not reach this destination",
         "nests.blessed_toggle": "Keep this box's trust renewed",
-        "nests.bound_note_bounded_mail": "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail sealed under that period's rotating keys, so content sealed before the schedule caught up may still be unreadable to it.",
+        "nests.bound_note_bounded_mail": "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.",
         "nests.bound_note_standing": "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.",
         "nests.capabilities_label": "Syncs:",
-        "nests.capability_account_replica": "sealed copy of your account settings",
-        "nests.custody_nest_label": "{host}'s nest — trusted to hold sealed copies",
+        "nests.capability_account_replica": "encrypted copy of your account settings",
+        "nests.custody_nest_label": "{host}'s nest — trusted to hold encrypted copies",
         "nests.custody_restore_button": "Restore from a custodian nest…",
         "nests.custody_restore_cancel": "Cancel",
         "nests.custody_restore_input_label": "The custodian nest's address, as its host gave it to you (for example https://nest.example)",
@@ -15163,11 +15323,12 @@ private enum _LFlat {
         "nests.custody_restore_revoked": "you revoked this nest's custody",
         "nests.custody_restore_row_button": "Restore from this nest now",
         "nests.custody_restore_running": "Restoring from the custodian nest…",
-        "nests.custody_restore_sealed": "{count} came back sealed and stay unreadable until this device has their key.",
+        "nests.custody_restore_sealed": "{count} came back still encrypted and stay unreadable until this device has their key.",
         "nests.custody_restore_submit": "Restore",
+        "nests.custody_restore_unchecked": "Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest.",
         "nests.description": "Nests you have linked to sync your account's content.",
         "nests.empty": "No linked nests yet.",
-        "nests.escrow_holder_badge": "Holds your recovery escrow",
+        "nests.escrow_holder_badge": "Holds the copy your recovery kit opens",
         "nests.expiry_label": "Expires:",
         "nests.expiry_never": "Never expires",
         "nests.forward_discard": "Stop forwarding these",
@@ -15191,7 +15352,7 @@ private enum _LFlat {
         "nests.history_revoked": "Trust revoked: {scope} · {when}",
         "nests.holders_status_unreachable": "Could not ask this nest which services it trusts",
         "nests.lasts_until": "Trusted until:",
-        "nests.link_recovery_keys_differ": "These two nests hold different recovery keys for this account, so they can't be linked.",
+        "nests.link_recovery_keys_differ": "These two nests know different recovery kits for this account, so they can't be linked.",
         "nests.list_title": "Your linked nests",
         "nests.mint_button": "Add trust…",
         "nests.mint_confirm": "Trust",
@@ -15283,7 +15444,7 @@ private enum _LFlat {
         "nostr.settings.auto_publish": "Auto-publish posts",
         "nostr.settings.auto_publish_subtitle": "Automatically publish Fauna posts to Nostr relays",
         "nostr.settings.description": "Configure Nostr publishing behavior",
-        "nostr.settings.expose_subtitle": "Allow Nostr users to see your Fauna content",
+        "nostr.settings.expose_subtitle": "Serve your public posts, apart from posts you imported from another service, to Nostr users from your nest's relay",
         "nostr.settings.expose_title": "Expose content",
         "nostr.settings.inbound_subtitle": "Show events from followed Nostr users in your feed",
         "nostr.settings.inbound_title": "Inbound to feed",
@@ -15334,15 +15495,15 @@ private enum _LFlat {
         "notifications.row_security_admin_action_expired": "Security: the pending admin action {action_type} (#{action_id}) on {target} expired without the approvals it needed. Nothing changed.",
         "notifications.row_security_admin_action_pending": "Security: admin {by} scheduled {action_type} (#{action_id}) on {target}; it runs at {execute_after} and still needs {approvals_needed} approval(s). Approve or cancel it under Admin → Users → Pending admin actions.",
         "notifications.row_security_admin_change": "Security: an administrative change ({change_type}) was made to {target}. If you did not request it, contact your nest administrator.",
-        "notifications.row_security_archive_exported": "Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.",
+        "notifications.row_security_archive_exported": "Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.",
         "notifications.row_security_identity_succeeded": "Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.",
-        "notifications.row_security_mailbox_export_downloaded": "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.",
+        "notifications.row_security_mailbox_export_downloaded": "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.",
         "notifications.row_security_new_token": "Security: new sign-in from a different IP address ({ip}). If this was not you, change your keys and contact your nest administrator.",
         "notifications.row_security_pending_action_against_you": "Security: administrator {by} scheduled {action_type} (#{action_id}) against your account; it runs at {execute_after}. You can cancel it under Settings → Pending actions.",
         "notifications.row_security_pending_action_queued": "Security: a pending action ({action_type}, #{action_id}) was queued by your account and runs at {execute_after}. If this was not you, cancel it under Settings → Pending actions.",
         "notifications.row_security_recovery_replacement_cancelled": "Security: the pending recovery key replacement was cancelled by {cancelled_by}.",
-        "notifications.row_security_recovery_replacement_landed": "Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.",
-        "notifications.row_security_recovery_replacement_pending": "Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.",
+        "notifications.row_security_recovery_replacement_landed": "Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.",
+        "notifications.row_security_recovery_replacement_pending": "Security: a recovery kit replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.",
         "notifications.row_tip": "{sender} tipped your post",
         "notifications.row_tip_anonymous": "Someone tipped your post",
         "notifications.row_tip_anonymous_msats": "Someone tipped {value} msats on your post",
@@ -15428,7 +15589,7 @@ private enum _LFlat {
         "onboarding.emergency_lockout.account_malformed": "Enter the full handle including the domain, in the form user@domain.",
         "onboarding.emergency_lockout.account_needed": "Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives.",
         "onboarding.emergency_lockout.desc": "Lock your account from this device without signing in. Paste your secret key and enter your handle. Nothing you enter here is saved on this device.",
-        "onboarding.emergency_lockout.invalid_secret": "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase.",
+        "onboarding.emergency_lockout.invalid_secret": "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery kit.",
         "onboarding.emergency_lockout.locked": "Your account is locked until {until}. Nothing was saved on this device.",
         "onboarding.emergency_lockout.refused": "The lock was refused. ({reason})",
         "onboarding.emergency_lockout.secret_label": "Secret key",
@@ -15455,6 +15616,7 @@ private enum _LFlat {
         "onboarding.handle_check.outcome.domain_available_priced": "{domain} is available — registration about {price}.",
         "onboarding.handle_check.outcome.domain_available_unpriced": "{domain} appears to be available for purchase.",
         "onboarding.handle_check.outcome.format_invalid": "Handle format must be user@domain or user.domain (with localhost or IP also accepted).",
+        "onboarding.handle_check.outcome.local_no_nest": "No nest is running at {domain}. Start a nest there, then check again.",
         "onboarding.handle_check.outcome.registered_no_nest": "{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.",
         "onboarding.handle_check.outcome.tld_invalid": "{tld} is not a TLD that can be registered.",
         "onboarding.handle_check.outcome.unregistered_unclaimed_nest": "There's a nest at {domain} but no one has claimed it yet. Continue to claim it as your own.",
@@ -15468,7 +15630,7 @@ private enum _LFlat {
         "onboarding.identity_choice.emergency_lockout_entry": "Lock my account for 24 hours",
         "onboarding.identity_choice.import_existing": "Import from Another Device",
         "onboarding.identity_choice.recover_lost_box": "Recover a lost box",
-        "onboarding.identity_choice.restore_from_recovery_kit": "Restore my account from a recovery phrase",
+        "onboarding.identity_choice.restore_from_recovery_kit": "Restore my account from a recovery kit",
         "onboarding.identity_choice.subtitle": "Your identity is an encryption key that belongs only to you.",
         "onboarding.identity_choice.title": "Set Up Your Identity",
         "onboarding.identity_created.continue": "Continue",
@@ -15500,10 +15662,12 @@ private enum _LFlat {
         "onboarding.invite.denied": "Request denied: {reason}",
         "onboarding.invite.error.already_registered": "This nest already has an account for you, so it won't take a new invite request. Its admin may have suspended your account — contact the admin; if they restore it, sign in again.",
         "onboarding.invite.error.closed": "This nest is not currently accepting invite requests.",
+        "onboarding.invite.error.domain_not_hosted": "This nest doesn't host addresses on that domain. Go back and choose an address on one of its own domains.",
         "onboarding.invite.error.not_found": "This invite request was not found. It may have been removed by the admin.",
         "onboarding.invite.error.rate_limited": "Too many requests. Please try again later.",
         "onboarding.invite.error.terminal": "Error: {cause}.",
         "onboarding.invite.error.transient": "{cause}. Try again.",
+        "onboarding.invite.error.unreachable": "Couldn't reach the nest to create your account. Try again.",
         "onboarding.invite.idle": "Request an invite or paste a code below.",
         "onboarding.invite.pending_review": "Submitted. The admin will review — you'll continue automatically once they respond.",
         "onboarding.invite.recheck_button": "Recheck",
@@ -15541,12 +15705,13 @@ private enum _LFlat {
         "onboarding.launch.index_malformed": "Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first.",
         "onboarding.launch.index_malformed_reset": "Start over on this device",
         "onboarding.launch.index_malformed_reset_blocked_other_window": "Nothing was removed — another Fauna window is using an account on this device. Close it, then start over again.",
-        "onboarding.launch.index_malformed_reset_confirm": "Remove everything and start over",
-        "onboarding.launch.index_malformed_reset_residual": "Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it.",
+        "onboarding.launch.index_malformed_reset_confirm": "Clear the list and start over",
+        "onboarding.launch.index_malformed_reset_residual": "Starting over clears this app's list of accounts. Your accounts still exist on your nest — you can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit. Some saved data on this device, which can include sign-in keys, can't be reached to clear it and stays behind.",
         "onboarding.launch.index_malformed_title": "Your saved accounts can't be read",
         "onboarding.launch.index_newer_build": "Your accounts were saved by a newer version of this app, so this version can't read them. Nothing has been lost — update the app and they'll be here.",
         "onboarding.launch.index_newer_build_title": "Update needed",
-        "onboarding.launch.launch_failed": "Startup hit a problem. Your data is safe — you can retry, or continue setup below.",
+        "onboarding.launch.launch_failed": "Startup hit a problem. Nothing saved on this device was deleted — restart the app to try again.",
+        "onboarding.launch.locked_secret_missing": "This device doesn't hold this account's secret key, so it can't replace the identity from here. Add the account back with its secret key or recovery kit, then try again.",
         "onboarding.launch.recover_lost_box": "Recover a lost box",
         "onboarding.launch.retire_server": "Retire a server",
         "onboarding.launch.sign_in_refused": "This nest no longer signs you in. Its admin may have suspended or removed your account — nothing on this device has changed. Contact the admin; if they restore your account, try again.",
@@ -15624,10 +15789,10 @@ private enum _LFlat {
         "onboarding.provision.substep.status_cancelling": "Cancelling…",
         "onboarding.provision.substep.status_retrying": "Retrying after error: {cause}",
         "onboarding.provision.substep.status_skipped": "Already configured — skipped",
-        "onboarding.provision.time": "This usually takes 2-3 minutes.",
-        "onboarding.recovery.box_item_hint": "Recovery key custodied",
+        "onboarding.provision.time": "This usually takes a few minutes.",
+        "onboarding.recovery.box_item_hint": "Server key saved",
         "onboarding.recovery.box_list_label": "Your boxes",
-        "onboarding.recovery.empty_message": "No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer.",
+        "onboarding.recovery.empty_message": "No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest.",
         "onboarding.recovery.method_cloud": "Re-provision on a cloud host",
         "onboarding.recovery.method_selfhosted": "Install on my own server",
         "onboarding.recovery.restore_cta": "Restore your data",
@@ -15635,25 +15800,25 @@ private enum _LFlat {
         "onboarding.recovery.selfhosted_continue": "Done",
         "onboarding.recovery.selfhosted_desc": "Put your server's key, from the line below, into the setup file of a fresh box before you start it for the first time — the setup guide's section on rebuilding after a total loss shows where it goes and how to write it. The rebuilt box is then the same nest, and your installed Fauna apps reconnect to it automatically once it's back online, with no warning that its identity changed.",
         "onboarding.recovery.selfhosted_title": "Install on your own server",
-        "onboarding.recovery.subtitle": "Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online.",
+        "onboarding.recovery.subtitle": "Choose the box you lost. A new server started with its saved key is the same nest, and Fauna can set one up on a cloud host for you. Your installed Fauna apps then reconnect to it automatically once it's back online, with no warning that its identity changed.",
         "onboarding.recovery.title": "Recover a lost box",
-        "onboarding.recovery_entry.account_hint": "If your phrase doesn't name your account, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.",
+        "onboarding.recovery_entry.account_hint": "If your kit doesn't say where your account lives, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.",
         "onboarding.recovery_entry.account_malformed": "Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.",
-        "onboarding.recovery_entry.account_needed": "Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.",
+        "onboarding.recovery_entry.account_needed": "Enter the handle of the account you're restoring (user@domain) — this kit doesn't say where your account lives.",
         "onboarding.recovery_entry.account_unknown": "No account named {account} exists on that nest.",
-        "onboarding.recovery_entry.desc": "Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow.",
-        "onboarding.recovery_entry.invalid_kit": "That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.",
-        "onboarding.recovery_entry.no_escrow": "This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in.",
-        "onboarding.recovery_entry.phrase_label": "Recovery phrase",
-        "onboarding.recovery_entry.refused": "That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})",
-        "onboarding.recovery_entry.restored_predecessors_lost": "Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})",
+        "onboarding.recovery_entry.desc": "Paste your recovery kit (the fauna://recovery link or the 64-character code). Your identity will be restored from the copy of your secret key that only your kit opens.",
+        "onboarding.recovery_entry.invalid_kit": "That isn't a recovery kit. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.",
+        "onboarding.recovery_entry.no_escrow": "Your kit can't restore this account from here — no copy of your secret key that it opens is available. On a device that's still signed in, open Settings → Account → Recovery Kit. If it offers Restore Kit Recovery, enter this kit and press it; if instead Create Recovery Kit can be pressed, this kit never took effect, so create a new one.",
+        "onboarding.recovery_entry.phrase_label": "Recovery kit",
+        "onboarding.recovery_entry.refused": "That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})",
+        "onboarding.recovery_entry.restored_predecessors_lost": "Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})",
         "onboarding.recovery_entry.submit": "Restore",
         "onboarding.recovery_entry.superseded": "This identity was replaced after it was compromised. Import the new identity to continue.",
         "onboarding.recovery_entry.title": "Restore from Recovery Kit",
         "onboarding.recovery_entry.unreachable": "Could not reach that account's nest. Check the handle and your connection, then try again. If the domain itself is gone, enter your handle with your nest's address instead, like alice@192.0.2.10. ({reason})",
         "onboarding.recovery_kit.confirm": "I've saved it — continue",
-        "onboarding.recovery_kit.desc": "This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device.",
-        "onboarding.recovery_kit.escrow_deferred": "Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe.",
+        "onboarding.recovery_kit.desc": "Your recovery kit is a second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.",
+        "onboarding.recovery_kit.escrow_deferred": "Your kit activates when your account comes online at the end of setup — until then, keep it safe and offline.",
         "onboarding.recovery_kit.not_minted": "Recovery kit not minted yet",
         "onboarding.recovery_kit.skip": "Skip for now",
         "onboarding.recovery_kit.title": "Your Recovery Kit",
@@ -15664,7 +15829,7 @@ private enum _LFlat {
         "onboarding.retire.confirm_current": "This is the server you're signed into. This session's nest will stop existing.",
         "onboarding.retire.confirm_destroyed": "Everything on this server — its disk and every account's data on it — is destroyed and cannot be recovered except from a backup.",
         "onboarding.retire.confirm_dns_none": "No DNS records will be removed automatically. The records to remove by hand are listed below.",
-        "onboarding.retire.confirm_dns_removals": "Before the server is deleted, these DNS records pointing at it are removed: {records}",
+        "onboarding.retire.confirm_dns_removals": "Before the server is deleted, these DNS records belonging to it are removed: {records}",
         "onboarding.retire.confirm_domain": "Domain: {domain}",
         "onboarding.retire.confirm_name_label": "Type the server's name to confirm",
         "onboarding.retire.confirm_secondary_domains": "Also serves: {domains}",
@@ -15674,14 +15839,14 @@ private enum _LFlat {
         "onboarding.retire.domain_label": "Domain",
         "onboarding.retire.done_button": "Done",
         "onboarding.retire.done_deleted": "{name} has been deleted.",
-        "onboarding.retire.empty_message": "No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard.",
+        "onboarding.retire.empty_message": "No servers created by Fauna were found in this account. Except on OVH, servers created before 8 July 2026 predate the Fauna marker and are not listed — retire those from your provider's dashboard.",
         "onboarding.retire.force_server_button": "Delete the server anyway",
         "onboarding.retire.force_server_warning": "Deleting the server now leaves DNS records pointing at an address your provider can hand to someone else. Remove them by hand right away — they are listed once the server is gone.",
         "onboarding.retire.leftover_copy": "Copy the list",
         "onboarding.retire.leftover_none": "Nothing is left to remove by hand.",
         "onboarding.retire.leftover_points_at_box": "Remove now — still points at the deleted server: {record}",
         "onboarding.retire.leftover_shared_name": "Stale, remove when convenient: {record}",
-        "onboarding.retire.list_label": "Servers Fauna created in this account",
+        "onboarding.retire.list_label": "Servers found in this account",
         "onboarding.retire.retry_button": "Try again",
         "onboarding.retire.secondary_domains_label": "Also serves",
         "onboarding.retire.step_dns": "DNS records",
@@ -15690,7 +15855,7 @@ private enum _LFlat {
         "onboarding.retire.step_skipped_no_dns_credential": "No DNS credential reaches this domain's zone, so nothing was removed automatically — see the list to remove by hand.",
         "onboarding.retire.step_skipped_no_verified_domain": "No domain was verified for this server, so no DNS records were touched.",
         "onboarding.retire.step_skipped_no_zone_for_domain": "None of your DNS credentials holds this domain's zone, so nothing was removed automatically — see the list to remove by hand.",
-        "onboarding.retire.subtitle": "Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved.",
+        "onboarding.retire.subtitle": "Delete a server Fauna created in your cloud account since 8 July 2026 — on OVH, any server your credentials reach — and clean up the DNS records that belong to it, or, where your provider can hand it out, get your domain's transfer code. Your cloud token is used for this visit only and is never saved.",
         "onboarding.retire.title": "Retire a server",
         "onboarding.retire.transfer_code_available_after": "The registry locks this domain against transfer until {when}. Ask again after that — the code is never refused, only delayed.",
         "onboarding.retire.transfer_code_button": "Get the domain transfer code",
@@ -15702,6 +15867,7 @@ private enum _LFlat {
         "onboarding.session_error.invalid_secret": "This device's saved secret key isn't valid: {message}",
         "onboarding.session_error.no_active_account": "Couldn't find the account that was just added.",
         "onboarding.session_error.persist_account": "Couldn't save your new account: {message}",
+        "onboarding.session_error.persist_identity": "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is.",
         "onboarding.session_error.persist_successor": "Couldn't save your new identity: {message}",
         "onboarding.session_error.remove_account": "Couldn't remove that account: {message}",
         "onboarding.session_error.switch_appended": "Couldn't switch to the new account: {message}",
@@ -15710,10 +15876,10 @@ private enum _LFlat {
         "onboarding.trust_prompt.grant_button": "Yes, trust this box",
         "onboarding.trust_prompt.nothing_to_grant": "There's nothing to decide yet — this box isn't running anything that would read your content. You can trust it later from Settings → Nests.",
         "onboarding.trust_prompt.skip_button": "Not now",
-        "onboarding.trust_prompt.summary": "This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.",
+        "onboarding.trust_prompt.summary": "This box can do more for you if you let it read your mail and calendar, and the posts of the paid tiers you already have: running its virus and spam checks on your mail again when those checks are updated, reading your calendar for itself, and showing the paid posts you publish on the web to the people who pay for them. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.",
         "onboarding.trust_prompt.title": "Trust this box?",
         "onboarding.vps_config.location_heading": "Location",
-        "onboarding.vps_config.mail_mode_desc": "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS.",
+        "onboarding.vps_config.mail_mode_desc": "A mail box runs email (SMTP, IMAP), which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box, which runs everything except email and can run on the cheapest 1 GB plan, but cannot add email later: the server would have to be set up again with email, on a plan with 2 GB or more.",
         "onboarding.vps_config.mail_mode_label": "Run mail on this box",
         "onboarding.vps_config.server_type_radio_legend": "Choose a VPS plan",
         "onboarding.vps_config.ssh_door_label": "Keep an SSH door to this server",
@@ -15725,7 +15891,7 @@ private enum _LFlat {
         "onboarding.vps_config.title": "Configure VPS",
         "onboarding.vps_config.update_channel_dev_desc": "The newest development builds, before any checking, for people who build the apps from source. Expect breakage.",
         "onboarding.vps_config.update_channel_dev_desc_no_build": "No build has been published on this channel yet — choose another channel.",
-        "onboarding.vps_config.update_channel_dev_desc_same_version": "The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.",
+        "onboarding.vps_config.update_channel_dev_desc_same_version": "The newest development builds, before any checking. Until version 0.2 the server works only with apps built from the same source. Expect breakage.",
         "onboarding.vps_config.update_channel_dev_label": "Dev",
         "onboarding.vps_config.update_channel_heading": "Updates",
         "onboarding.vps_config.update_channel_stable_desc": "Released versions. Recommended.",
@@ -15733,11 +15899,8 @@ private enum _LFlat {
         "onboarding.vps_config.update_channel_stable_label": "Stable",
         "onboarding.vps_config.update_channel_test_desc": "Numbered releases being accepted by users before they become Stable.",
         "onboarding.vps_config.update_channel_test_desc_no_build": "No build has been published on this channel yet — choose another channel.",
-        "onboarding.vps_config.update_channel_test_desc_same_version": "Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks.",
+        "onboarding.vps_config.update_channel_test_desc_same_version": "Numbered releases being accepted by users before they become Stable. Until version 0.2 the server works only with apps of exactly the same version.",
         "onboarding.vps_config.update_channel_test_label": "Test",
-        "onboarding.welcome.subtitle": "Your personal, private communications nest.",
-        "onboarding.welcome.tagline": "Private messaging and file sync,\nbuilt on your own server.",
-        "onboarding.welcome.title": "Fauna",
         "p2p.copy_to_clipboard": "Copy to Clipboard",
         "p2p.delete_contact": "Delete Contact",
         "p2p.no_contacts": "No P2P contacts yet",
@@ -15755,8 +15918,8 @@ private enum _LFlat {
         "personalization.publish_kind_list": "List of posts",
         "personalization.publish_kind_model": "Word-pattern model",
         "personalization.publish_kind_unknown": "{kind}",
-        "personalization.publish_limitation_note": "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published anonymously: nothing links the list back to you or your account.",
-        "personalization.publish_limitation_note_model": "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published anonymously, and it’s built only from posts you marked by hand: nothing you merely read or watched goes into it.",
+        "personalization.publish_limitation_note": "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though the posts you choose can still say something about you.",
+        "personalization.publish_limitation_note_model": "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though someone who compares its word patterns with public posts may be able to guess which of them you marked. It’s built only from posts you marked by hand: nothing you merely read or watched goes into it.",
         "personalization.publish_name_blank": "A published name can’t be blank.",
         "personalization.publish_name_label": "Public name for this list",
         "personalization.publish_name_label_model": "Public name for this model",
@@ -15888,7 +16051,6 @@ private enum _LFlat {
         "provisioning.linode.help": "Create a Personal Access Token at cloud.linode.com → Profile → API Tokens.",
         "provisioning.linode.location": "Region",
         "provisioning.linode.name": "Linode (Akamai)",
-        "provisioning.managed.disabled": "Managed subdomains on fauna.social are coming soon. For now, pick another option.",
         "provisioning.namecheap.api_key": "API key",
         "provisioning.namecheap.api_user": "API user",
         "provisioning.namecheap.domain": "Domain",
@@ -15922,6 +16084,7 @@ private enum _LFlat {
         "region.policy_authority": "{region}: {authority}",
         "region.policy_version": "Version {sequence}, issued {issued}",
         "region.reveal_button": "Show",
+        "region.sealed_note": "Hidden from you on this device — nothing was removed, detected or reported",
         "region.section_title": "Region",
         "region.source_browser_locale": "From your browser language — change it in your browser settings",
         "region.source_storefront": "From your app store region — change it in your store account",
@@ -16020,7 +16183,7 @@ private enum _LFlat {
         "sessions.load_failed": "Could not load your sessions: {error}",
         "sessions.lockout_button": "Lock for 24 Hours",
         "sessions.lockout_confirm_placeholder": "Type LOCK to confirm",
-        "sessions.lockout_warning": "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it.",
+        "sessions.lockout_warning": "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. (On an account that is an admin of its nest, the lock signs every device out but does not stop anyone signing in again.) It does not remove somebody who holds your secret key — they come back when the lock ends, or at once on an account that is an admin of its nest. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use — on a device that holds your secret key, choose My Identity Was Stolen on the Account locked screen (on an account that is an admin of its nest, which is not locked out, under Settings → Account → Recovery Kit). A lock you did not set is itself the sign to use it.",
         "sessions.lockout_wrong_word": "Type {word} exactly to lock the account.",
         "sessions.mark_this_app": "This app",
         "sessions.mark_this_device": "This device",
@@ -16032,7 +16195,7 @@ private enum _LFlat {
         "sessions.revoke_others_confirm": "Yes, Sign Out Everywhere Else",
         "sessions.title": "Sessions",
         "settings.about": "About",
-        "settings.about_desc": "Encrypted messaging, contacts, and file sync.",
+        "settings.about_desc": "Your feed, messages, mail, calendar and files, on a server you control.",
         "settings.about_name": "Fauna for Windows",
         "settings.account_list_full": "Not added — this device's account list is full. Remove an account this device no longer uses, then try again.",
         "settings.account_page.accounts": "Accounts",
@@ -16050,7 +16213,7 @@ private enum _LFlat {
         "settings.account_page.data": "Data",
         "settings.account_page.data_export": "Data Export",
         "settings.account_page.delete_account": "Delete Account",
-        "settings.account_page.delete_confirm_text": "This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail.",
+        "settings.account_page.delete_confirm_text": "This permanently removes your handle and data from this nest. Your key is not affected. Take your data first: Export My Data, in Settings → Account, downloads what your nest holds for you, your mail included; to move your mailbox to another mail service, use Export mailbox, among the mail pages in Settings.",
         "settings.account_page.delete_requested": "Account deletion scheduled",
         "settings.account_page.delete_subtitle": "Permanently delete your account and all data",
         "settings.account_page.export_dialog_title": "Export Account Data",
@@ -16107,6 +16270,7 @@ private enum _LFlat {
         "settings.errors.enable_notifications": "Failed to enable notifications.",
         "settings.errors.export": "Export failed",
         "settings.errors.export_status": "Export failed: {status}",
+        "settings.errors.icloud_backup": "The copy to iCloud Keychain could not be made, so the backup stays off",
         "settings.errors.keep_filter": "Failed to record that you recognise this rule",
         "settings.errors.publish_keys": "Failed to publish keys",
         "settings.errors.save_prefs": "Failed to save preferences",
@@ -16145,7 +16309,7 @@ private enum _LFlat {
         "settings.general_page.theme_subtitle": "Choose the application colour scheme",
         "settings.general_page.update_available": "{version} available",
         "settings.general_page.version": "Version",
-        "settings.icloud_backup.footer": "When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices.",
+        "settings.icloud_backup.footer": "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.",
         "settings.icloud_backup.title": "iCloud Backup",
         "settings.icloud_backup.toggle": "Back up identity to iCloud Keychain",
         "settings.identity_export.desc": "Show a QR code that another device can scan to import your identity.",
@@ -16173,7 +16337,7 @@ private enum _LFlat {
         "settings.mail.credentials_title": "Credentials",
         "settings.mail.disable_confirm": "Disable mail",
         "settings.mail.disable_title": "Disable mail?",
-        "settings.mail.disable_warning": "This revokes all your mail credentials and clears your mail encryption key. Third-party mail apps (IMAP/CalDAV) will stop working until you re-enable mail.",
+        "settings.mail.disable_warning": "Mail apps you connected can no longer send or read mail until you turn mail back on. Calendar, contacts and file apps that sign in with the same password keep working. Your mail keys stay, so your earlier mail stays readable, and turning mail back on needs no new set-up.",
         "settings.mail.done": "Done",
         "settings.mail.enable_subtitle": "Allow a third-party mail app to connect over IMAP and SMTP",
         "settings.mail.enable_title": "Enable mail",
@@ -16318,20 +16482,20 @@ private enum _LFlat {
         "settings.recovery_kit.corpus_reseal_partly_owed": "Moving your files across to your new identity: {done} done, {remaining} still to go. This continues on its own, and picks up where it left off each time you sign in.",
         "settings.recovery_kit.corpus_reseal_running": "Moving your files across to your new identity…",
         "settings.recovery_kit.create": "Create Recovery Kit",
-        "settings.recovery_kit.desc": "An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device.",
+        "settings.recovery_kit.desc": "A second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.",
         "settings.recovery_kit.drafts_reseal_done": "Your unsent drafts are available again under your new identity.",
         "settings.recovery_kit.drafts_reseal_failed": "Your unsent drafts could not be recovered yet: {reason}. They are safe, and this will be retried the next time you sign in.",
         "settings.recovery_kit.drafts_reseal_owed_elsewhere": "Your unsent drafts are still held under your previous identity, and this device does not have the key to unlock them. They are safe. Sign in on the device you used to take back your account, and it will finish there.",
         "settings.recovery_kit.drafts_reseal_partly_owed_elsewhere": "Some of your unsent drafts are still held under a previous identity that this device cannot unlock. Sign in on the device you used to take back your account, and it will finish there.",
         "settings.recovery_kit.drafts_reseal_running": "Recovering your unsent drafts under your new identity…",
-        "settings.recovery_kit.escrow_reseal": "Restore Phrase Recovery",
+        "settings.recovery_kit.escrow_reseal": "Restore Kit Recovery",
         "settings.recovery_kit.grant_remint_done": "The access you had granted to services (mail filtering, search and similar) is restored under your new identity. Review each one on the Nests page — if your identity was stolen, the thief could have granted access you never did.",
         "settings.recovery_kit.grant_remint_failed": "The access you had granted to services could not be restored under your new identity yet: {reason}. This will be retried the next time you sign in.",
         "settings.recovery_kit.grant_remint_partial": "Some of the access you had granted to services could not be restored yet. This will be retried the next time you sign in — anything already restored is listed on the Nests page for review.",
         "settings.recovery_kit.grant_remint_running": "Restoring the access you had granted to services, under your new identity…",
         "settings.recovery_kit.inherited_filters": "{count} of your email filter rule(s) were set up before your account recovery and are still unchecked. A filter can silently bin or redirect incoming mail, so it is worth confirming you recognise each one — Settings ▸ Privacy ▸ Email Filters.",
-        "settings.recovery_kit.kit_phrase_placeholder": "Paste your recovery phrase (fauna://recovery link or 64-character code)",
-        "settings.recovery_kit.kit_phrase_required": "Paste the recovery phrase for this account first.",
+        "settings.recovery_kit.kit_phrase_placeholder": "Paste your recovery kit (fauna://recovery link or 64-character code)",
+        "settings.recovery_kit.kit_phrase_required": "Paste the recovery kit for this account first.",
         "settings.recovery_kit.let_go": "Let Go Of Unreadable Data",
         "settings.recovery_kit.let_go_confirm_placeholder": "Type LET GO to confirm",
         "settings.recovery_kit.let_go_done": "{retired} unreadable items were let go.",
@@ -16354,7 +16518,7 @@ private enum _LFlat {
         "settings.recovery_kit.review_reason_other": "this could not confirm their identity",
         "settings.recovery_kit.review_remove": "Remove From My Groups",
         "settings.recovery_kit.review_remove_done_here": "Removed {who} from {removed} of your group conversations.",
-        "settings.recovery_kit.review_remove_folder_seats": "They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the set, if it is not yours — then choose Remove again.",
+        "settings.recovery_kit.review_remove_folder_seats": "They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again.",
         "settings.recovery_kit.review_remove_none_here": "{who} is not in any of your group conversations on this device.",
         "settings.recovery_kit.review_remove_partial": "Removed {who} from {removed} of {groups} of your group conversations. The rest still include them — try again, or ask another member of those groups to remove them.",
         "settings.recovery_kit.review_remove_unsynced_seats": "They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.",
@@ -16363,10 +16527,10 @@ private enum _LFlat {
         "settings.recovery_kit.review_verdict_failed": "Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds.",
         "settings.recovery_kit.status_failed": "Could not check your recovery kit: {message}",
         "settings.recovery_kit.status_loading": "Checking your recovery kit…",
-        "settings.recovery_kit.status_never_created": "No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back.",
-        "settings.recovery_kit.status_registered": "Your recovery kit is active, and a sealed copy of your identity secret is stored for it.",
-        "settings.recovery_kit.status_registered_no_escrow": "Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this.",
-        "settings.recovery_kit.status_replacement_pending": "A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.",
+        "settings.recovery_kit.status_never_created": "No recovery kit. If every copy of your secret key is lost, your account cannot be recovered, and if someone steals it, you cannot take it back.",
+        "settings.recovery_kit.status_registered": "Your recovery kit is active, and the copy of your secret key that only your kit opens is stored.",
+        "settings.recovery_kit.status_registered_no_escrow": "Your recovery kit is active, but the copy of your secret key that only your kit opens is not stored, so the kit cannot recover this account right now. Enter your kit below and press Restore Kit Recovery to fix this.",
+        "settings.recovery_kit.status_replacement_pending": "A replacement of your recovery kit was requested with your secret key alone, and takes effect in {days} days. Cancel it below if it was not you.",
         "settings.recovery_kit.stolen": "My Identity Was Stolen",
         "settings.recovery_kit.stolen_ceremony_failed": "Couldn't recover your account: {message}",
         "settings.recovery_kit.stolen_confirm_placeholder": "Type SUCCEED to confirm",
@@ -16484,11 +16648,9 @@ private enum _LFlat {
         "status.admin_section.title": "Nest Administration",
         "status.build.commit": "Commit",
         "status.build.title": "Build",
-        "status.build.verify_hint": "Verify this build: clone the repo at this commit, build locally, and compare file hashes.",
         "status.change_handle.changing": "Changing...",
         "status.change_handle.placeholder": "new-handle",
         "status.connection.service": "Service",
-        "status.danger_zone.delete_hint": "Permanently removes your handle and data from this node. Your key is not affected.",
         "status.data_export.description": "Download all your data, content included, as a zip archive. It may be large.",
         "status.data_export.exported_to": "Data exported to {path}",
         "status.email_filters.action_add_label": "Label",
@@ -16508,22 +16670,21 @@ private enum _LFlat {
         "status.encryption.checking": "Checking encryption status...",
         "status.encryption.dm_channels": "DM Channels",
         "status.encryption.key_packages": "Key Packages",
-        "status.encryption.low_keys": "Low key packages. Publishing more...",
         "status.encryption.mls_engine": "MLS Engine",
         "status.encryption.publishing": "Publishing...",
         "status.identity.not_configured": "Not configured",
         "status.inbox_privacy.allow_knock": "Allow Knocks",
-        "status.inbox_privacy.allow_knock_desc": "New contacts must send a knock request first.",
+        "status.inbox_privacy.allow_knock_desc": "New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.",
         "status.inbox_privacy.closed": "Closed",
         "status.inbox_privacy.closed_desc": "No new messages accepted.",
         "status.inbox_privacy.contacts_only": "Contacts Only",
-        "status.inbox_privacy.contacts_only_desc": "Only confirmed contacts can message you.",
+        "status.inbox_privacy.contacts_only_desc": "Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.",
         "status.inbox_privacy.description": "Control who can send you messages.",
         "status.inbox_privacy.open": "Open",
         "status.inbox_privacy.open_desc": "Anyone can message you directly.",
         "status.inbox_privacy.title": "Inbox Privacy",
         "status.node.title": "Node",
-        "status.notifications.content_encrypted": "Notification content is encrypted end-to-end.",
+        "status.notifications.content_encrypted": "Notification content is encrypted end-to-end, apart from a generic alert and the number of unread items, which Apple's notification service carries in the clear.",
         "status.notifications.denied_hint": "Enable notifications in system Settings to receive alerts.",
         "status.notifications.denied_title": "Notifications Disabled",
         "status.notifications.description": "Get notified when messages arrive, even when Fauna is closed.",
@@ -16713,6 +16874,7 @@ private enum _LFlat {
         "unlock.error_failed": "Could not open the credential store: {message}",
         "unlock.error_mismatch": "The two entries don't match",
         "unlock.error_wrong": "Wrong passphrase, or the stored identity is damaged",
+        "unlock.keyring_locked_notice": "Your system keyring is locked or not set up, so Fauna can't keep your sign-in keys in it and will encrypt them with a passphrase you choose instead. To use the keyring, unlock it or set it up, then restart Fauna before you choose a passphrase.",
         "unlock.passkey_button": "Unlock with a passkey",
         "unlock.passkey_error": "Could not open with the passkey: {message}",
         "unlock.passkey_unavailable": "This browser or authenticator can't use a passkey to unlock your sign-in keys. Your passphrase still works.",

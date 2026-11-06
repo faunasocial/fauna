@@ -94,9 +94,9 @@
     error: string | null;
   }
 
-  // The machine's own default (§ Wizard steps step 3), in MB — the field's unit;
-  // the action takes bytes.
-  const DEFAULT_MAX_SIZE_MB = '50';
+  // The field's unit is MB; the action takes bytes. The machine owns the
+  // default (§ Wizard steps step 3) — the field seeds from the snapshot's
+  // `max_size_bytes`, never from a literal here.
   const MB = 1024 * 1024;
 
   let machine = $state<WasmMailImportMachine | null>(null);
@@ -146,7 +146,7 @@
   let usernameInput = $state('');
   let passwordInput = $state('');
   let dateFromInput = $state('');
-  let maxSizeInput = $state(DEFAULT_MAX_SIZE_MB);
+  let maxSizeInput = $state('');
 
   const busy = $derived(snap?.status === 'Working');
   // Which Source fields this provider asks for — the per-provider table in
@@ -175,6 +175,12 @@
         if (drafts.clearPassword) passwordInput = '';
         draftsSeeded = drafts.seeded;
       }
+    }
+    // Scope step: the starting max size is the machine's own value, written
+    // only into an empty field so a Back shows what Next last committed
+    // (apple's `syncDraftsFromSnapshot` shape).
+    if (next.step === 'Scope' && maxSizeInput === '') {
+      maxSizeInput = String(Math.floor(next.max_size_bytes / MB));
     }
     wasRemembered = next.source_remembered;
     snap = next;
@@ -264,7 +270,7 @@
   // stale/zero value (tui's `scope_next_actions`).
   function scopeNext(): void {
     const mb = Number.parseInt(maxSizeInput.trim(), 10);
-    const bytes = Number.isInteger(mb) && mb > 0 ? mb * MB : 50 * MB;
+    const bytes = Number.isInteger(mb) && mb > 0 ? mb * MB : (snap?.max_size_bytes ?? MB);
     void dispatch(
       { SetDateFrom: { value: dateFromInput.trim() } },
       { SetMaxSizeBytes: { value: bytes } },

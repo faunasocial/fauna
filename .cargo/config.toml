@@ -32,7 +32,6 @@ jobs = 8
 # toolchain pin bump (unstable config may change at stabilization).
 [unstable]
 feature-unification = true
-min-publish-age = true
 
 [resolver]
 feature-unification = "workspace"
@@ -50,14 +49,58 @@ feature-unification = "workspace"
 #
 # This value is a CONSTANT, not a knob: nobody edits it per machine, and the
 # per-invocation override the resolver offers is never committed anywhere
-# (test_cargo_min_publish_age_committed.py holds both). Measured on the pinned
-# Cargo 1.99 nightly, 2026-10-03: the key is honoured only behind the
-# `min-publish-age` line in [unstable] above (without it Cargo warns and
-# ignores the key), and the value must be a string of the form "N days".
-# Stable in Cargo 1.100: at that pin bump drop the [unstable] line if Cargo
-# then rejects it, and re-run the test.
+# (test_cargo_min_publish_age_committed.py holds both). The value must be a
+# string of the form "N days". The key is stable since Cargo 1.100, so it needs
+# no [unstable] gate: measured on the pinned Cargo 1.101 nightly (2026-10-20)
+# on 2026-10-27, the key is honoured with no gate line (a scratch resolve
+# refused every too-new version, naming its age), and the old
+# `min-publish-age = true` gate line only drew an "unused config key" warning,
+# so it was dropped at that pin bump. (On the Cargo 1.99 nightly before it, the
+# key was ignored without the gate.)
 [registry]
 global-min-publish-age = "7 days"
+
+# § linker (owner: build-target-layout-linux.md § Linker verdict; the lld
+# adopted 2026-10-26, spelled as rustflags since 2026-10-29).
+#
+# aarch64 Linux links with the pinned toolchain's own self-contained lld,
+# through the system `cc` driver — on the Linux dev machines and in the nest
+# image's arm64 build alike. GNU ld, the target's default, spends about four
+# times lld's time relinking the workspace's test harnesses. The three flags
+# after `-Zthreads=4` make rustc pass the cc driver `-fuse-ld=lld` and
+# `-B <sysroot>/lib/rustlib/<host>/bin/gcc-ld`, so collect2 runs the
+# toolchain's `ld.lld` by full path, ahead of any `ld.lld` on PATH.
+#
+# Spelled as flags, not as a `linker` key naming a wrapper: cargo fingerprints a
+# `linker` key's RESOLVED path, and a relative one resolves to each checkout's
+# own root, so a target seeded from a sibling checkout read every unit dirty
+# (measured 2026-10-29). These flags hold no path: every checkout spells them
+# the same, and a seeded unit reads Fresh. They move every aarch64 Linux unit's
+# `-C metadata` once, when edited.
+# x86_64-unknown-linux-gnu needs no entry: the toolchain links it with its own
+# lld by default.
+#
+# `-Zthreads=4`: rustc's parallel frontend at four threads, the width a Linux
+# dev machine's build slot issues (owner: the goal doc's parallel-frontend
+# subsection under § Linker verdict, measured 2026-10-27). Any set RUSTFLAGS
+# replaces this whole table: the nest image's `rust-native` stage sets its own
+# `ENV RUSTFLAGS` carrying the same lld flags (Dockerfile; it also serves the
+# amd64 leg, which this table never reaches), and the release tooling's
+# mono-item analysis builds drop it. Edit a flag here and look at the image's
+# copy. Both `-Zthreads` and the lld spelling are unstable: re-verify them at
+# every rust-toolchain.toml pin bump, and leave `-Zthreads` out on any hang or ICE.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Zthreads=4", "-Clink-self-contained=+linker", "-Clinker-features=+lld", "-Zunstable-options"]
+
+# `-Zthreads=4` for macOS hosts: the same parallel frontend at the same width
+# as the Linux table above (owner: build-target-layout-macos.md, the
+# parallel-frontend subsection, measured 2026-10-30). Apple's `ld` stays the
+# linker, so this is the table's only flag. It moves every aarch64-apple-darwin unit's `-C metadata`
+# once, when edited; the iOS and watchOS triples are not reached. Any set
+# RUSTFLAGS replaces it. Unstable: re-verify at every rust-toolchain.toml pin
+# bump, and leave it out on any hang or ICE.
+[target.aarch64-apple-darwin]
+rustflags = ["-Zthreads=4"]
 
 # Android NDK cross-compilation linkers.
 # These resolve to NDK clang wrappers on PATH (api26, matching minSdk in
@@ -84,10 +127,23 @@ linker = "i686-linux-android26-clang"
 # crt-static makes them self-contained (no redist, nothing to keep updated). Scoped
 # to *-pc-windows-msvc, so it only affects native Windows builds — Android/web/Linux
 # targets are untouched.
+#
+# Every MSVC link — dev, release and the shipped `dist` artifacts — uses the pinned
+# toolchain's own `rust-lld` (lld-link), not MSVC's link.exe: on a quiet host the
+# workspace's test harnesses spent 26.4 min in link.exe against 6.1 min on rust-lld,
+# and the tui binary 125 s against 6.6 s (2026-10-26; the numbers and the ruling:
+# docs/goal/architecture/build-target-layout-windows.md § UniFFI cdylib rebuild cost
+# (win) → Linker verdict). Nothing is installed — rust-lld ships with the toolchain
+# rust-toolchain.toml pins. This table is the one spelling: cargo's profile-rustflags,
+# the dev-only alternative, would reach every machine's dev builds (measured and
+# rejected). Either moves nearly every kache key once (a proc-macro's relinked dll
+# feeds every dependent's key), so the first build after a change here fills the store.
 [target.aarch64-pc-windows-msvc]
+linker = "rust-lld"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 # The Go mail-bridge (bins/fauna-bridges) is cgo and links fauna_ffi with

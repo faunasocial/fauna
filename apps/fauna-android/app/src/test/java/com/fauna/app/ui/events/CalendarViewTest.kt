@@ -99,9 +99,32 @@ class CalendarViewTest {
         }
         // Click on day 15 of current month
         composeTestRule.onNodeWithText("15").performClick()
+        // The cell holds a single tap until its double-tap window closes.
+        composeTestRule.mainClock.advanceTimeBy(1_000)
         composeTestRule.waitForIdle()
         assert(clickedDate != null) { "Day click callback should have been called" }
         assert(clickedDate!!.dayOfMonth == 15) { "Clicked day should be 15" }
+    }
+
+    @Test
+    fun monthGrid_emptyDayDoubleTap_callsDoubleCallbackNotSingle() {
+        val target = LocalDate.now().withDayOfMonth(15)
+        var single: LocalDate? = null
+        var double: LocalDate? = null
+        composeTestRule.setContent {
+            MonthGridContent(
+                date = target,
+                events = emptyList(),
+                onDateChange = {},
+                onDayClick = { single = it },
+                onDayDoubleClick = { double = it }
+            )
+        }
+        composeTestRule.onNodeWithTag("events-day-cell-$target")
+            .performTouchInput { doubleClick() }
+        composeTestRule.waitForIdle()
+        assert(double == target) { "Double tap should compose on $target, got $double" }
+        assert(single == null) { "Double tap must not also drill in, got $single" }
     }
 
     // ── DayTimelineContent ───────────────────────────────────────────

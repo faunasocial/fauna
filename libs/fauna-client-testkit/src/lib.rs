@@ -70,6 +70,11 @@ pub struct RecordingRequester {
     /// invisible once a later one overwrites the slot.
     kinds: Mutex<Vec<&'static str>>,
     reply: ReplyTable,
+    /// A live connection and its `fauna.nest.info` memo, as a real transport
+    /// keeps them ([`Self::on_connection`]) — `None` for the default double,
+    /// whose readers then read on every call, as through any memo-less
+    /// transport.
+    connection: Option<(u64, fauna_protocol::NestInfoMemo)>,
 }
 
 impl RecordingRequester {
@@ -96,6 +101,19 @@ impl RecordingRequester {
             last: Mutex::new(None),
             kinds: Mutex::new(Vec::new()),
             reply,
+            connection: None,
+        }
+    }
+
+    /// [`Self::new`] over one live connection numbered `connection`, carrying
+    /// the per-connection `fauna.nest.info` memo a real transport carries
+    /// (`fauna_protocol::read_nest_info`) — for the test that pins a reader
+    /// onto the memo: through it, a second read on the connection sends
+    /// nothing.
+    pub fn on_connection(reply: ReplyTable, connection: u64) -> Self {
+        Self {
+            connection: Some((connection, fauna_protocol::NestInfoMemo::new())),
+            ..Self::new(reply)
         }
     }
 
@@ -141,6 +159,14 @@ impl RpcRequester for RecordingRequester {
         let reply = (self.reply)(kind);
         Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
     }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        self.connection.as_ref().map(|(id, _)| *id)
+    }
+
+    fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+        self.connection.as_ref().map(|(_, memo)| memo)
+    }
 }
 
 /// An [`RpcRequester`] that only proves a client type compiles over the
@@ -177,7 +203,7 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     use std::task::{Context, Poll, Waker};
 
     let mut cx = Context::from_waker(Waker::noop());
-    let mut fut = Box::pin(fut);
+    let mut fut = std::pin::pin!(fut);
     match fut.as_mut().poll(&mut cx) {
         Poll::Ready(v) => v,
         Poll::Pending => panic!("recording-mock future parked unexpectedly"),
@@ -361,6 +387,15 @@ impl core::fmt::Display for ClassifiedError {
             ClassifiedError::Rejected(e) => write!(f, "rpc: {}", e.code),
             ClassifiedError::Transport(s) => write!(f, "transport: {s}"),
         }
+    }
+}
+
+/// A rejection a caller mints itself (a read that refuses what the nest
+/// served, as the real transports' `From<RpcError>` lets it) is a
+/// [`ClassifiedError::Rejected`].
+impl From<RpcError> for ClassifiedError {
+    fn from(e: RpcError) -> Self {
+        ClassifiedError::Rejected(e)
     }
 }
 

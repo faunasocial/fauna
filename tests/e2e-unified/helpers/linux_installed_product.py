@@ -31,7 +31,7 @@ coverage (convention 7).
 
 **DEBUG binaries, and it must be** — the same substitution ``macos_artifact.py``
 makes and for the same reason: convention 15 compiles the automation surface out
-of release artifacts (``apps/fauna-linux/src/main.rs``: ``mod automation`` is
+of release artifacts (``apps/fauna-linux/src/lib.rs``: ``mod automation`` is
 ``#[cfg(any(debug_assertions, feature = "e2e-agent"))]``), so the release binary
 ``install.sh`` reads by default carries no in-process agent and cannot be driven
 at all. The substitution is honest because ``install.sh`` branches on nothing:

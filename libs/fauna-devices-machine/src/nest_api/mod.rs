@@ -162,6 +162,17 @@ pub trait DevicesNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// seam can send is `false` — enabling is that device's own local act.
     async fn request_p2p_off(&self, device_id: &str) -> Result<(), DevicesApiError>;
 
+    /// `fauna.sync.devices.rename` — name one of the owner's rows
+    /// (`behavior/devices.md` § Device names, rule (1)). `label_sealed` is the
+    /// name already sealed under the owner's root by the machine
+    /// ([`crate::DevicesMachine::rename_device`]); the wire carries no
+    /// plaintext, so this seam has nothing to send without it.
+    async fn rename_device(
+        &self,
+        device_id: &str,
+        label_sealed: Vec<u8>,
+    ) -> Result<(), DevicesApiError>;
+
     /// `fauna.folders.delete` — delete a folder (non-cascading).
     async fn delete_folder(&self, name: &str) -> Result<(), DevicesApiError>;
 

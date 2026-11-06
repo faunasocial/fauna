@@ -6222,7 +6222,9 @@ async fn cross_nest_shared_folder_reads_evict_and_leave_through_client_stack() {
         &fetcher,
         &keys,
         fauna_core::data::ContentHash::from_digest_raw(manifest_digest),
-        change.content_key_version,
+        change
+            .content_key_version
+            .map(fauna_core::blob_seal::SealStamp::Version),
         rel,
     )
     .await
@@ -6681,7 +6683,9 @@ async fn cross_nest_writer_records_and_uploads_owner_reads_back_through_client_s
         &fetcher,
         &keys,
         fauna_core::data::ContentHash::from_digest_raw(manifest_digest),
-        change.content_key_version,
+        change
+            .content_key_version
+            .map(fauna_core::blob_seal::SealStamp::Version),
         rel,
     )
     .await
@@ -8795,9 +8799,7 @@ async fn a_followed_authors_posts_reach_the_followers_nest_and_only_the_follower
     );
     let profile_req = FeedAuthorPostsRequest {
         author: hex::encode(alice.actor_id().0),
-        cursor: None,
-        limit: None,
-        extra: Default::default(),
+        ..Default::default()
     };
     let profile: FeedAuthorPostsReply = fauna_protocol::decode_strict(
         &read(
@@ -8905,6 +8907,196 @@ async fn a_followed_authors_posts_reach_the_followers_nest_and_only_the_follower
         .await
         .expect("a replay of a deleted post is answered Ok");
     assert_eq!(local(bob_id).await.len(), 1, "and does not restore it");
+}
+
+/// Custody is per home (`federated-follow.md` § Decision 3, *What a
+/// reader-named home is trusted for*). Alice's home is H; on the readers' nest
+/// F, Bob follows her at H and Dave follows her at S, a nest Dave named that
+/// holds a copy of her post. S delivers first, H second: each reader lists the
+/// post from the home they named, neither delivery keeps the other out; Alice's
+/// tombstone relayed by H removes it for both, and a replay from S does not
+/// restore it.
+#[tokio::test]
+async fn a_post_delivered_by_two_homes_lists_to_each_homes_followers_from_their_own_home() {
+    let (h_base, _h_authority, h_state) = start_home_nest().await;
+    let (f_base, _f_authority, f_state) = start_foreign_nest().await;
+    let (s_base, _s_authority, s_state) = start_foreign_nest().await;
+    let (alice, bob, dave) = (
+        ActorKeypair::generate(),
+        ActorKeypair::generate(),
+        ActorKeypair::generate(),
+    );
+    h_state
+        .db
+        .create_user_with_handle(&alice.actor_id().0, "free", "alice", None)
+        .await
+        .unwrap();
+    for (who, handle) in [(&bob, "bob"), (&dave, "dave")] {
+        f_state
+            .db
+            .create_user_with_handle(&who.actor_id().0, "free", handle, None)
+            .await
+            .unwrap();
+    }
+    let (f_nest_id, s_nest_id) = (
+        f_state.nest_identity.public_key_bytes(),
+        s_state.nest_identity.public_key_bytes(),
+    );
+    follow_and_approve(&h_state, &h_base, &f_state, &f_base, &alice, &bob).await;
+    // Dave's follow names S as Alice's home — the reader's own word, which F
+    // cannot check (S is no home of Alice's, so no approval travels: the row
+    // is written as the state S would push).
+    f_state
+        .db
+        .upsert_remote_follow(
+            &dave.actor_id().0,
+            &alice.actor_id().0,
+            fauna_core::subscription::FOLLOWERS_TIER,
+            &s_nest_id,
+            &s_base,
+            fauna_nest::db::remote_follows::RemoteFollowState::Approved,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+
+    // Alice posts on H; H's delivery to F stays queued while S delivers first.
+    let alice_nest =
+        connected_client(&h_base, ActorKeypair::from_secret(*alice.secret_bytes())).await;
+    let post = fauna_core::data::Post {
+        author: alice.actor_id(),
+        created_at: fauna_core::data::Timestamp::now(),
+        body: fauna_core::data::PostBody::Text {
+            content: "delivered by two homes".into(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated: None,
+        content_warning: None,
+        origin: None,
+    };
+    let created: fauna_protocol::posts::PostCreateReply = alice_nest
+        .request(
+            "fauna.posts.create",
+            fauna_protocol::posts::PostCreateRequest {
+                body: serde_bytes::ByteBuf::from(
+                    fauna_core::encoding::sign_and_pack(&alice, &post).unwrap(),
+                ),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("alice posts on her home nest");
+    let post_hex = created.post_id;
+    let post_id: [u8; 32] = hex::decode(&post_hex).unwrap().try_into().unwrap();
+    let body = fauna_nest::segments::post::read_body_by_post_id(
+        &h_state.post_segments,
+        &h_state.db,
+        &post_id,
+    )
+    .await
+    .unwrap()
+    .expect("the home holds its post");
+    let wire: fauna_core::encoding::EmbedAsBytes =
+        fauna_core::encoding::canonical_decode(&body).unwrap();
+    let forward = fauna_nest::federation_handlers::FedPostForwardRequest {
+        post_bytes: wire.bytes.clone(),
+        post_envelope: wire.envelope.clone(),
+        signer_auth: None,
+    };
+    let deliver_from_s = || {
+        let (forward, f_base, s_state) = (forward.clone(), f_base.clone(), s_state.clone());
+        async move {
+            fauna_nest::federation_pool::originate_follow_deliver(
+                &s_state.federation_pool,
+                &s_state,
+                &f_base,
+                &f_nest_id,
+                &forward,
+            )
+            .await
+            .expect("S reaches F")
+        }
+    };
+    let homes_of = |reader: [u8; 32]| {
+        let f_state = f_state.clone();
+        async move {
+            local_feed_of(&f_state, reader)
+                .await
+                .into_iter()
+                .map(|p| {
+                    (
+                        p.post_id,
+                        p.home_nest_url.map(|u| u.trim_end_matches('/').to_string()),
+                        p.home_nest_actor_id,
+                    )
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let (bob_id, dave_id) = (bob.actor_id().0, dave.actor_id().0);
+    let at_s = (
+        post_hex.clone(),
+        Some(s_base.trim_end_matches('/').to_string()),
+        Some(hex::encode(s_nest_id)),
+    );
+    let at_h = (
+        post_hex.clone(),
+        Some(h_base.trim_end_matches('/').to_string()),
+        Some(hex::encode(h_state.nest_identity.public_key_bytes())),
+    );
+
+    deliver_from_s()
+        .await
+        .expect("S's delivery passes the gate of Dave's follow");
+    assert_eq!(homes_of(dave_id).await, vec![at_s.clone()]);
+    assert!(
+        homes_of(bob_id).await.is_empty(),
+        "Bob follows at H: what only S delivered never lists to him"
+    );
+
+    assert_eq!(drain_all(&h_state).await, 1, "H's delivery to F");
+    assert_eq!(
+        homes_of(bob_id).await,
+        vec![at_h],
+        "H's delivery is not kept out by S's, and Bob lists it from H"
+    );
+    assert_eq!(
+        homes_of(dave_id).await,
+        vec![at_s],
+        "Dave still lists it from the home he named"
+    );
+
+    // Alice deletes it; H relays the tombstone, which removes it for both.
+    let tombstone = fauna_core::data::Tombstone {
+        author: alice.actor_id(),
+        post_id: fauna_core::data::PostId::from_digest_dag_cbor(post_id),
+        created_at: fauna_core::data::Timestamp::now(),
+    };
+    let _: fauna_protocol::posts::PostDeleteReply = alice_nest
+        .request(
+            "fauna.posts.delete",
+            fauna_protocol::posts::PostDeleteRequest {
+                body: serde_bytes::ByteBuf::from(
+                    fauna_core::encoding::sign_and_pack(&alice, &tombstone).unwrap(),
+                ),
+                extra: Default::default(),
+            },
+        )
+        .await
+        .expect("Alice deletes her post");
+    assert_eq!(drain_all(&h_state).await, 1, "one delete to F");
+    assert!(homes_of(bob_id).await.is_empty());
+    assert!(homes_of(dave_id).await.is_empty());
+    deliver_from_s()
+        .await
+        .expect("a replay of a deleted post is answered Ok");
+    assert!(
+        homes_of(dave_id).await.is_empty(),
+        "S's replay does not restore it"
+    );
 }
 
 /// Bob on F follows Alice on H through F's own nest and Alice approves — the

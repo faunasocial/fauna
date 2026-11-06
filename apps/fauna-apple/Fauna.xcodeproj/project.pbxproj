@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FB0000000000000000000041 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000040 /* Assets.xcassets */; };
+		FB0000000000000000000043 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000042 /* PrivacyInfo.xcprivacy */; };
+		FB0000000000000000000044 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000042 /* PrivacyInfo.xcprivacy */; };
 		FF0000000000000000000001 /* FaunaiOSMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000002 /* FaunaiOSMain.swift */; };
 		FF0000000000000000000002 /* FaunaiOSLib in Frameworks */ = {isa = PBXBuildFile; productRef = FF0000000000000000000005 /* FaunaiOSLib */; };
 		FF0000000000000000000003 /* FaunaKit in Frameworks */ = {isa = PBXBuildFile; productRef = FF0000000000000000000006 /* FaunaKit */; };
@@ -127,6 +130,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		FB0000000000000000000040 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = "Fauna-iOS/Resources/Assets.xcassets"; sourceTree = "<group>"; };
+		FB0000000000000000000042 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = "Fauna-iOS/Resources/PrivacyInfo.xcprivacy"; sourceTree = "<group>"; };
 		FF0000000000000000000004 /* Fauna-Kids-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Fauna-Kids-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		FD0000000000000000000001 /* FaunaWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaunaWidget.swift; sourceTree = "<group>"; };
 		FD0000000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -254,6 +259,8 @@
 				FC0000000000000000000017 /* Fauna-FileProviderUI */,
 				FD0000000000000000000060 /* Fauna-Widget */,
 				FB0000000000000000000012 /* Fauna-iOS.entitlements */,
+				FB0000000000000000000040 /* Assets.xcassets */,
+				FB0000000000000000000042 /* PrivacyInfo.xcprivacy */,
 				FE0000000000000000000001 /* social.fauna.FaunaMacOS.plist */,
 				1BADDC1D73C1A20F347483E1 /* Products */,
 			);
@@ -596,6 +603,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FB0000000000000000000041 /* Assets.xcassets in Resources */,
+				FB0000000000000000000043 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -603,6 +612,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FB0000000000000000000044 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -746,14 +756,14 @@
 			buildSettings = {
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
+				INFOPLIST_FILE = "Fauna-iOS/Resources/Info-Kids.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Fauna Kids";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;
 				PRODUCT_NAME = "Fauna-Kids-iOS";
 				SDKROOT = iphoneos;
@@ -771,14 +781,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 7457N3M72H;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
+				INFOPLIST_FILE = "Fauna-iOS/Resources/Info-Kids.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Fauna Kids";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;
 				PRODUCT_NAME = "Fauna-Kids-iOS";
 				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Fauna AppStore social.fauna.faunakids";
@@ -800,7 +810,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-Widget";
@@ -819,7 +829,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-Widget";
@@ -840,7 +850,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-iOS-Widget";
@@ -866,7 +876,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.Widget";
 				PRODUCT_MODULE_NAME = Fauna_Widget;
 				PRODUCT_NAME = "Fauna-iOS-Widget";
@@ -939,7 +949,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = Fauna;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -956,7 +966,7 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = Fauna;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -973,7 +983,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-FileProvider";
@@ -992,7 +1002,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-FileProvider";
@@ -1004,17 +1014,21 @@
 		FB0000000000000000000020 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Fauna-iOS/Resources/Fauna-iOS.entitlements";
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]" = "Fauna-iOS/Resources/Fauna-iOS-SimulatorDebug.entitlements";
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Fauna;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = "Fauna-iOS";
 				SDKROOT = iphoneos;
@@ -1027,6 +1041,7 @@
 		FB0000000000000000000021 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "Fauna-iOS/Resources/Fauna-iOS.entitlements";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";
 				CURRENT_PROJECT_VERSION = 1;
@@ -1035,11 +1050,13 @@
 				INFOPLIST_FILE = "Fauna-iOS/Resources/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Fauna;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = social.fauna.fauna;
 				PRODUCT_NAME = "Fauna-iOS";
 				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Fauna AppStore social.fauna.fauna";
@@ -1062,7 +1079,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-iOS-FileProvider";
@@ -1088,7 +1105,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProvider";
 				PRODUCT_MODULE_NAME = Fauna_FileProvider;
 				PRODUCT_NAME = "Fauna-iOS-FileProvider";
@@ -1111,7 +1128,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-FileProviderUI";
@@ -1130,7 +1147,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-FileProviderUI";
@@ -1150,7 +1167,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";
@@ -1175,7 +1192,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.5;
+				MARKETING_VERSION = 0.1.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "social.fauna.fauna.FileProviderUI";
 				PRODUCT_MODULE_NAME = Fauna_FileProviderUI;
 				PRODUCT_NAME = "Fauna-iOS-FileProviderUI";

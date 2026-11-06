@@ -6,6 +6,7 @@
 uniffi::setup_scaffolding!("fauna_onboarding_machine");
 
 pub mod admin_nat_mode;
+pub(crate) mod background;
 pub(crate) mod cancel;
 pub mod error;
 pub mod helpers;

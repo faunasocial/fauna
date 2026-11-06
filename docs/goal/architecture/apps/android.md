@@ -60,7 +60,9 @@ com.fauna.app/
 │                   CustodianHostWorker, CustodianPushKick (client-device backup
 │                   custodian pull — periodic + foreground push-debounce)
 ├── provider/       Content providers
-├── testing/        Test support
+├── age/            StoreAgeClaim (Play Age Signals + Play Integrity), StoreConsentRound (`behavior/account-age-band.md`)
+├── p2pshare/ payments/   offline-share rows; payments row models (the payments client glue is in per-build-type twins, below)
+├── testing/        Test support (lives in the `debug` / `noAgent` source sets, not `src/main`)
 ├── ui/navigation/  Compose NavHost, drawer navigation
 ├── ui/screen/      Screen composables (incl. onboarding/ wizard screens)
 ├── ui/viewmodel/   Hilt-injected ViewModels (incl. AppLaunchVM)

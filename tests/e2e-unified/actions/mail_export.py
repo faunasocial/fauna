@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from helpers.waiting import wait_until
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -68,11 +70,25 @@ class MailExportActions:
     # ── step 1 — format ───────────────────────────────────────────────────
 
     def select_format(self, label: str) -> None:
-        """Pick the export format from the picker (mbox / Maildir++ / EML zip)."""
+        """Pick the export format from the picker (mbox / Maildir++ / EML zip).
+
+        Returns once the picker shows ``label``: the apple picker dispatches the
+        choice to the shared machine asynchronously, so its shown value trails
+        the select by a beat. A picker that never shows it fails here."""
         self.driver.select("mail-export-format-picker", label)
+        wait_until(
+            lambda: self.selected_format() == label, 5.0, interval=0.1,
+            diagnose=lambda: f"picker shows {self.selected_format()!r}, wanted {label!r}",
+        )
 
     def selected_format(self) -> str:
-        """The format the picker shows as chosen."""
+        """The format the picker shows as chosen. Web's `get_text` answers a
+        `<select>`'s `<option value>` (`Mbox`), so web reads the selected
+        option's painted text — the label every other app's picker shows."""
+        if self.driver.is_web():
+            return (
+                self.driver.get_attr("mail-export-format-picker", "selected-text") or ""
+            ).strip()
         return self.driver.get_text("mail-export-format-picker")
 
     def format_options(self) -> list[str] | None:
@@ -100,7 +116,9 @@ class MailExportActions:
         The rows are an *indexed* element (convention 1), so the name is the
         row's text and position is the only handle a driver has on it.
         """
-        return self.driver.get_texts(self._MAILBOX_ITEM)
+        # Web paints each row as a checkbox label, so its text carries the
+        # label's leading space; a mailbox name is the trimmed text.
+        return [t.strip() for t in self.driver.get_texts(self._MAILBOX_ITEM)]
 
     def _mailbox_index(self, name: str) -> int:
         names = self.mailbox_names()

@@ -409,16 +409,23 @@ fn isolate_credentials() {
 /// the arms that start one take turns.
 static SEAT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// A restoring seat: the connected client, its engine host, and the temp dirs
-/// both keep state under.
+/// A restoring seat: the connected client, its engine host (macOS builds one,
+/// windows none — [`hostless_seat`]), and the temp dirs both keep state under.
 struct RestoringSeat {
     client: Arc<fauna_ffi::FfiNestClient>,
-    host: Arc<fauna_ffi::FfiSyncEngineHost>,
+    host: Option<Arc<fauna_ffi::FfiSyncEngineHost>>,
     _state_dir: tempfile::TempDir,
     _store_dir: tempfile::TempDir,
 }
 
 impl RestoringSeat {
+    /// The macOS seat's engine host.
+    fn host(&self) -> &Arc<fauna_ffi::FfiSyncEngineHost> {
+        self.host
+            .as_ref()
+            .expect("this arm built its seat with an engine host (`restoring_seat`)")
+    }
+
     /// Create [`FOLDER`] the way the owner's app does
     /// (`FfiFoldersClient::create` → `fauna_client_folders::create_set`): the
     /// set nonce minted into this seat's account-plane custody and stored on
@@ -480,6 +487,26 @@ impl RestoringSeat {
 /// a temp dir rather than the per-user root, and the credential slot is the
 /// harness's file backend ([`isolate_credentials`]).
 async fn restoring_seat(base: &str) -> RestoringSeat {
+    let mut seat = hostless_seat(base).await;
+    let host = seat
+        .client
+        .sync_engine_host(
+            OWNER_SECRET.to_vec(),
+            HOST_DEVICE_ID.to_vec(),
+            seat._state_dir.path().to_string_lossy().into_owned(),
+            "fauna-macos".to_string(),
+            None,
+        )
+        .expect("sync engine host");
+    seat.host = Some(host);
+    seat
+}
+
+/// The windows app's seat: the same connected client and account runtime as
+/// [`restoring_seat`], and **no engine host** — windows builds none
+/// (`docs/goal/ui/backups.md` § Where logic lives → *Whole-snapshot restore*),
+/// so its restore is the free fn `fauna_ffi::restore_snapshot_to_dir`.
+async fn hostless_seat(base: &str) -> RestoringSeat {
     // What this machine PINNED for its nest is the only escrow holder the
     // seat's account plane trusts (`fauna_client::trust::trusted_escrow_holders`
     // — never the nest's own claim about itself). Production pins by TOFU on
@@ -505,6 +532,7 @@ async fn restoring_seat(base: &str) -> RestoringSeat {
                 },
             }),
             Some(HOST_DEVICE_ID.to_vec()),
+            "fauna-ios".to_string(),
             None,
         )
         .await
@@ -524,18 +552,9 @@ async fn restoring_seat(base: &str) -> RestoringSeat {
     })
     .await
     .expect("the account runtime must assemble (the seat's `account_pump_cycles` state)");
-    let host = client
-        .sync_engine_host(
-            OWNER_SECRET.to_vec(),
-            HOST_DEVICE_ID.to_vec(),
-            state_dir.path().to_string_lossy().into_owned(),
-            "fauna-macos".to_string(),
-            None,
-        )
-        .expect("sync engine host");
     RestoringSeat {
         client,
-        host,
+        host: None,
         _state_dir: state_dir,
         _store_dir: store_dir,
     }
@@ -601,7 +620,7 @@ async fn a_sealed_snapshot_restores_its_files_to_disk() {
 
     let out = tempfile::tempdir().unwrap();
     let restored = seat
-        .host
+        .host()
         .restore_snapshot_to_dir(snapshot_id, out.path().to_string_lossy().into_owned())
         .await;
     seat.stop().await;
@@ -645,6 +664,99 @@ async fn a_sealed_snapshot_restores_its_files_to_disk() {
         restored == large,
         "the {chunks}-chunk file must restore byte-identically (first difference at byte {:?})",
         restored.iter().zip(&large).position(|(a, b)| a != b)
+    );
+}
+
+/// **The windows seam.** The free fn `fauna_ffi::restore_snapshot_to_dir` — the
+/// thin adapter over the same shared `restore_snapshot_into_dir` the macOS host
+/// method adapts, for the FFI apps that build no engine host — restores a sealed
+/// snapshot on a seat that has none ([`hostless_seat`]), into a directory that
+/// does not exist yet (the e2e's shape: the restore creates it).
+///
+/// The summary is compared WHOLE: the count, the bytes, nothing skipped and an
+/// empty `unverified` — the field a partial result would fill instead of an
+/// error (`ui/backups.md` § Whole-snapshot restore → *Outcome*). The files on
+/// disk are the witness the summary cannot fake.
+#[tokio::test]
+async fn the_free_fn_restores_a_sealed_snapshot_on_a_seat_with_no_engine_host() {
+    isolate_credentials();
+    let _seat_turn = SEAT.lock().await;
+    let nest = start_test_nest(SetCreation::BySeat).await;
+    let seat = hostless_seat(&nest.base).await;
+    seat.create_set().await;
+    let (snapshot_id, _watch) = capture_and_snapshot(&nest).await;
+
+    let out = tempfile::tempdir().unwrap();
+    let destination = out.path().join("restored");
+    let restored = fauna_ffi::restore_snapshot_to_dir(
+        Arc::clone(&seat.client),
+        OWNER_SECRET.to_vec(),
+        HOST_DEVICE_ID.to_vec(),
+        snapshot_id,
+        destination.to_string_lossy().into_owned(),
+    )
+    .await;
+    seat.stop().await;
+    let summary = restored.expect("the free-fn restore must succeed");
+
+    assert_eq!(
+        summary,
+        fauna_ffi::FfiRestoreSummary {
+            files_restored: 2,
+            bytes_written: (TOP_CONTENT.len() + NESTED_CONTENT.len()) as u64,
+            skipped: 0,
+            unverified: Vec::new(),
+        },
+        "every sealed row must restore whole — `files_restored: 0` is the silent \
+         data-loss signature this file exists to prevent",
+    );
+    assert_eq!(
+        std::fs::read(destination.join(TOP_PATH)).expect("top-level file restored"),
+        TOP_CONTENT,
+        "the restored bytes must be byte-identical to what was captured",
+    );
+    assert_eq!(
+        std::fs::read(destination.join(NESTED_PATH)).expect("nested file restored"),
+        NESTED_CONTENT,
+        "the nested file must restore, parent directories created",
+    );
+}
+
+/// **A failure before the walk is an error the page can word.** A destination
+/// naming a FILE is refused before any fetch: the free fn answers `Err` (the
+/// page paints it in `snapshot-restore-result`, never `error-message` —
+/// `ui/backups.md` § Whole-snapshot restore → *Outcome*) and the file is left
+/// exactly as it was. No seat, no snapshot: the refusal comes first.
+#[tokio::test]
+async fn the_free_fn_refuses_a_destination_that_is_not_a_directory() {
+    isolate_credentials();
+    let nest = start_test_nest(SetCreation::Direct).await;
+    let client = fauna_ffi::FfiNestClient::new(nest.base.clone(), OWNER_SECRET.to_vec())
+        .expect("build FfiNestClient");
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a-file.txt");
+    std::fs::write(&file, b"keep me").unwrap();
+    let refused = fauna_ffi::restore_snapshot_to_dir(
+        client,
+        OWNER_SECRET.to_vec(),
+        HOST_DEVICE_ID.to_vec(),
+        1,
+        file.to_string_lossy().into_owned(),
+    )
+    .await
+    .expect_err("a destination that is a file must be refused");
+    let fauna_ffi::FfiError::General { msg } = refused else {
+        panic!("the refusal is a General error carrying its reason: {refused:?}");
+    };
+    assert!(
+        msg.contains("not a directory"),
+        "the refusal must say why, so the result line can tell the user: {msg:?}"
+    );
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"keep me",
+        "a refused restore writes nothing"
     );
 }
 

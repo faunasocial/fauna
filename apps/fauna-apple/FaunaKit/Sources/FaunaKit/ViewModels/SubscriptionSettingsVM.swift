@@ -56,10 +56,14 @@ public final class SubscriptionSettingsVM {
     /// Unsubscribe from `authorId`, then re-read. In plaintext mode the row
     /// vanishes (`Removed`); in encrypted mode the nest returns `Queued` and the
     /// row persists until the author commits the removal — mirrors linux/android.
-    public func unsubscribe(authorId: Data) async {
+    ///
+    /// Takes the `mine.list` row's tier and `homeNestUrl`, so a follow carried
+    /// across nests is left at the creator's home (`federated-follow.md` § Decision 2).
+    public func unsubscribe(authorId: Data, tier: String, homeNestUrl: String?) async {
         guard let api else { return }
         do {
-            _ = try await api.subscriptionUnsubscribe(authorId: authorId)
+            _ = try await api.subscriptionUnsubscribe(
+                authorId: authorId, tier: tier, homeNestUrl: homeNestUrl)
             errorMessage = nil
             await hydrate()
         } catch {

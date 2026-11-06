@@ -28,7 +28,14 @@
 //! | held by the bound identity | [`SeatCarry::AlreadyHeld`] — nothing to do (a repeat run lands here) |
 //! | revoked | [`SeatCarry::Revoked`] — the freeze outlives the rotation |
 //! | held by an identity no verified chain links to the bound one | [`SeatCarry::Unlinked`] — another box's |
-//! | held by a verified predecessor, in force | `register { writer: bound, succeeds: holder }` → [`SeatCarry::Carried`] |
+//! | held by a verified predecessor, in force | `register { writer: bound, succeeds: holder, in_force_only }` → [`SeatCarry::Carried`] |
+//! | … revoked by the owner after the read, before the register | the destination changes nothing → [`SeatCarry::Revoked`] |
+//!
+//! The revoked check on the listed seat only spares a chain fetch; the freeze
+//! itself is the destination's to keep. An owner's revoke can land between the
+//! carry's read and its handover, and a handover without `in_force_only` would
+//! re-grant the seat — so the carry's only registration asks for a seat in
+//! force, decided in the destination's own transaction ([`SeatHandover`]).
 //!
 //! Two callers run it, each over a destination connection it already holds
 //! ([`crate::trust::connect_destination`]): the audit pass, ahead of its
@@ -44,6 +51,17 @@ use fauna_protocol::backup::WriterGrantListReply;
 use fauna_protocol::nest_rotation::{SignedNestRotation, verify_chain};
 
 use crate::trust::BackupNestSeam;
+
+/// What the destination answered the carry's handover
+/// ([`BackupNestSeam::writer_grant_carry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatHandover {
+    /// The seat now names the successor, in force.
+    Moved,
+    /// The owner's seat there is revoked: nothing changed, and the seat still
+    /// names its holder.
+    Revoked,
+}
 
 /// What one destination's carry found, or did. Every variant is settled: a run
 /// that could not ask (a failed read, a chain the bound nest would not serve, a
@@ -146,13 +164,17 @@ pub async fn carry_listed_seat(
     if verify_chain(&hops, &holder, bound).is_err() {
         return Ok(SeatCarry::Unlinked);
     }
-    destination
-        .writer_grant_succeed(
+    match destination
+        .writer_grant_carry(
             fauna_core::hex32::encode(bound),
             fauna_core::hex32::encode(&holder),
         )
-        .await?;
-    Ok(SeatCarry::Carried)
+        .await?
+    {
+        SeatHandover::Moved => Ok(SeatCarry::Carried),
+        // Revoked after the read above: the destination kept the freeze.
+        SeatHandover::Revoked => Ok(SeatCarry::Revoked),
+    }
 }
 
 #[cfg(test)]
@@ -168,13 +190,17 @@ mod tests {
     use std::sync::Mutex;
 
     /// A destination's writer-grant plane, recording every handover it is
-    /// asked for and applying it the way the nest does (the successor takes
-    /// the seat, in force).
+    /// asked for and applying it the way the nest does: the successor takes
+    /// the seat, in force — unless the seat is revoked when the handover
+    /// arrives, which changes nothing.
     #[derive(Default)]
     struct Destination {
         seat: Mutex<Vec<WriterGrantItem>>,
         handovers: Mutex<Vec<(String, String)>>,
         refuse_handover: bool,
+        /// The owner revokes the seat from another device right after the
+        /// carry's list read — the race the destination's check closes.
+        revoke_after_list: bool,
     }
 
     impl Destination {
@@ -204,8 +230,14 @@ mod tests {
             unreachable!()
         }
         async fn writer_grant_list(&self) -> Result<WriterGrantListReply, String> {
+            let listed = self.seat.lock().unwrap().clone();
+            if self.revoke_after_list {
+                for seat in self.seat.lock().unwrap().iter_mut() {
+                    seat.revoked = true;
+                }
+            }
             Ok(WriterGrantListReply {
-                grants: self.seat.lock().unwrap().clone(),
+                grants: listed,
                 ..Default::default()
             })
         }
@@ -226,13 +258,16 @@ mod tests {
         ) -> Result<GenerationRestoreReply, String> {
             unreachable!()
         }
-        async fn writer_grant_succeed(
+        async fn writer_grant_carry(
             &self,
             writer_nest_id: String,
             succeeds: String,
-        ) -> Result<(), String> {
+        ) -> Result<SeatHandover, String> {
             if self.refuse_handover {
                 return Err("fauna.backup.writer_seat_held".into());
+            }
+            if self.seat.lock().unwrap().iter().any(|s| s.revoked) {
+                return Ok(SeatHandover::Revoked);
             }
             self.handovers
                 .lock()
@@ -243,7 +278,7 @@ mod tests {
                 granted_at: 1_800_000_000,
                 ..Default::default()
             }];
-            Ok(())
+            Ok(SeatHandover::Moved)
         }
     }
 
@@ -394,6 +429,32 @@ mod tests {
         assert_eq!(chain.asked(), 0);
     }
 
+    /// **The owner's revoke between the carry's read and its handover is
+    /// kept.** The seat lists in force, the owner revokes it from another
+    /// device, then the carry registers: the destination refuses the revoked
+    /// seat and the carry reports [`SeatCarry::Revoked`], the seat still
+    /// revoked and naming the predecessor. (The nest's half of the same race:
+    /// `conformance_backup_writer_grant.rs`.)
+    #[test]
+    fn a_revoke_landing_after_the_read_is_not_undone() {
+        let (p, b) = (key(0x11), key(0x22));
+        let dest = Destination {
+            revoke_after_list: true,
+            ..Destination::holding(&id(&p), false)
+        };
+        let chain = Chain::of(vec![hop(&p, &b, 1)]);
+
+        assert_eq!(
+            block_on(carry_writer_seat(&dest, &id(&b), &chain)).unwrap(),
+            SeatCarry::Revoked
+        );
+        assert!(dest.handovers().is_empty(), "the seat did not move");
+        let seat = dest.seat.lock().unwrap().clone();
+        assert_eq!(seat.len(), 1);
+        assert_eq!(seat[0].writer_nest_id, fauna_core::hex32::encode(&id(&p)));
+        assert!(seat[0].revoked, "the owner's freeze stands");
+    }
+
     /// No seat, or the seat already the bound identity's: nothing to carry,
     /// and no chain is fetched on an ordinary pass.
     #[test]
@@ -439,7 +500,7 @@ mod tests {
     }
 
     /// **The carry never registers without `succeeds`.** The seam it speaks
-    /// has no such call (`BackupNestSeam::writer_grant_succeed` takes the
+    /// has no such call (`BackupNestSeam::writer_grant_carry` takes the
     /// predecessor by value, not as an option), so every handover a carry
     /// issues names the seat's holder — pinned here across every outcome.
     #[test]

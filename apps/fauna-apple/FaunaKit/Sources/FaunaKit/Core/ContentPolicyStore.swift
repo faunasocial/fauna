@@ -3,7 +3,7 @@ import Foundation
 /// The immutable snapshot of the two inputs the shared content-policy render
 /// engine composes (`family-safety.md` § Content policy, Slice C):
 ///
-/// 1. the guardian's per-category floor (the `fauna.family.status` reply's
+/// 1. the guardian's content rules (the `fauna.family.status` reply's
 ///    supervision fold, `FfiFamilyStatus.supervision`; `nil` unless
 ///    supervised), and
 /// 2. the viewer's OWN spam/phishing per-mille thresholds
@@ -69,6 +69,17 @@ public struct ContentPolicyInputs: Equatable {
             ? "" : renderDocumentToPlaintext(document: post.document)
     }
 #endif
+
+    /// Would Guardian Notify count an item with these `labels`: the
+    /// `content_notify` knob on AND the guardian floor biting on one of them? The
+    /// predicate `GuardianNotifyCadence.record` counts by, read without recording,
+    /// so the sealed-item sentence (`region.sealed_note`) never says "nothing was
+    /// reported" of an item Notify counted (android's `notifyWouldCount`).
+    /// Short-circuits (no FFI call) without the knob or a guardian policy.
+    public func notifyWouldCount(_ labels: [ContentLabelEntry]) -> Bool {
+        guard contentNotify, let contentPolicy else { return false }
+        return !guardianEnforcedCategories(labels: labels, contentPolicy: contentPolicy).isEmpty
+    }
 
     /// The client render verdict for one item's `labels` — one of
     /// `"show" | "badge" | "collapse" | "block"`, resolved by the shared
@@ -151,8 +162,9 @@ public struct ContentPolicyInputs: Equatable {
 /// is still to *under*-enforce a viewer's own collapse when a half was never
 /// loaded at all — never to hide content the nest never asked us to hide — but
 /// once a guardian floor IS loaded, an airplane-mode blip must not lift it.
-/// (Contrast the *knob-parsing* fail-closed rule, which is strict-by-default
-/// and lives in shared Rust: an unparseable floor renders `block`.)
+/// (Contrast the *document-reading* fail-closed rule, which is strict-by-default
+/// and lives in shared Rust: a rule document this build cannot read renders
+/// `block`.)
 ///
 /// Not actor-isolated, for the same reason as the sibling `FamilyStatusStore`:
 /// both `AppState` and `MacAppState` construct it in a stored property, which a
@@ -178,7 +190,9 @@ public final class ContentPolicyStore {
     /// (``ReportSheetStore``).
     public let report = ReportSheetStore()
 
-    public init() {}
+    public init() {
+        ContentPolicyTestState.store = self
+    }
 
     /// Bumped by every ``seed(from:)`` — the session-establish / teardown hook
     /// every identity change passes through — so a `refresh` fired under one
@@ -189,6 +203,26 @@ public final class ContentPolicyStore {
     /// way with their actor generation).
     @ObservationIgnored
     private var scopeGeneration = 0
+
+    /// The identity a caller's later ``setOwnThresholds(spamPermille:phishingPermille:scope:)``
+    /// must still be under — read before an await, handed back after it.
+    @MainActor
+    public var scope: Int { scopeGeneration }
+
+    /// Re-bind the viewer's own thresholds after this app saved them on the
+    /// Privacy page. No push carries `fauna.spam.get_preferences` (it is
+    /// reconnect-only, `StaleSurfaces::own_thresholds`), so without this a
+    /// threshold the viewer just moved would bind only at the next login or
+    /// reconnect — a ward setting themselves stricter than the guardian floor
+    /// would see nothing fold (`family-client-enforcement.md` § Content policy;
+    /// linux and tui re-set theirs on the same save). A save that outlived an
+    /// identity change (`scope` moved) lands nothing.
+    @MainActor
+    public func setOwnThresholds(spamPermille: UInt16, phishingPermille: UInt16, scope: Int) {
+        guard scope == scopeGeneration else { return }
+        inputs.ownSpamPermille = spamPermille
+        inputs.ownPhishingPermille = phishingPermille
+    }
 
     /// Replace the reporter-side hide list (a `hide_reported` reply, or the
     /// `load_hidden_content` read) — the stored list is the whole truth.
@@ -330,5 +364,19 @@ public final class ContentPolicyStore {
             ownPhishingPermille: ownPhishingPermille,
             contentNotify: contentNotify,
             hiddenContent: previous.hiddenContent)
+    }
+}
+
+/// The e2e witness that a guardian's save reached this device
+/// (`ward_rule_document_rules`, tui's/android's twin; `tests/e2e-unified/tests/
+/// test_nest_rules.py`): how many rules the guardian's document holds here,
+/// read through the shared editor's own view (never counted in Swift); `nil`
+/// for an unsupervised viewer or a policy with no document.
+public enum ContentPolicyTestState {
+    nonisolated(unsafe) static weak var store: ContentPolicyStore?
+
+    public static var wardRuleDocumentRules: Int? {
+        guard let policy = store?.inputs.contentPolicy, policy.document != nil else { return nil }
+        return FfiRuleEditor.forGuardian(policy: policy).view().rows.count
     }
 }

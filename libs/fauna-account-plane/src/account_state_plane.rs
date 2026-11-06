@@ -274,6 +274,15 @@ struct Served<'a> {
 pub struct WalkReport {
     /// Feed pages fetched.
     pub pages: usize,
+    /// **Group plane only:** rows that opened but failed their kind's writer
+    /// check — a `fauna.group.file` row whose author was not enrolled at the
+    /// generation it names, or whose carriage does not verify, and a
+    /// `fauna.group.name` no current authority device signed
+    /// (`p2p-shared-set-build.md` § Build design — the group set, decisions
+    /// 2 and 5). Never ingested; `reconcile` re-presents them, so a row refused only
+    /// because its generation's mint had not arrived yet lands on a later
+    /// pass. Always zero on the account plane.
+    pub refused: usize,
     /// Rows seen across those pages.
     pub rows: usize,
     /// Rows whose value this replica adopted verbatim.
@@ -5164,12 +5173,12 @@ mod door_tests {
     #[tokio::test]
     async fn a_named_relay_copy_is_forgotten_once_the_put_lands() {
         use fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
-        use fauna_protocol::merge_policy::{KIND_MODERATION, MODERATION_KEY};
+        use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, PREFERENCE_KEY};
 
         let other = WriterId([0x77; 32]);
         let item = ItemId {
-            kind: KIND_MODERATION.into(),
-            key: MODERATION_KEY.into(),
+            kind: KIND_SYNC_PREFS.into(),
+            key: PREFERENCE_KEY.into(),
         };
         let stamp = |at_ms| {
             Some(
@@ -5182,7 +5191,7 @@ mod door_tests {
             )
         };
         let value =
-            fauna_core::encoding::canonical_encode(&fauna_core::data::ModerationConfig::default())
+            fauna_core::encoding::canonical_encode(&fauna_core::data::SyncPrefsConfig::default())
                 .unwrap();
 
         for replaced in [Some(1), Some(0)] {

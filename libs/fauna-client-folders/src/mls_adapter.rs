@@ -226,6 +226,26 @@ impl fauna_peer_share::admission::SetMembership for MlsSetMembership {
             .find_leaf_by_identity(&ChannelId(*channel_id), member)
             .is_some()
     }
+
+    /// Listed whenever the leaf lookup finds the actor; NotListed only for a
+    /// group this engine holds AND still sits in (`is_group_active`) — an
+    /// evicted device keeps the roster as it stood at its own removal, which
+    /// can no longer vouch for anyone's absence; anything else Unreadable.
+    fn roster_reading(
+        &self,
+        channel_id: &[u8; 32],
+        member: &fauna_core::identity::ActorId,
+    ) -> fauna_peer_share::admission::RosterReading {
+        use fauna_peer_share::admission::RosterReading;
+        let channel = ChannelId(*channel_id);
+        if self.0.find_leaf_by_identity(&channel, member).is_some() {
+            RosterReading::Listed
+        } else if self.0.is_group_active(&channel) {
+            RosterReading::NotListed
+        } else {
+            RosterReading::Unreadable
+        }
+    }
 }
 
 /// The production [`FolderCommitGate`]: routes a folder member removal
@@ -488,6 +508,32 @@ mod tests {
         assert!(
             !consult.is_member(&[0xEE; 32], &bob_actor),
             "an unheld channel answers false, never an error"
+        );
+    }
+
+    /// The stale-endpoint sweep's positive reading (`p2p.md` § *A departed
+    /// member's cached endpoint*, ruling 2): a member is Listed, a stranger
+    /// on a group this engine holds and sits in is NotListed — the one
+    /// answer that may delete — and a channel it holds no group for is
+    /// Unreadable, never NotListed.
+    #[cfg(feature = "p2p-share")]
+    #[test]
+    fn roster_reading_is_not_listed_only_on_a_held_active_group() {
+        use fauna_peer_share::admission::{RosterReading, SetMembership as _};
+        let (alice, _bob, ch, bob_actor) = two_member_group();
+        let consult = MlsSetMembership(Arc::clone(&alice));
+        let stranger = ActorKeypair::generate().actor_id();
+        assert_eq!(
+            consult.roster_reading(&ch, &bob_actor),
+            RosterReading::Listed
+        );
+        assert_eq!(
+            consult.roster_reading(&ch, &stranger),
+            RosterReading::NotListed
+        );
+        assert_eq!(
+            consult.roster_reading(&[0xEE; 32], &stranger),
+            RosterReading::Unreadable
         );
     }
 

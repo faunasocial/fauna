@@ -105,10 +105,19 @@ pub fn is_actor_id(input: &str) -> bool {
 pub enum RecipientInput {
     /// A raw 64-hex actor ID, normalized to lowercase — addressable directly.
     ActorId(String),
-    /// An email-style `user@domain` handle that needs resolution.
-    Handle { user: String, domain: String },
-    /// Not a recognizable recipient (empty, malformed, or a bare-domain/subdomain
-    /// `@…` form that the compose path doesn't resolve today).
+    /// A Fauna handle that needs resolution: an email-style `user@domain`
+    /// (`domain: Some`), or a bare localpart (`domain: None`), which is by
+    /// definition addressed on the nest the client is logged into — the same
+    /// reading [`parse_fauna_handle`] gives it (`contacts.md` § Layout & flow,
+    /// region 3). Both feed `find_user_across_nests` as its `typed_domain`, so
+    /// the bare form takes its domain-less home probe and nothing else.
+    Handle {
+        user: String,
+        domain: Option<String>,
+    },
+    /// Not a recognizable recipient (empty, whitespace-bearing, malformed, another
+    /// rail's address — `npub1…`, `did:…` — or a bare-domain/subdomain `@…` form
+    /// that the compose path doesn't resolve today).
     Invalid,
 }
 
@@ -117,7 +126,10 @@ impl RecipientInput {
     /// which return built-in types rather than this enum (web/android/apple/windows
     /// each re-key the slots into a named object in their thin wrapper; native linux
     /// matches the enum directly). `kind` is `"actor_id"` | `"handle"` | `"invalid"`;
-    /// the slots not carried by that kind are empty strings. The positional contract
+    /// the slots not carried by that kind are empty strings — so a bare-localpart
+    /// handle is `"handle"` with an EMPTY `domain` slot, which every find face
+    /// (`find_user_across_nests` and its UniFFI/wasm wrappers) reads as "no typed
+    /// domain": a consumer forwards the slot as it is. The positional contract
     /// lives here so both FFI crates project it identically.
     pub fn into_parts(self) -> Vec<String> {
         match self {
@@ -125,7 +137,12 @@ impl RecipientInput {
                 vec!["actor_id".into(), id, String::new(), String::new()]
             }
             RecipientInput::Handle { user, domain } => {
-                vec!["handle".into(), String::new(), user, domain]
+                vec![
+                    "handle".into(),
+                    String::new(),
+                    user,
+                    domain.unwrap_or_default(),
+                ]
             }
             RecipientInput::Invalid => vec![
                 "invalid".into(),
@@ -142,7 +159,10 @@ impl RecipientInput {
 /// - A 64-hex actor ID → [`RecipientInput::ActorId`] (lowercased).
 /// - An email-style `user@domain` ([`HandleForm::Named`], via [`parse_handle`] — so the
 ///   LAN-IP / mDNS / no-dot cases the canonical parser accepts all classify uniformly) →
-///   [`RecipientInput::Handle`].
+///   [`RecipientInput::Handle`] with `domain: Some`.
+/// - A bare localpart (`alice` — no `@`, no whitespace, not another rail's `npub1…` /
+///   `did:…`; the [`parse_fauna_handle`] bare form) → [`RecipientInput::Handle`] with
+///   `domain: None`: looked up on the home nest (`contacts.md` § Layout & flow, region 3).
 /// - Everything else (empty, bare-domain `@domain`, subdomain `@user.domain`, malformed)
 ///   → [`RecipientInput::Invalid`]. The `@…`-prefixed forms aren't resolvable by the
 ///   compose path on any client yet, so they're rejected here rather than half-supported.
@@ -152,8 +172,14 @@ pub fn classify_recipient(input: &str) -> RecipientInput {
         return RecipientInput::ActorId(trimmed.to_ascii_lowercase());
     }
     match parse_handle(trimmed) {
-        HandleForm::Named { user, domain } => RecipientInput::Handle { user, domain },
-        _ => RecipientInput::Invalid,
+        HandleForm::Named { user, domain } => RecipientInput::Handle {
+            user,
+            domain: Some(domain),
+        },
+        _ => match parse_fauna_handle(trimmed) {
+            Some((user, None)) => RecipientInput::Handle { user, domain: None },
+            _ => RecipientInput::Invalid,
+        },
     }
 }
 
@@ -166,8 +192,8 @@ pub fn classify_recipient(input: &str) -> RecipientInput {
 /// The one parser behind every surface that takes a Fauna handle and then
 /// decides same-nest-vs-cross-nest with [`is_foreign_handle_domain`]: the
 /// conversations recipient picker (`FaunaMlsBackend::resolve_address`) and the
-/// public-folder follow (`fauna_client_folders::follow_ops`). It differs from
-/// [`classify_recipient`] in accepting the bare form — a bare handle is by
+/// public-folder follow (`fauna_client_folders::follow_ops`), and the bare arm
+/// of [`classify_recipient`] (the contacts find) — a bare handle is by
 /// definition addressed on the nest the client is logged into, which is exactly
 /// the same-nest arm those surfaces need to keep.
 pub fn parse_fauna_handle(raw: &str) -> Option<(String, Option<String>)> {
@@ -1234,7 +1260,7 @@ mod tests {
             classify_recipient("alice@fauna.social"),
             RecipientInput::Handle {
                 user: "alice".into(),
-                domain: "fauna.social".into(),
+                domain: Some("fauna.social".into()),
             }
         );
     }
@@ -1245,7 +1271,7 @@ mod tests {
             classify_recipient("  bob@example.com  "),
             RecipientInput::Handle {
                 user: "bob".into(),
-                domain: "example.com".into(),
+                domain: Some("example.com".into()),
             }
         );
     }
@@ -1259,7 +1285,7 @@ mod tests {
             classify_recipient("alice@localhost"),
             RecipientInput::Handle {
                 user: "alice".into(),
-                domain: "localhost".into(),
+                domain: Some("localhost".into()),
             }
         );
     }
@@ -1270,15 +1296,59 @@ mod tests {
             classify_recipient("alice@192.168.1.57:8443"),
             RecipientInput::Handle {
                 user: "alice".into(),
-                domain: "192.168.1.57:8443".into(),
+                domain: Some("192.168.1.57:8443".into()),
             }
         );
         assert_eq!(
             classify_recipient("alice@raspberrypi.local"),
             RecipientInput::Handle {
                 user: "alice".into(),
-                domain: "raspberrypi.local".into(),
+                domain: Some("raspberrypi.local".into()),
             }
+        );
+    }
+
+    /// A bare localpart is a handle on the home nest (`contacts.md` § Layout &
+    /// flow, region 3) — the same reading `parse_fauna_handle` gives it — so it
+    /// classifies as a domain-less `Handle`, never `Invalid`, and projects with
+    /// an empty `domain` slot that every find face reads as "no typed domain".
+    #[test]
+    fn classify_bare_localpart_is_a_home_nest_handle() {
+        for (typed, user) in [
+            ("justtext", "justtext"),
+            ("microsoft-reviewer", "microsoft-reviewer"),
+            ("  alice\n", "alice"),
+        ] {
+            assert_eq!(
+                classify_recipient(typed),
+                RecipientInput::Handle {
+                    user: user.into(),
+                    domain: None,
+                },
+                "{typed:?}"
+            );
+        }
+        assert_eq!(
+            classify_recipient("alice").into_parts(),
+            vec!["handle", "", "alice", ""]
+        );
+    }
+
+    /// The bare arm is `parse_fauna_handle`'s, so the shapes that belong to other
+    /// rails or are not a single token stay `Invalid` — and a 64-hex string is
+    /// still an actor id, never a bare handle.
+    #[test]
+    fn classify_bare_form_rejects_other_rails_and_junk() {
+        for typed in ["npub1abcdef", "did:plc:abc", "two words", "a\tb"] {
+            assert_eq!(
+                classify_recipient(typed),
+                RecipientInput::Invalid,
+                "{typed:?}"
+            );
+        }
+        assert_eq!(
+            classify_recipient(&"c".repeat(64)),
+            RecipientInput::ActorId("c".repeat(64))
         );
     }
 
@@ -1297,7 +1367,6 @@ mod tests {
     fn classify_malformed_inputs_are_invalid() {
         assert_eq!(classify_recipient(""), RecipientInput::Invalid);
         assert_eq!(classify_recipient("   "), RecipientInput::Invalid);
-        assert_eq!(classify_recipient("justtext"), RecipientInput::Invalid);
         assert_eq!(classify_recipient("alice@"), RecipientInput::Invalid);
         assert_eq!(classify_recipient("@"), RecipientInput::Invalid);
     }
@@ -1338,7 +1407,7 @@ mod tests {
         assert_eq!(
             RecipientInput::Handle {
                 user: "alice".into(),
-                domain: "fauna.social".into(),
+                domain: Some("fauna.social".into()),
             }
             .into_parts(),
             vec!["handle", "", "alice", "fauna.social"]

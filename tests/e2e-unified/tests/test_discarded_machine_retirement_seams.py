@@ -20,6 +20,10 @@ store through the running app (``_attached_slots``).
     relaunch is ``teardown()`` + an unseeded ``launch()`` resuming it — so once
     any launch was seeded, or a ``preserve_state_across_relaunch()`` pin is
     set, the teardown discards nothing.
+  * the apple drivers keep their pin in ``_preserved_cred_dir``, not
+    ``_preserve_pinned_keys``, so the seam asks ``_relaunch_pinned()``: a
+    teardown between an apple pin and its relaunch once signed the pinned
+    actor out, and the relaunch found no credentials and nothing to replay.
   * an unpinned android ``recover()`` erases the store with an empty seed
     while every enrollment in it is still live nest-side, so it vaults the
     slots first, and the teardown's nest half still reaches them.
@@ -38,6 +42,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from common.cred_store import ACCOUNT_STORE_FOREIGN_PREFIX  # noqa: E402
 from drivers.android import AndroidBridgeDriver  # noqa: E402
 from drivers.http_bridge import HttpBridgeDriver  # noqa: E402
+from drivers.ios import IosInProcessDriver  # noqa: E402
+from drivers.macos import MacosInProcessDriver  # noqa: E402
 from drivers.web import WebBridgeDriver  # noqa: E402
 
 pytestmark = pytest.mark.tier_1
@@ -98,6 +104,26 @@ def test_a_seeded_store_stays_the_callers_across_an_unseeded_relaunch():
 def test_a_pinned_android_store_is_kept():
     driver = _android_launched({})
     driver._record_relaunch_pin(driver._launch_config, ("preserve_store",))
+    assert not driver._discards_machine_at_teardown()
+
+
+# ── apple: the pin lives in `_preserved_cred_dir` ───────────────────────────
+
+
+@pytest.mark.parametrize("driver_cls", [MacosInProcessDriver, IosInProcessDriver])
+def test_an_apple_driver_with_a_live_carry_discards_its_machine(driver_cls):
+    driver = driver_cls()
+    driver._principal_slot_carry_live = True
+    assert driver._discards_machine_at_teardown()
+
+
+@pytest.mark.parametrize("driver_cls", [MacosInProcessDriver, IosInProcessDriver])
+def test_a_pinned_apple_store_is_kept(driver_cls):
+    driver = driver_cls()
+    driver._principal_slot_carry_live = True
+    driver._cred_dir = "/nonexistent/fauna-e2e-cred"
+    assert driver.preserve_state_across_relaunch()
+    assert driver._relaunch_pinned()
     assert not driver._discards_machine_at_teardown()
 
 

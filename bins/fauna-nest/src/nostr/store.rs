@@ -1027,7 +1027,11 @@ async fn unmaterialized_exposed_post_ids(
 /// wire-supplied hex string (the same case trap the takedown witness id
 /// documents). Every materialization path shares this query, so the exclusion
 /// binds the immediate toggle path, the periodic sweep, and a re-expose after
-/// unlink alike.
+/// unlink alike. Only this nest's OWN row counts (`issuer_nest_id IS NULL`):
+/// a row another nest delivered to the author's queue is that nest's decision
+/// about its own projection (§ Legal takedown → *The author homed on another
+/// nest*), and read as the home's it would let any federated peer silence a
+/// hosted author's post on Nostr for good.
 fn unmaterialized_posts_sql() -> String {
     format!(
         "SELECT lower(hex(c.id))
@@ -1045,6 +1049,7 @@ fn unmaterialized_posts_sql() -> String {
              WHERE o.content_type = 'post'
                AND lower(o.content_id) = lower(hex(c.id))
                AND o.action_taken = {taken_down}
+               AND o.issuer_nest_id IS NULL
         )",
         servable = crate::db::public_servability::PUBLIC_POST_SERVABLE.as_str(),
         taken_down = fauna_core::obligation::ObligationAction::TakenDown as u8,
@@ -1714,6 +1719,110 @@ mod tests {
         );
         assert!(!mapped(&quarantined), "a quarantined post is withheld");
         assert!(!mapped(&suppressed), "a suppressed post is withheld");
+    }
+
+    /// A `TakenDown` row another nest DELIVERED to the author's
+    /// queue is that nest's decision about its own projection
+    /// (`moderation.md` § Legal takedown → *The author homed on another
+    /// nest*), never this nest's takedown — so it must not trip the OVERTURN
+    /// arm of [`unmaterialized_posts_sql`]. Read as the home's own, any
+    /// federated peer could silence a hosted author's real post on Nostr for
+    /// good by delivering one row for it. The home's own takedown row still
+    /// excludes its post.
+    #[tokio::test]
+    async fn a_delivered_foreign_takedown_row_never_stops_the_homes_own_publication() {
+        use fauna_core::data::{Post, PostBody, Timestamp};
+        use fauna_core::identity::ActorId;
+        use fauna_core::obligation::ObligationAction;
+
+        let db = std::sync::Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::nostr::init_db(&db).await.unwrap();
+        let post_segments = test_post_segments();
+        let kp = keypair(14);
+        let author_bytes = [15u8; 32];
+        let actor_hex = hex::encode(author_bytes);
+
+        let store = async |content: &str| {
+            let post = Post {
+                author: ActorId(author_bytes),
+                created_at: Timestamp(1_000_000_000_000),
+                body: PostBody::Text {
+                    content: content.into(),
+                    facets: vec![],
+                },
+                references: vec![],
+                expires_at: None,
+                gated: None,
+                content_warning: None,
+                origin: None,
+            };
+            let payload = fauna_core::encoding::canonical_encode(&post).unwrap();
+            let id = *blake3::hash(&payload).as_bytes();
+            db.put_post(&id, &payload, None).await.unwrap();
+            id
+        };
+
+        let foreign = store("taken down only on another nest").await;
+        let own = store("taken down here, then restored").await;
+
+        db.insert_delivered_obligation(&crate::db::moderation::DeliveredObligation {
+            issuer_nest_id: hex::encode([0xAAu8; 32]),
+            issuer_ref: "7".into(),
+            content_type: "post".into(),
+            content_id: hex::encode(foreign),
+            author: author_bytes,
+            category: "legal".into(),
+            action_taken: ObligationAction::TakenDown as u8,
+            timestamp: 1,
+        })
+        .await
+        .unwrap();
+        // The home's own row, as `post_legal_takedown_txn` keeps it after a
+        // restore (the servability flag is clear; the row is history).
+        db.insert_obligation_action(
+            "post",
+            &hex::encode(own),
+            &actor_hex,
+            b"admin",
+            0,
+            "legal",
+            1.0,
+            ObligationAction::TakenDown as u8,
+            None,
+            1,
+            b"sig",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            materialize_account(&db, &post_segments, &actor_hex, &kp)
+                .await
+                .unwrap(),
+            1,
+            "exactly the post only another nest took down is signed"
+        );
+
+        let conn = db.conn().await;
+        let mapped = |id: &[u8; 32]| -> bool {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nostr_event_map \
+                  WHERE fauna_post_id = ?1 AND direction = 'outbound')",
+                [hex::encode(id)],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                > 0
+        };
+        assert!(
+            mapped(&foreign),
+            "a delivered row is the issuer's decision about its own projection, \
+             never the home's takedown of its own publication"
+        );
+        assert!(
+            !mapped(&own),
+            "the home's own takedown row still bars auto-re-materialization"
+        );
     }
 
     /// Ruling 1 (`archive-import.md` § Compatibility → *Slice-3 rulings*): an

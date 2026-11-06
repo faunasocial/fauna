@@ -36,10 +36,9 @@
                            Opacity="0.7"
                            Text="{loc:Localize Key=onboarding/recovery/selfhosted_desc}" />
 
-                <!-- The installer invocation carrying FAUNA_DEPLOYMENT_SEED. A
-                     placeholder until the C2 reachable-nest command render lands
-                     (box-recovery.md § Implementation status of step 4); mirrors
-                     linux's SELFHOSTED_COMMAND_PENDING. -->
+                <!-- The installer invocation carrying FAUNA_DEPLOYMENT_SEED,
+                     rendered in Rust; the pending text shows only while it is
+                     unresolved, and Copy stays disabled until then. -->
                 <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverSelfhostedCommand}"
                            Text="{x:Bind ViewModel.RecoverSelfhostedCommand, Mode=OneWay}"
                            FontFamily="Consolas"
@@ -49,6 +48,7 @@
 
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverSelfhostedCopyButton}"
                         Click="OnCopyClick"
+                        IsEnabled="{x:Bind ViewModel.RecoverSelfhostedCopyEnabled, Mode=OneWay}"
                         Content="{loc:Localize Key=common/copy}" />
 
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoverRestoreCta}"

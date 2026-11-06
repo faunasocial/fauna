@@ -370,3 +370,40 @@ pub async fn recover_selfhosted_command(
         msg: "no custodied deployment seed for that box".into(),
     })
 }
+
+/// The `recover-selfhosted-command` for a caller that holds **no connection**
+/// — the pre-login twin of [`recover_selfhosted_command`] and the native twin
+/// of linux's `selfhosted_command` call (`box-recovery.md` § The plane-era
+/// recovery floor, *(b) The reads*: this device's own store joined with a cold
+/// read from the nest, never either-or).
+///
+/// Over the shared `fauna_client_account_runtime::deployment_seeds::selfhosted_command`:
+/// the local read always runs, and a cold read over `nest_url` joins it when a
+/// URL is given and the nest answers (it connects and authenticates itself).
+/// A nest that is dead, or no URL at all, leaves the device's own store as the
+/// answer — the case a surviving device recovers a lost box from. `None` when
+/// no custodied seed matches `nest_actor_id` (or it is not 64-char hex).
+///
+/// # Errors
+///
+/// - `FfiError::General` if `owner_secret` is not 32 bytes, or the platform
+///   store location cannot resolve.
+#[fauna_uniffi_async::export(default(nest_url = None, store_container_dir = None))]
+pub async fn recover_selfhosted_command_pre_login(
+    owner_secret: Vec<u8>,
+    nest_actor_id: String,
+    nest_url: Option<String>,
+    store_container_dir: Option<String>,
+) -> Result<Option<String>, FfiError> {
+    let keypair = crate::keypair_from_bytes(&owner_secret)?;
+    let nest_url = nest_url.filter(|u| !u.trim().is_empty());
+    Ok(
+        fauna_client_account_runtime::deployment_seeds::selfhosted_command(
+            nest_url,
+            *keypair.secret_bytes(),
+            store_root(store_container_dir)?,
+            nest_actor_id.trim(),
+        )
+        .await,
+    )
+}

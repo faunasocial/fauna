@@ -15,11 +15,6 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false }
 # `decide`, the heartbeat/stale constants) live in fauna-core; a client's lease
 # loop composes `decide` with this crate's transport calls.
 fauna-core = { path = "../fauna-core", default-features = false }
-# The `fauna.state.delegation` plane kind is where the user's pins live
-# (client-authoritative, account-plane synced), so the Task-delegation surface
-# (`view.rs`) reads and writes them through the shared account-store seams.
-# Wasm-clean (it backs the SPA's own account seams), so the crate stays wasm-clean.
-fauna-client-config = { path = "../fauna-client-config" }
 
 # ── The `driver` feature: the native async lease-loop (`LeaseCoordinator::run`) ──
 # A tokio timer + push-wake loop that drives the pure per-cycle `step`. Native

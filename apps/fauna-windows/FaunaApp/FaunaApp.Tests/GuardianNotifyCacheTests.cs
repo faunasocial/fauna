@@ -17,6 +17,17 @@ public class GuardianNotifyCacheTests : IDisposable
     public void Dispose() => GuardianNotifyCache.Reset();
 
     [Fact]
+    public void WouldCount_OnlyWithTheKnobOnAndTheFloorBiting()
+    {
+        // The region sealed-item sentence's notify_counted input: the same two
+        // conditions Record counts under (region-blocking.md § Implementation status today).
+        Assert.False(GuardianNotifyCache.WouldCount(["nsfw"]));   // off by default
+        GuardianNotifyCache.SetEnabled(true);
+        Assert.True(GuardianNotifyCache.WouldCount(["nsfw"]));
+        Assert.False(GuardianNotifyCache.WouldCount([]));          // the floor does not bite
+    }
+
+    [Fact]
     public void TryTakeDue_NothingRecorded_ReturnsNull()
     {
         Assert.Null(GuardianNotifyCache.TryTakeDue());

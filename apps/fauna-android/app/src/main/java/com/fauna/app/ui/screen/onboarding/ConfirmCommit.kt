@@ -13,7 +13,8 @@ import com.fauna.app.core.ShellLog
  * to the screen the person confirmed on with the error on `error-message`, so
  * nobody reaches handle entry holding a key stored nowhere; confirming again is
  * the retry. [persistFailedTemplate] is the resolved
- * `onboarding.session_error.persist_successor` string, `{message}` filled here.
+ * `onboarding.session_error.persist_identity` string, shown as it is (the raw
+ * error goes to the log, not the screen).
  *
  * Returns whether the identity is committed — a caller with a line of its own
  * paints it only then, so it never covers this one.
@@ -30,6 +31,6 @@ internal fun commitConfirmedIdentity(
         true
     } catch (e: Exception) {
         ShellLog.w(tag, "persist_confirmed_identity (registry commit + read-back) failed: ${e.message}")
-        host.machine.identityCommitFailed(persistFailedTemplate.replace("{message}", e.message ?: ""))
+        host.machine.identityCommitFailed(persistFailedTemplate)
         false
     }

@@ -218,6 +218,7 @@ struct SignedFields {
     content_key_version: Option<u64>,
     derived_through: Option<i64>,
     is_resolution: Option<bool>,
+    deposited_by: Option<String>,
     signature: Option<fauna_protocol::ByteBuf>,
     signer_key: Option<fauna_protocol::ByteBuf>,
 }
@@ -362,6 +363,7 @@ fn media_list_handler() -> RpcHandler {
                         content_key_version: f.content_key_version.map(|v| v as u64),
                         derived_through: f.derived_through,
                         is_resolution: f.is_resolution,
+                        deposited_by: f.deposited_by.as_ref().map(hex::encode),
                         signature: f.signature.map(bytes),
                         signer_key: f.signer_key.map(bytes),
                     });
@@ -394,6 +396,7 @@ fn media_list_handler() -> RpcHandler {
                         content_key_version: s.content_key_version,
                         derived_through: s.derived_through,
                         is_resolution: s.is_resolution,
+                        deposited_by: s.deposited_by,
                         signature: s.signature,
                         signer_key: s.signer_key,
                         // Reader-stamped, never on the wire: a reader sets it

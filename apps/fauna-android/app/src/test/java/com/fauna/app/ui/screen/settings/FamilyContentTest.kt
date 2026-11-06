@@ -30,7 +30,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.app.testing.GuardianRulesFixture
 import org.robolectric.annotation.Config
+import uniffi.fauna_client_policy.RuleVerdict
 
 /**
  * Compose-level coverage for the stateless [FamilyContent] (family-safety.md
@@ -240,9 +242,7 @@ class FamilyContentTest {
             status = status(
                 supervisedBy = guardian,
                 policy = policy(
-                    contentPolicy = FfiContentPolicy(
-                        "inherit", "inherit", "inherit", "inherit", document = editor.documentBytes(),
-                    ),
+                    contentPolicy = FfiContentPolicy(document = editor.documentBytes()),
                 ),
             ),
         )
@@ -477,12 +477,12 @@ class FamilyContentTest {
     }
 
     // ── Content rules (nest-rules.md § The shared rule editor (b)): the shared ──
-    // rule editor's mounting stands where the four floor selects stood, with its
+    // rule editor's mounting is the guardian's content-rules surface, with its
     // own save; the policy form keeps the Notify toggle and sends the content
     // pillar absent.
 
     @Test
-    fun guardianEditorHostsTheRulesSectionInPlaceOfTheFloorSelects() {
+    fun guardianEditorHostsTheRulesSection() {
         val w = ward("Ward1")
         var hosted: ByteArray? = null
         render(
@@ -495,20 +495,20 @@ class FamilyContentTest {
         )
         composeTestRule.onNodeWithTag("family-policy-rules-section").assertExists()
         assertArrayEquals(w.actorId, hosted)
-        for (floor in listOf("nsfw", "spam", "phishing", "commercial")) {
-            composeTestRule.onNodeWithTag("family-policy-content-$floor-select").assertDoesNotExist()
-        }
         composeTestRule.onNodeWithTag("family-policy-content-notify-toggle").assertExists()
     }
 
     @Test
     fun policySaveLeavesTheContentRulesToTheirOwnSave() {
-        // The form never writes floors over the guardian's document: the content
+        // The form never writes over the guardian's document: the content
         // pillar rides out ABSENT ("leave unchanged"), Notify as seeded.
         val w = ward(
             "Ward1",
             policy = policy(
-                contentPolicy = FfiContentPolicy("block", "collapse", "inherit", "inherit"),
+                contentPolicy = GuardianRulesFixture.policy(
+                    "nsfw" to RuleVerdict.BLOCK,
+                    "spam" to RuleVerdict.COLLAPSE,
+                ),
                 contentNotify = true,
             ),
         )

@@ -1,10 +1,10 @@
 //! Test-only tracing capture for this crate's native test suite.
 //!
-//! A crate-local copy of `fauna_client_mls_sync::test_tracing`'s
-//! `capture_tracing_at_info` (its own doc: equivalents stay crate-local by
-//! design, not a shared test-support crate — the same reasoning that keeps
-//! `fauna_onboarding_machine::machine` and `fauna_provisioning::progress`'s
-//! own copies from becoming one).
+//! Deliberately NOT `fauna_test_tracing` (the shared process-global capture the
+//! sibling crates use): this copy records every field of an event (not only
+//! `message`) and has a `set_default`-based async twin that must hold a
+//! thread-local subscriber across an `.await`; both differ from the shared
+//! owner's message-only, thread-tagged global capture. Adjudicated legitimate.
 
 use std::sync::{Arc, Mutex};
 

@@ -232,11 +232,6 @@ def test_pending_card_shows_when_it_first_asked(bridges_pending_admin_app, bridg
     )
 
 
-#: Apps whose reject button asks first (`admin-bridges-reject-confirm`): tui is
-#: the lead app; windows and apple follow in their batched trickle-down.
-_REJECT_CONFIRM_BUILT_APPS = {"tui", "linux", "web", "android"}
-
-
 @pytest.mark.feature("admin-bridges")
 def test_rejecting_a_pending_bridge_asks_first(bridges_pending_admin_app, bridges_pending_nest):
     """Reject opens a confirm that says the bridge will not connect again until
@@ -245,17 +240,9 @@ def test_rejecting_a_pending_bridge_asks_first(bridges_pending_admin_app, bridge
     pending; only the confirm rejects. Ground truth is the bridge's own
     enrollment poll (`request_enrollment` → its row's status), never the UI
     alone."""
-    from helpers.app_surface import app_name, skip_unbuilt
     from helpers.waiting import wait_until
 
     admin_app = bridges_pending_admin_app
-    if app_name(admin_app.driver) not in _REJECT_CONFIRM_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-bridges-reject-confirm",
-            detail="the reject confirm is built on tui first",
-            tracked="the six-app trickle-down of the admin-bridges reject confirm",
-        )
     pubkey_hex, bridge_id = _seed_pending_bridge(bridges_pending_nest, "mta")
 
     def status() -> str:

@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Compiles the `fake` test provider into a RELEASE build (a debug build has it
+# already, through `debug_assertions`). Never default and never named on a
+# consumer's dependency line: a consumer forwards it from its own e2e feature
+# (`e2e-automation-surface-gating.md` rules (a) and (b)), so a production build
+# registers no `fake` (`src/lib.rs`, the module gate).
+test-helpers = []
+
 [dependencies]
 # `ActorId` appears in the `Buyer` half of the `PaymentEntitlement` narrow
 # waist (docs/goal/behavior/monetization.md § Pillar 3). Same

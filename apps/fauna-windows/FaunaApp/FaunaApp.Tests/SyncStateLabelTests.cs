@@ -34,7 +34,7 @@ public class SyncStateLabelTests
     {
         var item = new MediaItem(
             Name: "a.jpg", Path: "photos/a.jpg", Folder: "camera-roll",
-            SizeBytes: 1024, UpdatedAt: 0, ThumbnailHash: null, SourceStatus: "online");
+            FilterValue: "camera-roll", SizeBytes: 1024, UpdatedAt: 0, ThumbnailHash: null, SourceStatus: "online");
         Assert.Equal("media.status_label.synced", item.SyncStateLabel);
     }
 }

@@ -98,17 +98,24 @@ public enum FaunaAccounts {
             storeContainerDir: AccountStateDir.storeContainerDir)
     }
 
-    /// The `LaunchPersistence` over the **active** account — what `LaunchMachine` routes on
-    /// and what `mintAndPersistPendingFactoryReset` persists through.
+    /// The `LaunchPersistence` over the account **this process serves** (the bound
+    /// account of a secondary instance, else the active one) — what `LaunchMachine` routes
+    /// on and what `mintAndPersistPendingFactoryReset` persists through.
     ///
     /// This replaced apple's hand-rolled `KeychainLaunchPersistence` wholesale rather than
     /// sitting beside it. Keeping both would have re-introduced CR-3 by the back door: the
     /// old adapter read a single **global** pending-factory-reset row, so with two accounts
     /// on one device, account B's reset would overwrite account A's pending row and destroy
     /// A's claim code. Per-actor slots are the fix, and they only hold if *every* reader
-    /// goes through the registry (`nest/common.md` § Client-state recoverability, CR-3).
+    /// goes through the registry and names the served account: over the active pointer, a
+    /// secondary bound to B writes B's reset into A's slot (`nest/common.md` § Client-state
+    /// recoverability, CR-3; linux's `launch_persistence` twin).
     public static func launchPersistence(keychain: KeychainStore = KeychainStore()) -> LaunchPersistence {
-        registry(keychain: keychain).launchPersistence()
+        let registry = registry(keychain: keychain)
+        if let bound = sessionLaunchBinding() {
+            return registry.boundLaunchPersistence(actorId: bound)
+        }
+        return registry.launchPersistence()
     }
 
     /// This install's sync device id for `actorId` — the persisted per-account

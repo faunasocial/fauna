@@ -30,6 +30,9 @@ struct MacConversationsView: View {
                 .accessibilityElement(children: .contain)
         }
         .pageTitle(L.conversations.list.title)
+        // Each visit re-reads the `Archive` rail's imported threads: the page
+        // remounts on every sidebar switch (`ContentView`'s `switch`).
+        .task { await vm.refreshArchiveThreads() }
     }
 
     // ── List pane ──────────────────────────────────────────────────────────

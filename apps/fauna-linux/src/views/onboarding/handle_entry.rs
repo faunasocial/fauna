@@ -120,6 +120,11 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     // the shared snapshot's `terms_notice_visible` (never re-derived here) --
     let terms_notice = super::widgets::terms_notice();
     terms_notice.set_visible(false);
+    // -- The nest's rules directly above it, on the same condition — the
+    // machine's getter applies it (`nest-rules.md` § Acceptance at joining) --
+    let nest_rules = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    nest_rules.set_visible(false);
+    root.append(&nest_rules);
     root.append(&terms_notice);
 
     // -- Back / Continue button row --
@@ -174,6 +179,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         let continue_btn = continue_btn.clone();
         let error_label = error_label.clone();
         let terms_notice = terms_notice.clone();
+        let nest_rules = nest_rules.clone();
         let last_handle = last_handle.clone();
         move || {
             // Mirror handle into entry (without clobbering in-progress typing).
@@ -199,6 +205,10 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 
             continue_btn.set_sensitive(snap.continue_enabled);
             terms_notice.set_visible(snap.terms_notice_visible);
+            crate::nest_rules::paint_joining(
+                &nest_rules,
+                m.joining_nest_rules(crate::nest_rules::UI_LANG).as_ref(),
+            );
 
             // error-message
             let msg = m.error_message().filter(|msg| !msg.is_empty());

@@ -47,3 +47,28 @@ public struct ContentLabelBadge: View {
         .clipShape(Capsule())
     }
 }
+
+/// The opened-post **detail** twin of the list card's content-label paint: the
+/// `content-label-badge` for the shared `primaryContentLabel` pick over
+/// `PostSummary.labels`, or nothing when the post is unlabelled. One view for the
+/// iOS and macOS post detail (priority #2) so a room labeler's verdict folded onto
+/// a deep-linked post (`feed-read-model.md` § the room's labels on the opened post)
+/// paints the same on both.
+public struct PostDetailContentLabelBadge: View {
+    private let labels: [ContentLabelEntry]
+
+    public init(labels: [ContentLabelEntry]) {
+        self.labels = labels
+    }
+
+    /// The category painted for `labels` — nil iff the badge is absent. The testable seam.
+    static func paintedCategory(labels: [ContentLabelEntry]) -> String? {
+        primaryContentLabel(labels: labels)?.category
+    }
+
+    public var body: some View {
+        if let category = Self.paintedCategory(labels: labels) {
+            ContentLabelBadge(category: category)
+        }
+    }
+}

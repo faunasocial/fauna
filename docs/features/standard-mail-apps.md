@@ -9,10 +9,18 @@ guide: docs/guides/own-your-mail.md § Connecting a regular mail app
 ## What a user gets
 
 Thunderbird, Apple Mail or any IMAP client reads and sends your mail with the
-address and app password the Fauna app shows you: one password for reading, sending
-and your calendar alike, a second password if you want one, and mail that reaches
-your inbox the moment it arrives. Your mail rests sealed on the nest; the server
-unseals it only for a client that holds your password.
+address and app password the Fauna app shows you: one password for reading,
+sending and your calendar alike, a second password if you want one, and mail
+that reaches your inbox the moment it arrives. Mail your nest passes to and from
+email is readable to it on the way, as on every mail server, and is stored
+encrypted as it lands; after that, your nest opens it with the password of a
+mail, calendar, contacts or file app you connect, and only for that app's
+signed-in session; beyond those, your nest reads it for itself only if you give
+it permission to read your mail, or you subscribe to a community labeler that
+reads your mail, which gets its own trust for that one labeler and your mail
+alone. Your nest also sees what any server that delivers your messages must: who
+you're connected to — your contacts, whom you follow, the groups you're in — and
+when and how much you send.
 
 ## Coverage contract
 
@@ -86,13 +94,13 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.3-dev+937bbf0c.dirty standalone |
-| linux | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
-| windows | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
-| macos | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
-| ios | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
-| android | ⚠ partial | 0.1.3-dev+937bbf0c.dirty standalone |
-| tui | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| android |  no run recorded | |
+| tui | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -100,40 +108,40 @@ Stamped 2026-10-01 at 308c995169.
 | 1 | app | `tests/e2e-unified/tests/test_mail_enable_then_mua_round_trip.py::test_client_enabled_mail_submits_outbound_through_submission` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_mail_send_external_and_imap_auth.py::test_one_credential_sends_to_external_and_imap_authenticates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_mail_multi_credential_auth.py::test_second_credential_authenticates_over_caldav_and_imap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_mail_bare_username_auth.py::test_default_credential_username_form_matrix` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_login_and_select` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_wrong_password_rejected` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_append_fetch_roundtrip` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_idle_exists_push` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_search_body_axis_decrypts_index_hint` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_getquotaroot_reports_root_and_limits` | nest (linux): passed |
-| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_qresync_select_inline_vanished_earlier` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_mail_inbound_to_imap.py::test_inbound_smtp_delivers_and_imap_fetch_decrypts` | nest (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/test_mail_inbound_to_imap.py::test_an_over_frame_inbound_message_delivers_by_reference_and_fetches_byte_for_byte` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_round_trip` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_mail_from_owned_alias_accepted` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_mail_from_other_actor_rejected` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_from_header_other_actor_rejected` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_strips_received_headers` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_cleartext_143_refuses_every_password_path` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_six_special_use_mailboxes_seeded_and_protected` | nest (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_folders_and_subscriptions_are_the_same_in_every_mail_app` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_changes_in_one_mail_app_are_pushed_to_another` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_seen_on_non_peek_fetch` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_sectioned_body_fetch` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_numbered_part_body_fetch` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_binary_section_fetch` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_mua_ahead_of_restored_nest_is_told_to_resync` | nest (linux): passed |
-| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_internaldate_is_server_time_not_the_date_header` | nest (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_a_full_mailbox_refuses_saves_but_never_deletes` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_partial_local_failure_delivers_rest` | nest (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_oversize_mail_app_send_is_refused_at_once` | nest (linux): passed |
-| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_is_saved_to_sent` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_recipient_cap_and_daily_allowance_shared_with_app_sends` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_multi_recipient_mail_app_send_spends_one_unit_per_outside_recipient` | nest (linux): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_repeated_wrong_passwords_are_briefly_refused` | nest (linux): passed |
-| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_login_command_and_rev1_dialect_over_tls` | nest (linux): passed |
-| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_to_a_local_user_lands_in_their_inbox` | nest (linux): passed |
-| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_mail_app_sending_while_the_nest_is_down_is_told_to_try_again` | nest (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_mail_bare_username_auth.py::test_default_credential_username_form_matrix` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_login_and_select` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_wrong_password_rejected` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_append_fetch_roundtrip` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_idle_exists_push` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_search_body_axis_decrypts_index_hint` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_getquotaroot_reports_root_and_limits` | nest (linux): passed, nest (macos): passed |
+| 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_qresync_select_inline_vanished_earlier` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_inbound_to_imap.py::test_inbound_smtp_delivers_and_imap_fetch_decrypts` | nest (linux): passed, nest (macos): passed |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_inbound_to_imap.py::test_an_over_frame_inbound_message_delivers_by_reference_and_fetches_byte_for_byte` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_round_trip` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_dkim_signature_verifies` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_mail_from_owned_alias_accepted` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_mail_from_other_actor_rejected` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_from_header_other_actor_rejected` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_strips_received_headers` | nest (linux): passed, nest (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_cleartext_143_refuses_every_password_path` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_six_special_use_mailboxes_seeded_and_protected` | nest (linux): passed, nest (macos): passed |
+| 8 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_folders_and_subscriptions_are_the_same_in_every_mail_app` | nest (linux): passed, nest (macos): passed |
+| 9 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_changes_in_one_mail_app_are_pushed_to_another` | nest (linux): passed, nest (macos): passed |
+| 10 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_seen_on_non_peek_fetch` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_sectioned_body_fetch` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_numbered_part_body_fetch` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_binary_section_fetch` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_mua_ahead_of_restored_nest_is_told_to_resync` | nest (linux): passed, nest (macos): passed |
+| 13 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_internaldate_is_server_time_not_the_date_header` | nest (linux): passed, nest (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_sessions.py::test_a_full_mailbox_refuses_saves_but_never_deletes` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_submission_partial_local_failure_delivers_rest` | nest (linux): passed, nest (macos): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_an_oversize_mail_app_send_is_refused_at_once` | nest (linux): passed, nest (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_is_saved_to_sent` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_recipient_cap_and_daily_allowance_shared_with_app_sends` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_multi_recipient_mail_app_send_spends_one_unit_per_outside_recipient` | nest (linux): passed, nest (macos): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_repeated_wrong_passwords_are_briefly_refused` | nest (linux): passed, nest (macos): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_login_command_and_rev1_dialect_over_tls` | nest (linux): passed, nest (macos): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_to_a_local_user_lands_in_their_inbox` | nest (linux): passed, nest (macos): passed |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_mail_app_sending_while_the_nest_is_down_is_told_to_try_again` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

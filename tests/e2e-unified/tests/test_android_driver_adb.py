@@ -26,7 +26,7 @@ own argv to a log -- the shape `test_cargo_target_seed.py` and
 command LINES: pure state, no timing.
 
 **Two network calls are neutralized, and that is the point of the design, not a
-shortcut.** `launch()` ends with `_wait_for_health(timeout=30)` and a
+shortcut.** `launch()` ends with `_wait_for_health(posted_at, timeout=30)` and a
 `_post("/session")`, both of which talk to a bridge that does not exist here.
 Left alone this file would spend 30 s per test and end in `TimeoutError` before
 reaching a single assertion about command lines -- it would be a slow test of
@@ -137,7 +137,7 @@ def bridge_posts(monkeypatch):
                 issued = [ln for ln in fh.read().splitlines() if ln.strip()]
         posts.append((path, body, issued))
 
-    monkeypatch.setattr(AndroidBridgeDriver, "_wait_for_health", lambda self, timeout=30: None)
+    monkeypatch.setattr(AndroidBridgeDriver, "_wait_for_health", lambda self, posted_at, timeout=30: None)
     monkeypatch.setattr(AndroidBridgeDriver, "_post", record)
     monkeypatch.setattr(AndroidBridgeDriver, "_delete", lambda self, path: None)
     # `launch()` takes the app-log byte floor over the bridge before `/session`.

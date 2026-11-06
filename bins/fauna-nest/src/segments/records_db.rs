@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use fauna_cbor::Cid;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Decode a `record_cid` BLOB column (the full 36-byte `fauna_cbor::Cid`) into a
 /// `Cid`. The mirror stores the exact key the CARv2 index uses, so reads never
@@ -464,25 +464,102 @@ pub fn insert_conv_record_author(
     Ok(())
 }
 
-/// The attested author of the one conv record `record_cid` names — the mirror
-/// row's `(scope_id, seq)` joined onto `conv_record_authors`. `None` for a
-/// record no attestation names (appended before v70, or by a path that
-/// authenticated no actor) and for no such record alike. The key a takedown or
-/// block of a conversation record writes its author's queue row under
-/// (`moderation.md` § Legal takedown → *Conversations*).
-pub fn conv_record_author(conn: &Connection, record_cid: &Cid) -> Result<Option<[u8; 32]>> {
+/// The attested author of a conv record — the mirror row's `(scope_id, seq)`
+/// joined onto `conv_record_authors`. `scope = Some(channel)` reads that
+/// channel's copy; `None` reads the EARLIEST copy (`received_at`, then the row
+/// order), since one `record_cid` may name copies in several channels (the
+/// channel is not in a conv record's hash — `message-segment-store.md`
+/// § Record identity per kind). `None` for a record no attestation names
+/// (appended before v70, or by a path that authenticated no actor) and for no
+/// such record alike. The key a takedown or block of a conversation record
+/// writes its author's queue row under (`takedown-and-block.md` § Legal
+/// takedown → *Conversations*).
+pub fn conv_record_author(
+    conn: &Connection,
+    record_cid: &Cid,
+    scope: Option<&[u8; 32]>,
+) -> Result<Option<[u8; 32]>> {
     let author: Option<Vec<u8>> = conn
         .query_row(
             "SELECT a.author FROM segment_records r
                JOIN conv_record_authors a ON a.channel_id = r.scope_id AND a.seq = r.seq
               WHERE r.kind = 'conv' AND r.record_cid = ?1
+                AND (?2 IS NULL OR r.scope_id = ?2)
+              ORDER BY r.received_at, r.rowid
               LIMIT 1",
-            params![&record_cid.as_bytes()[..]],
+            params![&record_cid.as_bytes()[..], scope.map(|s| &s[..])],
             |r| r.get(0),
         )
         .optional()
         .context("conv_record_author")?;
     Ok(author.and_then(|a| <[u8; 32]>::try_from(a.as_slice()).ok()))
+}
+
+/// The channel holding a copy of `record_cid` that `author` is attested to
+/// have sent — how the issuer finds the channel whose foreign-member row names
+/// that author's home (`takedown-and-block.md` § Legal takedown → *The author
+/// homed on another nest*). `None` when no copy attests that author.
+pub fn conv_record_scope_of_author(
+    conn: &Connection,
+    record_cid: &Cid,
+    author: &[u8; 32],
+) -> Result<Option<[u8; 32]>> {
+    conn.query_row(
+        "SELECT r.scope_id FROM segment_records r
+           JOIN conv_record_authors a ON a.channel_id = r.scope_id AND a.seq = r.seq
+          WHERE r.kind = 'conv' AND r.record_cid = ?1 AND a.author = ?2
+          ORDER BY r.received_at, r.rowid
+          LIMIT 1",
+        params![&record_cid.as_bytes()[..], &author[..]],
+        |r| r.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .context("conv_record_scope_of_author")?
+    .map(|v| crate::db::blob_to_array(v.as_slice(), "scope_id"))
+    .transpose()
+}
+
+/// Every channel holding a copy of `record_cid`, sorted and distinct — the
+/// takedown audits one row per channel it withholds in.
+pub fn conv_record_scopes(conn: &Connection, record_cid: &Cid) -> Result<Vec<[u8; 32]>> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT DISTINCT scope_id FROM segment_records
+              WHERE kind = 'conv' AND record_cid = ?1
+              ORDER BY scope_id",
+        )
+        .context("prepare conv_record_scopes")?;
+    let rows = stmt
+        .query_map(params![&record_cid.as_bytes()[..]], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .context("query conv_record_scopes")?;
+    let mut out = Vec::new();
+    for row in rows {
+        let v = row.context("read conv_record_scopes row")?;
+        out.push(crate::db::blob_to_array(v.as_slice(), "scope_id")?);
+    }
+    Ok(out)
+}
+
+/// Does `scope` hold a LIVE copy of `record_cid`? The block's existence check
+/// for a report that names its channel. Live only, as the block's own write
+/// is: a user-deleted copy is served by nothing, and a compacted copy's
+/// tombstoned input row is history beside its live successor,
+/// so "the copy in that channel" is the one live row.
+pub fn conv_record_in_scope(conn: &Connection, scope: &[u8; 32], record_cid: &Cid) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM segment_records
+              WHERE kind = 'conv' AND scope_id = ?1 AND record_cid = ?2
+                AND tombstoned = 0
+              LIMIT 1",
+            params![&scope[..], &record_cid.as_bytes()[..]],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("conv_record_in_scope")?
+        .is_some())
 }
 
 /// The attested authors of one channel's records in `(after_seq, up_to_seq]`,
@@ -679,45 +756,58 @@ pub fn list_conv_after_seq(
     Ok(out)
 }
 
-/// Set (or clear) the admin-block flag on a single conv record, keyed by its
-/// `record_cid` — `Some(report_id)` blocks it under that report, `None`
-/// unblocks. Returns the number of rows updated. The conv-kind guard and the
-/// point lookup are [`set_conv_legal_takedown`]'s. `only_if` narrows the write
-/// to a record currently blocked under that report (the unblock's guard).
+/// Set (or clear) the admin-block flag on a conv record's LIVE rows, keyed by
+/// its `record_cid` — `Some(report_id)` blocks it under that report, `None`
+/// unblocks. Tombstoned rows are never written or read by the block: a
+/// compaction leaves the input row tombstoned beside the survivor's live row
+/// (which carries the flag across), and counting both would match two rows for
+/// one copy and refuse the block. Returns the number of rows updated. `scope = Some(channel)`
+/// narrows the write to that channel's copy — the block of a report that names
+/// its channel; `None` writes every copy (the takedown's rule, for a report
+/// that names none). `only_if` narrows the write to a record currently blocked
+/// under that report (the unblock's guard).
 pub fn set_conv_admin_block(
     conn: &Connection,
     record_cid: &Cid,
+    scope: Option<&[u8; 32]>,
     report_id: Option<&str>,
     only_if: Option<&str>,
 ) -> Result<usize> {
-    let n = match only_if {
-        None => conn.execute(
+    let n = conn
+        .execute(
             "UPDATE segment_records
                 SET admin_block_report_id = ?1
-              WHERE kind = 'conv' AND record_cid = ?2",
-            params![report_id, &record_cid.as_bytes()[..]],
-        ),
-        Some(current) => conn.execute(
-            "UPDATE segment_records
-                SET admin_block_report_id = ?1
-              WHERE kind = 'conv' AND record_cid = ?2 AND admin_block_report_id = ?3",
-            params![report_id, &record_cid.as_bytes()[..], current],
-        ),
-    }
-    .context("set_conv_admin_block")?;
+              WHERE kind = 'conv' AND record_cid = ?2 AND tombstoned = 0
+                AND (?3 IS NULL OR scope_id = ?3)
+                AND (?4 IS NULL OR admin_block_report_id = ?4)",
+            params![
+                report_id,
+                &record_cid.as_bytes()[..],
+                scope.map(|s| &s[..]),
+                only_if
+            ],
+        )
+        .context("set_conv_admin_block")?;
     Ok(n)
 }
 
-/// The report a conv record is currently blocked under, if any. `Ok(None)`
+/// The report a conv record is currently blocked under, if any — that
+/// channel's copy for `scope = Some`, any blocked copy for `None`. `Ok(None)`
 /// for a live record and for no such record alike — the caller has already
-/// resolved the record's existence through [`conv_record_scope_and_takedown`].
-pub fn conv_admin_block_report(conn: &Connection, record_cid: &Cid) -> Result<Option<String>> {
+/// resolved the record's existence.
+pub fn conv_admin_block_report(
+    conn: &Connection,
+    record_cid: &Cid,
+    scope: Option<&[u8; 32]>,
+) -> Result<Option<String>> {
     Ok(conn
         .query_row(
             "SELECT admin_block_report_id FROM segment_records
-              WHERE kind = 'conv' AND record_cid = ?1
+              WHERE kind = 'conv' AND record_cid = ?1 AND tombstoned = 0
+                AND (?2 IS NULL OR scope_id = ?2)
+              ORDER BY admin_block_report_id IS NULL
               LIMIT 1",
-            params![&record_cid.as_bytes()[..]],
+            params![&record_cid.as_bytes()[..], scope.map(|s| &s[..])],
             |r| r.get::<_, Option<String>>(0),
         )
         .optional()
@@ -725,10 +815,37 @@ pub fn conv_admin_block_report(conn: &Connection, record_cid: &Cid) -> Result<Op
         .flatten())
 }
 
-/// Set (or clear) the legal-obligation takedown reference on a single conv
-/// record, keyed by its `record_cid`. `Some(reference)` takes it down;
-/// `None` overturns/restores. Returns the number of rows updated — `0` means no
-/// such conv record (the caller maps that to `not_found`). The conv-kind guard
+/// Does ANY copy of a conv record (in `scope` when given) carry the admin
+/// block of `report_id`? A report naming no channel blocks every copy, and a
+/// later per-channel block overwrites one copy's flag, so "the first flagged
+/// copy" ([`conv_admin_block_report`]) can name the later report while another
+/// copy is still blocked under this one (`takedown-and-block.md` § Admin block
+/// → *Mechanism*).
+pub fn conv_carries_admin_block(
+    conn: &Connection,
+    record_cid: &Cid,
+    scope: Option<&[u8; 32]>,
+    report_id: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM segment_records
+          WHERE kind = 'conv' AND record_cid = ?1 AND tombstoned = 0
+            AND (?2 IS NULL OR scope_id = ?2)
+            AND admin_block_report_id = ?3)",
+        params![&record_cid.as_bytes()[..], scope.map(|s| &s[..]), report_id],
+        |r| r.get::<_, bool>(0),
+    )
+    .context("conv_carries_admin_block")
+}
+
+/// Set (or clear) the legal-obligation takedown reference on EVERY copy of a
+/// conv record, keyed by its `record_cid` — a legal order names the content,
+/// and every copy is the same sealed bytes, so the same bytes re-sent into a
+/// second channel (or into one channel after deleting the first) are taken
+/// down with it (`takedown-and-block.md` § Legal takedown → *Conversations*).
+/// `Some(reference)` takes it down; `None` overturns/restores. Returns the
+/// number of rows updated — `0` means no such conv record (the caller maps
+/// that to `not_found`). The conv-kind guard
 /// keeps this from ever touching a mail/filesync record that shares the
 /// (globally-unique-per-message) `record_cid` space. The `record_cid` index
 /// makes the lookup a point read. Mirror-only mutable flag, exactly like
@@ -1546,6 +1663,14 @@ pub struct NewSegmentRecord {
     /// reclaiming, so compaction carries it verbatim. `0` = unknown (a failed
     /// clock read) and is stored as NULL.
     pub stored_at: i64,
+    /// Canonical report-hash (report-sharing.md § Content identity), carried
+    /// through compaction from the survivor's `MailFloorMetadata.report_hash`
+    /// — the floor is authoritative, the column is the hot-path lookup. A
+    /// rewrite that dropped it would make `report_hash_for_message` answer
+    /// `None` and silently remove the copy from report aggregation. Empty =
+    /// none (an IMAP APPEND stores none) and is stored as NULL, as the append
+    /// path writes it.
+    pub report_hash: Vec<u8>,
 }
 
 /// Execute the compaction SQL transaction body: tombstone every row that
@@ -1578,8 +1703,8 @@ pub fn apply_compaction_tx(
                     (scope_id, kind, segment_id, record_cid, bucket,
                      tombstoned,
                      received_at, sender_dom, spam_disp, is_own_submission, seq,
-                     continuation_role, stored_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     continuation_role, stored_at, report_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     scope_id.as_slice(),
                     kind,
@@ -1594,6 +1719,8 @@ pub fn apply_compaction_tx(
                     rec.continuation_role as i64,
                     // 0 = unknown -> NULL (not reapable), never "epoch".
                     (rec.stored_at > 0).then_some(rec.stored_at),
+                    // Empty = no hash -> NULL.
+                    (!rec.report_hash.is_empty()).then_some(rec.report_hash.as_slice()),
                 ],
             )
             .context("INSERT segment_records new segment row")?;
@@ -1657,17 +1784,29 @@ pub fn apply_conv_compaction_tx(
     new_segment_id: Option<u32>,
     new_segment_records: &[NewConvSegmentRecord],
 ) -> Result<()> {
+    // The two withhold flags are mirror-only row state the segment bytes do
+    // not carry, so they are read off the live input rows BEFORE the
+    // tombstone and written onto each survivor's new row: a blocked or
+    // taken-down message stays withheld across compaction (
+    // a re-INSERT without them re-served the sealed body and dropped its
+    // attachments from the blob withhold).
+    let flags = live_conv_withhold_flags(tx, scope_id, input_segment_ids)?;
     // Tombstone every live row for each input segment (shared with mail).
     tombstone_input_segments(tx, scope_id, "conv", input_segment_ids)?;
     // INSERT new segment's rows — only when compact() produced survivors.
     if let Some(new_id) = new_segment_id {
         for rec in new_segment_records {
+            let (legal_takedown_ref, admin_block_report_id) = flags
+                .get(&(rec.record_cid.as_bytes().to_vec(), rec.seq))
+                .cloned()
+                .unwrap_or_default();
             tx.execute(
                 "INSERT INTO segment_records
                     (scope_id, kind, segment_id, record_cid, bucket,
                      tombstoned,
-                     received_at, sender_dom, spam_disp, is_own_submission, seq)
-                 VALUES (?1, 'conv', ?2, ?3, ?4, 0, ?5, NULL, NULL, NULL, ?6)",
+                     received_at, sender_dom, spam_disp, is_own_submission, seq,
+                     legal_takedown_ref, admin_block_report_id)
+                 VALUES (?1, 'conv', ?2, ?3, ?4, 0, ?5, NULL, NULL, NULL, ?6, ?7, ?8)",
                 params![
                     scope_id.as_slice(),
                     new_id as i64,
@@ -1675,12 +1814,52 @@ pub fn apply_conv_compaction_tx(
                     &rec.bucket,
                     rec.received_at,
                     rec.seq,
+                    legal_takedown_ref,
+                    admin_block_report_id,
                 ],
             )
             .context("INSERT segment_records new conv segment row")?;
         }
     }
     Ok(())
+}
+
+/// The withhold flags of every live conv row in the input segments, keyed by
+/// `(record_cid, seq)` — the pair a compaction survivor keeps, so a cid
+/// re-sent into the channel (a second row under the same cid) keeps its own
+/// row's flags. Only rows carrying a flag are returned.
+fn live_conv_withhold_flags(
+    tx: &Transaction,
+    scope_id: &[u8; 32],
+    input_segment_ids: &[u32],
+) -> Result<HashMap<(Vec<u8>, i64), (Option<String>, Option<String>)>> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT record_cid, seq, legal_takedown_ref, admin_block_report_id
+               FROM segment_records
+              WHERE scope_id = ?1 AND kind = 'conv' AND segment_id = ?2
+                AND tombstoned = 0
+                AND (legal_takedown_ref IS NOT NULL OR admin_block_report_id IS NOT NULL)",
+        )
+        .context("prepare live_conv_withhold_flags")?;
+    let mut out = HashMap::new();
+    for input_seg in input_segment_ids {
+        let rows = stmt
+            .query_map(params![scope_id.as_slice(), *input_seg as i64], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .context("query live_conv_withhold_flags")?;
+        for row in rows {
+            let (cid, seq, legal, block) = row.context("row live_conv_withhold_flags")?;
+            out.insert((cid, seq), (legal, block));
+        }
+    }
+    Ok(out)
 }
 
 // ============================ post kind ============================

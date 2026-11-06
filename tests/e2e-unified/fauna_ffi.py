@@ -512,6 +512,7 @@ if hasattr(_lib, "fauna_capability_build_consent_deposit_grant"):
         ctypes.POINTER(ctypes.c_uint8),                # identity_seed (32)
         ctypes.POINTER(ctypes.c_uint8),                # grant_id (16)
         ctypes.POINTER(ctypes.c_uint8),                # holder_x25519 (32)
+        ctypes.POINTER(ctypes.c_uint8),                # writer_ed25519 (32)
         ctypes.c_uint64,                               # epoch_start
         ctypes.c_uint64,                               # epoch_end
         ctypes.c_char_p,                               # scopes, newline-separated
@@ -1729,6 +1730,7 @@ def build_consent_deposit_grant(
     identity_seed: bytes,
     grant_id: bytes,
     holder_x25519: bytes,
+    writer_ed25519: bytes,
     epoch_start: int,
     epoch_end: int,
     scopes: list[str],
@@ -1739,10 +1741,18 @@ def build_consent_deposit_grant(
     (``ext_consent::prepare_ext_consent_grant``) over the consent row's own
     ``scopes``, its bare folder-plane scopes qualified by the card's
     ``folder`` choice (``None`` for a qualified row), owned by the actor
-    ``identity_seed`` (the owner's 32-byte Ed25519 seed) derives. Returns the
-    ``fauna.capabilities.mint`` grant_blob."""
-    if len(identity_seed) != 32 or len(grant_id) != 16 or len(holder_x25519) != 32:
-        raise ValueError("identity_seed/holder_x25519 must be 32 bytes; grant_id 16")
+    ``identity_seed`` (the owner's 32-byte Ed25519 seed) derives, each
+    ``deposit`` tuple confined to the principal's attested ``writer_ed25519``.
+    Returns the ``fauna.capabilities.mint`` grant_blob."""
+    if (
+        len(identity_seed) != 32
+        or len(grant_id) != 16
+        or len(holder_x25519) != 32
+        or len(writer_ed25519) != 32
+    ):
+        raise ValueError(
+            "identity_seed/holder_x25519/writer_ed25519 must be 32 bytes; grant_id 16"
+        )
     if folder is not None and folder <= 0:
         raise ValueError("folder must be a positive row id")
     out = _FfiBuffer()
@@ -1750,6 +1760,7 @@ def build_consent_deposit_grant(
         _u8(identity_seed),
         _u8(grant_id),
         _u8(holder_x25519),
+        _u8(writer_ed25519),
         epoch_start,
         epoch_end,
         "\n".join(scopes).encode("utf-8"),
@@ -2412,11 +2423,13 @@ def sign_custody_witness(
 
 
 _SEAT_EXPORTS = (
+    "fauna_harness_machine_principal",
     "fauna_harness_mint_custody",
     "fauna_harness_revoke_custody",
     "fauna_harness_custodied_fleet_handshake",
     "fauna_harness_serve_set",
     "fauna_harness_answer_consent",
+    "fauna_harness_enable_mail",
     "fauna_harness_topic_create",
     "fauna_harness_topic_train",
     "fauna_harness_cues_record_and_flush",
@@ -2457,6 +2470,19 @@ def _seat_call(fn_name: str, nest_url: str, secret: bytes, request: list):
 
         raise _build_rpc_call_error(reply["err"])
     return reply["ok"]
+
+
+def harness_machine_principal(nest_url: str, owner_secret: bytes) -> tuple[bytes, bytes]:
+    """Enroll one more machine of the account whose seed is ``owner_secret`` and
+    return its principal as ``(writer_secret, device_authorization)`` — the
+    carriage an app provisions its out-of-process File Provider host with (the
+    DEBUG ``provision`` verb's last two arguments). The host keys the account
+    plane's folder custody as that enrolled machine, so a headless File Provider
+    run needs one before its engine opens a set. Like ``harness_create_set``,
+    the account gains one fleet enrollment."""
+    writer_secret, device_authorization = _seat_call(
+        "fauna_harness_machine_principal", nest_url, owner_secret, [])
+    return bytes(writer_secret), bytes(device_authorization)
 
 
 def harness_mint_custody(
@@ -2610,6 +2636,31 @@ def harness_answer_consent(
         "fauna_harness_answer_consent", nest_url, owner_secret, [consent_id, folder])
 
 
+
+def harness_enable_mail(nest_url: str, owner_secret: bytes) -> None:
+    """Enable mail for the account whose seed is ``owner_secret``, app-less: the
+    shared ``MailSettingsMachine`` the apps' Mail settings page builds, sent
+    ``EnableMail`` with one generated plain credential over the owner's mail
+    custody, then published — the MSEK sealed in ``fauna.state.mail`` and the
+    recipient seal key on file, as an app's first enable leaves them, with no
+    app seat left running (whose capability sweep would judge the grants a
+    test mints afterwards). Like ``harness_create_set``, the call hosts the
+    account store for its length (one fleet enrollment). Raises on a refusal."""
+    _seat_call("fauna_harness_enable_mail", nest_url, owner_secret, [])
+
+
+def harness_mint_trust(nest_url: str, owner_secret: bytes, use_case: str) -> None:
+    """Mint the content trust the Nests page's picker offers for ``use_case``
+    (``"mail"`` or ``"calendar"``), app-less, as the account whose seed is
+    ``owner_secret``: the shared ``LinkedNestsMachine`` every native app's Nests
+    page builds, hydrated so its home row carries the derived mint options, then
+    sent ``Mint`` with that option's scope and first holder candidate — record
+    the signed Mint event, publish, then deposit, the order an app's confirm
+    runs. Needs mail enabled (``harness_enable_mail``) and a holder of the
+    option's role. Like ``harness_create_set``, the call hosts the account store
+    for its length (one fleet enrollment). Raises on a refusal."""
+    _seat_call("fauna_harness_mint_trust", nest_url, owner_secret, [use_case])
+
 if hasattr(_lib, "fauna_folder_read_keys_header"):
     _lib.fauna_folder_read_keys_header.argtypes = [
         ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # grant_blob, len
@@ -2759,6 +2810,64 @@ def harness_peer_seat_hold(
         ctypes.byref(out),
     )
     return cbor2.loads(_take_buffer(rc, out, "fauna_harness_peer_seat_hold"))["ok"]
+
+
+_HAS_CONV_FORGE_DELETE = hasattr(_lib, "fauna_harness_conv_forge_delete")
+if _HAS_CONV_FORGE_DELETE:
+    _lib.fauna_harness_conv_forge_delete.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # forger secret (32-byte Ed25519 seed), len
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # dag-cbor request, len
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": [channel, target_seq, delete_seq]}
+    ]
+    _lib.fauna_harness_conv_forge_delete.restype = ctypes.c_int32
+
+
+def harness_conv_forge_delete(
+    nest_url: str,
+    secret: bytes,
+    victim_actor_hex: str,
+    target_body: str,
+    ready_path,
+    budget_secs: int,
+) -> dict:
+    """Be a **real MLS member that forges a delete** of the victim's message:
+    the actor whose seed is ``secret`` publishes key packages, writes
+    ``ready_path``, joins the victim's conversation from its Welcome (the
+    shared ``ingest_welcome``), waits for the message whose body is
+    ``target_body``, then seals a ``Delete`` of it whose inner sender claims
+    to be the VICTIM and sends it — the forgery no app's UI can send
+    (``message-reactions.md`` § Reactions & message delete).
+
+    Blocks until the delete is sent or ``budget_secs`` runs out, so a test runs
+    it on a thread and lets the victim send only once ``ready_path`` exists
+    (before that the member is not addressable). Returns ``{"channel",
+    "target_seq", "delete_seq"}``; raises the nest's refusal as
+    ``RpcCallError`` and a spent budget as ``RuntimeError``."""
+    if not _HAS_CONV_FORGE_DELETE:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_conv_forge_delete` — it is stale, "
+            "or not the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    body = cbor2.dumps(
+        [victim_actor_hex, target_body, os.fspath(ready_path), int(budget_secs)],
+        canonical=True,
+    )
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    req_arr = (ctypes.c_uint8 * len(body)).from_buffer_copy(body)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_conv_forge_delete(
+        nest_url.encode("utf-8"), sec_arr, 32, req_arr, len(body), ctypes.byref(out),
+    )
+    reply = cbor2.loads(_take_buffer(rc, out, "fauna_harness_conv_forge_delete"))
+    if "err" in reply:
+        from clients._ws_rpc_core import _build_rpc_call_error
+
+        raise _build_rpc_call_error(reply["err"])
+    channel, target_seq, delete_seq = reply["ok"]
+    return {"channel": channel, "target_seq": target_seq, "delete_seq": delete_seq}
 
 
 _HAS_MAIL_IMPORT = hasattr(_lib, "fauna_harness_mail_import")

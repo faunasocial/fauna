@@ -28,7 +28,15 @@ from i18n.strings import S
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.windows,
+    pytest.mark.android,
+]
 
 _UI_S = 20.0
 
@@ -80,6 +88,8 @@ def _account_reset(nest_instance, test_user):
     reset()
 
 
+@pytest.mark.android
+@pytest.mark.ios
 @pytest.mark.feature("turn-on-mail")
 def test_receiving_and_sending_are_switched_off_and_on_separately(
     logged_in_app, nest_instance, test_user, _account_reset
@@ -131,6 +141,7 @@ def test_receiving_and_sending_are_switched_off_and_on_separately(
     assert _wait(lambda: ms.toggle_state(ms.RECEIVE_ID) == "on")
 
 
+@pytest.mark.ios
 @pytest.mark.feature("mail-filter-rules")
 def test_an_automatic_reply_is_turned_on_with_its_message_and_off_again(
     logged_in_app, nest_instance, test_user, _account_reset

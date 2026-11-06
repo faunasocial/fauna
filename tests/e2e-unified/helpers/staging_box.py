@@ -27,7 +27,8 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from helpers.nest_mode import ACCEPTANCE_NEST_HOSTS
@@ -355,15 +356,238 @@ def load_or_create_state(domain: str, *, localpart: str = "admin") -> dict:
 
 
 def save_state(state: dict) -> Path:
-    path = state_path(state["domain"])
+    return _write_private(state_path(state["domain"]), state)
+
+
+def _write_private(path: Path, data: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
+        json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
     os.chmod(path, 0o600)
     return path
+
+
+# ── The acceptance nest's org-minted accounts ───────────────────────────────
+#
+# `org-nests.md` § fauna.build → *Accounts*: one reviewer account per store
+# plus a tester, each identity minted on the dev host and kept beside the
+# box's own, admitted by its public key through the admin UI — so the secret
+# is never sent anywhere to create the account, and a re-created box admits
+# the same keys again, keeping the secrets in the store consoles valid.
+
+#: The org-minted accounts, by handle local part; the tester seeds the content
+#: a reviewer meets on a first run. The acceptance nest holds them for the
+#: stores; the two staging boxes hold the same set (each box its own
+#: identities) so the store reviewer journey
+#: (`tests/test_store_reviewer_journey.py`) runs where automated tests may
+#: (owner, 2026-10-28; `org-nests.md` § fauna.build → *Accounts*).
+_ORG_LOCALPARTS = ("microsoft-reviewer", "apple-reviewer", "google-reviewer", "tester")
+ORG_ACCOUNTS = {
+    "fauna.build": _ORG_LOCALPARTS,
+    "dev.fauna.build": _ORG_LOCALPARTS,
+    "test.fauna.build": _ORG_LOCALPARTS,
+}
+#: The account whose posts and messages populate the reviewers' first run.
+SEEDING_ACCOUNT = "tester"
+#: What the tester seeds for a reviewer's first run — plain content that
+#: claims nothing about the product, so it is no public text.
+SEED_POSTS = ("Hello from the tester account.",
+              "A second post, so the feed has more than one.")
+SEED_MESSAGE = "Hello — this conversation was started by the tester account."
+#: The reviewer accounts among the org accounts, in store order.
+REVIEWER_ACCOUNTS = tuple(lp for lp in _ORG_LOCALPARTS if lp != SEEDING_ACCOUNT)
+
+
+def org_accounts_for(domain: str) -> tuple[str, ...]:
+    return ORG_ACCOUNTS.get(domain, ())
+
+
+def account_path(domain: str, localpart: str) -> Path:
+    return Path(os.path.expanduser(STATE_DIR)) / domain / "accounts" / f"{localpart}.json"
+
+
+def load_or_create_account(domain: str, localpart: str) -> dict:
+    """An org-minted account's identity, minted once (mode 0600, before
+    anything about it reaches the nest) and reused by every later run."""
+    path = account_path(domain, localpart)
+    if path.exists():
+        account = json.loads(path.read_text(encoding="utf-8"))
+        if (account.get("domain"), account.get("localpart")) != (domain, localpart) \
+                or not account.get("secret_hex"):
+            raise StagingPlanError(
+                f"{path} does not describe {localpart} on {domain!r} (or holds no "
+                "seed); move it aside rather than letting a run overwrite it")
+        return account
+    account = {"domain": domain, "localpart": localpart,
+               "secret_hex": secrets.token_bytes(32).hex()}
+    _write_private(path, account)
+    return account
+
+
+def actor_hex_for(secret_hex: str) -> str:
+    """The actor id an imported seed signs in as: its Ed25519 public key."""
+    from nacl.signing import SigningKey
+
+    return bytes(SigningKey(bytes.fromhex(secret_hex)).verify_key).hex()
+
+
+def mark_accounts_seeded(state: dict, *, at: str) -> dict:
+    """``state`` once the drive has admitted every account and seeded the
+    reviewers' content — the mark :func:`recreation_record_refusal` waits on."""
+    return {**state, "accounts_seeded_at": at}
+
+
+def account_actor(account: dict) -> str:
+    """The actor id an account is admitted under: its ``actor_hex`` when the
+    record carries only the public half (a witness host's tester, registered
+    in `WITNESS_TESTER_REGISTRY`), else the public key of its seed."""
+    if account.get("actor_hex"):
+        return str(account["actor_hex"])
+    return actor_hex_for(account["secret_hex"])
+
+
+# ── The witness hosts' testers: secret-free, registered by public key ────────
+#
+# `org-nests.md` § fauna.build → *Accounts*, the witness-host tester: a store
+# witness (`tests/artifact/test_*_store_install.py`) signs in to a staging box
+# through the shipped app's own UI, so it needs an admitted identity on the
+# machine it runs on — and the drive's identity files have one copy, on the dev
+# host. Rather than carry a secret between machines, each witness host mints
+# its OWN tester identity, keeps it where the drive keeps its own (0600 under
+# `STATE_DIR`), and publishes only the public key and handle into the tracked
+# registry below; the drive reads the registry on every run and admits each
+# entry by public key, exactly as it admits the reviewers. The secret never
+# leaves the machine that uses it, and a re-creation re-admits the same key.
+
+#: The tracked registry — every witness host's tester, public half only.
+WITNESS_TESTER_REGISTRY = Path(__file__).resolve().parents[1] / "org-testers.toml"
+#: The staging boxes a witness tester may be registered for: the harness's
+#: automated side of the shared-box rule, never the acceptance nest (humans
+#: only — `testing.md` § The shared-box rule).
+WITNESS_TESTER_DOMAINS = ("dev.fauna.build", "test.fauna.build")
+#: The host platform a witness runs on → the tester's local part. One
+#: witness machine per platform runs the store witnesses, so the platform
+#: names the host, and the local part says what the account is for.
+WITNESS_PLATFORMS = {"darwin": "macos", "win32": "windows", "linux": "linux"}
+
+
+def witness_platform(platform: str | None = None) -> str:
+    """This host's platform name for the tester's local part (``linux``,
+    ``macos`` or ``windows``)."""
+    platform = platform or sys.platform
+    for prefix, name in WITNESS_PLATFORMS.items():
+        if platform.startswith(prefix):
+            return name
+    return "linux"
+
+
+def witness_tester_localpart(platform: str | None = None) -> str:
+    """``<platform>-tester`` — the handle local part of this host's tester."""
+    return f"{witness_platform(platform)}-tester"
+
+
+def _validate_tester_entry(entry: dict, *, where: str) -> dict:
+    domain = str(entry.get("domain") or "")
+    localpart = str(entry.get("localpart") or "")
+    actor = str(entry.get("actor_hex") or "")
+    if domain not in WITNESS_TESTER_DOMAINS:
+        raise StagingPlanError(
+            f"{where}: {domain!r} is not a staging box a witness tester may be "
+            f"registered for ({', '.join(WITNESS_TESTER_DOMAINS)})")
+    if not localpart.endswith("-tester") or not (3 <= len(localpart) <= 63) \
+            or not all(c.islower() or c.isdigit() or c == "-" for c in localpart) \
+            or localpart.startswith("-"):
+        raise StagingPlanError(f"{where}: {localpart!r} is not a witness tester's local part")
+    if len(actor) != 64 or any(c not in "0123456789abcdef" for c in actor):
+        raise StagingPlanError(f"{where}: {localpart}@{domain} carries no 64-hex actor id")
+    return {"domain": domain, "localpart": localpart, "actor_hex": actor,
+            "registered_at": str(entry.get("registered_at") or "")}
+
+
+def load_witness_testers(registry: Path | None = None) -> list[dict]:
+    """Every registered witness tester (``domain``, ``localpart``,
+    ``actor_hex``, ``registered_at``), validated; an absent registry is empty."""
+    import tomllib
+
+    path = registry or WITNESS_TESTER_REGISTRY
+    if not path.is_file():
+        return []
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        raise StagingPlanError(f"{path}: not valid TOML ({e})") from None
+    entries = [_validate_tester_entry(t, where=str(path)) for t in data.get("tester", ())]
+    seen: set[tuple[str, str]] = set()
+    for e in entries:
+        key = (e["domain"], e["localpart"])
+        if key in seen:
+            raise StagingPlanError(f"{path}: {e['localpart']}@{e['domain']} is registered twice")
+        seen.add(key)
+    return entries
+
+
+def witness_testers_for(domain: str, registry: Path | None = None) -> dict[str, dict]:
+    """The registered testers of ``domain``, by local part — public half only,
+    the shape :func:`account_actor` admits."""
+    return {e["localpart"]: e for e in load_witness_testers(registry) if e["domain"] == domain}
+
+
+def _write_witness_testers(entries: list[dict], registry: Path) -> None:
+    lines = [
+        "# The witness hosts' testers on the staging boxes — PUBLIC halves only.",
+        "#",
+        "# Each entry is an account a store-install witness signs in as, through",
+        "# the shipped app's own UI, on the staging box named. The identity was",
+        "# minted on the machine that runs the witness and its secret stays",
+        "# there (`just org-tester-mint`); the staging-box provisioning drive",
+        "# reads this file on every run and admits each entry by its public key,",
+        "# as it admits the reviewers (`org-nests.md` § fauna.build → Accounts,",
+        "# the witness-host tester). Written by the recipe, never by hand.",
+        "",
+    ]
+    for e in sorted(entries, key=lambda e: (e["domain"], e["localpart"])):
+        lines += ["[[tester]]",
+                  f'domain = "{e["domain"]}"',
+                  f'localpart = "{e["localpart"]}"',
+                  f'actor_hex = "{e["actor_hex"]}"',
+                  f'registered_at = "{e["registered_at"]}"',
+                  ""]
+    registry.write_text("\n".join(lines), encoding="utf-8")
+
+
+def register_witness_tester(domain: str, *, platform: str | None = None,
+                            registry: Path | None = None, now: str | None = None) -> dict:
+    """Mint this host's tester identity for ``domain`` (once; reused after) and
+    put its public half in the registry. Returns the registry entry plus
+    ``changed``, whether the registry was written. The secret is written only
+    under `STATE_DIR` on this machine."""
+    if domain not in WITNESS_TESTER_DOMAINS:
+        raise StagingPlanError(
+            f"{domain!r} is not a staging box a witness tester may be registered for "
+            f"({', '.join(WITNESS_TESTER_DOMAINS)}): the acceptance nest is humans-only")
+    path = registry or WITNESS_TESTER_REGISTRY
+    localpart = witness_tester_localpart(platform)
+    account = load_or_create_account(domain, localpart)
+    actor = actor_hex_for(account["secret_hex"])
+    stamp = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entries = load_witness_testers(path)
+    for e in entries:
+        if (e["domain"], e["localpart"]) == (domain, localpart):
+            if e["actor_hex"] == actor:
+                return {**e, "changed": False}
+            # The kept identity differs from the registered one: a kept file
+            # moved aside and minted anew, or a registry written on another
+            # machine of the same platform. The machine holding the secret
+            # is the one the entry describes.
+            e["actor_hex"], e["registered_at"] = actor, stamp
+            _write_witness_testers(entries, path)
+            return {**e, "changed": True}
+    entry = {"domain": domain, "localpart": localpart, "actor_hex": actor, "registered_at": stamp}
+    _write_witness_testers([*entries, entry], path)
+    return {**entry, "changed": True}
 
 
 # ── The fresh-box guard: one complex connection per re-creation ─────────────
@@ -386,10 +610,25 @@ FRESH_BOX_HOSTS = ACCEPTANCE_NEST_HOSTS
 #: had one. A constant in the tree, never a setting (`org-nests.md` § fauna.build).
 RECREATION_CADENCE = timedelta(days=7)
 
+#: The certificate budget (`org-nests.md` § fauna.build → *Disposable*, rule
+#: (3)): every box bought requests a certificate for the box's exact name set,
+#: and the issuer allows five per set per seven days. A buy is recorded in
+#: ``state["box_buys"]`` before the drive presses "Buy and set up"
+#: (:func:`note_box_bought`), and the teardown refuses a re-creation while the
+#: window already holds the budget (:func:`certificate_budget_refusal`).
+#: Constants in the tree, never settings.
+CERTIFICATE_BUDGET = 5
+CERTIFICATE_WINDOW = timedelta(days=7)
+
 
 class StaleBoxError(StagingPlanError):
     """A complex connection to a box that has not been re-created since the
     last one — raised BEFORE anything connects, so the refusal costs nothing."""
+
+
+class CertificateBudgetWait(StagingPlanError):
+    """A re-creation refused because the certificate window is spent: a WAIT
+    until the oldest recorded buy falls out of :data:`CERTIFICATE_WINDOW`."""
 
 
 def _instant(value: str, what: str) -> datetime:
@@ -404,9 +643,16 @@ def _instant(value: str, what: str) -> datetime:
     return when
 
 
-def record_recreation(state: dict, *, at: str, image: str) -> dict:
-    """``state`` with a re-creation recorded: when it finished and the image
-    the box serves, and no complex connection made since.
+def record_recreation(state: dict, *, at: str, image: str,
+                      version: str | None = None) -> dict:
+    """``state`` with a re-creation recorded: when it finished, the image the
+    box serves and that image's product version, and no complex connection
+    made since.
+
+    ``version`` is what the calendar's store-review hold matches a submission
+    against (:func:`recreation_verdict`); the state file names the box by
+    digest, which no submission carries. The re-creation's record step
+    always passes it, read off the image's version label.
 
     Written once, at the END of a re-creation — after the box serves, its
     accounts sign in and its firewall is verified. Every connection the
@@ -416,13 +662,65 @@ def record_recreation(state: dict, *, at: str, image: str) -> dict:
     """
     if not at or not image:
         raise StagingPlanError("a re-creation record needs its time and the image it serves")
-    out = {**state, "recreated_at": at, "recreated_image": image, "complex_connection": None}
+    out = {**state, "recreated_at": at, "recreated_image": image,
+           "recreated_version": version, "complex_connection": None}
     out.pop("recreation_started_at", None)
     return out
 
 
-def admit_complex_connection(state: dict, *, purpose: str, at: str) -> dict:
+#: The one purpose the store-review exemption admits: the admin's headless
+#: reports pass (`fauna-reports-pass`), which lists and resolves open reports
+#: and nothing else (`org-nests.md` § fauna.build → *Disposable*, ruled
+#: 2026-11-01). No other purpose, and never the full admin app, is admitted by
+#: an open review.
+REPORTS_PASS = "headless reports pass"
+
+def _admit_reports_pass(state: dict, domain: str, *, at: str,
+                        submissions: list[dict] | None) -> dict:
+    """The reports-pass exemption: admitted without spending the box's one
+    complex connection, and whatever the calendar says (exemption (b) holds the
+    calendar while a review is open), only while the store-review record holds
+    an `in-review` submission of the version the box was re-created serving."""
+    _instant(at, "the connection time")
+    if state.get("recreation_started_at"):
+        raise StaleBoxError(
+            f"refusing the {REPORTS_PASS} to {domain}: a re-creation of it started at "
+            f"{state['recreation_started_at']} and recorded no finish — the box being "
+            "built is nobody's to sign in to yet.")
+    if not state.get("recreated_at"):
+        raise StaleBoxError(
+            f"refusing the {REPORTS_PASS} to {domain}: no re-creation of it is recorded "
+            "on this machine, so nothing says which version it serves.")
+    served = state.get("recreated_version")
+    if not served:
+        raise StaleBoxError(
+            f"refusing the {REPORTS_PASS} to {domain}: its re-creation at "
+            f"{state['recreated_at']} recorded no served version (the image label was "
+            "unreadable, or the record predates it), so no open review can be matched "
+            "to it. Re-create the box first (org-nests.md § fauna.build).")
+    if submissions is None:
+        raise StaleBoxError(
+            f"refusing the {REPORTS_PASS} to {domain}: the store-review record was not "
+            "read, and the exemption holds only while it shows an open review "
+            "(org-nests.md § fauna.build → Disposable).")
+    if not _store_review().calendar_hold(submissions, serving=served):
+        raise StaleBoxError(
+            f"refusing the {REPORTS_PASS} to {domain}: the store-review record holds no "
+            f"in-review submission of {served}, the version the box serves. Outside "
+            "an open review the pass is a complex connection like any other — re-create "
+            "the box first (org-nests.md § fauna.build → Disposable).")
+    return {**state, "reports_pass": {"at": at}}
+
+
+def admit_complex_connection(state: dict, *, purpose: str, at: str,
+                             submissions: list[dict] | None = None) -> dict:
     """``state`` with this complex connection recorded — or a refusal.
+
+    The one exemption: ``purpose`` :data:`REPORTS_PASS`, admitted without
+    spending the connection while ``submissions`` (the store-review record's
+    tables) holds an `in-review` submission of the version the box serves
+    (:func:`_admit_reports_pass`). ``submissions`` changes nothing for any
+    other purpose.
 
     For a box outside :data:`FRESH_BOX_HOSTS`, ``state`` unchanged. For the
     acceptance nest: refused when no re-creation is recorded, when the last one
@@ -437,6 +735,8 @@ def admit_complex_connection(state: dict, *, purpose: str, at: str) -> dict:
         return state
     if not purpose or not at:
         raise StagingPlanError("a complex connection names its purpose and time")
+    if purpose == REPORTS_PASS:
+        return _admit_reports_pass(state, domain, at=at, submissions=submissions)
     recreated = state.get("recreated_at")
     if not recreated:
         raise StaleBoxError(
@@ -474,6 +774,56 @@ def admit_drive_resume(state: dict, *, at: str) -> dict:
     return admit_complex_connection(state, purpose="provisioning drive resume", at=at)
 
 
+def post_claim_relaunch_owed(start: str, *, relaunched: bool) -> bool:
+    """Whether a drive whose post-claim session never reached Connected
+    relaunches the app and signs in as the box's admin, in the same run.
+
+    Only a fresh box (``PROVISION``), and once: on 2026-11-02 the claiming
+    process's session stayed Disconnected for minutes after the box's name
+    resolved and its certificate was issued, while a fresh process — the sync
+    agent, then a resume run — connected to the same box; failing there spends
+    the box (`org-nests.md` § fauna.build → *Disposable*, rule (2)). A resume
+    already IS a fresh process signing in, so a relaunch adds nothing there, and
+    a second relaunch would only hide a box that genuinely does not serve."""
+    return start == PROVISION and not relaunched
+
+
+# ── The certificate budget: a ledger of the boxes bought ───────────────────
+
+
+def _buys_in_window(state: dict, now: datetime) -> list[datetime]:
+    """The recorded buys still inside :data:`CERTIFICATE_WINDOW` at ``now``,
+    oldest first. An unreadable entry is refused, never read as outside."""
+    buys = [_instant(b, "a recorded box buy") for b in state.get("box_buys") or []]
+    return sorted(b for b in buys if now - b < CERTIFICATE_WINDOW)
+
+
+def note_box_bought(state: dict, *, at: str) -> dict:
+    """``state`` with a box buy at ``at`` recorded, buys beyond the window pruned.
+
+    The drive saves the returned state BEFORE it presses "Buy and set up": a
+    box bought is a certificate requested, whatever happens after, so a run
+    that dies after the click has still spent its token."""
+    now = _instant(at, "the buy time")
+    kept = [b.strftime("%Y-%m-%dT%H:%M:%SZ") for b in _buys_in_window(state, now)]
+    return {**state, "box_buys": [*kept, at]}
+
+
+def certificate_budget_refusal(state: dict, *, at: str) -> str | None:
+    """Why a box may not be bought at ``at`` — the window already holds
+    :data:`CERTIFICATE_BUDGET` buys, named with the instant the oldest falls
+    out — or None when it may."""
+    buys = _buys_in_window(state, _instant(at, "the time"))
+    if len(buys) < CERTIFICATE_BUDGET:
+        return None
+    oldest = buys[-CERTIFICATE_BUDGET]
+    refill = oldest + CERTIFICATE_WINDOW
+    return (f"the certificate budget is spent: {len(buys)} boxes bought within "
+            f"{CERTIFICATE_WINDOW.days} days (budget {CERTIFICATE_BUDGET}, the oldest "
+            f"counted at {oldest:%Y-%m-%dT%H:%M:%SZ}); the next buy is admitted from "
+            f"{refill:%Y-%m-%dT%H:%M:%SZ} (org-nests.md § fauna.build → Disposable, rule 3)")
+
+
 # ── The re-creation of the acceptance nest ──────────────────────────────────
 #
 # 
@@ -497,13 +847,20 @@ def begin_recreation(*, state: dict, servers: list[dict], rrsets: list[dict],
     a run dropped it — the drive turns mail on with it), remembers the ids of
     the firewalls applied to the old server (the box's own firewall outlives
     its server and is re-applied to the new one), voids the old re-creation
-    record and marks the re-creation begun."""
+    record and marks the re-creation begun.
+
+    Refused with :class:`CertificateBudgetWait` while the certificate window
+    already holds :data:`CERTIFICATE_BUDGET` buys (:func:`certificate_budget_refusal`):
+    a re-creation buys a box, and a box bought past the budget serves its
+    self-signed floor certificate."""
     domain = (state.get("domain") or "").lower().rstrip(".")
     if domain not in FRESH_BOX_HOSTS:
         raise StagingPlanError(
             f"{domain!r} is not the acceptance nest: the calendar re-creation is "
             f"fauna.build's alone ({sorted(FRESH_BOX_HOSTS)})"
         )
+    if refusal := certificate_budget_refusal(state, at=at):
+        raise CertificateBudgetWait(f"refusing to re-create {domain}: {refusal}")
     recorded = state.get("server_id")
     strangers = [s for s in servers if not is_recorded_server(s, recorded)]
     if strangers:
@@ -525,10 +882,36 @@ def begin_recreation(*, state: dict, servers: list[dict], rrsets: list[dict],
     return {"servers": list(servers), "rrsets": rrsets_under(rrsets, rel), "state": new}
 
 
-def finish_teardown(state: dict) -> dict:
+#: The TTL a record without one of its own carries (the provider's zone default).
+ZONE_DEFAULT_TTL_S = 3600
+
+
+def finish_teardown(state: dict, *, removed: list[dict] = (), at: str | None = None) -> dict:
     """``state`` once the old server and records are gone: no server recorded,
-    so the drive's :func:`decide_start` provisions afresh."""
-    return {**state, "server_id": None, "ipv4": None}
+    so the drive's :func:`decide_start` provisions afresh.
+
+    ``dns_clear_at`` is when every resolver that cached a removed ADDRESS
+    record has let it go (``at`` + the longest A/AAAA TTL; the drive connects
+    by address, so the mail and TXT records do not hold it up). Before then
+    the drive's handle check can still be answered the dead box's address,
+    read it as "nest unreachable" and fail before anything is bought. A rerun
+    that removes nothing keeps the earlier time."""
+    new = {**state, "server_id": None, "ipv4": None}
+    addresses = [r for r in removed if r.get("type") in ("A", "AAAA")]
+    if addresses and at:
+        ttl = max(r.get("ttl") or ZONE_DEFAULT_TTL_S for r in addresses)
+        clear = _instant(at, "the teardown time") + timedelta(seconds=ttl)
+        new["dns_clear_at"] = clear.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return new
+
+
+def dns_clear_wait_s(state: dict, *, at: str) -> int:
+    """Seconds until :func:`finish_teardown`'s ``dns_clear_at``; 0 when none."""
+    clear = state.get("dns_clear_at")
+    if not clear:
+        return 0
+    left = (_instant(clear, "dns_clear_at") - _instant(at, "the time")).total_seconds()
+    return max(0, int(left))
 
 
 def recreation_record_refusal(state: dict) -> str | None:
@@ -550,3 +933,124 @@ def recreation_record_refusal(state: dict) -> str | None:
                 "tester accounts since the teardown (no accounts_seeded_at after "
                 f"{started})")
     return None
+
+
+# ── The calendar: when the acceptance nest is due its re-creation ────────────
+#
+# `org-nests.md` § fauna.build re-creates the box weekly and at every UAT entry,
+# and a missed re-creation is a red, never silence. One verdict serves both
+# readers: the dev-host trigger re-creates on DUE or OVERDUE, and the daily
+# merge-gate check goes red on OVERDUE or DEAD — so the trigger acts a day
+# before the guard (`admit_complex_connection`) would start refusing, and the
+# red means the trigger missed. A re-creation that died part-way is DEAD and
+# the trigger never retries it (`org-nests.md` § fauna.build → *Disposable*,
+# rule (2)): a deterministic fault re-run every tick buys a box every tick.
+
+#: How long before the cadence runs out the trigger re-creates the box, so a
+#: re-creation that takes its hour lands before the box is overdue.
+RECREATION_LEAD = timedelta(days=1)
+
+#: How long a re-creation the teardown started may run before it counts as
+#: dead: the drive and the serving gate take about an hour, and a slot queue on
+#: a loaded dev host can add as much again.
+RECREATION_RUN_BOUND = timedelta(hours=6)
+
+#: The verdicts of :func:`recreation_verdict`. OVERDUE and DEAD are reds; only
+#: DUE and OVERDUE make the trigger re-create — DEAD waits for a mind, whose
+#: re-creation run by hand is the one way it is cleared (its teardown accepts a
+#: started state and voids it); HELD is a store review's window.
+RECREATION_VERDICTS = ("NO-BOX", "FRESH", "RUNNING", "HELD", "DUE", "OVERDUE", "DEAD")
+
+
+def _store_review():
+    """`scripts/_store_review.py`, the record's single home (its calendar-hold
+    predicates are the ones this verdict reads)."""
+    import sys
+    scripts = str(Path(__file__).resolve().parents[3] / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import _store_review as sr
+    return sr
+
+
+def recreation_verdict(state: dict | None, *, at: str, test_image: str | None = None,
+                       reviews: list[dict] | None = None) -> tuple[str, str]:
+    """``(verdict, why)`` for the acceptance nest's state file at time ``at``.
+
+    ``state`` None (no state file on this machine: no box to re-create) is
+    NO-BOX. A re-creation the teardown started within
+    :data:`RECREATION_RUN_BOUND` is RUNNING; one started longer ago that wrote
+    no record is DEAD — never retried by the trigger, cleared only by a
+    re-creation run by hand. No record at all is OVERDUE, as is a record older than
+    :data:`RECREATION_CADENCE`. A record within :data:`RECREATION_LEAD` of the
+    cadence — or one whose image is not the one ``test_image`` (the digest
+    `:test` names now) says the UAT channel serves — is DUE: a release
+    entered UAT since. Otherwise FRESH. A time it cannot read is refused
+    (:class:`StagingPlanError`), never read as fresh.
+
+    ``reviews`` is the store-review record's submissions (None: not read).
+    While one is `in-review` of the version the box serves
+    (``recreated_version``), a box that would be DUE or past its cadence is
+    HELD — the trigger defers and the miss check is quiet — however long the
+    review lasts (org-nests.md § fauna.build → *Disposable*, ruled
+    2026-11-01). The digest trigger is held too: duty 2's re-creation is the
+    only one a review sees (store-review.md § During a review), and duty 2 is
+    a re-creation run by hand, which never reads this verdict. A running or
+    dead re-creation, or a box with no recorded version, is never held. Once
+    the record answers the review, a box the hold kept past its cadence is
+    DUE, not OVERDUE, until :data:`RECREATION_LEAD` after the end of the
+    answer's day, so the trigger re-creates it before the miss check reads a
+    red.
+    """
+    if state is None:
+        return "NO-BOX", "no fauna.build state file on this machine: there is no box to re-create"
+    now = _instant(at, "the time")
+    started = state.get("recreation_started_at")
+    if started:
+        since = now - _instant(started, "the teardown time")
+        if since <= RECREATION_RUN_BOUND:
+            return "RUNNING", f"a re-creation started at {started} and is within its {RECREATION_RUN_BOUND}"
+        return "DEAD", (f"a re-creation started at {started} and wrote no record within "
+                        f"{RECREATION_RUN_BOUND}: it died part-way, and the trigger never "
+                        "retries a death — a re-creation run by hand clears it, once the "
+                        "cause is read and fixed")
+    recreated = state.get("recreated_at")
+    if not recreated:
+        return "OVERDUE", "no re-creation of the box is recorded on this machine"
+    due_at = _instant(recreated, "the re-creation time") + RECREATION_CADENCE
+    verdict, why = _calendar(state, now=now, recreated=recreated, due_at=due_at,
+                             test_image=test_image)
+    if verdict == "FRESH" or reviews is None:
+        return verdict, why
+    sr = _store_review()
+    serving = state.get("recreated_version")
+    held = sr.calendar_hold(reviews, serving=serving)
+    if held:
+        open_ = ", ".join(f"{s['store']} {s['version']} (build {s['build']}, in review since "
+                          f"{s['since']})" for s in held)
+        return "HELD", (f"a store review of {serving}, the version the box serves, is open — "
+                        f"{open_}; the calendar holds until the record answers it "
+                        f"(it would be {verdict}: {why})")
+    answered = sr.review_answered_on(reviews, serving=serving)
+    if verdict == "OVERDUE" and answered is not None:
+        answer_end = datetime(answered.year, answered.month, answered.day,
+                              tzinfo=timezone.utc) + timedelta(days=1)
+        if due_at <= answer_end and now <= answer_end + RECREATION_LEAD:
+            return "DUE", (f"a store review of {serving} was answered on {answered}, ending the "
+                           f"hold that kept the box past its cadence (due "
+                           f"{due_at:%Y-%m-%d %H:%MZ}); the trigger re-creates it")
+    return verdict, why
+
+
+def _calendar(state: dict, *, now: datetime, recreated: str, due_at: datetime,
+              test_image: str | None) -> tuple[str, str]:
+    """:func:`recreation_verdict` for a recorded box, before any review hold."""
+    if now > due_at:
+        return "OVERDUE", (f"the last re-creation, at {recreated}, is older than the "
+                           f"{RECREATION_CADENCE.days}-day cadence (due {due_at:%Y-%m-%d %H:%MZ})")
+    if test_image and test_image != state.get("recreated_image"):
+        return "DUE", (f"`:test` names {test_image}, not the {state.get('recreated_image')} "
+                       f"the box was re-created on at {recreated}: a release entered UAT since")
+    if now >= due_at - RECREATION_LEAD:
+        return "DUE", f"the last re-creation, at {recreated}, falls due {due_at:%Y-%m-%d %H:%MZ}"
+    return "FRESH", f"re-created at {recreated}, due {due_at:%Y-%m-%d %H:%MZ}"

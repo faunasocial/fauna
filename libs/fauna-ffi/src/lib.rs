@@ -245,6 +245,13 @@ mod succession_witness;
 #[cfg(feature = "conversations-session")]
 mod mls_sync_launch;
 
+// The conversations oracle's door, staged by the conversations session factory
+// and started on the account store's runtime, so the macOS and windows apps
+// serve the account's door with no per-app glue
+// (`conversations-oracle.md` § The custodian and the door).
+#[cfg(feature = "conversations-session")]
+mod conversations_door;
+
 // Content-index launcher — the native (apple/windows/android) leg of the
 // per-user sealed index. Same shape as `mls_sync_launch` above: the FFI
 // `conversations_session` factory builds `NestMailIndexLauncher` and injects it
@@ -672,7 +679,9 @@ mod app_route;
 pub use app_route::*;
 
 // The shared Status snapshot's FFI face (`ui/status.md` § State & data shape) —
-// the node read and the `status-*` text projection. Gated on `value-format`
+// the node read and the shapes of the `status-*` text projection, whose one
+// function, `status_text`, reads the build stamp and so lives in the thin
+// `fauna-ffi` artifact crate (`status.rs` says why). Gated on `value-format`
 // like `features`: the Go mail-bridge has no Status surface.
 #[cfg(feature = "value-format")]
 mod status;
@@ -957,6 +966,16 @@ mod mail_import;
 #[cfg(feature = "mail-import")]
 pub use mail_import::*;
 
+// The archive-import wizard's machine (archive-import.md § The wizard and its
+// machine) — re-exported so its UniFFI face reaches the native apps, plus the
+// constructor over this connection. Gated behind the default-on
+// `archive-import` feature so the Go mail-bridge `--no-default-features` build
+// drops it.
+#[cfg(feature = "archive-import")]
+mod archive_import;
+#[cfg(feature = "archive-import")]
+pub use archive_import::*;
+
 // Raw `fauna.folders.*` typed-call client (FfiFoldersClient) — the
 // Devices/Backups folder control plane. Unconditional (wasm-clean,
 // Go-bridge-emittable), unlike the `folders`-feature wizard/devices machines.
@@ -1002,6 +1021,13 @@ pub use sync_engine_host::*;
 // comment has the full rationale + the recipe list).
 #[cfg(feature = "file-provider-host")]
 mod file_provider_host;
+// The app's mirror of its held group sets' rings for the app-dead hosts
+// (`group-set.md` § decision 12): the seat the shell names the hosts' state
+// dir through, and the runtime task that keeps the mirror current. The
+// writer needs the share plane's group doors; the host's read sits in
+// `file_provider_host`.
+#[cfg(all(feature = "file-provider-host", feature = "offline-share"))]
+mod group_ring_mirror;
 // Relay serving from the on-demand hosts (`docs/goal/behavior/file-sync.md`
 // § Relay serving) — beside the host it serves, never behind `p2p-share`.
 #[cfg(feature = "file-provider-host")]
@@ -1080,6 +1106,12 @@ pub use web_content::*;
 // clients use UniFFI bindings instead.
 #[cfg(feature = "e2e-harness")]
 pub mod cabi;
+
+// The windows app's forced UI-thread stall (e2e convention 11): a plain C export
+// its TestAgent calls on the UI thread, compiled only into a debug build or the
+// e2e flavor (`test-helpers`) — never a shipped artifact (convention 15).
+#[cfg(any(debug_assertions, feature = "test-helpers"))]
+pub mod e2e_stall;
 
 // ── Error type ──
 

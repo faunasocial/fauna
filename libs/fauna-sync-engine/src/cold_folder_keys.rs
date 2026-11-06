@@ -18,7 +18,9 @@
 //! owner's recipient key from it to adopt third-party deposits
 //! (`on-demand-files-apple.md` § Apple File Provider binding → *Third-party
 //! deposit adoption on a capability host*). No mail row → no MSEK, and the
-//! host adopts nothing.
+//! host adopts nothing. So does the owner's grant log, the succession
+//! ledger, whose `deposit` events name the writers the adopter admits
+//! ([`FolderKeyReader::deposit_writers`]).
 //!
 //! **The replica lives on a thread of its own.** Its store futures are not
 //! `Send` (the store backend's async trait), so — like the account runtime's
@@ -26,6 +28,8 @@
 //! channel, and the reader handle is a `Send + Sync` sender any runtime may
 //! hold. Requests are served one at a time, in order. The worker ends when the
 //! last handle drops.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use fauna_account_plane::cold_replica::{ColdFleetReplica, ColdKeySource};
@@ -43,6 +47,8 @@ enum Request {
     Load(oneshot::Sender<Result<FoldersConfig>>),
     /// The mail custody's MSEKs, current first, then the retired generations.
     Mseks(oneshot::Sender<Result<Vec<SecretArray32>>>),
+    /// The writers the owner's grant log authorizes to deposit into a folder.
+    DepositWriters(i64, oneshot::Sender<Result<BTreeSet<[u8; 32]>>>),
 }
 
 impl Request {
@@ -53,6 +59,9 @@ impl Request {
                 let _ = reply.send(Err(anyhow::anyhow!("{why}")));
             }
             Self::Mseks(reply) => {
+                let _ = reply.send(Err(anyhow::anyhow!("{why}")));
+            }
+            Self::DepositWriters(_, reply) => {
                 let _ = reply.send(Err(anyhow::anyhow!("{why}")));
             }
         }
@@ -113,6 +122,10 @@ impl ColdReplicaFolderKeys {
                             (Ok(replica), Request::Mseks(reply)) => {
                                 let _ = reply.send(mseks(replica).await);
                             }
+                            (Ok(replica), Request::DepositWriters(folder_id, reply)) => {
+                                let _ =
+                                    reply.send(deposit_writers(replica, actor, folder_id).await);
+                            }
                         }
                     }
                 });
@@ -166,6 +179,27 @@ async fn mseks<R: RpcRequester>(replica: &ColdFleetReplica<R>) -> Result<Vec<Sec
     Ok(mail.msek.into_iter().chain(mail.prior_mseks).collect())
 }
 
+/// Walk, then fold the succession ledger as `actor` reads it — the grant log
+/// rests on the fleet scope beside the mail custody — and answer the writers
+/// its `deposit` events ever authorized for `folder_id`.
+async fn deposit_writers<R: RpcRequester>(
+    replica: &ColdFleetReplica<R>,
+    actor: ActorId,
+    folder_id: i64,
+) -> Result<BTreeSet<[u8; 32]>> {
+    replica.walk().await?;
+    let ledger = fauna_account_plane::succession_ledger_rows::succession_ledger_of(
+        &replica
+            .states_of_kind(fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER)
+            .await?,
+        actor,
+    )?;
+    Ok(fauna_core::grant_event::deposit_writers_for(
+        &ledger.grant_events,
+        folder_id,
+    ))
+}
+
 impl ColdReplicaFolderKeys {
     /// Hand `request` to the worker and await its answer.
     async fn ask<T>(
@@ -193,5 +227,12 @@ impl FolderKeyReader for ColdReplicaFolderKeys {
     /// built reach the next adoption. Empty when no mail row rests.
     async fn recipient_mseks(&self) -> Result<Vec<SecretArray32>> {
         self.ask(Request::Mseks).await
+    }
+
+    /// The deposit writers the replica's walk leaves the owner's grant log
+    /// authorizing for `folder_id` — read fresh each pass, as the MSEKs are.
+    async fn deposit_writers(&self, folder_id: i64) -> Result<BTreeSet<[u8; 32]>> {
+        self.ask(|reply| Request::DepositWriters(folder_id, reply))
+            .await
     }
 }

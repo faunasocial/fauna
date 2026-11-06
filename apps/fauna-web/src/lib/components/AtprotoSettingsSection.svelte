@@ -555,6 +555,7 @@
             <input
               type="checkbox"
               data-testid={IDS.ATPROTO_HISTORY_BACKFILL}
+              data-checked={snap.history_backfill ? 'true' : 'false'}
               checked={snap.history_backfill}
               onchange={toggleHistoryBackfill}
             />
@@ -728,11 +729,17 @@
           {/each}
         {/if}
       </div>
+    {/if}
 
-      <!-- ── The D10 authoring-delegation row ─────────────────────────────
-           What authorizes an external app to POST as this account, not merely
-           to sign in. `-authorize` renders in BOTH states because re-minting
-           IS renewal; `-revoke` only alongside a live row. -->
+    <!-- ── The D10 authoring-delegation row ─────────────────────────────
+         What authorizes an external app to POST as this account, not merely
+         to sign in. Gated on the delegation, not the level (atproto.md §
+         Layout & flow): a HELD row renders at every level; the EMPTY state
+         and its first-grant `-authorize` stay full-PDS-only (the condition
+         below only admits `!snap.delegation` at full PDS). `-authorize`
+         renders in BOTH states because re-minting IS renewal; `-revoke` only
+         alongside a live row. -->
+    {#if snap?.level === 'hosted_full' || snap?.delegation}
       <div class="creds">
         <h3>{t.atproto_settings.delegation_heading}</h3>
         {#if !snap?.delegation}

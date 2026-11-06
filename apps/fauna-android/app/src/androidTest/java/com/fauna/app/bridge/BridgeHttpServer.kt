@@ -1,6 +1,10 @@
 package com.fauna.app.bridge
 
 import com.fauna.app.core.downloadsDir
+import com.fauna.automation.ElementNotFound
+import com.fauna.automation.UnsupportedKey
+import com.fauna.automation.parseScope
+import com.fauna.automation.scopeOf
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,10 +28,12 @@ private val REGION_E2E_ENV_KEYS = listOf("FAUNA_E2E_REGION_REGISTRY", "FAUNA_E2E
 private val DNS_E2E_ENV_KEYS = listOf(
     "FAUNA_DNS_PROVIDER_FAKE",
     "FAUNA_DNS_RECHECK_SECS",
+    "FAUNA_E2E_DRAFTS_AUTOSAVE_DEBOUNCE_MS",
     "FAUNA_E2E_ACME_DIRECTORY_URL",
     "FAUNA_E2E_ACME_CA_PEM",
     "FAUNA_E2E_ACME_NAMESERVER",
     "FAUNA_E2E_IMAP_EXTRA_CA_PEM",
+    "FAUNA_E2E_NEST_EXTRA_CA_PEM",
     "FAUNA_E2E_IMAP_HOST_MAP",
     "FAUNA_E2E_MICROSOFT_AUTHORITY",
 )
@@ -233,6 +239,11 @@ class BridgeHttpServer(
                     elementOps.click(d.getString("id"), d.optInt("index", 0), scopeOf(d))
                     json(Response.Status.OK, """{}""")
                 }
+                "/element/double_click" -> {
+                    val d = JSONObject(body)
+                    elementOps.doubleClick(d.getString("id"), d.optInt("index", 0), scopeOf(d))
+                    json(Response.Status.OK, """{}""")
+                }
                 "/element/type" -> {
                     val d = JSONObject(body)
                     elementOps.type(d.getString("id"), d.getString("text"), d.optInt("index", 0), scopeOf(d))
@@ -311,22 +322,6 @@ class BridgeHttpServer(
 
     private fun esc(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 }
-
-/** The `scope` of a POST body — an array of `{"id", "index"}` steps, or none. */
-internal fun scopeOf(body: JSONObject): List<ScopeStep> =
-    body.optJSONArray("scope")?.let(::scopeSteps) ?: emptyList()
-
-/** The `scope` of a GET query — the same array, JSON-encoded as a string, or none. */
-internal fun parseScope(raw: String?): List<ScopeStep> {
-    if (raw.isNullOrEmpty()) return emptyList()
-    return scopeSteps(JSONArray(raw))
-}
-
-private fun scopeSteps(steps: JSONArray): List<ScopeStep> =
-    (0 until steps.length()).map { i ->
-        val step = steps.getJSONObject(i)
-        ScopeStep(step.getString("id"), step.optInt("index", 0))
-    }
 
 class AppLauncher(private val instrumentation: android.app.Instrumentation) {
     /**

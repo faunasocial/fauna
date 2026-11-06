@@ -57,37 +57,23 @@ pub const APPLE_MACOS_APP_GROUP: &str = "7457N3M72H.group.social.fauna.shared";
 /// container, not because the two ever disagree about the domain.
 pub const APPLE_WATCHKIT_APP_GROUP: &str = "group.social.fauna.watchkit";
 
-/// The **macOS account-credential keychain access group** — the group
-/// `KeychainStore`'s data-protection-keychain rows (the actor secret, node
-/// URL, device id, and every other account-scoped row) live in, and which
-/// ONLY the app is entitled to (`Fauna-macOS.entitlements`; never an appex).
+/// The **account-credential keychain access group** — the family App ID,
+/// [`APPLE_TEAM_ID`] + [`APPLE_BUNDLE_ID`] (pinned equal by test below, and to
+/// [`APPLE_IOS_APP_ID`]): `KeychainStore`'s data-protection-keychain rows (the
+/// actor secret, node URL, device id, and every other account-scoped row) live
+/// in it on macOS.
 ///
-/// Why a second, app-only group rather than [`APPLE_MACOS_APP_GROUP`]: on
-/// macOS a Developer-ID-signed, non-App-Store app reaches the data-protection
-/// keychain only through an access group its entitlements grant, and an app
-/// group is the one entitlement class that ad-hoc dev builds *tolerate*
-/// (`keychain-access-groups` is restricted — it gets any profile-less build
-/// killed at launch). ⚠ **MEASURED 2026-08-28: Developer ID does NOT honour an
-/// app group as a data-protection-keychain access group without an embedded
-/// provisioning profile** — the entitlement is silently ignored and the store
-/// falls back to the legacy plane (the real signed app reads `write plane:
-/// legacy`; `installers/macos.md` § Identifier domain owns the measurement, the
-/// why, and the provisioning-profile crux). So this group is the *intended*
-/// home for the DP-plane rows, but reaching that plane at all is still owed.
-/// But the SHARED group is also the sandboxed File
-/// Provider extension's, so rows there would be readable by the extension —
-/// and the extension must never hold the identity seed (`on-demand-files.md`
-/// § Apple File Provider binding, *the extension hosts the engines*: it is
-/// handed `BackupKey` + a bearer, never the seed). The account rows therefore
-/// get a group no appex entitlement names — least privilege by entitlement,
-/// the boundary iOS gets for free from its per-app default access group.
-/// Keychain-only: no process ever resolves a container directory for it.
+/// One group across the Mac/iPhone line so the opt-in iCloud copy meets there
+/// (`docs/goal/architecture/apps/ios.md` § Credential Storage, *Across the
+/// Mac/iPhone line*, owns the ruling and `installers/macos.md` § Identifier
+/// domain the measurement that reaching the plane needs a provisioning
+/// profile). The boundary is the App ID's: the File Provider appex has its own
+/// (`….FileProvider`), so it can name neither this group nor the seed in it
+/// (`on-demand-files.md` § Apple File Provider binding).
 ///
-/// macOS only. iOS's `KeychainStore` rows stay in the app's own default
-/// (application-identifier) access group, which already excludes the appex.
-/// The pin test (`test_apple_identifier_pins.py`) asserts the app names it
-/// and that no extension does.
-pub const APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP: &str = "7457N3M72H.group.social.fauna.account";
+/// The iOS `KeychainStore` names no group: its rows sit in the bundle's default
+/// access group, which IS this App ID on a signed build.
+pub const APPLE_ACCOUNT_KEYCHAIN_GROUP: &str = "7457N3M72H.social.fauna.fauna";
 
 /// The apple app's **bundle id** — one id across the Apple family
 /// (`installers/macos.md` § Identifier domain); immutable once a build is
@@ -427,19 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn account_keychain_group_is_team_prefixed_org_domain_and_not_the_shared_one() {
-        // Same authorization model as the container group (a Developer-ID app
-        // is entitled to a Team-ID-prefixed group), same org domain — and a
-        // DIFFERENT group from the one the File Provider appex is entitled to,
-        // which is the entire point: the identity seed must not be readable
-        // from the extension's access group.
-        assert!(APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP.starts_with(&format!("{APPLE_TEAM_ID}.")));
-        assert!(
-            APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP
-                .trim_start_matches(&format!("{APPLE_TEAM_ID}."))
-                .starts_with("group.social.fauna.")
+    fn account_keychain_group_is_the_family_app_id_and_not_the_shared_one() {
+        // The family App ID, the one group a Mac's and an iPhone's rows can
+        // share — and a DIFFERENT group from the one the File Provider appex is
+        // entitled to: the identity seed must not be readable from the
+        // extension's access group.
+        assert_eq!(APPLE_ACCOUNT_KEYCHAIN_GROUP, APPLE_IOS_APP_ID);
+        assert_eq!(
+            APPLE_ACCOUNT_KEYCHAIN_GROUP,
+            format!("{APPLE_TEAM_ID}.{APPLE_BUNDLE_ID}")
         );
-        assert_ne!(APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP, APPLE_MACOS_APP_GROUP);
+        assert_ne!(APPLE_ACCOUNT_KEYCHAIN_GROUP, APPLE_MACOS_APP_GROUP);
     }
 
     #[test]

@@ -71,10 +71,10 @@ flow and now succeeds. Seamless keepalive auto-reconnect of a long-lived client
 across a reset is a separate, lower-priority robustness follow-on (bearer/session
 staleness on the keepalive path, distinct from the transport-identity fix here).
 
-Linux-only: the linux Events page is the encrypted-CalDAV-store (``bridge_caldav_*``)
-surface where the live symptom appears (``docs/goal/ui/events.md`` Decision B); the
-other apps have no such encrypted-CalDAV-store surface. The skip is checked first so the heavy
-image build never runs for the parametrized web app.
+Apps: the harness surface ``calendar-after-reclaim-docker-drive``
+(``surfaces.toml``) names the apps whose drive is wired — linux first, where the
+live symptom appeared, then tui (the lead app, the same shared driver calls), then
+web (through the CORS-adding SPA proxy, ``_login_admin``). The surface check runs first so the heavy image build never runs for an app outside it.
 """
 
 import subprocess
@@ -85,7 +85,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from common.auth import claim_admin
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 
 from .helpers import (
     docker_build,
@@ -94,6 +94,7 @@ from .helpers import (
     get_repo_root,
     register_primary_domain,
     remove_container,
+    scanner_wired_network,
     start_container_with_ports,
     wait_for_health,
 )
@@ -182,22 +183,32 @@ def _wait_connected(app, timeout: float = 90.0) -> None:
     )
 
 
-def _login_admin(app, nest) -> None:
-    """Log the linux app in as the nest admin on the regular (feed) shell —
+def _login_admin(app, nest, request) -> None:
+    """Log the app in as the nest admin on the regular (feed) shell —
     the calendar actor, mirroring the live CalDAV test. The admin identity
     survives ``factory_reset_and_reclaim_docker`` (re-claimed with the same key),
     so the same client re-points at the same actor on the re-claimed nest. Waits
     for the WS-RPC connection to settle before returning so the caller's first
-    WS-RPC action does not race the connect."""
+    WS-RPC action does not race the connect.
+
+    A browser reaches the nest only through a CORS-adding SPA proxy — the raw
+    nest sends no Access-Control-Allow-Origin — whose HTTP and WS hops both speak
+    TLS to the image's https listener (``_serve_spa_proxy``; the port is
+    ``mark_tls_nest``-registered by the fixture). The proxy is memoized per nest
+    URL and outlives the s6 restart, so phase 2 re-points through the same one."""
     from conftest import _relaunch_trusting_nest
 
     _relaunch_trusting_nest(app.driver, nest)
+    node_url = (
+        request.getfixturevalue("spa_proxy_for")(nest["url"])
+        if app.driver.is_web() else nest["url"]
+    )
 
     admin = nest["admin"]
     app.driver.set_state({
         "session": {
             "authenticated": True,
-            "node_url": nest["url"],
+            "node_url": node_url,
             "secret_hex": bytes(admin["signing_key"]).hex(),
             "handle": "admin",
             "actor_id": admin["actor_id_hex"],
@@ -234,21 +245,10 @@ def _create_event_and_assert_visible(app, summary: str, *, phase: str) -> None:
 @pytest.fixture()
 def docker_reclaim_nest(app):
     """A fresh **claimed** nest running as the real Docker image, encrypted
-    storage, primary domain registered — the linux Events page is the unit under
-    test. Linux-only; the skip is first so the heavy image build never runs for
-    the parametrized web app."""
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the encrypted-CalDAV calendar-after-reclaim observation",
-            detail="the linux Events page is the observation surface for "
-            "this docker tier_4 cycle; the other apps are the remaining "
-            "cross-app follow-on. As with the two sibling docker drives, the "
-            "real gate is a FRESH nest image on a docker-capable box (only "
-            "the primary Linux dev VM has a daemon), not the app surface "
-            "",
-            tracked="caldav-server.md",
-        )
+    storage, primary domain registered — the app's Events page is the unit under
+    test. The surface check is first so the heavy image build never runs for an
+    app outside ``calendar-after-reclaim-docker-drive``."""
+    require_surface(app.driver, "calendar-after-reclaim-docker-drive")
 
     docker_build(get_repo_root())
 
@@ -256,10 +256,18 @@ def docker_reclaim_nest(app):
     mail_ports = dict(zip((25, 465, 587, 993), mail))
     name = f"fauna-reclaim-cal-{http_port}"
 
+    # Enabling mail needs content scanners beside the nest (else
+    # `mail_unavailable_here`), so the container joins a scanner-wired network.
+    with scanner_wired_network("fauna-reclaim-cal") as (network, scan_env):
+        yield from _boot_reclaim_nest(name, http_port, mail_ports, network, scan_env)
+
+
+def _boot_reclaim_nest(name, http_port, mail_ports, network, scan_env):
     start_container_with_ports(
         name,
         {443: http_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
+        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+        network=network,
     )
     try:
         wait_for_health(http_port, name)
@@ -286,7 +294,7 @@ def docker_reclaim_nest(app):
 
 
 @pytest.mark.feature("factory-reset")
-def test_calendar_works_after_factory_reset_reclaim_docker(app, docker_reclaim_nest):
+def test_calendar_works_after_factory_reset_reclaim_docker(app, docker_reclaim_nest, request):
     """The Personal calendar must provision AND accept an event after a REAL
     (s6-driven) ``factory_reset → re-claim (same identity) → enable-mail`` against
     the Docker image, exactly as on a first claim. The reset is the only variable
@@ -297,7 +305,7 @@ def test_calendar_works_after_factory_reset_reclaim_docker(app, docker_reclaim_n
     nest = docker_reclaim_nest
 
     # ── Phase 1: fresh-claim baseline (proves the operation works) ──────────
-    _login_admin(app, nest)
+    _login_admin(app, nest, request)
     _enable_mail_and_open_events(app)
     _create_event_and_assert_visible(
         app, f"baseline-{uuid.uuid4().hex[:8]}", phase="phase 1 (fresh claim)"
@@ -315,11 +323,17 @@ def test_calendar_works_after_factory_reset_reclaim_docker(app, docker_reclaim_n
     # reconnect-after-restart bug (False) from a driver.reset()/set_state harness
     # artifact (True → reconnect works, the reset path is what breaks it).
     auto = _poll_connected(app, timeout=45.0)
+    try:
+        status = app.driver.get_text("connection-status")
+    except LookupError:
+        # The page after the reset may not carry the element; this line is a
+        # diagnostic and must never fail the test.
+        status = "<connection-status not on screen>"
     print(f"[diag] keepalive auto-reconnect after factory_reset (no driver action): "
-          f"connected={auto}; status={app.driver.get_text('connection-status')!r}")
+          f"connected={auto}; status={status!r}")
     register_primary_domain(nest, DOMAIN)
     app.driver.reset()
-    _login_admin(app, nest)
+    _login_admin(app, nest, request)
     _enable_mail_and_open_events(app)
     _create_event_and_assert_visible(
         app, f"reclaim-{uuid.uuid4().hex[:8]}", phase="phase 2 (after re-claim)"

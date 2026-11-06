@@ -31,6 +31,7 @@ struct SettingsShellView: View {
                 AccountSettingsView(
                     session: appState.session,
                     ownLock: appState.instanceLock,
+                    flushDraftRails: { await appState.flushDraftRails() },
                     onAccountReset: {
                         appState.onSignOut?()
                         appState.isOnboarded = false
@@ -70,6 +71,11 @@ struct SettingsShellView: View {
                 // The device roster (formerly the top-level "Peers" page; shared
                 // FaunaKit `DevicesContent` roster slice — devices.md).
                 DevicesView(reloadToken: appState.navGeneration)
+            case .sessions:
+                // Where the account is signed in right now (shared FaunaKit;
+                // ui/sessions.md). A landed lock leaves for the launch surface.
+                SessionsView(reloadToken: appState.navGeneration,
+                             onLocked: { appState.onAccountLocked?() })
             case .folders:
                 // The folder control plane (list + wizard + per-set config +
                 // conflicts + desktop folder binding + the Apple photo-backup
@@ -102,6 +108,15 @@ struct SettingsShellView: View {
                 MailImportView(onNavigateToConversations: {
                     appState.selectedSidebar = .conversations
                 })
+            case .archiveImport:
+                // Import from other services (shared FaunaKit;
+                // archive-import.md § The wizard and its machine). View
+                // imported opens the feed; the folder link opens Folders.
+                ArchiveImportView(
+                    session: appState.session,
+                    onNavigateToFeed: { appState.selectedSidebar = .feed },
+                    onNavigateToFolders: { appState.selectedSettingsPage = .folders }
+                )
             case .mailLists:
                 MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
                     appState.selectedMailListId = listIdHex
@@ -134,7 +149,10 @@ struct SettingsShellView: View {
                 // rows are nest state and a quiet push raises no event; the
                 // same token restarts the visit when a `fauna://consent` route
                 // lands while the page is already on screen.
-                ConnectedAppsView(reloadToken: appState.navGeneration)
+                ConnectedAppsView(
+                    reloadToken: appState.navGeneration,
+                    onOpenBridges: { appState.selectedSidebar = .bridges }
+                )
             case .logs:
                 // The client's durable log record — the process-global `fauna_log`
                 // ring (observability.md § Surfaces). Self-wires (no client handle).

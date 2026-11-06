@@ -55,6 +55,13 @@ pub struct SyncServiceState {
     /// keychain/Secret Service (testing.md § point 10 applied to the agent's
     /// own tests). `run_agent` injects the production store.
     pub credentials: Option<Arc<fauna_credential_store::CredentialStore>>,
+    /// Where this agent's change-record signer comes from — the one source every
+    /// record it sends is signed from: its engines' uploads, the custodian's
+    /// re-seed and the restore verb ([`Self::change_signer`]). Follows
+    /// [`Self::credentials`]: a state that persists reads the account store's
+    /// principal writer key, one that does not (the unit tests) reads none, and a
+    /// test hands in its own ([`ChangeSignerSource::Fixed`]).
+    pub(crate) change_signer_source: std::sync::RwLock<ChangeSignerSource>,
     /// The standing renewal refusal, mirrored in memory from its persisted
     /// record ([`crate::credentials::RefusalRecord`]) so the status reply's
     /// `needs_reenrollment` stays a field read. Written only by
@@ -447,6 +454,11 @@ impl SyncServiceState {
     ) -> Arc<Self> {
         let mounted_store = Arc::new(std::sync::Mutex::new(None));
         let notification_sink = crate::push_arm::platform_sink(&paths.flat_base_dir());
+        let change_signer_source = std::sync::RwLock::new(if credentials.is_some() {
+            ChangeSignerSource::AccountStore
+        } else {
+            ChangeSignerSource::None
+        });
         Arc::new(Self {
             config: RwLock::new(config),
             paths,
@@ -458,6 +470,7 @@ impl SyncServiceState {
             http_client: reqwest::Client::new(),
             capability: crate::bearer::CapabilitySlot::new(None),
             credentials,
+            change_signer_source,
             renewal_refusal: std::sync::RwLock::new(None),
             renewal_wake: tokio::sync::Notify::new(),
             store_principal_actor: RwLock::new(None),
@@ -541,6 +554,19 @@ impl SyncServiceState {
         {
             return Ok(Arc::clone(&retained.client));
         }
+        // Parked on the identity verdict (`transport-trust.md` § Pin custody
+        // across processes, *it parks*): the served cert moved and the identity
+        // the app pinned did not sign it. A rebuilt client would only redial the
+        // box the pin refused; the verdict was logged once, at the dial, and the
+        // park lifts by itself when the app's re-trust moves the pin.
+        if let Some(retained) = slot.as_ref()
+            && retained.nest_url == nest_url
+            && retained.actor_id == actor_id
+            && retained.device_id == device_id
+            && let Some(verdict) = retained.client.identity_park()
+        {
+            return Err(format!("nest control plane parked: {verdict}"));
+        }
 
         // The bearer reads `self.capability` per request, so the rebuilt client keeps
         // following `RefreshBearer` exactly like the hydration engine's.
@@ -581,4 +607,66 @@ impl SyncServiceState {
     pub async fn invalidate_nest_rpc(&self) {
         *self.nest_rpc.lock().await = None;
     }
+
+    /// This machine's change-record signer for `actor_id`, from
+    /// [`Self::change_signer_source`]: the principal writer key the app's
+    /// enrollment ceremony certified with `SyncWrite`, load-only. `None` (not
+    /// enrolled yet, or a `[RenewBearer]`-only grant) leaves a record unsigned,
+    /// which the nest refuses `signature_required`.
+    pub(crate) fn change_signer(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Option<Arc<fauna_protocol::sync_writer_sig::ChangeSigner>> {
+        let source = self
+            .change_signer_source
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*source {
+            ChangeSignerSource::AccountStore => {
+                fauna_sync_engine::principal_bundle::load_change_signer(
+                    &fauna_sync_engine::account_runtime::production_credential_store(),
+                    actor_id,
+                )
+                .map(Arc::new)
+            }
+            ChangeSignerSource::Fixed(signer) => Some(Arc::clone(signer)),
+            ChangeSignerSource::None => None,
+        }
+    }
+
+    /// How a record this agent sends outside an engine is signed for
+    /// `actor_id` (`writer-signed-change-records.md`): [`Self::change_signer`],
+    /// under each set's nonce lineage by name from the agent's own content-key
+    /// resolution — the full lineage, serve window included, the one source
+    /// every agent reader takes (ruling (7)(b)(ii) rule (2)). `None` when either
+    /// half is missing: the record then goes out unsigned and the nest refuses it.
+    pub(crate) async fn record_signing(
+        &self,
+        actor_id: [u8; 32],
+    ) -> Option<fauna_client_sync::RecordSigning> {
+        let nonces = self
+            .content_keys
+            .read()
+            .await
+            .as_ref()
+            .filter(|r| r.is_for(actor_id))
+            .map(|r| r.set_lineages_by_name())?;
+        Some(fauna_client_sync::RecordSigning {
+            signer: self.change_signer(&actor_id)?,
+            set_nonce: fauna_client_sync::SetNonceSource::ByFolder(Arc::new(nonces)),
+        })
+    }
+}
+
+/// Where [`SyncServiceState::change_signer`] reads the signer from.
+pub(crate) enum ChangeSignerSource {
+    /// The account store's principal writer key — production.
+    AccountStore,
+    /// A signer the caller holds — a test's, which must never reach the
+    /// developer's real credential store. Its one constructor is the
+    /// `resident_restore_tier3` harness, so every other build leaves it unbuilt.
+    #[cfg_attr(not(all(test, windows, feature = "tier3-nest")), allow(dead_code))]
+    Fixed(Arc<fauna_protocol::sync_writer_sig::ChangeSigner>),
+    /// No signer — the unit tests' state.
+    None,
 }

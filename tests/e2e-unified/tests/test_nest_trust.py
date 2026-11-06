@@ -115,8 +115,8 @@ def trust_mint_nest(request, nest_mode, tmp_path_factory):
 
 @pytest.mark.feature("nests-and-trust")
 def test_nest_trust_mint_paywalled_posts_grant(app, trust_mint_nest):
-    """The scope-first mint flow, end-to-end through the UI: an admin author
-    creates a tier (the Tiers tab seeds the period-key custody the picker's
+    """The scope-first mint flow, end-to-end through the UI: a plain member
+    (registered, never an admin) creates a tier (the Tiers tab seeds the period-key custody the picker's
     derivability filter reads), then on the Nests page mints a "Serve paywalled
     posts — ‹tier›" trust to the nest's web-serve holder — the
     `monetization.md` § Pillar 2 grant-mint UX. The holder is derived from the
@@ -127,25 +127,40 @@ def test_nest_trust_mint_paywalled_posts_grant(app, trust_mint_nest):
     content-processor holder at boot (`web_content/holder.rs`, self-approved,
     x25519 attested), so the discoverable holder here is the production one.
 
+    The author is a plain member because every member may let the nest serve
+    their paid posts (`nests.md` § Trust facet — grants → *Mint* → *Who may let
+    the nest serve their paid posts*, ruled 2026-10-23): the User-class holder
+    view lists the in-process web-serve holder. Against a nest from before that
+    ruling a member sees no mint button.
+
     This is the client-UI-equivalent mint that `test_capability_rescore_drain.py`'s
     API-driven fixture mint may cite (testing rule 8's mutation carve-out)."""
-    app.nest_trust.require_mint_test_setup_supported()
 
     from conftest import _relaunch_trusting_nest
 
     _relaunch_trusting_nest(app.driver, trust_mint_nest)
 
-    # Login as the nest ADMIN: holder discovery (`list_service_users`) is
-    # admin-gated in v1 (nests.md § Known gap), and Admin ⊇ User covers the
-    # tier-create + mint. set_state login, test_gated_post_compose.py shape.
-    admin = trust_mint_nest["admin"]
+    # Login as a plain registered MEMBER, never the admin: the holder view a
+    # member reads lists the nest's own web-serve holder. set_state login,
+    # test_gated_post_compose.py shape.
+    from nacl.signing import SigningKey
+
+    member = SigningKey.generate()
+    member_id = bytes(member.verify_key).hex()
+    register_user(
+        trust_mint_nest["port"],
+        member_id,
+        base_url=trust_mint_nest["url"],
+        admin_signing_key=trust_mint_nest["admin"]["signing_key"],
+        handle="paidauthor",
+    )
     app.driver.set_state({
         "session": {
             "authenticated": True,
             "node_url": trust_mint_nest["url"],
-            "secret_hex": bytes(admin["signing_key"]).hex(),
-            "handle": "admin",
-            "actor_id": admin["actor_id_hex"],
+            "secret_hex": bytes(member).hex(),
+            "handle": "paidauthor",
+            "actor_id": member_id,
             "device_id": "test-device-trust-mint",
         },
         "nav": {"stack": [{"view": "feed"}]},
@@ -200,6 +215,265 @@ def test_nest_trust_mint_paywalled_posts_grant(app, trust_mint_nest):
     # ── … and the Mint event in History.
     app.nest_trust.show_history()
     assert app.nest_trust.history_count() >= 1, "History records the Mint event"
+
+
+# ── shared steps of the journeys below ──────────────────────────────────────
+
+#: Named convention-14 budget for an author-side follow grant landing: the
+#: author's app drains a pending follow on connect and then on its poll
+#: backstop (`test_subscription_tier_management.py`'s budget, same reason).
+FOLLOW_GRANT_BUDGET_S = 90
+
+#: The reserved system tiers the post option must never name
+#: (`fauna_core::subscription::is_reserved_tier`).
+RESERVED_TIERS = ("followers", "only-me", "room")
+
+WEB_SERVE_BRIDGE_ID = "web-serve"
+
+
+def _sign_in_member(app, nest, device_id: str) -> dict:
+    """Relaunch the app trusting ``nest``, admit a fresh plain MEMBER (never
+    the admin) and sign the app in as them — the member's User-class holder
+    view lists the nest's own web-serve holder. Returns the actor dict."""
+    from conftest import _relaunch_trusting_nest
+    from common.auth import create_actor_and_register
+    from helpers.e2e_session import login_as
+
+    _relaunch_trusting_nest(app.driver, nest)
+    member = create_actor_and_register(
+        nest["port"], base_url=nest["url"],
+        admin_signing_key=nest["admin"]["signing_key"],
+    )
+    login_as(app, nest, member, handle=member["handle"], device_id=device_id)
+    return member
+
+
+def _create_tier_through_the_app(app, tier: str) -> None:
+    """The author creates ``tier`` on the Tiers tab — custody records its
+    period key client-side, which the mint picker's derivability probe reads."""
+    subs = app.subscriptions
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$5/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1 My tiers; "
+        f"error={subs.error_text()!r}"
+    )
+
+
+def _mint_paywalled_trust(app, tier: str) -> None:
+    """Mint "Serve paywalled posts — ‹tier›" to the web-serve holder through
+    the Nests page and wait for it in the Now lens."""
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert app.nest_trust.mint_button_present(), (
+        f"mint button missing despite holder + held tier. "
+        f"error: {app.error_text()!r}"
+    )
+    app.nest_trust.open_mint()
+    app.nest_trust.select_scope(app.nest_trust.paywalled_label(tier))
+    app.nest_trust.confirm_mint()
+    assert app.nest_trust.wait_for_grant_count(1), (
+        f"minted grant never rendered in the Now lens. "
+        f"error: {app.error_text()!r}"
+    )
+
+
+def _reenter_nests_page(app) -> None:
+    """Leave the Nests page and come back, so the facet hydrates afresh
+    (re-entering is the page's own refresh)."""
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_the_post_option_names_only_tiers_the_author_created(app, trust_mint_nest):
+    """The grant picker offers "Serve paywalled posts" only for a tier the
+    author created, never for the reserved system tiers — the free
+    `followers` tier, `only-me` or `room` — even while the author HOLDS the
+    followers tier's period key (`nests.md` § Trust facet — grants → *Mint* →
+    *Which tiers the post option names*, ruled 2026-10-23).
+
+    The followers key is held for real, the way nearly every author comes to
+    hold it: a second actor follows and the author's app approves, minting the
+    tier's period key into the author's custody. Without that the absence of a
+    followers option would prove nothing — the derivability probe drops an
+    option whose key is missing anyway. The precondition is witnessed twice:
+    the follower can read the followers tier's key blob, and the author's
+    composer offers the followers audience.
+
+    tier_3; latency-independent (deadline polls on observable state only)."""
+    from actions.api_actor import ApiActor
+    from clients._ws_rpc_core import RpcCallError
+    from common.auth import create_actor_and_register
+
+    nest = trust_mint_nest
+    author = _sign_in_member(app, nest, "test-device-trust-tiers")
+    paid = f"gold-{uuid.uuid4().hex[:6]}"
+    _create_tier_through_the_app(app, paid)
+
+    # ── A follower makes the author hold the followers tier's key.
+    follower = create_actor_and_register(
+        nest["port"], base_url=nest["url"],
+        admin_signing_key=nest["admin"]["signing_key"],
+    )
+    follow_api = ApiActor(
+        nest["url"], follower["token"], follower["actor_id_hex"],
+        bytes(follower["signing_key"]),
+    )
+    follow_api.subscribe(author["actor_id_bytes"], "followers")
+
+    def follower_holds_the_key() -> bool:
+        try:
+            blob = follow_api.subscription_key_blob(author["actor_id_bytes"], "followers")
+            return blob["version"] >= 1
+        except RpcCallError:
+            return False
+
+    app.subscriptions.navigate()
+    assert app.subscriptions.approve_until(
+        follower_holds_the_key, timeout=FOLLOW_GRANT_BUDGET_S,
+    ), (
+        "precondition: the follow should be granted, so the author holds the "
+        f"followers tier's key; error={app.subscriptions.error_text()!r}"
+    )
+    app.feed.navigate()
+    assert app.feed.wait_for_audience_option("followers", timeout_s=30.0), (
+        "precondition: the author's composer should offer the followers "
+        f"audience once its key is held; error={app.error_text()!r}"
+    )
+
+    # ── The picker: one paywalled option, the paid tier's.
+    app.linked_nests.navigate()
+    assert app.linked_nests.is_page_visible(), (
+        f"Nests page not reachable. error: {app.error_text()!r}"
+    )
+    assert app.nest_trust.mint_button_present(), (
+        f"mint button missing despite holder + held tier. "
+        f"error: {app.error_text()!r}"
+    )
+    app.nest_trust.open_mint()
+    options = app.nest_trust.mint_scope_options()
+    assert options is not None, (
+        "this driver does not serve the scope select's `options` attr, so the "
+        "picker's whole catalog cannot be read"
+    )
+    prefix = app.nest_trust.paywalled_label("")
+    paywalled = [o for o in options if o.startswith(prefix)]
+    assert paywalled == [app.nest_trust.paywalled_label(paid)], (
+        "the picker must offer exactly one 'Serve paywalled posts' option, the "
+        f"author-created tier {paid!r}'s; it painted {paywalled!r} "
+        f"(all options: {options!r}). error: {app.error_text()!r}"
+    )
+    for reserved in RESERVED_TIERS:
+        assert app.nest_trust.paywalled_label(reserved) not in options, (
+            f"the reserved tier {reserved!r} must never be offered as a "
+            f"paywalled-posts option; options: {options!r}"
+        )
+
+
+def _web_serve_pubkey(nest) -> bytes:
+    """The nest's own web-serve holder key, read from the admin roster (an
+    observation, not a mutation)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    sk = nest["admin"]["signing_key"]
+    with WsRpcAdminClient(
+        nest["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk)
+    ) as admin_ws:
+        rows = admin_ws.call("fauna.bridges.list_service_users", {})["service_users"]
+    row = next((r for r in rows if r.get("bridge_id") == WEB_SERVE_BRIDGE_ID), None)
+    assert row is not None, (
+        f"the nest enrolled no {WEB_SERVE_BRIDGE_ID!r} holder at boot; roster: "
+        f"{[r.get('bridge_id') for r in rows]!r}"
+    )
+    return bytes(row["ed25519_pubkey"])
+
+
+@pytest.mark.feature("nests-and-trust")
+def test_a_live_grant_stays_listed_with_revoke_when_the_roster_omits_or_fails(
+    app, trust_mint_nest
+):
+    """A live grant is listed with its revoke control whatever the holder
+    roster says: when the nest leaves its holder out of the roster, and when
+    the roster could not be read at all — and then the page says it could not
+    ask, never "trusted with nothing" (`nests.md` § Trust facet — grants →
+    *The holder roster groups the log; it never gates it*, ratified
+    2026-10-12).
+
+    Leg 1 omits the holder through real nest state: after the member mints a
+    paywalled-posts trust, the nest's admin revokes the web-serve holder, so
+    the member's holder view no longer lists it (only approved holders are
+    listed) and the grant falls into the home row's catch-all.
+
+    Leg 2 makes the roster read fail: the nest turns every
+    `fauna.bridges.list_service_users` away (the test-hooks refusal door,
+    `rpc_hold_test_hook.rs` § Refusal), proven to have reached the nest before
+    the page is read.
+
+    tier_3; latency-independent (arrival counters and deadline polls)."""
+    from helpers.bridge_enrollment import revoke_bridge
+    from helpers.rpc_hold import refuse_rpc, release_rpc_hold, wait_for_refused_rpc
+
+    nest = trust_mint_nest
+    _sign_in_member(app, nest, "test-device-trust-roster")
+    tier = f"gold-{uuid.uuid4().hex[:6]}"
+    _create_tier_through_the_app(app, tier)
+    _mint_paywalled_trust(app, tier)
+    assert app.nest_trust.holders_status_text() == "", (
+        "the roster answered, so the holders status must be empty; got "
+        f"{app.nest_trust.holders_status_text()!r}"
+    )
+
+    # ── Leg 1: the roster omits the holder.
+    revoke_bridge(nest["url"], nest["admin"]["signing_key"], _web_serve_pubkey(nest))
+    _reenter_nests_page(app)
+    assert app.nest_trust.wait_for_grant_count(1), (
+        "a grant whose holder the roster omits must still render on the home "
+        f"row (the catch-all); got {app.nest_trust.grant_count()} grant rows. "
+        f"error: {app.error_text()!r}"
+    )
+    assert tier in app.nest_trust.grant_scope_text(0), (
+        f"the listed grant should be the minted one naming {tier!r}; got "
+        f"{app.nest_trust.grant_scope_text(0)!r}"
+    )
+    assert app.nest_trust.has_grant_revoke(0), (
+        "the catch-all grant must keep its revoke control"
+    )
+    assert app.nest_trust.holders_status_text() == "", (
+        "an omitted holder is not an unreadable roster: the status must stay "
+        f"empty; got {app.nest_trust.holders_status_text()!r}"
+    )
+
+    # ── Leg 2: the roster read fails.
+    kind = "fauna.bridges.list_service_users"
+    refuse_rpc(nest["port"], kind)
+    try:
+        _reenter_nests_page(app)
+        wait_for_refused_rpc(nest["port"], kind)
+        status = app.nest_trust.wait_for_holders_status(S.nests.holders_status_unreachable)
+        assert status == S.nests.holders_status_unreachable, (
+            "a roster that could not be read must say so on the home row; "
+            f"nest-trust-holders-status read {status!r}. error: {app.error_text()!r}"
+        )
+        assert app.nest_trust.empty_state_absent(), (
+            "an unreadable roster is not an empty one: nest-trust-empty must "
+            "not render"
+        )
+        assert app.nest_trust.wait_for_grant_count(1), (
+            "the log's grant must still be listed while the roster is "
+            f"unreadable; got {app.nest_trust.grant_count()} grant rows"
+        )
+        assert app.nest_trust.has_grant_revoke(0), (
+            "the grant must keep its revoke control while the roster is unreadable"
+        )
+    finally:
+        release_rpc_hold(nest["port"], kind)
 
 
 @pytest.mark.feature("nests-and-trust")

@@ -27,6 +27,7 @@ internally).
 | Network-reachable bind | canonical `0.0.0.0` listen (the loopback rewrite was removed 2026-06-23); target `:443` via socket activation, internal loopback fixed at `127.0.0.1:3000` | cross-device LAN reach verified manually 2026-06-26 (dev binary on `:3000`); macOS Application Firewall blocks an *unsigned* binary's LAN ingress (needed `socketfilterfw --unblockapp`) — a signed+notarized daemon is auto-allowed | installed-`.pkg` cross-device `:443` reach rides the signed install |
 | App side | the app manages no daemons today (`SyncDaemonManager` — which last managed only the per-user sync agent — was **deleted 2026-07-13** with the B2 in-process cutover, `../apps/macos.md` § Sync; the app-tends-its-own-helper role returns with the per-user sync agent, `../apps/sync-agent.md` § Packaging); **no in-app "run a nest" toggle and no runtime elevation** — the install-time component selection is the opt-in (decided 2026-06-26, matching Windows) | `TestDryRun` asserts the enabled-when-selected shape | bridge-requires-nest auto-deselect `selected=` expression (GUI-only verifiable; rides the signed-install proof — needs a maintainer-run environment) |
 | `.dmg` channel | the app-only download; the app's update path is notice-only, built 2026-10-08 (§ Upgrade → *Desktop App*): Settings → General's About block and the app-menu item ask through the shared `fauna-ffi` check, and the app looks once per sign-in. **The update framework the app used to embed left the tree the same day**: the bundle embeds no third-party framework, the Apple package pins no remote SwiftPM dependency, and no update feed, feed-signing key or in-place update payload is built, signed or published | `release-macos.yml` (public repository, 2026-08-25): credential-free build job + Environment-gated sign/notarize/staple/attest/publish job, driving `just mac-app release` + `just mac-dmg-package` — the shape is pinned by the publish tooling's own workflow-shape test and its recipe/script references by the publish transform's workflow gates | **never executed**: its first tagged run on the public repository is the first proof of the whole pipeline (the `macos` CI job's first run on a GitHub-hosted runner is the buildability proof before it) |
+| Terminal-app component (`social.fauna.tui`) | scriptless, default-selected → `/usr/local/bin`: `fauna-tui` + `fauna-cli` (the archive's third member, [`tui.md`](tui.md) § Decisions, decision 4) + `fauna-uninstall`, hardened-runtime-signed with no entitlements | built unsigned on macOS 2026-09-27 and, with `fauna-cli`, 2026-10-22 — the component expands to exactly those three files, no `Scripts` archive; `test_installer.py::TestDryRun` green over it ([`tui.md`](tui.md) § Implementation status today holds the run, with the archive's by-hand signing) | `TestFullInstall` (sudo) over it; a Developer ID signature |
 | Worker auth (S2) | resolved 2026-06-25 as a *confirm*, no new wiring: the co-located MDA authenticates by **service-user enrollment** (keypair file + loopback endpoint from the supervisor), and `bins/fauna-nest-daemon` authorizing no worker is the correct standalone state — worker authorization is the unrelated public-nest storage worker's concern (owner: `../nest/worker.md`) | `bins/fauna-nest/tests/desktop_serve_loopback.rs` (reachable co-located loopback) | — |
 
 Declared gaps (target-state prose ahead of code):
@@ -59,8 +60,8 @@ the **sync** agent as a per-user `LaunchAgent` (§ launchd jobs).
 - **Minimum macOS:** 13.0 (Ventura) — the `.pkg` volume-check floor, valid for the *service* components; the app component requires 15 and its choice is install-gated at that floor (§ Implementation status today — the floors note)
 - **Architecture:** Apple Silicon only (aarch64-apple-darwin)
 
-The installer presents **four** selectable components mirroring the Windows MSI
-feature tree — the desktop **app** and **sync** default **selected** (the common
+The installer presents **five** selectable components mirroring the Windows MSI
+feature tree (plus the terminal app) — the desktop **app**, **sync** and terminal app (`tui`) default **selected** (the common
 macOS case is "just the app": app + sync, connecting to a remote nest), **nest
 and bridge default unselected** (selecting a server component is the install-time
 opt-in to self-host, matching Windows "Nest Service default OFF" — § launchd jobs →
@@ -162,7 +163,7 @@ machine-scoped):
 
 # App + sync — per-user (UNCHANGED; the user's data stays theirs):
 ~/Library/LaunchAgents/social.fauna.sync-agent.plist  (sync agent — runs as the user, enabled)
-~/Library/Application Support/Fauna/            (the USER-DOMAIN home: app data — messages/MLS/settings, the app's deployment-seed config-replica; the identity key is in the Keychain — on a signed build the data-protection plane's app-only access group, § Identifier domain)
+~/Library/Application Support/Fauna/            (the USER-DOMAIN home: app data — messages/MLS/settings, the app's deployment-seed config-replica; the identity key is in the Keychain — on a signed build the data-protection plane under the family's App ID access group, § Identifier domain)
 ~/Library/Application Support/Fauna/sync/       (the sync agent's OWN config/state-db/chunk-cache/logs + the account store, per-actor scoped — the platform state base every non-sandboxed process shares; ../apps/sync-agent.md § Packaging owns the mechanics)
 ~/Library/Application Support/Fauna/sync-agent.sock   (the agent's per-user IPC socket)
 ~/Library/Application Support/Fauna/trust/      (the install-scoped nest-identity pin store — the app writes, the agent + tui read)
@@ -298,7 +299,7 @@ evidence.**
 |---|---|---|
 | `.pkg` component ids | `social.fauna.{app,nest,sync,tui,bridge}` (§ Components) | `com.fauna.*` |
 | launchd labels | `social.fauna.{nest,bridge}` (daemons), `social.fauna.sync-agent` (agent) | `com.fauna.*`, plus the pre-A4 `com.fauna.sync` and `social.fauna.sync` (the removed `fauna-sync install`'s own agent, gone 2026-10-02) — none swept (below) |
-| App groups | macOS: `7457N3M72H.group.social.fauna.shared`; iOS: `group.social.fauna.shared` (app + appex — per-OS fork decided 2026-08-23, below; **the sync agent names NO app group since 2026-08-25**, record item 6); `7457N3M72H.group.social.fauna.account` (macOS app ONLY — the keychain access group `KeychainStore`'s data-protection-plane rows live in, deliberately not the shared group so the sandboxed appex can never read the identity seed; keychain-only, no container dir ever resolved; decided 2026-08-25 with the keychain-plane migration, `../apps/ios.md` § Credential Storage); `group.social.fauna.watchkit` (watch widgets) | `group.com.fauna.*`; unprefixed `group.social.fauna.shared` on macOS (never shipped — dev boxes only); the agent's `7457N3M72H.group.social.fauna.shared` claim (never shipped — `test_apple_identifier_pins.py` pins it absent) |
+| App groups | macOS: `7457N3M72H.group.social.fauna.shared`; iOS: `group.social.fauna.shared` (app + appex — per-OS fork decided 2026-08-23, below; **the sync agent names NO app group since 2026-08-25**, record item 6); `7457N3M72H.group.social.fauna.account` (macOS app ONLY; **RETIRED 2026-10-30** — decided 2026-08-25 as the keychain access group `KeychainStore`'s data-protection-plane rows would live in, keychain-only, no container dir ever resolved, and never reached by any build (*Path A* below); the plane's group is the family App ID `7457N3M72H.social.fauna.fauna`, the one the iOS app already writes, so the opt-in iCloud copy meets across the Mac/iPhone line — `../apps/ios.md` § Credential Storage owns the ruling); `group.social.fauna.watchkit` (watch widgets) | `group.com.fauna.*`; unprefixed `group.social.fauna.shared` on macOS (never shipped — dev boxes only); the agent's `7457N3M72H.group.social.fauna.shared` claim (never shipped — `test_apple_identifier_pins.py` pins it absent) |
 | Keychain services | `social.fauna.push`, `social.fauna.fileprovider`, `social.fauna.account` (the `KeychainStore` account-credential store — decided 2026-08-24, below) | `com.fauna.*`; `social.fauna.desktop`/`social.fauna.ios` (pre-2026-08-23 per-platform leaves), `social.fauna.fauna` (the 2026-08-23 bundle-id echo), `social.fauna.watch` (watchOS's platform-word leaf) — **never read** since the compat-remnant sweep (below) |
 | iOS `BGTaskScheduler` ids | `social.fauna.sync.{upload,pull,bg-upload}` | `com.fauna.*` |
 | Bundle ids | `social.fauna.fauna` — ONE string for macOS **and** iOS (+ its `.FileProvider`/`.FileProviderUI` appexes) | `com.fauna.*` moved 2026-07-19; the per-platform `social.fauna.desktop` / `social.fauna.ios` leaves retired 2026-08-23 (*How the LEAF is spelled* above). **No upgrade sweep is owed for this tier** (none is owed on any tier since the compat-remnant sweep, below); `test_apple_identifier_pins.py` pins them absent |
@@ -461,8 +462,8 @@ correspondence (the two look alike and a draft of this passage confused them).
 **⚠ The macOS data-protection KEYCHAIN plane is blocked on PROVISIONING-PROFILE
 infrastructure, not a one-line entitlement — MEASURED 2026-08-28, and it REFUTES the
 premise that "an app group is the one entitlement class Developer ID honours without a
-provisioning profile."** That premise (`fauna_core::platform_ids`
-`APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP` doc; [`../apps/ios.md`](../apps/ios.md)
+provisioning profile."** That premise (`fauna_core::platform_ids`'
+account keychain group doc; [`../apps/ios.md`](../apps/ios.md)
 § Credential Storage's *keychain plane* bullet, which pre-registered exactly this as *"a
 `legacy` reading there means the group is not an access group under Developer ID after
 all — the fallback then IS the behaviour, silently"*) is the one this section's app-group
@@ -527,16 +528,22 @@ protection keychain is only available to programs running in a user context, lik
 an app extension"*) and *Sharing access to keychain items* (*"You can use app group names as
 keychain access group names"*; the portal *"guards against the reuse of app group names
 across teams when you try to add an app group to a provisioning profile"* — i.e. an app
-group can be added to a profile and used as a DP-keychain access group). ⚠ **There is no
-entitlement change to make** — the app already declares
-`com.apple.security.application-groups` = [`…shared`, `…account`]; what is missing is the
-**embedded provisioning profile that authorizes them**. The scope, split by the TWO
-distinct keychain stores on macOS:
+group can be added to a profile and used as a DP-keychain access group). ⚠ **The entitlement
+change is the signed path's alone (2026-10-30)** — the app declares
+`com.apple.security.application-groups` = [`…shared`] (the plane's group is the App ID,
+`../apps/ios.md` § Credential Storage), and the signed build additionally claims
+`com.apple.application-identifier` + `com.apple.developer.team-identifier`, which the profile
+authorizes (item 3 above: a profile-less process carrying them is killed, so the ad-hoc
+`mac-app`/e2e signature never does); what is missing is the **embedded provisioning profile**.
+The scope, split by the TWO distinct keychain stores on macOS:
 
 - **Store #1 — the app's identity store, Swift `KeychainStore` (service `social.fauna.account`).**
   Reaches the data-protection plane once the app bundle embeds a Developer-ID provisioning
-  profile authorizing the app-only access group `7457N3M72H.group.social.fauna.account`.
-  Touched by the app alone (Swift). This is the store behind the upgrade re-prompts
+  profile — since 2026-10-30 the group it addresses is the App ID `7457N3M72H.social.fauna.fauna`,
+  authorized by the profile as the signed build's `com.apple.application-identifier`
+  (`../apps/ios.md` § Credential Storage, *Across the Mac/iPhone line*: the one group the iOS app
+  already writes, so the opt-in iCloud copy meets across the line); the app-only group
+  `…account` it was to address is retired. Touched by the app alone (Swift). This is the store behind the upgrade re-prompts
   ([`../apps/ios.md`](../apps/ios.md) § Credential Storage owns its plane mechanism). **A
   fixes it.**
 - **Store #1b — the File Provider appex rendezvous (shared group `7457N3M72H.group.social.fauna.shared`).**
@@ -565,7 +572,8 @@ distinct keychain stores on macOS:
 **Mechanism (no code behaviour change; a build-pipeline + portal change only).** Register
 the App ID `7457N3M72H.social.fauna.fauna` and the appex App ID
 `7457N3M72H.social.fauna.fauna.FileProvider` in the Apple Developer portal with the App
-Groups capability enabling `…shared` (+ `…account` on the app), generate a **Developer ID**
+Groups capability enabling `…shared` (the retired `…account` group is registered nowhere —
+2026-10-30), generate a **Developer ID**
 provisioning profile for each, and embed them as
 `Fauna.app/Contents/embedded.provisionprofile` and
 `…/PlugIns/Fauna-FileProvider.appex/Contents/embedded.provisionprofile` in the signing
@@ -595,7 +603,7 @@ prompt it buys, and it is a security *regression*, not merely more code:
   enforce per-caller scoping — the agent gets only `BackupKey` + bearer, the app gets the
   seed, all else refused. That is **reimplementing, in our own security-critical code, the
   exact audience tiering the OS already enforces for free via access groups**, and it inverts
-  today's least-privilege boundary, where the identity seed lives in an app-only access group
+  today's least-privilege boundary, where the identity seed lives in the app family's App ID access group
   no other process can name ([`../apps/ios.md`](../apps/ios.md) § Credential Storage;
   `key-material-hierarchy.md`). A broker would hold the seed and hand it out.
 - **macOS access groups already ARE this broker, done by the OS** — a shared,
@@ -642,8 +650,8 @@ per-user (the same split as Windows: machine services for nest/bridge, per-user 
 > self-installs the LaunchAgent at first post-auth (user-writable, no elevation) from the agent binary
 > `just mac-app` bundles at `Fauna.app/Contents/MacOS/fauna-sync-agent`.
 > An archive-installed terminal app ([`tui.md`](tui.md) § The ratified channel) self-installs the same
-> plist through the shared Rust spawner (ruled 2026-10-08, unbuilt), both writers converging on one
-> target order.
+> plist through the shared Rust spawner (ruled 2026-10-08, built 2026-10-23) — the same writer the desktop app
+> now uses — so both apps converge on one target order and the `.pkg`'s own plist bytes.
 > Owner: `../apps/sync-agent.md` § Packaging (milestone A4).
 
 Common properties:
@@ -729,7 +737,7 @@ The all-in-one `.pkg` is assembled in stages:
 3. **Relocate the MDA dylib linkage** — `just mail-bridge-build` links `fauna-mail-bridge` against the dylib by its absolute build path; `install_name_tool` rewrites the dylib's install-name to `@rpath/libfauna_ffi.dylib` and the binary's rpath to `@loader_path` so the installed MDA finds the dylib staged beside it in `/usr/local/bin/` (the macOS twin of Windows resolving `fauna_ffi.dll` from the same dir)
 4. **Code-sign binaries + the app** — sign each binary + the dylib with the Developer ID Application certificate; sign `Fauna.app` **inside-out** with the hardened runtime + entitlements (`installer/macos/sign-app-bundle.sh`, shared by `mac-app`'s ad-hoc signature, this `--sign` path and `mac-dmg`): the bundled `fauna-sync-agent` first with ITS OWN entitlements file, then **each `Contents/PlugIns/*.appex` with ITS OWN** (resolved by bundle name from `apps/fauna-apple/<Name>/<Name>.entitlements`, so a new extension is signed correctly by existing, and an extension without one is a hard error rather than a silent unsandboxed ship), then the app with `Fauna-macOS.entitlements` and **never `--deep`**. The extensions are where this matters most: the File Provider appex is sandboxed and names ONE app group (its replica container) while the app names two, and the second exists precisely so a sandboxed extension can never reach the identity seed (§ Identifier domain). Measured 2026-08-25: `codesign --deep --entitlements` re-stamps every nested Mach-O with the outer bundle's entitlements, so the bundled agent — the copy the sync postinstall's LaunchAgent prefers — shipped carrying the app's app-group claims while the `/usr/local/bin` copy carried none; `test_installer.py::TestDryRun::test_bundled_agent_carries_its_own_entitlements` pins the built artifact's two entitlement sets. (A notarizable `.pkg` requires its inner app to be Developer-ID-signed with hardened runtime, replacing `mac-app`'s ad-hoc signature.) The bridge artifacts are signed **after** the `install_name_tool` relocation, which invalidates any prior signature
 5. **`pkgbuild`** — produce one `.pkg` per component (`fauna-app.pkg`, `fauna-nest.pkg`, `fauna-sync.pkg`, `fauna-bridge.pkg`). The app component uses `--install-location /Applications` with a component plist pinning `BundleIsRelocatable=false`
-6. **`productbuild`** — combine component packages into the final metapackage with a Distribution XML (four selectable choices)
+6. **`productbuild`** — combine component packages into the final metapackage with a Distribution XML (five selectable choices)
 7. **`xcrun notarytool`** — submit the metapackage to Apple's notarization service and wait for approval
 8. **Staple** — run `xcrun stapler staple` to attach the notarization ticket to the `.pkg`
 

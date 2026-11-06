@@ -124,6 +124,10 @@ public sealed partial class SettingsGeneralPage : Page
         await _viewModel.ConfigureCommand.ExecuteAsync(null);
     }
 
+    private void TermsLink_Click(object sender, RoutedEventArgs e)
+        => FaunaApp.Services.UrlOpener.Open(
+            uniffi.fauna_ffi.FaunaFfiMethods.FaunaFfiTermsUrl(), "Settings");
+
     private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e) =>
         await _updates.CheckAsync();
 

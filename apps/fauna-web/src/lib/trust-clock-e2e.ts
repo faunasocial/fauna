@@ -16,12 +16,12 @@
 // NOT an error: a journey resets the clock before it ever opens the Nests page,
 // and the next mount hydrates against the moved clock anyway.
 //
-// Scope on web: the grant fold (`fauna-wasm`'s pair machine) only. The custody
-// receipt fold runs in the `wasm-folders` chunk, which has no test flavor, so
-// its freshness is not moved here — the only journey that ages a receipt is the
-// custody ceremony, tui-only (`CustodyActions.require_supported`).
+// Two folds, two runtimes: the grant fold runs in the core chunk (`fauna-wasm`'s
+// pair machine) and the custody receipt fold in the `wasm-folders` chunk, each
+// with its own copy of the clock's static, so the command moves both.
 
 import { trustSetClockOffsetForTest } from '#lib/wasm';
+import { foldersTrustSetClockOffsetForTest } from '#lib/wasm-folders';
 import { registerE2eCommands } from '#lib/e2e-commands';
 
 /** The Nests page's own re-hydrate callback, installed while it is mounted. */
@@ -41,7 +41,9 @@ export function registerTrustClockCommands(): void {
     // `0` is the reset every lapse test owes its successor — the offset is
     // module-wide and nothing auto-clears it.
     // Set the offset FIRST: the rehydrate below is what folds against it.
-    trustSetClockOffsetForTest(Number(p.now_offset_secs ?? 0));
+    const offsetSecs = Number(p.now_offset_secs ?? 0);
+    trustSetClockOffsetForTest(offsetSecs);
+    await foldersTrustSetClockOffsetForTest(offsetSecs);
     await rehydrateHook?.();
     return null;
   });

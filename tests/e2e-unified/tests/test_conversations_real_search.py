@@ -98,15 +98,10 @@ def test_search_filters_on_real_decrypted_snippet(real_faunamls_app, nest_instan
     # contact so her DM Welcome flows under the default mode — per-pair,
     # so the session-scoped recipient's own mode stays untouched.
     conv_api.accept_contact(port, test_user, alice["actor_id_hex"])
-    conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
-    wait_until(
-        lambda: any(
-            t.rail == "FaunaMls" and t.channel_id_hex == channel_id_hex
-            for t in bob_app.conversations.list_threads()
-        ),
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "waiting for bob's client to drain the inbox + join the Welcome's group",
-    )
+    inbox_id = conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first message.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S, who="bob's client")
 
     # Post the tagged message. bob's receive loop fetches + DECRYPTS it, and
     # the manager's snapshot exposes the decrypted body as the thread's

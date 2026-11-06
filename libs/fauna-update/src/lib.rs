@@ -19,7 +19,10 @@ pub const RELEASE_PUBLIC_KEY: [u8; 32] = [0u8; 32];
 /// Configuration for the update system.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    pub github_repo: &'static str,
+    /// The release API's origin (`fauna_core::version::GITHUB_API_ORIGIN` in
+    /// production); the repository and path are
+    /// `fauna_core::version::latest_release_api_url`'s, never the caller's.
+    pub feed_origin: String,
     pub current_version: &'static str,
     pub artifact_prefix: &'static str,
     pub check_interval: Duration,

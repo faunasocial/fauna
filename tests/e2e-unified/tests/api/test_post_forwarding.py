@@ -151,3 +151,68 @@ def test_forwarding_roundtrip(public_nest, initiator_nest):
     read_req = urllib.request.Request(f"{pub['url']}/api/v1/posts/{expected_id}")
     read_resp = urllib.request.urlopen(read_req)
     assert read_resp.status == 200, "forwarded post should be available on public nest"
+
+
+@pytest.mark.feature("feed-delete-own-post")
+def test_a_deleted_post_replayed_by_a_peer_nest_is_not_stored_again(
+    public_nest, initiator_nest
+):
+    """A post the author deleted stays deleted when a peer nest re-sends its bytes.
+
+    ``feed.md`` § Post deletion: the signed bytes of a post stay public, so under
+    ``SubmissionPolicy::Open`` any peer could otherwise undo the author's delete
+    by forwarding them again. ``CacheDb::post_was_deleted`` gates the forward
+    handler: the answer is ``Ok`` (the peer stops retrying) with no store and no
+    fan-out. The replay deliberately comes over ``fauna.federation.post.forward``
+    — the local ``fauna.posts.create`` door is *not* gated by the deleted check
+    (a stranger there is turned away by the author check instead; see
+    ``test_post_create_author_only_nest.py``).
+    """
+    import urllib.error
+
+    import cbor2
+
+    from tests.api import ws_api
+    from tests.api.bare import sign_and_encode_post, sign_and_encode_tombstone
+
+    pub = public_nest
+    author = create_actor_and_register(
+        pub["port"], admin_signing_key=pub["admin"]["signing_key"]
+    )
+    now_us = int(time.time() * 1_000_000)
+    wrapped = sign_and_encode_post(author["signing_key"], now_us, "Posted, deleted, replayed")
+    parts = cbor2.loads(wrapped)
+    post_bytes, envelope = bytes(parts["bytes"]), bytes(parts["envelope"])
+
+    post_id = ws_api.create_post(pub["port"], author, wrapped)
+    assert ws_api.get_post(pub["port"], author, post_id), "precondition: the post is live"
+
+    ws_api.delete_post(
+        pub["port"],
+        author,
+        sign_and_encode_tombstone(author["signing_key"], post_id, now_us + 1_000_000),
+    )
+    with pytest.raises(RpcCallError) as gone:
+        ws_api.get_post(pub["port"], author, post_id)
+    assert gone.value.code == "fauna.posts.not_found", gone.value.code
+
+    # The peer nest re-sends the author's kept signed bytes.
+    with FederationChannelClient(initiator=initiator_nest, target=pub) as fed:
+        fed.call("fauna.federation.post.forward", {
+            "post_bytes": post_bytes,
+            "post_envelope": envelope,
+        })  # Ok — a refusal would raise RpcCallError and keep the peer retrying
+
+    # Nothing came back: not by id, not in the feed, not on the read-back route.
+    with pytest.raises(RpcCallError) as still_gone:
+        ws_api.get_post(pub["port"], author, post_id)
+    assert still_gone.value.code == "fauna.posts.not_found", still_gone.value.code
+    assert post_id not in {
+        p["post_id"] for p in ws_api.local_feed_posts(pub["port"], author)
+    }, "a replayed forward must not put the deleted post back in the feed"
+    read_req = urllib.request.Request(
+        f"{pub['url']}/api/v1/posts/{forwarded_post_id(post_bytes, envelope)}"
+    )
+    with pytest.raises(urllib.error.HTTPError) as read_back:
+        urllib.request.urlopen(read_req)
+    assert read_back.value.code == 404, read_back.value.code

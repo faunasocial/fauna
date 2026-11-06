@@ -603,6 +603,8 @@ async fn a_designated_tiers_paid_entitlement_rides_the_unchanged_waist() {
         valid_until_secs: None,
         external_ref: "pay_unlock_1".into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     let applied = payment_core::apply_payment(&state, &entitlement)
         .await

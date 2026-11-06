@@ -67,7 +67,8 @@ public sealed record SubscriptionMineRow(
     string AuthorDisplay,
     string Tier,
     string Status,
-    ulong Since);
+    ulong Since,
+    string? HomeNestUrl = null);
 
 // The viewer's per-tier status (<c>subscription-offer-status</c>) is the SHARED
 // `fauna_core::format::OfferStatus { None, Pending, Active }` enum, consumed over the
@@ -168,6 +169,10 @@ public sealed record PaymentProviderRow(string Kind, string Tier, ulong? LastVer
 /// the VM from the shared 3-state decision
 /// (<c>fauna_core::format::claim_status_label</c> — redeemed wins over voided;
 /// FFI <c>ClaimStatusLabel</c>), the single source every app shares.
+/// <see cref="CanVoid"/> (not yet voided) shows <c>subscription-claim-void-button</c>
+/// with <see cref="VoidText"/> (the Void label, or the armed confirm text);
+/// <see cref="Armed"/> additionally shows the Keep button.
 /// </summary>
-public sealed record PaymentClaimRow(string Code, string Tier, string StatusLabel);
+public sealed record PaymentClaimRow(string Code, string Tier, string StatusLabel,
+    bool CanVoid = false, string VoidText = "", bool Armed = false);
 #endif   // PAYMENTS

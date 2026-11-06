@@ -127,7 +127,7 @@ class FeedVM @Inject constructor(
     }
 
     /**
-     * The shared content-policy render inputs (guardian floor + the viewer's own
+     * The shared content-policy render inputs (guardian rules + the viewer's own
      * spam/phishing thresholds) — the feed card resolves each post's block/collapse
      * verdict off this via [ContentPolicyInputs.verdictFor] (family-safety.md
      * § Content policy). One shared [ContentPolicyStore] backs both the feed and
@@ -139,9 +139,9 @@ class FeedVM @Inject constructor(
      *  (moderation.md § User-initiated reporting; the shell's ReportHost paints it). */
     fun openReport(target: com.fauna.ffi.FfiReportTarget) = contentPolicyStore.report.open(target)
 
-    /** Count a rendered post's guardian-floor enforcement for **Guardian Notify**
+    /** Count a rendered post's guardian-rule enforcement for **Guardian Notify**
      *  (family-safety.md § Guardian Notify) — a no-op unless the ward's
-     *  `content_notify` knob is on and the guardian floor bites. */
+     *  `content_notify` knob is on and the guardian rules bite. */
     fun noteContentEnforcement(postId: String, labels: List<ContentLabelEntry>) =
         familyNotifyStore.record(postId, labels)
 
@@ -286,7 +286,7 @@ class FeedVM @Inject constructor(
         // A profile's Posts tab: a reconnect re-mints its window over the
         // (possibly rebuilt) timeline manager; nothing timeline-side to load.
         windowActor?.let { openAuthorWindow(it); return }
-        // Re-pull the ward's guardian floor + own spam thresholds on entry and on
+        // Re-pull the ward's guardian rules + own spam thresholds on entry and on
         // reconnect, so a guardian's policy change (or a just-completed login)
         // reaches the feed's render enforcement (family-safety.md § Content policy).
         contentPolicyStore.refresh()
@@ -358,6 +358,13 @@ class FeedVM @Inject constructor(
     fun clearSearch() {
         val m = host.manager() ?: return
         viewModelScope.launch { m.clearSearch() }
+    }
+
+    /** `feed-imported-clear` — leave the imported-posts selection for the local
+     *  feed (the shared `clear_imported`). */
+    fun clearImported() {
+        val m = host.manager() ?: return
+        viewModelScope.launch { m.clearImported() }
     }
 
     fun loadMore() {
@@ -1042,6 +1049,23 @@ class FeedVM @Inject constructor(
                 .onFailure {
                     android.util.Log.w("FeedVM", "repost failed: ${it.message}")
                     _verbError.value = it.message ?: "repost failed"
+                }
+        }
+    }
+
+    // React/un-react with `emoji` (`post-reaction-pill`) is the manager's TOGGLE
+    // off the tapped group's `viewer_react_id` (feed.md § Layout & flow →
+    // *Reaction posts count and paint*, ruling 4): off → composes the caller's
+    // wordless `React` post, on → deletes it, and the tally is folded back by
+    // the manager. A bridged target is refused (`REACT_REFUSED_NOT_NATIVE`) and
+    // surfaces on `error-message` like the other verbs.
+    fun react(postId: String, emoji: String) {
+        val m = manager() ?: return
+        viewModelScope.launch {
+            runCatching { m.react(postId, emoji) }
+                .onFailure {
+                    android.util.Log.w("FeedVM", "react failed: ${it.message}")
+                    _verbError.value = it.message ?: "react failed"
                 }
         }
     }

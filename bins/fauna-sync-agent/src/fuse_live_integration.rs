@@ -24,7 +24,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -88,6 +88,13 @@ struct DbBackedHost {
     /// The `changes.list` entries the next re-pull folds (taken once) — how a test
     /// plays another device's delete, through the engine's real fold.
     changes: Arc<std::sync::Mutex<Vec<fauna_protocol::sync::SyncChange>>>,
+    /// How long each re-pull stays out before it folds — stands in for the nest
+    /// round-trip a slow nest makes the loop wait on. Read at each re-pull, so a
+    /// test sets it once the boot's own re-pull has passed.
+    repull_delay: Arc<std::sync::Mutex<Option<Duration>>>,
+    /// True from the top of a re-pull until its delay has passed — how a test knows
+    /// the loop is out on the nest.
+    repulling: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -174,6 +181,11 @@ impl HydrationHost for DbBackedHost {
 
     async fn repull(&self) -> Result<PlaceholderFold> {
         self.ticks.fetch_add(1, Ordering::SeqCst);
+        self.repulling.store(true, Ordering::SeqCst);
+        let delay = *self.repull_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let changes = std::mem::take(&mut *self.changes.lock().unwrap());
         let mut fold = if changes.is_empty() {
             PlaceholderFold::default()
@@ -182,6 +194,7 @@ impl HydrationHost for DbBackedHost {
         };
         fold.stale_hydrated
             .extend(std::mem::take(&mut *self.stale.lock().unwrap()));
+        self.repulling.store(false, Ordering::SeqCst);
         Ok(fold)
     }
 
@@ -223,6 +236,16 @@ impl HydrationHost for DbBackedHost {
 
     async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
         Vec::new()
+    }
+
+    // The real engine's own sibling pass: a harness engine holds no sibling
+    // registry, so it pulls nothing and its admission arm stays pending.
+    async fn pull_siblings(&self, folder: &str) {
+        HydrationHost::pull_siblings(&self.engine, folder).await
+    }
+
+    fn sibling_admissions(&self) -> Option<watch::Receiver<u64>> {
+        HydrationHost::sibling_admissions(&self.engine)
     }
 
     async fn refresh_and_converge_corpus(&self, _folder: &str) {}
@@ -282,6 +305,12 @@ struct Serve {
     stale: Arc<std::sync::Mutex<Vec<StaleHydratedRow>>>,
     /// Remote changes the next re-pull folds ([`DbBackedHost::changes`]).
     changes: Arc<std::sync::Mutex<Vec<fauna_protocol::sync::SyncChange>>>,
+    /// The loop's nudge channel — the receiving half, handed to the loop.
+    wake: Option<mpsc::Receiver<()>>,
+    /// How long each re-pull stays out ([`DbBackedHost::repull_delay`]).
+    repull_delay: Arc<std::sync::Mutex<Option<Duration>>>,
+    /// Set while a re-pull is out ([`DbBackedHost::repulling`]).
+    repulling: Arc<AtomicBool>,
 }
 
 impl Default for Serve {
@@ -293,6 +322,9 @@ impl Default for Serve {
             commands: None,
             stale: Arc::default(),
             changes: Arc::default(),
+            wake: None,
+            repull_delay: Arc::default(),
+            repulling: Arc::default(),
         }
     }
 }
@@ -427,6 +459,8 @@ impl Harness {
             ticks: Arc::clone(&serve.ticks),
             stale: Arc::clone(&serve.stale),
             changes: Arc::clone(&serve.changes),
+            repull_delay: Arc::clone(&serve.repull_delay),
+            repulling: Arc::clone(&serve.repulling),
         }
     }
 
@@ -533,6 +567,7 @@ impl Harness {
         // The product's invalidator for this binding (`engine_driver::run_on_demand_root`).
         let invalidator = FuseInvalidator::new(reach.path(), cmd_tx.clone());
         let commands = serve.commands.take();
+        let wake = serve.wake.take();
         async move {
             // Held for the loop's lifetime, as the product holds it.
             let _cmd_tx = cmd_tx;
@@ -548,7 +583,7 @@ impl Harness {
                 reach.path().to_path_buf(),
                 FOLDER.to_string(),
                 cancel,
-                None,
+                wake,
                 commands,
                 None,
             )
@@ -1993,7 +2028,7 @@ async fn a_remote_modify_of_a_hydrated_file_refetches() {
             relative_path: REAL.to_string(),
             manifest_hash: new_head,
             size_bytes: NEW_SIZE,
-            content_key_version: None,
+            content_stamp: None,
             remote_mtime: CLOUD_MTIME,
             version_num: 2,
             signed_as: None,
@@ -2036,6 +2071,71 @@ async fn a_remote_modify_of_a_hydrated_file_refetches() {
         let row = h.entry(REAL).expect("the row");
         assert_eq!(row.state, SyncState::Synced);
         assert_eq!(row.manifest_hash, Some(new_head));
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// **A listing of the root is answered while the loop re-pulls the nest** (`on-demand-files.md`
+/// § *A placeholder describes the version its row resolves*: nothing the serve loop waits on holds
+/// up the root — on linux a listing of the root waits with it otherwise). The loop is nudged, its
+/// re-pull stays out 20 s (a slow nest), and an `ls` from another process is timed on the wall
+/// clock — never through a loop-polled `eventually`, which a held-up loop blinds. The shared
+/// loop answers the mount across the re-pull (`answer_while`), so the placeholder is listed at
+/// once. Red-verified by taking the nudge arm's `requests.answer_while(…)` wrapper off in
+/// `bridge.rs`: the listing then took 19.96 s (green: a few ms). The delay is set only after the
+/// mount is up — the boot's own re-pull is wrapped like every other arm and would pin nothing.
+#[tokio::test]
+async fn a_listing_is_answered_while_the_loop_repulls_the_nest() {
+    const REPULL_DELAY: Duration = Duration::from_secs(20);
+    let h = harness();
+    let reach = Reach::open(&h.root).expect("open the reach");
+    let (wake_tx, wake_rx) = mpsc::channel(4);
+    let repulling = Arc::new(AtomicBool::new(false));
+    let repull_delay = Arc::new(std::sync::Mutex::new(None));
+    let loop_fut = h.serve_with(
+        &reach,
+        CancellationToken::new(),
+        Serve {
+            wake: Some(wake_rx),
+            repull_delay: Arc::clone(&repull_delay),
+            repulling: Arc::clone(&repulling),
+            ..Serve::default()
+        },
+    );
+
+    let driver = async {
+        eventually(
+            || h.mounted(),
+            Duration::from_secs(20),
+            "the mount to come up",
+        )
+        .await;
+        // Only the nudge's re-pull is slow: the boot's own is answered through the
+        // same wrapper as every other arm, so it would pin nothing.
+        *repull_delay.lock().unwrap() = Some(REPULL_DELAY);
+        wake_tx.send(()).await.expect("nudge the loop");
+        eventually(
+            || repulling.load(Ordering::SeqCst),
+            Duration::from_secs(10),
+            "the loop's re-pull to be out",
+        )
+        .await;
+
+        let listing = std::time::Instant::now();
+        let names = ls(&h.root).await;
+        // Timed on the wall clock: a loop held up on this thread holds `eventually` up too.
+        let took = listing.elapsed();
+        eprintln!("[measure] the root listed in {took:?} while the re-pull was out");
+        assert!(
+            names.contains(&"cloud.txt".to_string()),
+            "the placeholder is listed: {names:?}"
+        );
+        assert!(
+            took < Duration::from_secs(5),
+            "the root lists at once while the loop re-pulls, not after {took:?}: the loop answers \
+             the mount across the re-pull"
+        );
     };
 
     drive_until_asserted(loop_fut, driver).await;

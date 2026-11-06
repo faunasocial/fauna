@@ -44,9 +44,21 @@ import Foundation
 // absolutes: the counters are process-wide by contract and deliberately not
 // cleared between tests (`SessionGeneration.count`), so an absolute expectation
 // here would be an order-dependent lie.
+//
+// `.sharedKeychain` because `.serialized` orders only THIS suite's cases, and
+// the re-auth cases drive `AccountReauth` through the process-wide
+// `FAUNA_E2E_CREDENTIAL_DIR`, which `KeychainE2EFileBackingTests` and
+// `KeychainDurableDeleteRollbackTests` also `setenv`/`unsetenv` — in parallel,
+// under that lock. Unlocked here, a sibling's `unsetenv` (or its repoint) could
+// land between `withVerdictDir`'s `setenv` and the gate's `Task` reading the
+// variable, so the approve arm read no verdict (or the sibling's dir) and
+// declined or fell through to a real `LAContext` — the 2026-11-03 full-run red
+// of `theApprovedArmDispatchesBeforeItCounts` (all four expectations, green
+// alone). No other test drives the gesture counter, so the delta read itself
+// was never the race. Every writer of that variable now holds the one lock.
 @MainActor
 @Suite("Convention 14 counter observables (session generation + switch gate)",
-       .serialized, .timeLimit(.minutes(1)))
+       .serialized, .sharedKeychain, .timeLimit(.minutes(1)))
 struct AutomationCountersTests {
     /// A non-active account entry the switcher will actually route: a fresh VM
     /// has `activeActorId == nil`, so `isActive` is false for any id.

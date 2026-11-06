@@ -21,7 +21,7 @@ Deno.test('a restored answer joins its parts and closes the form', () => {
   expect(r.kind === 'notice', JSON.stringify(r));
   if (r.kind !== 'notice') return;
   expect(r.closesForm, 'a restored outcome closes the form');
-  expect(r.text.includes('Restored 3') && r.text.includes('2 came back sealed'), r.text);
+  expect(r.text.includes('Restored 3') && r.text.includes('2 came back still encrypted'), r.text);
   expect(!r.text.includes('nests.'), `no raw key: ${r.text}`);
 });
 

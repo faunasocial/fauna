@@ -119,7 +119,10 @@ impl ContactsCache {
     /// ([`fauna_core::format::peer_display_label`]) over this projection's
     /// nickname, so no surface resolves a person's name itself. `display_name`
     /// and `handle` are whatever public name the surface holds for them
-    /// (`None` where it holds none). **Only for a surface keyed on the id the
+    /// (`None` where it holds none); a surface holding no handle gets the
+    /// contact roster's ([`Self::roster_handle`]), so a contact the account
+    /// knows by handle never falls to the short id (`value-formatting.md`
+    /// § Peer display label). **Only for a surface keyed on the id the
     /// overlay is about** — roster row, knock sender, Profile header, feed and
     /// subscription author; member chips and message senders take their names
     /// from the conversations snapshot, which applies the paint gate
@@ -130,12 +133,55 @@ impl ContactsCache {
         handle: Option<&str>,
         actor_id_hex: &str,
     ) -> PeerLabel {
+        let roster_handle = match handle {
+            Some(_) => None,
+            None => self.roster_handle(actor_id_hex),
+        };
         peer_display_label(
             self.nickname(actor_id_hex).as_deref(),
             display_name,
-            handle,
+            handle.or(roster_handle.as_deref()),
             actor_id_hex,
         )
+    }
+
+    /// The handle the contact roster holds for `actor_id_hex` — bare, as the
+    /// roster row paints it — when it holds a non-empty one.
+    pub fn roster_handle(&self, actor_id_hex: &str) -> Option<String> {
+        self.roster
+            .read()
+            .unwrap()
+            .iter()
+            .find(|e| e.actor_id_hex.eq_ignore_ascii_case(actor_id_hex))
+            .and_then(|e| e.handle.clone())
+            .filter(|h| !h.trim().is_empty())
+    }
+
+    /// The roster's Fauna address for `actor_id_hex`, spelled as a handled
+    /// participant displays (`handle@domain` when the nest knows both, else
+    /// the bare handle); `None` when the roster holds no handle for them. What
+    /// the conversations snapshot names a handle-less Fauna sender, member or
+    /// thread label by.
+    pub fn roster_address(&self, actor_id_hex: &str) -> Option<TypedAddress> {
+        let roster = self.roster.read().unwrap();
+        let e = roster
+            .iter()
+            .find(|e| e.actor_id_hex.eq_ignore_ascii_case(actor_id_hex))?;
+        let actor_id = fauna_core::identity::ActorId::from_hex(&e.actor_id_hex).ok()?;
+        let handle = roster_spelling(e)?;
+        Some(TypedAddress::Fauna { handle, actor_id })
+    }
+
+    /// What the viewer calls `actor_id_hex` when this projection knows them —
+    /// by a nickname or a roster handle — else `None`, so the surface keeps
+    /// the name it already holds (a fauna-native notification row's
+    /// `{sender}`, the nest's 8-hex prefix: `behavior/notifications.md`
+    /// § Localized body).
+    pub fn known_peer_label(&self, actor_id_hex: &str) -> Option<String> {
+        if self.nickname(actor_id_hex).is_none() && self.roster_handle(actor_id_hex).is_none() {
+            return None;
+        }
+        Some(self.peer_label(None, None, actor_id_hex).primary)
     }
 
     /// What a subscription row calls its creator: the viewer's nickname for
@@ -233,11 +279,7 @@ impl ContactsCache {
                 let Ok(actor_id) = fauna_core::identity::ActorId::from_hex(&e.actor_id_hex) else {
                     continue;
                 };
-                let handle = match (e.handle.as_deref(), e.domain.as_deref()) {
-                    (Some(h), Some(d)) if !h.is_empty() && !d.is_empty() => format!("{h}@{d}"),
-                    (Some(h), _) => h.to_string(),
-                    _ => String::new(),
-                };
+                let handle = roster_spelling(e).unwrap_or_default();
                 let address = TypedAddress::Fauna { handle, actor_id };
                 let spelled = address.display();
                 if !self.matches_filter(
@@ -256,6 +298,16 @@ impl ContactsCache {
             }
         }
         out
+    }
+}
+
+/// A roster edge's Fauna handle spelling: `handle@domain` when the nest knows
+/// both, else the bare handle; `None` with no handle.
+fn roster_spelling(e: &RosterEntry) -> Option<String> {
+    match (e.handle.as_deref(), e.domain.as_deref()) {
+        (Some(h), Some(d)) if !h.is_empty() && !d.is_empty() => Some(format!("{h}@{d}")),
+        (Some(h), _) if !h.is_empty() => Some(h.to_string()),
+        _ => None,
     }
 }
 
@@ -347,5 +399,46 @@ mod tests {
         );
         assert_eq!(cache.subscription_author_label(None, &[0xcd; 32]), stranger);
         assert_eq!(cache.form(&stranger), OverlayForm::default());
+    }
+
+    /// A contact the roster knows by handle is named by it wherever a surface
+    /// holds no handle of its own (the OTHER Profile header, the knock row) —
+    /// never by the short id (`value-formatting.md` § Peer display label).
+    #[test]
+    fn a_roster_contact_is_named_by_its_handle_where_the_surface_holds_none() {
+        let cache = ContactsCache::default();
+        let tester = "ec".repeat(32);
+        let stranger = "cd".repeat(32);
+        cache.replace_roster(vec![RosterEntry {
+            actor_id_hex: tester.to_uppercase(),
+            handle: Some("tester".into()),
+            domain: Some("nest.test".into()),
+            status: "accepted".into(),
+        }]);
+
+        assert_eq!(cache.peer_label(None, None, &tester).primary, "tester");
+        assert_eq!(cache.roster_handle(&tester).as_deref(), Some("tester"));
+        let spelled = cache.roster_address(&tester).map(|a| a.display());
+        assert_eq!(spelled, Some(["tester", "nest.test"].join("@")));
+        // The surface's own handle and display name still win.
+        assert_eq!(
+            cache.peer_label(None, Some("other"), &tester).primary,
+            "other"
+        );
+        assert_eq!(
+            cache.peer_label(Some("Tess"), None, &tester).primary,
+            "Tess"
+        );
+        // Unknown to the roster: the short id, and no known label.
+        assert_eq!(
+            cache.peer_label(None, None, &stranger).primary,
+            fauna_core::format::short_id(&stranger)
+        );
+        assert_eq!(cache.roster_address(&stranger), None);
+        assert_eq!(cache.known_peer_label(&stranger), None);
+        assert_eq!(cache.known_peer_label(&tester).as_deref(), Some("tester"));
+        // A nickname alone makes the person known.
+        cache.replace(BTreeMap::from([(stranger.clone(), with_nick(Some("Mum")))]));
+        assert_eq!(cache.known_peer_label(&stranger).as_deref(), Some("Mum"));
     }
 }

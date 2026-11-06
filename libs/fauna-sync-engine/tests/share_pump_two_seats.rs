@@ -31,7 +31,8 @@ use fauna_sync_engine::db::SyncDb;
 use fauna_sync_engine::share_body::TreeBodySource;
 use fauna_sync_engine::share_landing::Landing;
 use fauna_sync_engine::share_pump::{
-    ShareIngestDoor, ShareIngestSummary, SharedSetSpec, pull_set_from_peer, refresh_serve_sources,
+    ShareIngestDoor, ShareIngestSummary, SharedSetSpec, pull_set_from_peer, pull_target,
+    refresh_serve_sources,
 };
 use fauna_transport::testing::{MemTransport, OnPath, PathCell, await_listening};
 use fauna_transport::{EndpointKey, NestPath, PathCandidates, PathKind, PeerTransport};
@@ -317,6 +318,9 @@ struct HolidaySeats {
     /// Bob's resident loop — deliberately !Send, so it is raced in-task
     /// against each pump ([`Self::pull`]).
     loop_fut: Pin<Box<dyn Future<Output = ()>>>,
+    /// The in-memory network both seats listen on — a test takes Alice's
+    /// seat off it to make her unreachable ([`Self::take_alice_offline`]).
+    listeners: fauna_transport::testing::Listeners,
 }
 
 async fn holiday_seats(bob_path: Option<PathCell>) -> HolidaySeats {
@@ -329,6 +333,17 @@ async fn holiday_seats_claiming(
     bob_path: Option<PathCell>,
     claimed_size: Option<i64>,
 ) -> HolidaySeats {
+    holiday_seats_with(bob_path, claimed_size, 0).await
+}
+
+/// [`holiday_seats`] whose page carries `extra_notes` further small files
+/// (`note-<n>.txt`, seqs 42..) behind the holiday file, so the page holds
+/// more than one body.
+async fn holiday_seats_with(
+    bob_path: Option<PathCell>,
+    claimed_size: Option<i64>,
+    extra_notes: usize,
+) -> HolidaySeats {
     let listeners = fauna_transport::testing::listeners();
 
     // ── Alice's seat: a recorded, sealed, multi-chunk file + retention, and
@@ -338,7 +353,14 @@ async fn holiday_seats_claiming(
         .map(|i| ((i.wrapping_mul(37) ^ (i / 239)) % 251) as u8)
         .collect();
     std::fs::write(alice_dir.path().join("holiday.mp4"), &bytes).unwrap();
-    let sealed = fauna_sync_engine::seal::seal_blob(&bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = fauna_sync_engine::seal::seal_blob(
+        &bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
     assert!(
         sealed.manifest.chunk_hashes.len() >= 2,
         "the fixture must be multi-chunk (ranged pulls are what make the leg real)"
@@ -356,7 +378,7 @@ async fn holiday_seats_claiming(
             size_bytes: claimed_size.unwrap_or(bytes.len() as i64),
             change_type: "create".to_string(),
             created_at: 1_700_000_000_000,
-            content_key_version: Some(1),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: None,
@@ -369,9 +391,47 @@ async fn holiday_seats_claiming(
             &hex::encode(sealed.manifest_hash.digest()),
             &sealed.manifest_bytes,
             "holiday.mp4",
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
+        for n in 0..extra_notes {
+            let name = format!("note-{n}.txt");
+            let note = format!("note body {n}").into_bytes();
+            std::fs::write(alice_dir.path().join(&name), &note).unwrap();
+            let sealed_note = fauna_sync_engine::seal::seal_blob(
+                &note,
+                Some((
+                    CONTENT_KEY,
+                    Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                )),
+            )
+            .unwrap();
+            db.retain_own_change(&signed_by_alice(fauna_sync_engine::db::OwnChangeRow {
+                seq: Some(42 + n as i64),
+                path: name.clone(),
+                path_hash: hex::encode(fauna_core::sync::path_hash(&name)),
+                path_sealed: None,
+                manifest_hash: Some(hex::encode(sealed_note.manifest_hash.digest())),
+                size_bytes: note.len() as i64,
+                change_type: "create".to_string(),
+                created_at: 1_700_000_000_000,
+                content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
+                thumbnail_hash: None,
+                derived_through: None,
+                is_resolution: None,
+                author_actor_id: alice().actor_id().to_hex(),
+                device_id: "d2".repeat(32),
+                ..Default::default()
+            }))
+            .unwrap();
+            db.retain_manifest(
+                &hex::encode(sealed_note.manifest_hash.digest()),
+                &sealed_note.manifest_bytes,
+                &name,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            )
+            .unwrap();
+        }
     }
 
     let alice_node = bind_seat(&listeners, &alice()).await;
@@ -384,7 +444,7 @@ async fn holiday_seats_claiming(
             db_path: alice_db_path.clone(),
             body: TreeBodySource::shared(alice_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         }],
     );
     assert_eq!(routed, 1);
@@ -425,6 +485,7 @@ async fn holiday_seats_claiming(
         loop_fut: Box::pin(async move {
             let _ = resident.await;
         }),
+        listeners,
     }
 }
 
@@ -443,7 +504,7 @@ impl HolidaySeats {
             db_path: self.bob_db_path.clone(),
             body: TreeBodySource::shared(self.bob_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         };
         let target = PeerDialTarget {
             node_id: alice().actor_id().0,
@@ -471,9 +532,98 @@ impl HolidaySeats {
         }
     }
 
+    /// The pass's form of [`Self::pull`] (`share_pump::pull_target`): always
+    /// one outcome, a failure kept on it.
+    async fn pull_as_the_pass_does(
+        &mut self,
+        ledger: &mut fauna_sync_engine::share_pump::TransferUsageLedger,
+    ) -> fauna_sync_engine::share_pump::SetPullOutcome {
+        let spec = SharedSetSpec {
+            folder: "holiday".to_string(),
+            folder_id: "local:1".to_string(),
+            set_id: SET,
+            db_path: self.bob_db_path.clone(),
+            body: TreeBodySource::shared(self.bob_dir.path()),
+            landing: Landing::Resident,
+            content_keys: keys().into(),
+        };
+        let target = PeerDialTarget {
+            node_id: alice().actor_id().0,
+            candidates: PathCandidates::default(),
+            relay_url: None,
+        };
+        let pump = pull_target(
+            &self.bob_node,
+            &self.membership,
+            &self.door,
+            &[SET],
+            &spec,
+            &target,
+            self.spool_root.path(),
+            &self.policy,
+            ledger,
+            TODAY,
+            NestPath::Reachable,
+        );
+        tokio::select! {
+            _ = &mut self.loop_fut => panic!("the resident loop must not exit"),
+            got = tokio::time::timeout(PUMP_CEILING, pump) => got
+                .expect("the pull must finish well inside the ceiling"),
+        }
+    }
+
+    /// Alice's device leaves the network: a dial to her finds no path.
+    fn take_alice_offline(&self) {
+        self.listeners.lock().unwrap().remove(&alice().actor_id().0);
+    }
+
     fn landed(&self) -> Option<Vec<u8>> {
         std::fs::read(self.bob_dir.path().join("holiday.mp4")).ok()
     }
+}
+
+/// A pass that cannot reach a member keeps that member's row (`p2p.md`
+/// § Cross-user shared-set transfer → *The transfer row of a pull that
+/// failed*): after a pass that delivered, Alice goes offline, and the next
+/// pass still yields one outcome for the same `(set, peer)` — folder and peer
+/// named, marked failed before admission, so it reads unreachable.
+#[tokio::test]
+async fn an_unreachable_member_keeps_their_row_after_a_delivering_pass() {
+    let mut seats = holiday_seats(None).await;
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let delivered = seats.pull_as_the_pass_does(&mut ledger).await;
+    assert!(!delivered.failed, "{delivered:?}");
+    assert!(
+        delivered.admitted && delivered.materialized == 1,
+        "{delivered:?}"
+    );
+
+    seats.take_alice_offline();
+    let unreachable = seats.pull_as_the_pass_does(&mut ledger).await;
+    assert_eq!(
+        (unreachable.folder.as_str(), unreachable.peer_hex.as_str()),
+        (delivered.folder.as_str(), delivered.peer_hex.as_str()),
+        "the same (set, peer) row survives the failed pass"
+    );
+    assert!(unreachable.failed, "{unreachable:?}");
+    assert!(
+        !unreachable.admitted,
+        "the dial never connected: {unreachable:?}"
+    );
+    assert_eq!(
+        (
+            unreachable.pages,
+            unreachable.rows_accepted,
+            unreachable.materialized
+        ),
+        (0, 0, 0),
+        "a failed dial moved nothing this pass"
+    );
+    assert_eq!(
+        fauna_sync_engine::share_glue::transfer_state_label(&unreachable).key,
+        "folders.share_transfer_state_unreachable"
+    );
 }
 
 #[tokio::test]
@@ -643,6 +793,80 @@ async fn a_relayed_seat_leaves_the_bodies_to_a_reachable_nest() {
     assert_eq!(seats.landed().as_deref(), Some(&seats.bytes[..]));
 }
 
+/// `p2p.md` § The relay, ruling 4, on the share pump, mid-page:
+/// the byte gate is read before EACH body, through the closure `pull_into`
+/// hands `spool_planned` (`bytes_may_ride(channel.path(), nest)`). A direct
+/// connection that turns relayed after the page's first body leaves the
+/// remaining bodies to the nest path: counted in `relay_deferred`, never
+/// landed, the cursor held below the first of them. The flip is made by a
+/// watcher that sees the first body's chunks reach the spool, so it lands
+/// inside the page whatever the timing. Red when `pull_into` passes
+/// `&|| true`, or reads `channel.path()` once before the loop.
+#[tokio::test]
+async fn a_path_flip_mid_page_defers_the_remaining_bodies_through_the_pump() {
+    let path = PathCell::new(PathKind::Lan);
+    let mut seats = holiday_seats_with(Some(path.clone()), None, 2).await;
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let spool_root = seats.spool_root.path().to_path_buf();
+    let flip = path.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            let seen = std::fs::read_dir(&spool_root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|set| std::fs::read_dir(set.path().join("chunks")).ok())
+                .any(|mut chunks| chunks.next().is_some());
+            if seen {
+                flip.set(PathKind::Relay);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_micros(200)).await;
+        }
+    });
+
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    watcher.await.unwrap();
+    assert_eq!(path.get(), PathKind::Relay, "the flip happened mid-pull");
+    assert!(outcome.admitted, "{outcome:?}");
+    assert_eq!(
+        outcome.rows_accepted, 3,
+        "the page's rows are walked: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.relay_deferred, 2,
+        "the two bodies behind the first are deferred: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.materialized, 1,
+        "only the first body landed: {outcome:?}"
+    );
+    assert_eq!(seats.landed().as_deref(), Some(&seats.bytes[..]));
+    for n in 0..2 {
+        assert!(
+            !seats.bob_dir.path().join(format!("note-{n}.txt")).exists(),
+            "a deferred body must not land (note-{n})"
+        );
+    }
+    assert!(
+        outcome.cursor < 42,
+        "the cursor stays below the first deferred row: {outcome:?}"
+    );
+
+    path.set(PathKind::Lan);
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    assert_eq!(outcome.relay_deferred, 0, "{outcome:?}");
+    assert_eq!(outcome.cursor, 43, "{outcome:?}");
+    for n in 0..2 {
+        assert_eq!(
+            std::fs::read(seats.bob_dir.path().join(format!("note-{n}.txt"))).ok(),
+            Some(format!("note body {n}").into_bytes()),
+            "the next direct pull lands note-{n}"
+        );
+    }
+}
+
 fn one_mib_cap() -> Option<fauna_core::feature_gate::BoundSource> {
     Some(fauna_core::feature_gate::BoundSource {
         limit: 1024 * 1024,
@@ -751,7 +975,7 @@ async fn a_stranger_is_refused_at_admission_and_pulls_nothing() {
             db_path: alice_db_path,
             body: TreeBodySource::shared(alice_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         }],
     );
 
@@ -786,7 +1010,7 @@ async fn a_stranger_is_refused_at_admission_and_pulls_nothing() {
             db_path: mallory_db,
             body: TreeBodySource::shared(mallory_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         },
         &PeerDialTarget {
             node_id: alice().actor_id().0,
@@ -803,7 +1027,7 @@ async fn a_stranger_is_refused_at_admission_and_pulls_nothing() {
 
     // Alice's serve side refuses the admit exchange itself for an actor her
     // roster does not vouch for — the pull errors at admission (the pump's
-    // pull_pass logs-and-skips exactly this), the door never opened
+    // pull_pass keeps as a failed, unreachable row), the door never opened
     // (ClosedDoor panics if it did), and no bytes left her seat.
     assert!(refused.is_err(), "a stranger's admission must not succeed");
     assert!(
@@ -830,7 +1054,14 @@ async fn the_share_probe_reads_a_members_set_and_a_stranger_gets_nothing() {
     let bytes = b"the probe's payload".to_vec();
     let alice_dir = tempfile::tempdir().unwrap();
     std::fs::write(alice_dir.path().join(PATH), &bytes).unwrap();
-    let sealed = fauna_sync_engine::seal::seal_blob(&bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = fauna_sync_engine::seal::seal_blob(
+        &bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
     let manifest_hex = hex::encode(sealed.manifest_hash.digest());
     let alice_db_path = alice_dir.path().join("fs-holiday.db");
     {
@@ -844,7 +1075,7 @@ async fn the_share_probe_reads_a_members_set_and_a_stranger_gets_nothing() {
             size_bytes: bytes.len() as i64,
             change_type: "create".to_string(),
             created_at: 1_700_000_000_000,
-            content_key_version: Some(1),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: None,
@@ -853,8 +1084,13 @@ async fn the_share_probe_reads_a_members_set_and_a_stranger_gets_nothing() {
             ..Default::default()
         }))
         .unwrap();
-        db.retain_manifest(&manifest_hex, &sealed.manifest_bytes, PATH, Some(1))
-            .unwrap();
+        db.retain_manifest(
+            &manifest_hex,
+            &sealed.manifest_bytes,
+            PATH,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )
+        .unwrap();
     }
     let alice_node = bind_seat(&listeners, &alice()).await;
     refresh_serve_sources(
@@ -866,7 +1102,7 @@ async fn the_share_probe_reads_a_members_set_and_a_stranger_gets_nothing() {
             db_path: alice_db_path,
             body: TreeBodySource::shared(alice_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         }],
     );
     let alice_code = PeerCode {
@@ -950,7 +1186,14 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bytes: Vec<u8> = b"authored in the cabin, with the nest unreachable\n".to_vec();
     std::fs::write(alice_dir.path().join("cabin-draft.txt"), &bytes).unwrap();
-    let sealed = fauna_sync_engine::seal::seal_blob(&bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = fauna_sync_engine::seal::seal_blob(
+        &bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
 
     let alice_db_path = alice_dir.path().join("fs-holiday.db");
     {
@@ -966,7 +1209,7 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
             size_bytes: bytes.len() as i64,
             change_type: "create".to_string(),
             created_at: 1_700_000_500_000,
-            content_key_version: Some(1),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: None,
@@ -979,7 +1222,7 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
             &hex::encode(sealed.manifest_hash.digest()),
             &sealed.manifest_bytes,
             "cabin-draft.txt",
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
     }
@@ -994,7 +1237,7 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
             db_path: alice_db_path.clone(),
             body: TreeBodySource::shared(alice_dir.path()),
             landing: Landing::Resident,
-            content_keys: keys(),
+            content_keys: keys().into(),
         }],
     );
     assert_eq!(routed, 1);
@@ -1036,7 +1279,7 @@ async fn an_offline_authored_pending_file_arrives_at_an_admitted_member() {
         db_path: bob_db_path.clone(),
         body: TreeBodySource::shared(bob_dir.path()),
         landing: Landing::Resident,
-        content_keys: keys(),
+        content_keys: keys().into(),
     };
     let alice_target = PeerDialTarget {
         node_id: alice().actor_id().0,
@@ -1119,7 +1362,14 @@ async fn an_uncached_writer_is_refused_wholesale_and_looks_like_a_quiet_pass() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bytes: Vec<u8> = b"served, but never attributable\n".to_vec();
     std::fs::write(alice_dir.path().join("cabin-draft.txt"), &bytes).unwrap();
-    let sealed = fauna_sync_engine::seal::seal_blob(&bytes, Some((CONTENT_KEY, Some(1)))).unwrap();
+    let sealed = fauna_sync_engine::seal::seal_blob(
+        &bytes,
+        Some((
+            CONTENT_KEY,
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
+        )),
+    )
+    .unwrap();
 
     let alice_db_path = alice_dir.path().join("fs-holiday.db");
     {
@@ -1133,7 +1383,7 @@ async fn an_uncached_writer_is_refused_wholesale_and_looks_like_a_quiet_pass() {
             size_bytes: bytes.len() as i64,
             change_type: "create".to_string(),
             created_at: 1_700_000_500_000,
-            content_key_version: Some(1),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
             thumbnail_hash: None,
             derived_through: None,
             is_resolution: None,
@@ -1146,7 +1396,7 @@ async fn an_uncached_writer_is_refused_wholesale_and_looks_like_a_quiet_pass() {
             &hex::encode(sealed.manifest_hash.digest()),
             &sealed.manifest_bytes,
             "cabin-draft.txt",
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
     }
@@ -1162,7 +1412,7 @@ async fn an_uncached_writer_is_refused_wholesale_and_looks_like_a_quiet_pass() {
                 db_path: alice_db_path.clone(),
                 body: TreeBodySource::shared(alice_dir.path()),
                 landing: Landing::Resident,
-                content_keys: keys(),
+                content_keys: keys().into(),
             }],
         ),
         1
@@ -1200,7 +1450,7 @@ async fn an_uncached_writer_is_refused_wholesale_and_looks_like_a_quiet_pass() {
         db_path: bob_db_path.clone(),
         body: TreeBodySource::shared(bob_dir.path()),
         landing: Landing::Resident,
-        content_keys: keys(),
+        content_keys: keys().into(),
     };
     let alice_target = PeerDialTarget {
         node_id: alice().actor_id().0,
@@ -1377,7 +1627,7 @@ fn own_row(
         size_bytes: size as i64,
         change_type: "create".to_string(),
         created_at: 1_700_000_500_000,
-        content_key_version: Some(1),
+        content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
         thumbnail_hash: None,
         derived_through: None,
         is_resolution: None,
@@ -1415,7 +1665,14 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
     std::fs::write(alice_dir.path().join("recorded.txt"), &recorded).unwrap();
     std::fs::write(alice_dir.path().join("cabin-draft.txt"), &draft).unwrap();
     let seal = |bytes: &[u8]| {
-        fauna_sync_engine::seal::seal_blob(bytes, Some((CONTENT_KEY, Some(1)))).unwrap()
+        fauna_sync_engine::seal::seal_blob(
+            bytes,
+            Some((
+                CONTENT_KEY,
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
+            )),
+        )
+        .unwrap()
     };
     let (recorded_sealed, draft_sealed) = (seal(&recorded), seal(&draft));
     let alice_db_path = alice_dir.path().join("fs-holiday.db");
@@ -1443,7 +1700,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
                 &hex::encode(sealed.manifest_hash.digest()),
                 &sealed.manifest_bytes,
                 path,
-                Some(1),
+                Some(fauna_core::blob_seal::SealStamp::Version(1)),
             )
             .unwrap();
         }
@@ -1459,7 +1716,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
                 db_path: alice_db_path.clone(),
                 body: TreeBodySource::shared(alice_dir.path()),
                 landing: Landing::Resident,
-                content_keys: keys(),
+                content_keys: keys().into(),
             }],
         ),
         1
@@ -1502,7 +1759,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
         landing: Landing::OnDemand {
             kept_root: kept.clone(),
         },
-        content_keys: keys(),
+        content_keys: keys().into(),
     };
     let alice_target = PeerDialTarget {
         node_id: alice().actor_id().0,
@@ -1677,7 +1934,7 @@ async fn an_on_demand_seat_lands_the_unsequenced_body_and_serves_it_to_a_third_p
         db_path: carol_db_path.clone(),
         body: TreeBodySource::shared(carol_dir.path()),
         landing: Landing::Resident,
-        content_keys: keys(),
+        content_keys: keys().into(),
     };
     let bob_target = PeerDialTarget {
         node_id: bob().actor_id().0,

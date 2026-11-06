@@ -514,7 +514,11 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
   `conversations_select_message` test-only command that drives the identical
   `ConversationsVM.selectThreadAndMessage` call a real `SearchResultsView` row
   tap makes: `test_conversations_selected_message.py` green `--app ios` on a
-  real booted simulator. **windows closed both
+  real booted simulator. That seam left the row tap itself unwitnessed, and
+  the tap did not open the thread: iOS's single-pane stack follows its own
+  path, and the detail's plain select dropped the message. Both fixed 2026-10-31
+  and witnessed by the row tap, with a desktop seat as the index builder:
+  `test_search_local_index_phone.py` green `--app ios`. **windows closed both
   halves 2026-08-26** — its
   `Mail` arm calls `ConversationsViewModel.OpenThreadAndMessage` →
   `SelectThreadAndMessage`, and `DmMessageBubble` paints the `selected`
@@ -523,7 +527,7 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
   witness became possible 2026-08-31, when windows registered its local search
   arm (the registration bullet above): `test_search_local_index.py` now lists
   `windows` among the apps its selected-message walk exercises, so a
-  `Mail`-class row can reach the result list in a Windows test run; the paint
+  `Mail`-class row can reach the result list in a windows test run; the paint
   itself is exercised by construction (every bubble render path always calls
   `Bind`) as well as by that live `SearchNav::Mail` hit. web never reaches
   either half — `SearchNav::Mail` cannot occur on web by construction

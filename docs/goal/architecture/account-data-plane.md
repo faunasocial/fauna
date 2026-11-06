@@ -655,7 +655,7 @@ roles, and only one of them is permanently special.
    and expensive to retrofit after. The same seat machinery is
    instantiated **per MLS group** for the conversation delivery seat —
    holdable by a member device (PQ-1's messaging half, design
-   2026-08-17; owner [`../behavior/p2p.md`](../behavior/p2p.md)
+   2026-08-17; owner [`../behavior/p2p.md`](../behavior/p2p-shared-set.md)
    § Offline share initiation).
 3. **Always-on internet endpoint roles** — the mail bridges (MX),
    federation, public serving, the ATProto PDS, the relay sidecar: a
@@ -725,7 +725,12 @@ part of the plane itself:
    (need the existing federation-aware per-post retraction, not a raw purge),
    financial/entitlement records (payment/subscription tables — retention needs
    its own ruling), and identity-lifecycle audit trails (`actor_successions`,
-   `handle_cooldowns`) that must outlive the actor by design. A third verdict,
+   `handle_cooldowns`) that must outlive the actor by design. **No `Retain`
+   table has a retention sweep (2026-11-04):** a retained row has no fixed
+   end and lasts as long as the nest's own records do; and `handle_cooldowns`
+   is written only by `release_handle_with_cooldown`, which has no production
+   caller, so an account deletion leaves no cooldown row and the handle is
+   free at once. A third verdict,
    `Policy::Partial(reason)` (2026-09-21), is for a table where some rows must
    go and some must stay and the registry — one table, one column — cannot say
    which: the purge walk carries a hand-written predicate and a dedicated test
@@ -1404,13 +1409,17 @@ in-memory capstone proving begin→offer→accept→deliver→admit end to end.
 three `fauna.peer.share.ceremony.*` kinds on the share serve set,
 initiator-originated, first-contact admitted by the receive-act
 expectation, capstone re-proven over a real channel —
-[`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation →
+[`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation →
 *Built — the ceremony carriage* owns the mechanism + walk. *Built — the
 bind door (2026-08-17):* the listener composition with rule 7's brake made
 structural, plus the affordance's shared paint decision —
 [`../behavior/p2p.md`](../behavior/p2p.md) § Implementation status today
-owns it. *Still design-only:* group content-kind sealing (arrives with the
-`p2p-share` data plane as `GroupSealing::GenerationTip` registry rows) — the
+owns it. *Designed 2026-10-29; its plane half built the same day:* group
+content-kind sealing — the `GroupSealing::GenerationTip` seal path and the
+first kinds under it (`fauna.group.file`, `fauna.group.name`), the group
+set's whole shape —
+[`../behavior/group-set.md`](../behavior/group-set.md)
+§ Build design — the group set owns it, its status line there. The
 tui affordance itself (slice 4) landed 2026-08-18, both roles (below).
 Consumer chain: [`../behavior/p2p.md`](../behavior/p2p.md) § Offline share
 initiation (build split declared there).
@@ -1428,9 +1437,10 @@ scope-keyed tables under the `group:<scope-id-hex>` scope string
 plane's mechanics at the one ruled structural difference: entries seal
 (form v1) under the scope's `GroupMachinerySchedule` — possession of the
 birth-minted root — rather than the owner-`BackupKey` schedule;
-`GroupSealing::GenerationTip` is a registered seam whose write door refuses
-and whose v2 feed rows count `unopened` until group content-kind sealing
-lands. **Pull-only by construction**: no nest write kind exists for a group
+`GroupSealing::GenerationTip` kinds seal form v2 under the member's
+admissible, keyable group generation tip and refuse with none
+([`../behavior/group-set.md`](../behavior/group-set.md)
+§ Build design — the group set owns the arm). **Pull-only by construction**: no nest write kind exists for a group
 scope — the feed is the share serve set's relay pull (transport wiring:
 [`../behavior/p2p.md`](../behavior/p2p.md) § Cross-user shared-set
 transfer), so a write lands journal + entry + sealed relay row and the own
@@ -1459,13 +1469,13 @@ answers `None` for a scope with no birth row (or one that is another scope's —
 surface enforces: **the store is the listing's source, the ceremony record
 never is**, since a record whose rows never landed names a scope the device
 cannot read a byte of. Consumer + the affordance's own build state:
-[`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation →
+[`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation →
 *Built — the affordance, both roles*. The write side of these doors is now
 proven by a live ceremony too, not just unit and restart tests: the
 co-present dial's addressing gap is resolved, and the tier_3 two-seat journey
 drives a real dial through two real apps to the recipient's folders page
 listing the shared set — `adopt_group_rows` reached for real
-([`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation →
+([`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation →
 contract point 1, the addressing resolution + its proof). *Still open:* the
 share serve set does not yet serve a group scope's state-entry feed (the
 `p2p-share` workstream wires the transport this plane's walk already
@@ -2122,8 +2132,8 @@ pinned nest identity in hand — absent otherwise, never disabled;
 drive's arm (6) routes a nest-form accept to the hosting deposit
 (never a `custodies-held` fleet row — no host device serves or
 pulls), and the owner's facet refresh fetches staged receipts itself
-(`ingest_nest_receipts` rides `load_custody_facet`, the reconcile
-sweep's cadence precedent). Budget/stop rewrites route to whichever
+(`custody_ceremony::ingest_nest_receipts` rides `load_custody_facet`
+and web's `custodyFacetLoad`, the reconcile sweep's cadence precedent). Budget/stop rewrites route to whichever
 runtime row the accept's form owns. Covered by
 `test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored`
 (tier_3, both tui UIs: select → nest accept → hosting deposit → poked
@@ -2306,7 +2316,7 @@ seal/open + mint assembly (`fauna_mls::wrapped_blob::generation_wraps`
 AEAD's `(generation, device)` binding or at the commitment, both
 red-verified), the engine's **deposit-first** mint sequence + the
 seed-holding escrow-target publication
-(`fauna_sync_engine::generation_mint` — refuses precisely while no
+(`fauna_account_plane::generation_mint` — refuses precisely while no
 `fauna.state.escrow-target` row is published; the verified receipt is
 *input* to the returned mint/receipt rows, so an unescrowed generation
 is unrepresentable as its output), and the tier_3 chain over the real
@@ -2320,7 +2330,7 @@ gate bullet above, supersession + candidacy mutation-red-verified) —
 **and the writer door consumes it**: the boolean gate is REPLACED by the
 sealing-epoch dispatch (`fauna_sync_engine::account_state_plane` —
 `admit_origination` + the seal dispatch; the store seam + the writer's
-own-wrap opening are `fauna_sync_engine::generation_tip`). `Gen0` kinds
+own-wrap opening are `fauna_account_plane::generation_tip`). `Gen0` kinds
 — every delegable kind and the machinery kinds themselves — are
 admitted (machinery rows now write through an ordinary fleet-scope
 `put`); a `GenerationTip` origination resolves the tip and refuses only
@@ -2346,7 +2356,7 @@ the production re-staging of the door-less fixtures).
 first production consumer is proven end to end in
 `conformance_account_state_walk.rs` § step 7: two devices enroll through the
 door, a seed-holding surface publishes the escrow target, and
-`fauna_sync_engine::generation_mint` runs its deposit-first sequence against
+`fauna_account_plane::generation_mint` runs its deposit-first sequence against
 the **real** `fauna.generation.escrow.put` handler — so the receipt lifting
 the door is one the nest signed with its deployment identity, and the trust
 accepting it is that same pinned identity — after which

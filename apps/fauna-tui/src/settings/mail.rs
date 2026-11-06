@@ -57,6 +57,14 @@ pub struct MailState {
     /// actions makes Enable "Toggle → add-credential dialog → submit", and the
     /// inline reveal is the shape web/linux/windows/android already render.
     pub show_add_form: bool,
+    /// Which control opened the form, and so which action its submit
+    /// dispatches: the enable toggle → `EnableMail`, Add credential →
+    /// `AddCredential` (linux's `FormMode`). Never re-derived from the
+    /// snapshot's `enabled`: on a deployment serving CalDAV with mail off an
+    /// account's first Add credential is the read recipe, which `EnableMail`
+    /// would turn into an email enable (`mail-settings.md` § Layout & flow →
+    /// *CalDAV-only mailbox*).
+    pub form_enables_mail: bool,
     /// The `mail-add-credential-name-input` buffer — a local draft committed
     /// only on submit, like every other tui form buffer.
     pub name_input: String,
@@ -172,6 +180,15 @@ pub struct MailState {
     /// readout and the `mail-settings-over-quota-notice`. `None` until it
     /// resolves (nothing painted).
     pub quotas: Option<fauna_protocol::bridge_routing::GetMailQuotasReply>,
+    /// A draft the shared parser refused on commit (the Forwarding pair, the
+    /// automatic reply's message) — read back onto `error-message` by
+    /// `settings::page_error`, the Devices `enrollment_refusal` shape. It is
+    /// held here, not parked in `App::errors`, because every Settings
+    /// sub-section's clean read clears that one slot: a page hydrate or the
+    /// account read landing after the commit would wipe the refusal the user
+    /// was just shown. Cleared when the field is edited, when a commit's draft
+    /// passes, and on every visit (`reset_form`).
+    pub draft_refusal: Option<String>,
 }
 
 /// One nest-confirmed read of the page's per-account mail settings — the
@@ -336,6 +353,7 @@ impl MailState {
         self.show_disable_confirm = false;
         self.show_rotate_form = false;
         self.rotate_excluded.clear();
+        self.draft_refusal = None;
         self.reset_add_form_fields();
     }
 
@@ -382,12 +400,13 @@ impl MailState {
     }
 
     /// Open the add-credential inline reveal at its fresh defaults. Used by both
-    /// the enable toggle (first credential) and the add-credential button
-    /// (subsequent), so re-opening after an OAUTHBEARER token reveal or a
-    /// cancelled PLAIN entry always starts clean.
-    pub fn open_add_form(&mut self) {
+    /// the enable toggle (`enables_mail`) and the add-credential button, so
+    /// re-opening after an OAUTHBEARER token reveal or a cancelled PLAIN entry
+    /// always starts clean.
+    pub fn open_add_form(&mut self, enables_mail: bool) {
         self.reset_add_form_fields();
         self.show_add_form = true;
+        self.form_enables_mail = enables_mail;
         self.show_disable_confirm = false;
         self.show_rotate_form = false;
     }

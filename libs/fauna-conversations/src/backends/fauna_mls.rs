@@ -17,14 +17,14 @@
 
 use crate::address::{Rail, TypedAddress};
 use crate::backend::{
-    BackendError, ChannelCursor, CommitGate, ConvRpcError, ConversationsRpc, CustodyCeremonySink,
-    DomainEvidence, FolderCustodySink, FolderEnvelopeOwner, GroupReceptionKeys, HistoryPersist,
-    InboundBucket, MailFeed, ProviderPersist, RailBackend, RailInboundMessage, ResolveResult,
-    RoomCeremonyRpc, RoomGenerationReader, RoomPolicyEdit, RoomPolicyRebuild, RoomPrincipalKind,
-    RoomRosterEntry, RoomRosterRead, RoomRosterReader, RoomRosterReport, RoomRosterReportOutcome,
-    RoomRosterReporter, RoomSeams, RoomSearchPostReader, SchedulingSink, SelfAddress, SendOutcome,
-    ShareEndpointsSink, SiblingGroupAdopter, SuccessionWitness, WelcomeChannelKind,
-    classify_foreign_non_answer,
+    ArchiveSignalSink, BackendError, ChannelCursor, CommitGate, ConvRpcError, ConversationsRpc,
+    CustodyCeremonySink, DomainEvidence, FolderCustodySink, FolderEnvelopeOwner,
+    GroupReceptionKeys, HistoryPersist, InboundBucket, MailFeed, ProviderPersist, RailBackend,
+    RailInboundMessage, ResolveResult, RoomCeremonyRpc, RoomGenerationReader, RoomPolicyEdit,
+    RoomPolicyRebuild, RoomPrincipalKind, RoomRosterEntry, RoomRosterRead, RoomRosterReader,
+    RoomRosterReport, RoomRosterReportOutcome, RoomRosterReporter, RoomSeams, RoomSearchPostReader,
+    SchedulingSink, SelfAddress, SendOutcome, ShareEndpointsSink, SiblingGroupAdopter,
+    SuccessionWitness, WelcomeChannelKind, classify_foreign_non_answer,
 };
 use crate::capabilities::{ThreadCapabilities, derive_capabilities};
 use crate::compose::ComposeState;
@@ -917,6 +917,11 @@ pub struct FaunaMlsBackend {
     /// like [`Self::rewound_channels`]: it answers "has this *process* folded a
     /// commit since I last looked", which is the only question a barrier asks.
     folded_commits: Mutex<HashMap<ChannelId, u64>>,
+    /// Folder channels whose processed REMOVAL this session has already turned
+    /// into a share-endpoints drop ([`Self::drop_share_endpoints_if_evicted`]) —
+    /// RAM-only, so a relaunch drops once more, which heals a crash between the
+    /// merge and the drop (the store door answers 0 on a repeat).
+    evicted_endpoints_dropped: Mutex<HashSet<ChannelId>>,
     /// The **custody-ceremony ingest** seam ([`CustodyCeremonySink`], W8.4 (account-data-plane.md § Workstreams) —
     /// `account-data-plane.md` § Replica posture → *The custody grant +
     /// ceremony*): the inbound poll hands every
@@ -953,6 +958,29 @@ pub struct FaunaMlsBackend {
     /// that is a security signal, not a storage hiccup. Collapsing it into a
     /// custody counter would bury exactly the number worth watching.
     share_endpoints: CustodyPayloadTally,
+    /// Ingest seam for archive-link signals (`archive-import.md` § Linking
+    /// and merging (phase two), ruling 2): the inbound poll hands every
+    /// [`ChannelMessageBody::Archive`] record's verbatim bytes here as a
+    /// thread effect, never a bubble. Injected at login by the glue layer
+    /// (the archive-import machine's `link` module); **unset** ⇒ the record
+    /// is skipped and tallied, and the sender's re-driven pending sends
+    /// repeat it for a capable session. Set once via
+    /// [`Self::set_archive_signal_sink`].
+    archive_signal_sink: OnceLock<Arc<dyn ArchiveSignalSink>>,
+    /// What this session's inbound poll did with archive-link signals — its
+    /// own tally, for the `share_endpoints` reason: `uncaptured` here is a
+    /// refused sender or an unwritable folder, a different fact from either
+    /// custody counter.
+    archive_signals: CustodyPayloadTally,
+    /// Pair channels [`archive_channel_for`] bootstrapped whose **birth
+    /// report** (`conversation-rooms.md` § The floor roster → *End-to-end
+    /// rooms*) is still owed. A 1:1's creator reports its roster once, after
+    /// the channel's first post — the post registers this actor on the
+    /// routing roster the report door checks — and on a channel born for a
+    /// signal that first post is [`Self::send_archive_signal`]'s, not a chat
+    /// send's. RAM-only: a relaunch between the bootstrap and the first post
+    /// loses only the report, the window a chat bootstrap has too.
+    unreported_births: Mutex<std::collections::HashSet<ChannelId>>,
 }
 
 /// The receive-side tally of in-group succession statements, session-scoped.
@@ -1325,11 +1353,15 @@ impl FaunaMlsBackend {
             parked_folder_successions: Mutex::new(HashMap::new()),
             folder_park_loaded: Mutex::new(HashSet::new()),
             folded_commits: Mutex::new(HashMap::new()),
+            evicted_endpoints_dropped: Mutex::new(HashSet::new()),
             custody_sink: OnceLock::new(),
             custody_payloads: CustodyPayloadTally::default(),
             custody_receipts: CustodyPayloadTally::default(),
             share_endpoints_sink: OnceLock::new(),
             share_endpoints: CustodyPayloadTally::default(),
+            archive_signal_sink: OnceLock::new(),
+            archive_signals: CustodyPayloadTally::default(),
+            unreported_births: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -4940,6 +4972,62 @@ impl FaunaMlsBackend {
         Ok(())
     }
 
+    /// Register the archive-link ingest seam ([`ArchiveSignalSink`] —
+    /// `archive-import.md` § Linking and merging (phase two), ruling 2).
+    /// Injected once at login by the glue layer, beside the custody sink;
+    /// idempotent (the `OnceLock` keeps the first). A backend with none skips
+    /// + tallies every signal.
+    pub fn set_archive_signal_sink(&self, sink: Arc<dyn ArchiveSignalSink>) {
+        let _ = self.archive_signal_sink.set(sink);
+    }
+
+    /// The registered archive-link sink, if any — consumed by
+    /// [`poll_inbound_conv`]'s archive arm.
+    fn archive_signal_sink(&self) -> Option<&Arc<dyn ArchiveSignalSink>> {
+        self.archive_signal_sink.get()
+    }
+
+    /// What this session's inbound poll did with archive-link signals — the
+    /// same shape as [`Self::custody_payload_counts`]. `uncaptured` means the
+    /// sink refused the sender or could not write the folder.
+    pub fn archive_signal_counts(&self) -> CustodyPayloadCounts {
+        self.archive_signals.snapshot()
+    }
+
+    /// Post one archive-link signal (the verbatim canonical `ArchiveSignal`
+    /// bytes) to a pair channel — [`archive_channel_for`] names it — sealed
+    /// as a [`ChannelMessageBody::Archive`] application message. The
+    /// `send_custody_payload` shape, and like it never a user "send": no
+    /// bubble on either side, no thread activity. When the channel was
+    /// bootstrapped for a signal, this first post is what registers this
+    /// actor on its routing roster, so the creator's birth report follows it
+    /// here.
+    ///
+    /// ⚠ **"no Commit" describes the BODY, not the path** — every door here
+    /// funnels through [`Self::post_app_message`], whose device-owned-epoch
+    /// takeover may Commit first (see [`Self::send_custody_payload`]).
+    pub async fn send_archive_signal(
+        &self,
+        channel_hex: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), BackendError> {
+        let channel_id = ChannelId::from_hex(channel_hex)
+            .map_err(|e| BackendError::Internal(format!("archive signal channel id: {e}")))?;
+        self.post_app_message(&channel_id, ChannelMessageBody::Archive(bytes), Vec::new())
+            .await?;
+        if self.take_unreported_birth(&channel_id) {
+            self.report_roster(&channel_id, None).await;
+        }
+        Ok(())
+    }
+
+    /// Whether `channel_id` was bootstrapped for a signal and still owes its
+    /// birth report — consumed, so the report runs once, after whichever post
+    /// comes first.
+    fn take_unreported_birth(&self, channel_id: &ChannelId) -> bool {
+        self.unreported_births.lock().unwrap().remove(channel_id)
+    }
+
     /// What this session's inbound poll did with custody-ceremony payloads
     /// — see [`CustodyPayloadCounts`] for how to read it.
     pub fn custody_payload_counts(&self) -> CustodyPayloadCounts {
@@ -5554,13 +5642,47 @@ impl FaunaMlsBackend {
     /// (the foreign twin of the roster self-drop the caller pairs this with —
     /// `fauna_client_folders::leave_share` owns the sequence). The record drop
     /// is best-effort and a no-op for a same-nest set (no record exists).
+    /// Then the set's cached share-endpoints rows are tombstoned
+    /// ([`FolderCustodySink::drop_share_endpoints`], `p2p.md` stale-endpoint
+    /// ruling 2's last sentence) — only after a forget that succeeded.
     /// Idempotent. Returns the forgotten `ChannelId`.
     pub async fn leave_folder(&self, group_id_hex: &str) -> Result<ChannelId, BackendError> {
         let channel = leave_folder(self, group_id_hex)?;
         if let Some(sink) = self.folder_custody_sink() {
             sink.forget_foreign_set(&channel.0).await;
+            sink.drop_share_endpoints(&channel.0).await;
         }
         Ok(channel)
+    }
+
+    /// The REMOVAL arm of `p2p.md` stale-endpoint ruling 2's last sentence:
+    /// when this device has processed the commit removing it from a folder
+    /// set — the group still HELD by the engine but no longer active
+    /// ([`MlsEngine::is_group_active`], the one positive local reading of an
+    /// eviction) — tombstone the set's cached share-endpoints rows through the
+    /// custody sink, once per session per channel. A set the engine does not
+    /// hold (never joined, not yet restored, or left — the leave arm drops in
+    /// [`Self::leave_folder`]) drops nothing: a pass that merely does not hold
+    /// the set is never the event. Called after every folder walk
+    /// ([`poll_inbound_folder`]), so a relaunch over an evicted group's
+    /// restored snapshot drops again on its first walk — the door is
+    /// idempotent, and that heals a crash between the merge and the drop.
+    async fn drop_share_endpoints_if_evicted(&self, channel_id: &ChannelId) {
+        if !self.engine.has_group(channel_id) || self.engine.is_group_active(channel_id) {
+            return;
+        }
+        let Some(sink) = self.folder_custody_sink() else {
+            return;
+        };
+        if !self
+            .evicted_endpoints_dropped
+            .lock()
+            .unwrap()
+            .insert(*channel_id)
+        {
+            return;
+        }
+        sink.drop_share_endpoints(&channel_id.0).await;
     }
 
     /// Whether this device **explicitly knows** the channel is same-nest — the
@@ -5647,6 +5769,21 @@ impl FaunaMlsBackend {
     pub fn bind_channel(&self, thread_id: ThreadId, channel_id: ChannelId) {
         self.engine.mark_channel_chat(&channel_id);
         self.channels.lock().unwrap().insert(thread_id, channel_id);
+    }
+
+    /// Undo a bootstrap whose Welcome reached no peer: forget the group in the
+    /// engine and drop the thread binding and the home marker, so the
+    /// channel is as if never created. Best-effort: a forget the engine
+    /// refuses (a retired engine) leaves the group, and is logged.
+    fn abandon_bootstrapped_channel(&self, channel_id: ChannelId) {
+        if let Err(e) = self.engine.forget_group(&channel_id) {
+            tracing::warn!(channel = %channel_id, "abandoning a refused bootstrap's group failed: {e}");
+        }
+        self.channels
+            .lock()
+            .unwrap()
+            .retain(|_, c| *c != channel_id);
+        self.channel_home.lock().unwrap().remove(&channel_id);
     }
 
     fn channel_for(&self, thread_id: &ThreadId) -> Option<ChannelId> {
@@ -5904,6 +6041,21 @@ impl FaunaMlsBackend {
     /// is shared-Rust MLS; the client never sees the `ChannelId`.)
     async fn bootstrap_group(&self, thread: &ThreadDetail) -> Result<ChannelId, BackendError> {
         let peers = self.peer_actors(thread);
+        let thread_id = thread.thread_id.clone();
+        self.bootstrap_channel(&peers, |_| thread_id).await
+    }
+
+    /// The shared body of [`Self::bootstrap_group`] and
+    /// [`archive_channel_for`]: fetch each peer's key package, create the
+    /// group, bind it to the thread `bind_to` names for the new channel,
+    /// deliver the Welcome, persist the empty history slice. `bind_to` takes
+    /// the channel because a channel-keyed thread (the signal carrier's) is
+    /// materialized from it, while a chat send already has its thread.
+    async fn bootstrap_channel(
+        &self,
+        peers: &[(ActorId, Option<String>)],
+        bind_to: impl FnOnce(ChannelId) -> ThreadId,
+    ) -> Result<ChannelId, BackendError> {
         if peers.is_empty() {
             return Err(BackendError::Internal(
                 "cannot start an MLS conversation with no Fauna peers".to_string(),
@@ -5912,7 +6064,7 @@ impl FaunaMlsBackend {
 
         // Fetch + validate one key package per peer.
         let mut key_packages = Vec::with_capacity(peers.len());
-        for (actor, peer_domain) in &peers {
+        for (actor, peer_domain) in peers {
             let actor_hex = hex::encode(actor.0);
             tracing::debug!(peer = %actor_hex, "bootstrap_group: keypackage_fetch");
             let kp_bytes = self
@@ -5955,7 +6107,7 @@ impl FaunaMlsBackend {
             self.engine.create_group(&key_packages)
         }
         .map_err(|e| BackendError::Internal(format!("create group: {e}")))?;
-        self.bind_channel(thread.thread_id.clone(), channel_id);
+        self.bind_channel(bind_to(channel_id), channel_id);
         // The creator's channel is same-nest by construction (its log lives on
         // this member's own nest). Record the explicit marker — not merely
         // leaving it absent — so a hostile re-delivered Welcome's pre-guard
@@ -5979,9 +6131,10 @@ impl FaunaMlsBackend {
         } else {
             WelcomeChannelKind::Dm
         };
-        for (actor, peer_domain) in &peers {
+        for (delivered, (actor, peer_domain)) in peers.iter().enumerate() {
             tracing::debug!(peer = %hex::encode(actor.0), "bootstrap_group: welcome_deliver");
-            self.rpc
+            if let Err(e) = self
+                .rpc
                 .welcome_deliver(
                     hex::encode(actor.0),
                     channel_id.to_string(),
@@ -5989,7 +6142,19 @@ impl FaunaMlsBackend {
                     kind.clone(),
                     peer_domain.clone(),
                 )
-                .await?;
+                .await
+            {
+                // No peer holds a Welcome yet, so nobody but this seat is in
+                // the group: forget it and drop its binding, or the next send
+                // finds it bound (a chat retry, an archive signal's "existing
+                // pair channel") and seals into a group no peer can ever join.
+                // Once one peer has its Welcome the group is real for that
+                // peer and stays; the error surfaces either way.
+                if delivered == 0 {
+                    self.abandon_bootstrapped_channel(channel_id);
+                }
+                return Err(e.into());
+            }
         }
 
         // Rule 3 (durable-before-done, `devices.md` § Durability rules):
@@ -6096,18 +6261,26 @@ impl FaunaMlsBackend {
         Ok(())
     }
 
-    /// Wrap a same-nest actor in a `Resolved(Fauna)` when it is reachable.
-    /// Reachability is a boolean on every arm, never another actor's count
-    /// (`federation.md` § Key packages — privacy & exhaustion): ≥1 usable key
-    /// package, one-time **or** last-resort, means there is one to add them to a
-    /// group with. Not addressable is indistinguishable from non-existent and
-    /// equally un-addable, so it keeps the manager's chain falling through
-    /// (`NotFound`).
-    fn reachable(addressable: bool, actor_id: ActorId, handle: String) -> ResolveResult {
+    /// Wrap a same-nest actor in a `Resolved(Fauna)` when it is reachable, else
+    /// answer `unaddressable`. Reachability is a boolean on every arm, never
+    /// another actor's count (`federation.md` § Key packages — privacy &
+    /// exhaustion): ≥1 usable key package, one-time **or** last-resort, means
+    /// there is one to add them to a group with. What "not addressable" means
+    /// is the caller's: the actor-id form cannot tell an unknown id from an
+    /// unaddressable one, so it falls through (`NotFound`); the handle form's
+    /// home nest has FOUND the account, so its answer is the terminal
+    /// `NotReachable` (`conversations.md` § Errors & edge cases → *The picker
+    /// tells the truth*, rule 2).
+    fn reachable(
+        addressable: bool,
+        actor_id: ActorId,
+        handle: String,
+        unaddressable: ResolveResult,
+    ) -> ResolveResult {
         if addressable {
             ResolveResult::Resolved(TypedAddress::Fauna { handle, actor_id })
         } else {
-            ResolveResult::NotFound
+            unaddressable
         }
     }
 
@@ -6124,7 +6297,11 @@ impl FaunaMlsBackend {
             .keypackage_addressable(hex::encode(actor_id.0))
             .await
         {
-            Ok(addressable) => Self::reachable(addressable, actor_id, handle),
+            // An id the nest does not know and an id with no key package read
+            // the same through this predicate — fall through, never claim.
+            Ok(addressable) => {
+                Self::reachable(addressable, actor_id, handle, ResolveResult::NotFound)
+            }
             Err(e) => ResolveResult::Error(e.to_string()),
         }
     }
@@ -7093,8 +7270,15 @@ impl RailBackend for FaunaMlsBackend {
                 // Canonical `localpart@domain` display, regardless of which form
                 // was typed (so a bare-handle chip still shows the full address).
                 let canonical = format!("{localpart}@{}", resolved.echoed_domain);
-                // The reply already carries reachability — no second call.
-                Self::reachable(resolved.addressable, actor_id, canonical)
+                // The reply already carries reachability — no second call. The
+                // home nest FOUND this account: not addressable is its terminal
+                // answer, never a cue for the mail rail to claim the string.
+                Self::reachable(
+                    resolved.addressable,
+                    actor_id,
+                    canonical,
+                    ResolveResult::NotReachable,
+                )
             }
             // Bare handle with no local actor → fall through to other rails.
             None => ResolveResult::NotFound,
@@ -7176,7 +7360,7 @@ impl RailBackend for FaunaMlsBackend {
         // same-nest by construction. No position: the creation is not on the
         // room log, and the door's bootstrap bound admits a self-naming first
         // report on an empty floor.
-        if born_here {
+        if born_here || self.take_unreported_birth(&channel_id) {
             self.report_roster(&channel_id, None).await;
         }
 
@@ -9290,6 +9474,33 @@ pub async fn poll_inbound_conv(
                         }
                         continue;
                     }
+                    // An archive-link signal (`archive-import.md` § Linking
+                    // and merging (phase two), ruling 2) — a thread effect,
+                    // never a bubble, and it touches nothing the thread list
+                    // reads (no snippet, no activity stamp, no unread count).
+                    // The verbatim bytes go to the session-wired sink, which
+                    // admits only an accepted contact and captures durably
+                    // before answering `true`. No sink / capture failure:
+                    // tallied and skipped — the sender re-drives its pending
+                    // sends — and the walk never stalls here.
+                    if let ChannelMessageBody::Archive(bytes) = &cm.body {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let tally = &backend.archive_signals;
+                        tally.seen.fetch_add(1, Relaxed);
+                        match backend.archive_signal_sink() {
+                            None => {
+                                tally.no_sink.fetch_add(1, Relaxed);
+                            }
+                            Some(sink) => {
+                                if sink.archive_signal(&channel_hex, cm.sender, bytes).await {
+                                    tally.captured.fetch_add(1, Relaxed);
+                                } else {
+                                    tally.uncaptured.fetch_add(1, Relaxed);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // A share-set endpoint advertisement — the shared arm
                     // (`route_share_endpoints`), because folder channels carry
                     // the same body through their own poll and the two rails
@@ -10143,6 +10354,49 @@ pub async fn ingest_welcome(
     Ok(thread_id)
 }
 
+/// The **pair channel** an archive-link signal to `contact` rides
+/// (`archive-import.md` § Linking and merging (phase two), ruling 1),
+/// returned as its hex: the existing two-member chat channel whose other
+/// member is `contact` when there is one (the `custody_mint_candidates`
+/// enumeration), else one bootstrapped exactly as a first message does —
+/// key-package fetch, `create_group`, a `Dm` Welcome, a bound thread — with
+/// nothing posted. `peer_domain` is the contact's foreign nest domain, `None`
+/// for same-nest, as on every data-plane call.
+///
+/// The thread a bootstrap binds is channel-keyed, the shape a Welcome gives
+/// the receiver, so on both sides it is a thread that has carried no
+/// renderable body and is therefore unlisted until a chat message arrives.
+/// A free function beside [`ingest_welcome`] for its reason: it materializes
+/// that thread on the manager. The owed birth report is made after the first
+/// post ([`FaunaMlsBackend::send_archive_signal`]).
+pub async fn archive_channel_for(
+    backend: &FaunaMlsBackend,
+    manager: &ConversationsManager,
+    contact: ActorId,
+    peer_domain: Option<String>,
+) -> Result<String, BackendError> {
+    if contact == backend.self_actor {
+        return Err(BackendError::Internal(
+            "an archive signal has no pair channel with oneself".to_string(),
+        ));
+    }
+    let existing = backend.conv_channels().into_iter().find(|channel| {
+        let members = backend.engine.group_members(channel);
+        members.len() == 2 && members.contains(&contact) && members.contains(&backend.self_actor)
+    });
+    if let Some(channel) = existing {
+        return Ok(channel.to_string());
+    }
+    let participants = vec![manager.seat_address_for(contact)];
+    let channel_id = backend
+        .bootstrap_channel(&[(contact, peer_domain)], |channel| {
+            manager.materialize_conv_thread(channel.to_string(), participants)
+        })
+        .await?;
+    backend.unreported_births.lock().unwrap().insert(channel_id);
+    Ok(channel_id.to_string())
+}
+
 /// Ingest a **scheduling** MLS Welcome on the recipient — the mailbox-less
 /// CalDAV-iMIP twin of [`ingest_welcome`] (`docs/goal/behavior/caldav-server.md`
 /// § Server-side auto-schedule, Half-1). Join the one-off group and record the
@@ -10636,7 +10890,29 @@ pub struct FolderPollOutcome {
 /// MLS group-state sync, Rules 1–2). For the background feed the stop is equally
 /// right: everything after an unincorporated epoch transition is
 /// future-epoch-unprocessable anyway, and the next tick retries the heal.
+///
+/// **After every walk, a processed removal drops the set's cached
+/// share-endpoints rows** ([`FaunaMlsBackend::drop_share_endpoints_if_evicted`],
+/// `p2p.md` stale-endpoint ruling 2's last sentence, the removal arm): a
+/// commit merged here that removes this device leaves the group held but
+/// inactive, and that is the positive local event. A retired engine writes
+/// nothing.
 pub async fn poll_inbound_folder(
+    backend: &FaunaMlsBackend,
+    channel_id: &ChannelId,
+    after_seq: &mut i64,
+    page_limit: i64,
+) -> Result<FolderPollOutcome, BackendError> {
+    let outcome = walk_inbound_folder(backend, channel_id, after_seq, page_limit).await;
+    if !backend.engine.is_retired() {
+        backend.drop_share_endpoints_if_evicted(channel_id).await;
+    }
+    outcome
+}
+
+/// [`poll_inbound_folder`]'s log walk proper — split out so the removal arm's
+/// drop runs after it on every exit (a clean drain, a stall, a held commit).
+async fn walk_inbound_folder(
     backend: &FaunaMlsBackend,
     channel_id: &ChannelId,
     after_seq: &mut i64,

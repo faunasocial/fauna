@@ -1,0 +1,30 @@
+[package]
+# The admin's headless reports pass: list a nest's open user reports and
+# resolve them, and nothing else (docs/goal/architecture/org-nests.md
+# § fauna.build → *Disposable*, the store-review exemption of 2026-11-01).
+# Shared Rust alone — memory-safe parsers, no browser engine, WebView or media
+# decoder — so it may talk to a box a stranger could hold without carrying the
+# third-party native code deployment-threat-model.md § Concern 2, path 2
+# accepts as residue. Fleet tooling: ships in no artifact.
+name = "fauna-reports-pass"
+description = "Headless admin reports pass: list and resolve a nest's open user reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "fauna-reports-pass"
+path = "src/main.rs"
+
+[dependencies]
+# The bearer mint over the silent challenge and the one-shot authed WS-RPC
+# connection — the leaf native client, no reconnect supervisor, no UI.
+fauna-anon-client = { path = "../../libs/fauna-anon-client" }
+# `abuse_report_queue` / `abuse_report_resolve` — the same typed calls every
+# app's reports section makes, and the wire types they return.
+fauna-client-admin = { path = "../../libs/fauna-client-admin" }
+fauna-protocol = { path = "../../libs/fauna-protocol", default-features = false }
+ed25519-dalek.workspace = true
+hex.workspace = true
+tokio.workspace = true

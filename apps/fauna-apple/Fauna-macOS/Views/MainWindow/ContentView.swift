@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import FaunaKit
 
 struct ContentView: View {
@@ -10,6 +11,11 @@ struct ContentView: View {
     /// when the saved nest is dead) and the click that drops into `nest_recovery`.
     let loadLaunchRecoverableBoxes: (() async -> [String])?
     let onRecoverFromLaunch: (([String]) -> Void)?
+    /// `launch-retire-button`: open `nest_retire` over the retry surface.
+    let onRetireFromLaunch: (() -> Void)?
+    /// The retire page was left after retiring this session's own nest from
+    /// `admin-nest`: drop the session (keeping credentials) and re-enter launch.
+    let onRetireDroppedSession: (() -> Void)?
     let onUseDifferentNest: (() -> Void)?
     let onRetrySignIn: (() -> Void)?
     let onTrustNestIdentity: (() -> Void)?
@@ -21,6 +27,8 @@ struct ContentView: View {
         onRetryLaunch: (() -> Void)? = nil,
         loadLaunchRecoverableBoxes: (() async -> [String])? = nil,
         onRecoverFromLaunch: (([String]) -> Void)? = nil,
+        onRetireFromLaunch: (() -> Void)? = nil,
+        onRetireDroppedSession: (() -> Void)? = nil,
         onUseDifferentNest: (() -> Void)? = nil,
         onRetrySignIn: (() -> Void)? = nil,
         onTrustNestIdentity: (() -> Void)? = nil,
@@ -31,6 +39,8 @@ struct ContentView: View {
         self.onRetryLaunch = onRetryLaunch
         self.loadLaunchRecoverableBoxes = loadLaunchRecoverableBoxes
         self.onRecoverFromLaunch = onRecoverFromLaunch
+        self.onRetireFromLaunch = onRetireFromLaunch
+        self.onRetireDroppedSession = onRetireDroppedSession
         self.onUseDifferentNest = onUseDifferentNest
         self.onRetrySignIn = onRetrySignIn
         self.onTrustNestIdentity = onTrustNestIdentity
@@ -39,15 +49,36 @@ struct ContentView: View {
     }
 
     var body: some View {
+        if appState.retiring != nil, let retireVM = appState.retireVM {
+            // `nest_retire` takes the window over in place — over the retry surface
+            // or a live admin session — exactly as the wizard host does.
+            NestRetireView(vm: retireVM) { sessionDropped in
+                appState.retiring = nil
+                if sessionDropped { onRetireDroppedSession?() }
+            }
+            .padding(40)
+        } else {
+            launchContent
+        }
+    }
+
+    @ViewBuilder
+    private var launchContent: some View {
         switch appState.launchGate {
         case .launching:
+            // Shared FaunaKit view, also used by iOS while its launch verdict
+            // is pending (priority #2).
             LaunchProgressView()
         case .retrying(let error):
+            // Shared FaunaKit view, also used by iOS for its gating case
+            // (priority #2).
             LaunchRetryView(
                 error: error,
                 onRetry: { onRetryLaunch?() },
+                onUseDifferentNest: { onUseDifferentNest?() },
                 loadRecoverableBoxes: loadLaunchRecoverableBoxes,
-                onRecover: { onRecoverFromLaunch?($0) })
+                onRecover: { onRecoverFromLaunch?($0) },
+                onRetire: { onRetireFromLaunch?() })
         case .needsUpdate(let message):
             // Non-retry "update required" surface — shared FaunaKit view, also
             // used by iOS (priority #2). version-compatibility.md Dim 4.
@@ -61,16 +92,26 @@ struct ContentView: View {
                 onRetry: { onRetrySignIn?() },
                 onUseDifferentNest: { onUseDifferentNest?() }
             )
-        case .identityChanged(let pinnedHex, let seenHex):
+        case .identityChanged(let pinnedHex, let seenHex, let isFork):
             // BLOCKING nest-identity-changed surface — shared FaunaKit view, also used
             // by iOS (priority #2). security.md § Transport trust. Note it
             // takes NO retry callback: a retry cannot change the verdict.
             LaunchIdentityChangedView(
                 pinnedHex: pinnedHex,
                 seenHex: seenHex,
+                isFork: isFork,
                 onTrust: { onTrustNestIdentity?() },
                 onUseDifferentNest: { onUseDifferentNest?() }
             )
+        case .accountLocked:
+            // `launch_account_locked` and its `identity_stolen_entry` step —
+            // shared FaunaKit view, also used by iOS (priority #2). NO retry, NO
+            // fallthrough (ui/sessions.md § The locked surface).
+            if let model = appState.lockedLaunch {
+                LaunchAccountLockedView(model: model) { successor in
+                    try? await appState.onSwitchAccount?(successor, false)
+                }
+            }
         case .accountIndexUnreadable(let refusal, let confirming, let error):
             // The saved account index is present and unreadable — shared
             // FaunaKit view, also used by iOS (priority #2). NO retry, NO
@@ -89,56 +130,6 @@ struct ContentView: View {
                 OnboardingContainerView(vm: onboardingVM)
             }
         }
-    }
-}
-
-private struct LaunchProgressView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-            Text(L.launch.signingIn)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier(Ids.launchStatus)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct LaunchRetryView: View {
-    let error: String
-    let onRetry: () -> Void
-    let loadRecoverableBoxes: (() async -> [String])?
-    let onRecover: ([String]) -> Void
-
-    /// The custodied boxes the launch-time read found — `launch-recover-button`
-    /// is revealed only once ≥1 resolves (`ui.yaml`), after the retry surface has
-    /// already painted, so a slow or dead saved nest never delays it.
-    @State private var recoverableBoxes: [String] = []
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text(L.launch.retryTitle)
-                .font(.title3)
-                .accessibilityIdentifier(Ids.launchErrorTitle)
-            // `ErrorBanner`, not a raw `Text`, so the launch failure also
-            // publishes into `AppMessages.error` — `serializeState()` builds
-            // `state["messages"]` unconditionally (not gated on `isOnboarded`),
-            // so this pre-authenticated surface is reachable through
-            // `error_text()` exactly like any authenticated page.
-            ErrorBanner(message: error)
-            Button(L.launch.retryButton) { onRetry() }
-                .keyboardShortcut(.defaultAction)
-                .accessibilityIdentifier(Ids.launchRetryButton)
-                .automationActivate(Ids.launchRetryButton) { onRetry() }
-            if !recoverableBoxes.isEmpty {
-                Button(L.onboarding.launch.recoverLostBox) { onRecover(recoverableBoxes) }
-                    .accessibilityIdentifier(Ids.launchRecoverButton)
-                    .automationActivate(Ids.launchRecoverButton) { onRecover(recoverableBoxes) }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-        .task { recoverableBoxes = await loadRecoverableBoxes?() ?? [] }
     }
 }
 
@@ -216,12 +207,19 @@ struct MainWindowView: View {
                     ProfileView(
                         session: appState.session,
                         actorId: appState.profileActorId,
+                        homeNestUrl: appState.profileHome,
                         onStartDm: { actorIdHex in
                             // Seed the new-thread composer (shared FaunaKit) then
                             // switch to Conversations (mirrors linux start_dm +
                             // on_open_conversations).
                             conversationsVM.startDirectMessage(actorIdHex: actorIdHex)
                             appState.selectedSidebar = .conversations
+                        },
+                        postCardAppState: appState,
+                        onOpenFeed: { appState.selectedSidebar = .feed },
+                        onNavigateToPersonalization: {
+                            appState.selectedSidebar = .settings
+                            appState.selectedSettingsPage = .personalization
                         }
                     )
                 case .media:
@@ -257,7 +255,7 @@ struct MainWindowView: View {
             // Recreate the detail view on sidebar change AND on profile-actor
             // change (profile→another's-profile keeps selectedSidebar == .profile,
             // so include the actor id to force a fresh ProfileView + re-fetch).
-            .id("\(appState.selectedSidebar.rawValue)|\(appState.profileActorId ?? "")")
+            .id("\(appState.selectedSidebar.rawValue)|\(appState.profileActorId ?? "")|\(appState.profileHome ?? "")")
             .accessibilityElement(children: .contain)
             }
             .focusRegionAnchor("page")
@@ -285,6 +283,13 @@ struct MainWindowView: View {
                 CriticalAlertsBanner(host: criticalAlertsHost)
                 RecoveryCustodyBanner(session: appState.session)
                 ConnectionStatusBar(client: client)
+                // The one-line changed-rules notice (nest-rules.md § Acceptance
+                // at joining, and a change of rules): names the nest; a tap opens
+                // Settings → Status, whose rules surface clears it.
+                NestRulesChangedNotice(nestRules: appState.region.nestRules) {
+                    appState.selectedSidebar = .settings
+                    appState.selectedSettingsPage = .status
+                }
                 // Global local sync-agent process-health indicator, sibling to
                 // `connection-status` (`sync-agent.md` § Local agent health) —
                 // distinct from the WS-RPC link above it.
@@ -327,6 +332,11 @@ struct MainWindowView: View {
         // already does before it switches pages.
         .onChange(of: appState.selectedSidebar) { dismissSearchForPageChange() }
         .onChange(of: appState.pageNavRequest) { dismissSearchForPageChange() }
+        // A `dm-message-withheld-badge` tap opens the Moderation page; the queue
+        // reads itself and opens the appeal draft (`PendingAppealStore`).
+        .onReceive(NotificationCenter.default.publisher(for: .faunaOpenModerationAppeal)) { _ in
+            appState.selectedSidebar = .moderation
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -476,7 +486,7 @@ struct MainWindowView: View {
         // `configure`) can race the login-time `conversationsSession` build, so
         // a reconnect is the natural, already-wired second chance.
         .onReconnect {
-            await refreshAdminStatus()
+            await refreshAdminStatus(keepingLastAnswer: true)
             await appState.familyStatus.refresh(api: client?.api)
             await appState.contentPolicy.refresh(api: client?.api)
             await appState.region.refresh(api: client?.api)
@@ -490,8 +500,11 @@ struct MainWindowView: View {
         .onPushNotification { await refreshUnreadNotificationCount() }
     }
 
-    private func refreshAdminStatus() async {
-        appState.isAdmin = await FaunaClient.refreshAdminStatus(client: client)
+    /// `keepingLastAnswer` is the reconnect re-read: a failed read moves nothing.
+    /// The login/identity read starts from "not admin".
+    private func refreshAdminStatus(keepingLastAnswer: Bool = false) async {
+        appState.isAdmin = await FaunaClient.refreshAdminStatus(
+            client: client, lastAnswer: keepingLastAnswer && appState.isAdmin)
     }
 
     /// `search-cancel-button`'s own act, taken when the user chooses a page.

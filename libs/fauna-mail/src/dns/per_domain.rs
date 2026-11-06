@@ -44,10 +44,11 @@ pub struct DnsRecord {
     pub ttl_seconds: u32,
 }
 
-/// Default TTL for every per-domain mail record, per the goal doc
-/// § Publication lifecycle ("3600 s default; matches the primary domain's
-/// TTL"). Not configurable.
-pub const DEFAULT_TTL_SECS: u32 = 3600;
+/// Default TTL for every steady-state record Fauna publishes — 5 minutes, so
+/// a corrected or re-pointed record (a re-created box, a rotated key) is seen
+/// within minutes rather than an hour (docs/goal/behavior/dns-management.md
+/// § Records covered → *TTL*). Not configurable.
+pub const DEFAULT_TTL_SECS: u32 = 300;
 
 /// Hardcoded MX priority — single MX target across all domains per the goal
 /// doc § Compile-time decisions (not a tunable priority).
@@ -437,7 +438,7 @@ mod tests {
         assert_eq!(r.record_type, DnsRecordType::Txt);
         assert_eq!(r.name, "default._domainkey.example.com");
         assert_eq!(r.body, "\"v=DKIM1; k=rsa; p=MIIBstored\"");
-        assert_eq!(r.ttl_seconds, 3600);
+        assert_eq!(r.ttl_seconds, 300);
     }
 
     #[test]
@@ -448,7 +449,7 @@ mod tests {
         // FQDN target (trailing dot): a relative target is doubled by providers
         // that append the zone origin (e.g. Hetzner → mail.example.com.example.com).
         assert_eq!(r.body, "10 mail.example.com.");
-        assert_eq!(r.ttl_seconds, 3600);
+        assert_eq!(r.ttl_seconds, 300);
     }
 
     #[test]
@@ -518,7 +519,7 @@ mod tests {
         assert_eq!(r.record_type, DnsRecordType::Txt);
         assert_eq!(r.name, "_acme-challenge.example.com");
         assert_eq!(r.body, "\"abc123-keyauth-digest\"");
-        // Transient → short TTL, NOT the 3600s steady-state mail-record default.
+        // Transient → short TTL, NOT the 300 s steady-state record default.
         assert_eq!(r.ttl_seconds, ACME_CHALLENGE_TTL_SECS);
         assert_eq!(r.ttl_seconds, 120);
         assert_ne!(r.ttl_seconds, DEFAULT_TTL_SECS);

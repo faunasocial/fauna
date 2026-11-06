@@ -6,15 +6,17 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
-import uniffi.fauna_client_connected_apps.ComposedText
+import uniffi.fauna_core.ComposedText
 import uniffi.fauna_core.LocalizedText
 
 /**
  * Pins how Android resolves a shared-Rust [ComposedText]
- * (`fauna_client_connected_apps::compose`): each `nested` text resolves first
+ * (`fauna_core::localized::ComposedText`): each `nested` text resolves first
  * and fills its argument, then the outer template resolves. The composition
  * itself (order, which key, which args) is pinned in Rust; this pins only the
- * Kotlin half, with hand-built values so no native library is needed.
+ * Kotlin half, with hand-built values. The placeholder fill itself is the shared
+ * Rust `fill_placeholders` over UniFFI, so these tests load the host-built
+ * `libfauna_ffi` through JNA (`jna.library.path` from `CARGO_TARGET_DIR`).
  */
 @RunWith(FaunaRobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -53,6 +55,17 @@ class ComposedTextTest {
             nested = mapOf("text" to verbatim("Post as you")),
         )
         assertEquals("  • Post as you", resolveComposed(context, bullet))
+    }
+
+    @Test
+    fun anArgHoldingAPlaceholderIsNotExpandedAndNonNameBracesStayAsWritten() {
+        // One shared single-pass fill: a stranger-chosen value that looks like a
+        // token is data, never expanded; `{not a name}` is kept as written.
+        val text = ComposedText(
+            text = LocalizedText("connected_apps.created", mapOf("time" to "{other} {not a name}")),
+            nested = emptyMap(),
+        )
+        assertEquals("Added {other} {not a name}", resolveComposed(context, text))
     }
 
     @Test

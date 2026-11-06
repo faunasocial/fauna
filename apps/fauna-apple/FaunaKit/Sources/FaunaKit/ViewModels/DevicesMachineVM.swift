@@ -28,6 +28,13 @@ import SwiftUI
 /// lives.
 @MainActor @Observable
 public final class DevicesMachineVM {
+    // A folder row's reads, by wire kind: the `FfiRowReadErrors` key and, as on
+    // the other apps, the banner's prefix.
+    private static let readActors = "fauna.folders.members.list_actors"
+    private static let readPlaces = "fauna.folders.members.list"
+    private static let readActivity = "fauna.folders.devices"
+    private static let readDestinations = "fauna.backup.destination.list"
+
     /// The page-level machine. `nil` until `configure` succeeds. Views forward
     /// page gestures through the wrappers below; the embedded wizard is reached
     /// via `wizardMachine`.
@@ -84,9 +91,20 @@ public final class DevicesMachineVM {
     public private(set) var folderDestinations: [String: [FfiFolderDestinationPlace]] = [:]
 
     /// Transient share / remove failure (`folder-share-button` / `-remove-button`),
-    /// surfaced on the page `error-message`. A per-item **read** failure is NOT an
-    /// error (owner-only sets answer `not_shared`) — those map to an empty roster.
+    /// surfaced on the page `error-message`, which an open row's failed background
+    /// read shares (`rowRead`). An owner-only set's `not_shared` is no failure: the
+    /// shared client answers it as an empty roster.
     public private(set) var sharingError: String?
+
+    /// What each folder row's background read put on `sharingError`: the shared
+    /// rule for which answer retires which text (`FfiRowReadErrors`, `ui/folders.md`
+    /// § Errors & edge cases, "A folder row's own reads retire their own error").
+    @ObservationIgnored private var rowReads = FfiRowReadErrors()
+
+    /// The folder row open on the Folders page, kept here because a failed read
+    /// paints only on the open row: nothing re-runs a collapsed row's read to
+    /// retire the text, so the eager badge read stays silent.
+    @ObservationIgnored private var openFolderRow: String?
 
     /// A macOS-only local-folder-binding refusal (`folder-location-add-button`,
     /// `MacFolderBindingSection`) — the desktop local-folder binding is
@@ -103,6 +121,18 @@ public final class DevicesMachineVM {
     /// `private(set)`, matching every other gesture-error setter on this VM.
     public func setBindLocationError(_ message: String?) {
         bindLocationError = message
+    }
+
+    /// A group set's *use the other version* refused
+    /// (`devices.error_use_other_version`). The gesture runs on the sync agent,
+    /// not this machine, whose own re-point does not know these rows, so like
+    /// `bindLocationError` it has no other route to `error-message`. The row
+    /// stands (`group-set.md` § Build design — the group set, decision 9).
+    public private(set) var retainedRestoreError: String?
+
+    /// Set (or clear with `nil`) `retainedRestoreError`.
+    public func setRetainedRestoreError(_ message: String?) {
+        retainedRestoreError = message
     }
 
     /// The owner-side custody facet rows (`custody-holder-*`, `devices.md` §
@@ -144,6 +174,13 @@ public final class DevicesMachineVM {
 
     public init() {}
 
+    /// Test seam: adopt `api` without building the machine, so a single load
+    /// (`loadDefaultConflictPolicy`) can be exercised against a stubbed seam.
+    func adoptAPIForTest(_ api: APIClient) { self.api = api }
+
+    /// Test seam: stand in for a gesture's failure on `sharingError`.
+    func overwriteSharingErrorForTest(_ message: String) { sharingError = message }
+
     /// The in-flight first build + first load, joined by any configure that
     /// arrives while it runs (two pages appearing at once) — never a second
     /// machine.
@@ -152,6 +189,15 @@ public final class DevicesMachineVM {
     /// Bumped by `reset()`, so a build that was in flight across a reset
     /// discards its machine instead of installing it for the next session.
     private var sessionGeneration: UInt64 = 0
+
+    /// A `folder-add-button` tap that arrived before the machine existed. The
+    /// page and its + button render while `devicesMachine` is still awaiting
+    /// the nest connect and the ConversationsSession, so a tap there must be
+    /// held and honoured when the machine lands — dropped, it is a + button
+    /// that does nothing (measured: the iOS no-tier paywall witness tapped
+    /// within moments of navigating and the wizard never opened). Cleared by
+    /// a failed build (its connect error answers the tap) and by `reset()`.
+    private(set) var wizardOpenHeld = false
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -221,6 +267,7 @@ public final class DevicesMachineVM {
             logMessage(level: .error, target: "fauna.devices.vm",
                        message: "configure: machine build FAILED: \(error)")
             connectError = DisplayError.message(error)
+            wizardOpenHeld = false
             return
         }
         guard sessionGeneration == generation else {
@@ -230,6 +277,11 @@ public final class DevicesMachineVM {
         }
         connectError = nil
         machine = built
+        if wizardOpenHeld {
+            logMessage(level: .info, target: "fauna.devices.vm",
+                       message: "configure: machine built — opening the wizard a tap asked for during the build")
+            openWizard()
+        }
         logMessage(level: .info, target: "fauna.devices.vm",
                    message: "configure: machine built — first refresh")
         await refresh()
@@ -261,6 +313,8 @@ public final class DevicesMachineVM {
         folderDeviceActivity = [:]
         folderDestinations = [:]
         sharingError = nil
+        rowReads = FfiRowReadErrors()
+        openFolderRow = nil
         bindLocationError = nil
         custodyRows = []
         custodyHeld = []
@@ -269,6 +323,7 @@ public final class DevicesMachineVM {
         keylessPrincipals = []
         enrollmentNotice = nil
         thisDeviceRow = nil
+        wizardOpenHeld = false
         pendingShares = []
         #if !FAUNA_EXCISE_P2P_SHARE
         offlineSharePanel = .closed
@@ -309,15 +364,15 @@ public final class DevicesMachineVM {
     }
 
     /// The page-level `error-message`: the connect failure, then the sharing
-    /// error, then the macOS-only bind-location refusal, then the machine
-    /// snapshot's localized `error`, then — lowest precedence — the standing
+    /// error, then the macOS-only bind-location refusal, then a group set's
+    /// restore refusal, then the machine snapshot's localized `error`, then — lowest precedence — the standing
     /// device-cap refusal notice (a roster gesture's own error still wins
     /// while it stands). A computed property, so it recomputes fresh on
     /// every read; no explicit re-assert on hydrate is needed.
     public var errorMessage: String? {
         _ = _observerTick
         return firstNonNil(
-            connectError, sharingError, bindLocationError,
+            connectError, sharingError, bindLocationError, retainedRestoreError,
             machine?.snapshot().error.map(renderLocalizedText), enrollmentNotice)
     }
 
@@ -342,7 +397,14 @@ public final class DevicesMachineVM {
     /// inherits the `sync-default-conflict-policy-select` value. Best-effort: a
     /// defaults read failure just leaves the nest column default (`auto`) in force.
     public func openWizard() {
-        machine?.openWizard()
+        guard let machine else {
+            wizardOpenHeld = true
+            logMessage(level: .info, target: "fauna.devices.vm",
+                       message: "openWizard: machine not built yet — holding the tap until it lands")
+            return
+        }
+        wizardOpenHeld = false
+        machine.openWizard()
         Task { [weak self] in
             guard let self else { return }
             if self.defaultConflictPolicy == nil { await self.loadDefaultConflictPolicy() }
@@ -350,7 +412,22 @@ public final class DevicesMachineVM {
             self.wizardMachine?.setDefaultConflictPolicy(policy: policy)
         }
     }
-    public func closeWizard() { machine?.closeWizard() }
+    public func closeWizard() {
+        wizardOpenHeld = false
+        machine?.closeWizard()
+    }
+
+    /// `device-rename-input`'s prefill: the shared machine's current name for
+    /// `deviceId` (`devices.md` § Device names), keyed by id, never position.
+    public func deviceName(deviceId: String) -> String? {
+        machine?.deviceName(deviceId: deviceId)
+    }
+
+    /// `device-rename-confirm-button`: the machine sends nothing for a blank or
+    /// unchanged name and paints any refusal on `error-message`.
+    public func renameDevice(deviceId: String, label: String) async {
+        await machine?.renameDevice(deviceId: deviceId, label: label)
+    }
 
     public func removeDevice(index: Int) async {
         await machine?.removeDevice(index: UInt32(index))
@@ -449,31 +526,77 @@ public final class DevicesMachineVM {
     // ── Owner-side folder Sharing gestures ─────────────────────────────────
     // (docs/goal/ui/folders.md § Sharing; the linux LEAD shape.)
 
-    /// Load the cross-user "Shared with" roster for a shared set into
-    /// `folderActors[name]`. Call only for a shared set (`mlsGroupId != nil`) — an
-    /// owner-only set never needs the read. ANY failure maps to an empty roster (a
-    /// per-item read never blanks the page — goal doc § Sharing), so this never sets
-    /// `sharingError`.
-    public func loadFolderActors(name: String) async {
-        guard let api else { return }
+    /// One background read of a folder row. A failure degrades to `fallback` (a
+    /// per-item read never blanks the page — goal doc § Sharing) and, on the open
+    /// row, says so on `error-message` as `<wire kind>: <detail>`, the read's own
+    /// text, which its next good answer retires and a gesture's text survives.
+    /// A collapsed row's read stays silent: nothing would re-run it.
+    private func rowRead<T>(
+        _ read: String, set: String, fallback: T, _ body: () async throws -> T
+    ) async -> T {
         do {
-            folderActors[name] = try await api.folderActorMembers(name: name)
+            let answer = try await body()
+            if rowReads.retire(read: read, set: set, shown: sharingError ?? "") {
+                sharingError = nil
+            }
+            return answer
         } catch {
-            folderActors[name] = []
+            if set == openFolderRow, let detail = DisplayError.message(error) {
+                let text = "\(read): \(detail)"
+                sharingError = text
+                rowReads.put(read: read, set: set, message: text)
+            }
+            return fallback
         }
     }
 
-    /// Load one folder's device-place roster into `folderPlaces[name]`. ANY
-    /// failure maps to an empty roster (a per-item read never blanks the page —
-    /// mirrors `loadFolderActors`), so this never sets `sharingError`.
+    /// The row open on the page changed (`nil` for none). The closing row takes
+    /// its reads' errors with it, because nothing would re-run those reads.
+    public func setOpenFolderRow(_ name: String?) {
+        guard name != openFolderRow else { return }
+        if let closing = openFolderRow,
+           rowReads.retireSet(set: closing, shown: sharingError ?? "") {
+            sharingError = nil
+        }
+        openFolderRow = name
+    }
+
+    /// The `devices` surface (`transport.md` § Which surfaces a push invalidates):
+    /// the page lists, and every read of the open row, whose good answers retire
+    /// what they put up while the nest was away. `resync`, not `refresh`: this
+    /// answers no gesture, so a gesture's error stays on `error-message`.
+    public func devicesStale() async {
+        guard let machine else { return }
+        await machine.resync()
+        guard let name = openFolderRow,
+              let folder = machine.snapshot().folders.first(where: { $0.name == name }),
+              folder.role != "member"
+        else { return }
+        await loadFolderActors(name: name)
+        await loadFolderPlaces(name: name)
+        await loadFolderDeviceActivity(name: name)
+        await loadFolderDestinations(name: name, folderId: folder.id)
+    }
+
+    /// Load the cross-user "Shared with" roster into `folderActors[name]`: the
+    /// `folder-shared-badge` count on a collapsed row and the member list on an
+    /// open one. An owner-only set answers an empty roster; a failure degrades as
+    /// `rowRead` says.
+    public func loadFolderActors(name: String) async {
+        guard let api else { return }
+        folderActors[name] = await rowRead(
+            Self.readActors, set: name, fallback: []
+        ) { try await api.folderActorMembers(name: name) }
+    }
+
+    /// Load one folder's device-place roster into `folderPlaces[name]`. A failure
+    /// degrades as `rowRead` says.
     public func loadFolderPlaces(name: String) async {
         guard let api else { return }
-        do {
-            folderPlaces[name] = try await api.folderDevicePlaces(
-                name: name, devices: snapshot?.devices ?? [])
-        } catch {
-            folderPlaces[name] = []
-        }
+        let devices = snapshot?.devices ?? []
+        folderPlaces[name] = await rowRead(
+            Self.readPlaces, set: name, fallback: []
+        ) { try await api.folderDevicePlaces(name: name, devices: devices) }
     }
 
     /// Write ONE device's place on a folder — `fauna.folders.places.set` through
@@ -516,36 +639,54 @@ public final class DevicesMachineVM {
         await loadFolderPlaces(name: name)
     }
 
-    /// Load the per-set device activity into `folderDeviceActivity[name]`. ANY
-    /// failure maps to an empty list (a per-item read never blanks the page —
-    /// mirrors `loadFolderActors`), so this never sets `sharingError`.
+    /// Load the per-set device activity into `folderDeviceActivity[name]`. A
+    /// failure degrades as `rowRead` says.
     public func loadFolderDeviceActivity(name: String) async {
         guard let api else { return }
-        do {
-            folderDeviceActivity[name] = try await api.listFolderDevices(name: name)
-        } catch {
-            folderDeviceActivity[name] = []
-        }
+        folderDeviceActivity[name] = await rowRead(
+            Self.readActivity, set: name, fallback: []
+        ) { try await api.listFolderDevices(name: name) }
     }
 
     /// Share a set with the picked recipient (`folder-share-confirm`). Resolves the
     /// handle + creates the MLS group + delivers the Welcome, then refreshes the
     /// snapshot (so `mlsGroupId` flips to shared) and re-reads the roster. Returns
     /// `true` on success so the sheet can dismiss; a failure surfaces on the page
-    /// `error-message` and returns `false`.
+    /// `error-message` and returns `false`. `access` is the share-time
+    /// `folder-share-role-select` grant (`"writer"`, or `nil` = Reader).
     @discardableResult
-    public func shareFolder(name: String, recipientInput: String) async -> Bool {
+    public func shareFolder(name: String, recipientInput: String, access: String? = nil) async -> Bool {
         guard let api else { return false }
         sharingError = nil
         do {
-            _ = try await api.shareFolder(name: name, recipientInput: recipientInput)
+            _ = try await api.shareFolder(name: name, recipientInput: recipientInput, access: access)
             await refresh()
             await loadFolderActors(name: name)
             return true
         } catch {
-            sharingError = DisplayError.message(error).map { "\(L.devices.errorShareSet): \($0)" }
+            sharingError = DisplayError.message(error).map { L.devices.errorShareSet(message: $0) }
             return false
         }
+    }
+
+    /// Edit one member's grant in place (`folder-member-role-select` /
+    /// `folder-member-cap-input`) — `fauna.folders.members.set_access` with the
+    /// FULL `(access, byteCap)` pair (the write upserts the whole row, so sending
+    /// one half would clear the other), then a roster RE-READ: the row repaints
+    /// from the nest's answer, never from an optimistic flip — a failed write
+    /// re-reads back to the unchanged truth. Failure surfaces on `error-message`.
+    public func setFolderMemberAccess(
+        name: String, memberActorIdHex: String, access: String, byteCap: Int64?
+    ) async {
+        guard let api else { return }
+        sharingError = nil
+        do {
+            try await api.setFolderMemberAccess(
+                name: name, memberActorIdHex: memberActorIdHex, access: access, byteCap: byteCap)
+        } catch {
+            sharingError = DisplayError.message(error).map { L.devices.errorSetMemberAccess(message: $0) }
+        }
+        await loadFolderActors(name: name)
     }
 
     /// Remove a member (`folder-member-remove-button`) — rotates the content key —
@@ -563,7 +704,7 @@ public final class DevicesMachineVM {
             await refresh()
             await loadFolderActors(name: name)
         } catch {
-            sharingError = DisplayError.message(error).map { "\(L.devices.errorRemoveMember): \($0)" }
+            sharingError = DisplayError.message(error).map { L.devices.errorRemoveMember(message: $0) }
         }
     }
 
@@ -571,16 +712,12 @@ public final class DevicesMachineVM {
     // (backup-destinations.md § Ordinary-folder coverage.)
 
     /// Load the destination-places list for a folder into
-    /// `folderDestinations[name]`. ANY failure maps to an empty list (a
-    /// per-item read never blanks the page — mirrors `loadFolderActors`), so
-    /// this never sets `sharingError`.
+    /// `folderDestinations[name]`. A failure degrades as `rowRead` says.
     public func loadFolderDestinations(name: String, folderId: Int64) async {
         guard let api else { return }
-        do {
-            folderDestinations[name] = try await api.listFolderDestinations(folderId: folderId)
-        } catch {
-            folderDestinations[name] = []
-        }
+        folderDestinations[name] = await rowRead(
+            Self.readDestinations, set: name, fallback: []
+        ) { try await api.listFolderDestinations(folderId: folderId) }
     }
 
     /// Attach `folderId` to `destinationId` (`folder-destination-attach-button`),
@@ -1209,23 +1346,31 @@ public final class DevicesMachineVM {
     public private(set) var defaultConflictPolicy: String?
 
     /// Load the stored default. A read failure maps to `nil` (the select falls back to
-    /// `auto`) — a defaults read never blanks the page.
+    /// `auto`) — a defaults read never blanks the page — except the first-listing
+    /// gate's refusal, which also says why on `error-message`
+    /// (`account-client-lifecycle.md` § *The first listing*, clauses (4) and (5)).
     public func loadDefaultConflictPolicy() async {
         guard let api else { return }
-        defaultConflictPolicy = (try? await api.defaultConflictPolicy()) ?? nil
+        do {
+            defaultConflictPolicy = try await api.defaultConflictPolicy()
+        } catch {
+            defaultConflictPolicy = nil
+            if let refusal = DisplayError.firstListingRefusal(error) { sharingError = refusal }
+        }
     }
 
     /// The store-change notice's re-read (account-runtime.md § Multi-instance
     /// concurrency, the own-pump notice, part 4 — Devices and Folders): the
-    /// roster and folder rows through the shared machine's own `refresh()`
-    /// (the machine paints only a changed snapshot), the stored default
+    /// roster and folder rows through the shared machine's own `resync()`
+    /// (the machine paints only a changed snapshot, and a gesture's error
+    /// stays on `error-message`), the stored default
     /// conflict policy, and the custody facet re-folded WITHOUT the ceremony
     /// drive (a notice is not a page load, and the drive is itself a store
     /// writer). Raises no banner, touches no wizard draft or armed row, and
     /// each field is set only when it differs.
     public func resyncStore() async {
         guard let api, machine != nil else { return }
-        await machine?.refresh()
+        await machine?.resync()
         if let policy = try? await api.defaultConflictPolicy(), policy != defaultConflictPolicy {
             defaultConflictPolicy = policy
         }

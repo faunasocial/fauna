@@ -110,8 +110,11 @@ public struct NostrSettingsView: View {
                 }
             }
             if let mode = status.mode {
+                let label = renderLocalizedText(nostrKeySourceLabel(mode: mode))
                 LabeledContent(L.nostr.account.signingMode) {
-                    Text(renderLocalizedText(nostrKeySourceLabel(mode: mode)))
+                    Text(label)
+                        .accessibilityIdentifier(Ids.nostrSigningMode)
+                        .automationValue(Ids.nostrSigningMode, text: { label })
                 }
             }
             Button(L.nostr.account.unlink, role: .destructive) {

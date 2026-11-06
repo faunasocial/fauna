@@ -51,7 +51,7 @@ import urllib.request
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 import fauna_ffi
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bridge are pytest fixtures adopted by import
@@ -59,6 +59,7 @@ from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bri
     consent_bridge,
     consent_nest,
 )
+from helpers import deposit_signing
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.client_metadata_server import ClientMetadataServer, client_document
 from helpers.oauth_client import NONCE_HEADER, OAuthClient
@@ -116,7 +117,7 @@ def _approve_with_grant(
         )
         blob = fauna_ffi.build_consent_deposit_grant(
             bytes(alice["signing_key"]), secrets.token_bytes(16), holder_pub,
-            now - 60, now + 3600, consent["scopes"], folder_id if choose else None,
+            client.writer_ed25519, now - 60, now + 3600, consent["scopes"], folder_id if choose else None,
         )
         minted = ws.call("fauna.capabilities.mint", {"grant_blob": blob})
         assert minted.get("ok") is True, minted
@@ -144,10 +145,29 @@ def _approve_with_grant(
     return tokens
 
 
-def _http_deposit(nest, client, token: str, folder_id: int, name: str, body: bytes):
-    """``POST /api/v1/folders/{id}/deposit`` with the token and a fresh DPoP
-    proof; one ``use_dpop_nonce`` retry, the protocol's own. Returns
-    ``(status, json body)``."""
+def _signed(client, request: dict) -> dict:
+    """A ``fauna.folders.deposit`` request signed by the app's writer key
+    (``folder-deposit.md`` § The depositor signs, the owner's device
+    verifies)."""
+    sig = deposit_signing.sign(
+        client.writer_key,
+        request["folder_id"],
+        request["name"],
+        request.get("content_type", ""),
+        bytes(request["body"]),
+    )
+    return {**request, "sig": sig}
+
+
+def _http_deposit(
+    nest, client, token: str, folder_id: int, name: str, body: bytes, sig: bytes | None = None
+):
+    """``POST /api/v1/folders/{id}/deposit`` with the token, a fresh DPoP
+    proof and the app's signature over the body (``sig`` overrides it); one
+    ``use_dpop_nonce`` retry, the protocol's own. Returns ``(status, json
+    body)``."""
+    if sig is None:
+        sig = deposit_signing.sign(client.writer_key, folder_id, name, "text/plain", body)
     path = f"/api/v1/folders/{folder_id}/deposit"
     htu = f"https://{HANDLE_DOMAIN}{path}"
     url = f"{nest['url']}{path}?{urllib.parse.urlencode({'name': name})}"
@@ -161,6 +181,7 @@ def _http_deposit(nest, client, token: str, folder_id: int, name: str, body: byt
                 "Authorization": f"DPoP {token}",
                 "DPoP": client.dpop_proof("POST", htu, access_token=token),
                 "Content-Type": "text/plain",
+                deposit_signing.SIGNATURE_HEADER: deposit_signing.header_value(sig),
             },
         )
         try:
@@ -198,27 +219,48 @@ def _inbox(nest, folder_id: int) -> list[bytes]:
 
 def _client(nest, metadata_server, scope: str):
     """A connected app whose document declares the bare folder scope, asking
-    for ``scope``, with a fresh attested holder key."""
+    for ``scope``, with fresh attested holder and writer keys — a deposit
+    scope is never granted blind of its writer (``folder-deposit.md`` § The
+    depositor signs, the owner's device verifies)."""
     metadata_server.documents[DOCUMENT] = client_document(
         metadata_server.client_id(DOCUMENT), REDIRECT_URI, BARE_SCOPE
     )
     holder_pub = _raw(x25519.X25519PrivateKey.generate().public_key())
+    writer_key = ed25519.Ed25519PrivateKey.generate()
     client = OAuthClient(
         base=nest["url"],
         htu_origin=f"https://{HANDLE_DOMAIN}",
         redirect_uri=REDIRECT_URI,
         scope=scope,
         holder_x25519=holder_pub,
+        writer_ed25519=_raw(writer_key.public_key()),
         client_id_url=metadata_server.client_id(DOCUMENT),
     )
+    # The private half signs every deposit; only the public half was attested.
+    client.writer_key = writer_key
     return client, holder_pub
 
 
 def _everything_on_disk(nest) -> list[tuple[pathlib.Path, bytes]]:
     """Every file under the nest's data directory — the database, its WAL,
-    every segment store — so a marker is looked for everywhere it could rest."""
+    every segment store — so a marker is looked for everywhere it could rest.
+
+    Two kinds of file are left out when windows refuses to read them under the
+    running nest's byte-range locks: an MLS database's empty ``.lock`` role guard
+    (``fauna_mls::storage::role_lock_path``), and SQLite's ``-shm``, the WAL's
+    index of frames, which holds no row. A refused read of any other file fails
+    here by name."""
     root = pathlib.Path(nest["db_path"]).parent
-    return [(p, p.read_bytes()) for p in root.rglob("*") if p.is_file()]
+    found = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            found.append((p, p.read_bytes()))
+        except PermissionError as e:
+            if not p.name.endswith((".lock", "-shm")):
+                raise PermissionError(f"the nest's {p} refused a read: {e}") from e
+    return found
 
 
 @pytest.mark.feature("connected-apps")
@@ -245,7 +287,7 @@ def test_a_connected_app_deposits_into_a_folder_blind_over_both_doors(
     session = PrincipalSession(upgrade(nest, client, token))
     ok, reply = session.call(
         "fauna.folders.deposit",
-        {"folder_id": folder, "name": WS_NAME, "content_type": "text/plain", "body": WS_MARKER},
+        _signed(client, {"folder_id": folder, "name": WS_NAME, "content_type": "text/plain", "body": WS_MARKER}),
     )
     assert ok, f"the session door accepts a deposit into the scoped folder: {reply!r}"
     assert reply == {"accepted": True}, f"the depositor learns 'accepted' and nothing else: {reply!r}"
@@ -276,7 +318,7 @@ def test_a_connected_app_deposits_into_a_folder_blind_over_both_doors(
     # ── Refusals. ──
     ok, reply = session.call(
         "fauna.folders.deposit",
-        {"folder_id": other, "name": "x.txt", "body": b"x"},
+        _signed(client, {"folder_id": other, "name": "x.txt", "body": b"x"}),
     )
     assert not ok and refusal_code(reply) == "fauna.folders.permission_denied", (
         f"a folder outside the scope is refused: {reply!r}"
@@ -287,11 +329,27 @@ def test_a_connected_app_deposits_into_a_folder_blind_over_both_doors(
     )
     assert _inbox(nest, other) == [], "nothing parked in the out-of-scope folder"
 
+    # An unsigned deposit, and one whose signature is over another body, are
+    # refused over both doors (folder-deposit.md § The depositor signs).
+    ok, reply = session.call(
+        "fauna.folders.deposit",
+        {"folder_id": folder, "name": "unsigned.txt", "body": b"unsigned"},
+    )
+    assert not ok and refusal_code(reply) == "fauna.folders.invalid_params", (
+        f"an unsigned deposit is refused: {reply!r}"
+    )
+    forged = deposit_signing.sign(client.writer_key, folder, "forged.txt", "text/plain", b"other")
+    status, body = _http_deposit(nest, client, token, folder, "forged.txt", b"forged", sig=forged)
+    assert status == 400 and body.get("error") == "fauna.folders.invalid_params", (
+        f"the HTTP door refuses a signature over another body: {status} {body!r}"
+    )
+    assert len(_inbox(nest, folder)) == 2, "a refused signature parked nothing"
+
     with alice_client(nest) as ws:
         ws.call("fauna.folders.update", {"name": "drop-box", "residency": "metadata_only"})
     ok, reply = session.call(
         "fauna.folders.deposit",
-        {"folder_id": folder, "name": "late.txt", "body": b"late"},
+        _signed(client, {"folder_id": folder, "name": "late.txt", "body": b"late"}),
     )
     assert not ok and refusal_code(reply) == "fauna.folders.permission_denied", (
         f"a metadata-only folder keeps nothing here to park a deposit in: {reply!r}"
@@ -322,7 +380,7 @@ def test_a_qualified_request_against_the_bare_declaration_deposits_without_a_cho
     session = PrincipalSession(upgrade(nest, client, token))
     ok, reply = session.call(
         "fauna.folders.deposit",
-        {"folder_id": folder, "name": "again.txt", "content_type": "text/plain", "body": b"a"},
+        _signed(client, {"folder_id": folder, "name": "again.txt", "content_type": "text/plain", "body": b"a"}),
     )
     assert ok and reply == {"accepted": True}, reply
     status, body = _http_deposit(nest, client, token, folder, "again-http.txt", b"b")
@@ -354,7 +412,7 @@ def _large_body(tag: bytes) -> tuple[bytes, list[bytes]]:
     return bytes(body), markers
 
 
-def _ws_large_deposit(session, folder: int, name: str, body: bytes):
+def _ws_large_deposit(session, client, folder: int, name: str, body: bytes):
     """``fauna.folders.deposit.{begin,part,commit}`` — the body in parts of
     one message's worth. Returns the first refusal as ``(False, reply)``, or
     ``(True, commit reply)``."""
@@ -379,6 +437,13 @@ def _ws_large_deposit(session, folder: int, name: str, body: bytes):
             "name": name,
             "content_type": "application/octet-stream",
             "parts": len(parts),
+            # The whole body's hash and the app's signature: the nest cannot
+            # hash sealed parts, so it sums their length and verifies
+            # authorship; the body binding is the adopter's.
+            "hash": deposit_signing.body_hash(body),
+            "sig": deposit_signing.sign(
+                client.writer_key, folder, name, "application/octet-stream", body
+            ),
         },
     )
 
@@ -471,7 +536,7 @@ def test_a_deposit_larger_than_one_message_rests_sealed_and_the_inbox_quota_bind
     ws_name, http_name = "large-ws-scan-41.bin", "large-http-scan-8e.bin"
 
     # ── Door one: the staged upload on the principal session. ──
-    ok, reply = _ws_large_deposit(session, folder, ws_name, ws_body)
+    ok, reply = _ws_large_deposit(session, client, folder, ws_name, ws_body)
     assert ok and reply == {"accepted": True}, (
         f"the session door accepts a deposit larger than one message: {reply!r}"
     )
@@ -495,7 +560,7 @@ def test_a_deposit_larger_than_one_message_rests_sealed_and_the_inbox_quota_bind
 
     # ── The quota: a third large deposit does not fit, over either door. ──
     third, _ = _large_body(b"third")
-    ok, reply = _ws_large_deposit(session, folder, "third.bin", third)
+    ok, reply = _ws_large_deposit(session, client, folder, "third.bin", third)
     assert not ok and refusal_code(reply) == "fauna.folders.inbox_full", (
         f"a part past the owner's inbox quota is refused: {reply!r}"
     )

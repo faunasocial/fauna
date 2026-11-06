@@ -14,7 +14,7 @@
   every one into the generated .g.cs and the binary XBF, both of which ship
   inside FaunaApp.dll. Removing the ITEM is the only construct that removes
   the markup, so FaunaApp.csproj drops `Views\Payments\**` from Page and
-  Compile when `/p:FaunaStoreSafe=true` (dynamic-features.md § Platform-family
+  Compile when `/p:FaunaExcisePayments=true` (dynamic-features.md § Platform-family
   surface excision), same directory as the Payments plane one page over.
 
   Consequences, both load-bearing:

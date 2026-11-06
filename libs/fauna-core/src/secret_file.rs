@@ -116,7 +116,9 @@ const REPLACE_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs
 /// app's credential file while a harness poll read it. So on windows a
 /// transient refusal is retried, backing off, for at most
 /// [`REPLACE_RETRY_BUDGET`]; any other error, or one that outlives the
-/// budget, is returned as before.
+/// budget, is returned as before. A target carrying the read-only attribute
+/// also answers access denied, but that is a state no hold ends, so it is
+/// returned at once rather than ridden out.
 fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -124,12 +126,14 @@ fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
         const TRANSIENT: [i32; 3] = [5, 32, 33];
         let deadline = std::time::Instant::now() + REPLACE_RETRY_BUDGET;
         let mut backoff = std::time::Duration::from_millis(5);
+        let read_only = || std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly());
         loop {
             match std::fs::rename(tmp_path, path) {
                 Err(e)
                     if e.raw_os_error()
                         .is_some_and(|code| TRANSIENT.contains(&code))
-                        && std::time::Instant::now() < deadline =>
+                        && std::time::Instant::now() < deadline
+                        && !read_only() =>
                 {
                     #[cfg(test)]
                     tests::on_replace_retry();
@@ -254,6 +258,46 @@ mod tests {
              gave up after {:?} with {err:#}",
             started.elapsed()
         );
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        let mut tmp_name = path.as_os_str().to_os_string();
+        tmp_name.push(".tmp");
+        assert!(!std::path::Path::new(&tmp_name).exists());
+    }
+
+    /// A read-only target is refused at once, never ridden out: the attribute
+    /// is a state, not a hold that ends, so a retry only spends the budget —
+    /// and a caller rewriting several such files (a credential erase on a
+    /// read-only namespace) would stall that long per file on whatever thread
+    /// it runs, measured 2026-11-02 as a 25 s tui UI-thread stall over eleven
+    /// keys. Red-verify: drop the read-only check and the hook fires.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_target_is_refused_at_once_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        write_secret_file_0600(&path, b"old").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let count = fired.clone();
+        RETRY_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || count.set(count.get() + 1)));
+        });
+        let written = write_secret_file_0600(&path, b"new");
+        RETRY_HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        assert!(
+            written.is_err(),
+            "a read-only target must refuse the replace"
+        );
+        assert_eq!(fired.get(), 0, "a read-only target must not be retried");
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         let mut tmp_name = path.as_os_str().to_os_string();
         tmp_name.push(".tmp");

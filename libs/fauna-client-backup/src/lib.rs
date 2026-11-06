@@ -489,6 +489,34 @@ impl<R: RpcRequester> BackupClient<R> {
             .await
     }
 
+    /// The automatic seat carry's handover: [`Self::writer_grant_succeed`]
+    /// with `in_force_only` set, so the destination refuses a revoked seat in
+    /// the same transaction that would move it (the reply's `seat_revoked`)
+    /// rather than re-granting it. The carry reads the seat first, but an
+    /// owner's revoke can land between that read and this call; only the
+    /// destination can decide "in force" atomically
+    /// (`segment-backup-protocol.md` § Cross-location backup protocol → *The
+    /// writer seat*, *How the seat moves*). The restore ceremony's
+    /// re-enrollment keeps [`Self::writer_grant_succeed`]: its confirm is the
+    /// owner's gesture, and re-grants.
+    pub async fn writer_grant_carry(
+        &self,
+        writer_nest_id: String,
+        succeeds: String,
+    ) -> Result<WriterGrantRegisterReply, R::Error> {
+        self.nest
+            .request(
+                KIND_WRITER_GRANT_REGISTER,
+                WriterGrantRegisterRequest {
+                    writer_nest_id,
+                    succeeds: Some(succeeds),
+                    in_force_only: true,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
     /// `fauna.auth.rotation_chain` (**source** nest) — the box's full rotation
     /// chain, oldest hop first; empty when it never rotated. Read by the seat
     /// carry, which verifies it ([`fauna_protocol::nest_rotation::verify_chain`])
@@ -1124,7 +1152,7 @@ mod tests {
     fn writer_grant_register_sends_the_destination_side_kind() {
         let nest = MockNest::with_reply(&WriterGrantRegisterReply {
             ok: true,
-            extra: Default::default(),
+            ..Default::default()
         });
         block_on(BackupClient::new(&nest).writer_grant_register("bb".repeat(32))).unwrap();
 
@@ -1137,13 +1165,14 @@ mod tests {
             req.succeeds, None,
             "a plain registration names no predecessor"
         );
+        assert!(!req.in_force_only, "an enrollment re-grants a revoked seat");
     }
 
     #[test]
     fn writer_grant_succeed_always_names_the_predecessor() {
         let nest = MockNest::with_reply(&WriterGrantRegisterReply {
             ok: true,
-            extra: Default::default(),
+            ..Default::default()
         });
         block_on(BackupClient::new(&nest).writer_grant_succeed("bb".repeat(32), "aa".repeat(32)))
             .unwrap();
@@ -1155,6 +1184,30 @@ mod tests {
         let req: WriterGrantRegisterRequest = nest.last_request();
         assert_eq!(req.writer_nest_id, "bb".repeat(32));
         assert_eq!(req.succeeds.as_deref(), Some("aa".repeat(32).as_str()));
+        assert!(
+            !req.in_force_only,
+            "the restore ceremony's re-enrollment is the owner's gesture"
+        );
+    }
+
+    #[test]
+    fn writer_grant_carry_names_the_predecessor_and_asks_for_a_seat_in_force() {
+        let nest = MockNest::with_reply(&WriterGrantRegisterReply {
+            seat_revoked: true,
+            ..Default::default()
+        });
+        let reply =
+            block_on(BackupClient::new(&nest).writer_grant_carry("bb".repeat(32), "aa".repeat(32)))
+                .unwrap();
+        assert!(reply.seat_revoked && !reply.ok);
+
+        let req: WriterGrantRegisterRequest = nest.last_request();
+        assert_eq!(req.writer_nest_id, "bb".repeat(32));
+        assert_eq!(req.succeeds.as_deref(), Some("aa".repeat(32).as_str()));
+        assert!(
+            req.in_force_only,
+            "the carry never re-grants a revoked seat"
+        );
     }
 
     #[test]

@@ -111,26 +111,27 @@ def assert_the_retry_affordance_matches_the_sweep(app, sweep: dict) -> None:
         )
         return
 
-    from helpers.app_surface import skip_unbuilt
-
-    try:
-        wait_until(_present, _RETRY_AFFORDANCE_S, diagnose=lambda: "")
-    except Exception:
-        skip_unbuilt(
-            app.driver,
-            surface="recovery-kit-sweep-retry-button",
-            detail=(
-                "settings.md § Recovery kit — the group-sweep retry; tui, web, "
-                "linux, windows, macos and ios render it, and android owes "
-                "its own leg"
-            ),
-            tracked="docs/goal/ui/settings.md § Recovery kit",
-        )
+    wait_until(
+        _present,
+        _RETRY_AFFORDANCE_S,
+        diagnose=lambda: (
+            "the sweep owes work but recovery-kit-sweep-retry-button never "
+            "rendered — every app renders the group-sweep retry (settings.md "
+            f"§ Recovery kit), so this is a regression; sweep={sweep!r}\n"
+            + app.driver.diagnose("recovery-kit-sweep-retry-button")
+        ),
+    )
 
     # Present, so the scrolled read is safe now — and needed, since a driver
     # may refuse to click what is below the fold.
     app.driver.is_visible_scrolled("recovery-kit-sweep-retry-button")
     before = app.driver.get_state("data.succession_sweep")
+    # The button is `.disabled(vm.busy)` on apple, and the successor's first
+    # hydrate mints the owed kit under that same flag: a bare click can land in
+    # that window and be refused (convention 14; a ceiling paid only on red).
+    app.driver.wait_until_enabled(
+        "recovery-kit-sweep-retry-button", timeout=_RETRY_AFFORDANCE_S
+    )
     app.driver.click("recovery-kit-sweep-retry-button")
 
     def _answered() -> bool:

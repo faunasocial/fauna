@@ -196,6 +196,12 @@ public struct ThreadDetailView: View {
             // opened thread (`mail-content-scanning.md` § User sees their own
             // message's row) — the snapshot then carries `scanResultLines`.
             await vm.refreshMessageScanResults(detail.threadId)
+            // And the alias each received mail message arrived on
+            // (`mail-aliases.md` § Label) — `deliveredTo` on the snapshot.
+            await vm.refreshDeliveredAliases(detail.threadId)
+            // And the queue row each of the author's own withheld messages
+            // matches (`dm-message-withheld-badge`).
+            await vm.refreshWithheldMessages(detail.threadId)
             guard let client else { return }
             await MutedWordsHolder.shared.refresh(api: client.api)
         }
@@ -242,6 +248,10 @@ public struct ThreadDetailView: View {
                                     #if !FAUNA_KIDS
                                     vm.revealRemoteImages(mid)
                                     #endif
+                                },
+                                onAppealWithheld: { contentId in
+                                    PendingAppealStore.set(contentId)
+                                    NotificationCenter.default.post(name: .faunaOpenModerationAppeal, object: nil)
                                 },
                                 onToggleReaction: { mid, emoji in
                                     Task { await vm.toggleReaction(detail.threadId, mid, emoji) }

@@ -83,9 +83,7 @@ public enum CustodianPullTestCommand {
     public static func apply(_ command: [String: Any], client: FaunaClient?) async -> Outcome {
         // Absent/unparseable is `0`: an ordinary pass at the real clock. The same
         // spelling and default as `backup_audit_run_now` and tui's arm.
-        let offset = (command["now_offset_secs"] as? NSNumber)?.int64Value
-            ?? (command["now_offset_secs"] as? Int).map(Int64.init)
-            ?? 0
+        let offset = TestCommandArgs.nowOffsetSecs(command)
         guard let client else {
             return .refused(
                 "custodian_pull_run_now: no authenticated session (no live FaunaClient), "

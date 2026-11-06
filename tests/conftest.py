@@ -21,3 +21,17 @@ if _test_run_slot_path.exists():
     _spec.loader.exec_module(_test_run_slot)
     pytest_collection_finish = _test_run_slot.pytest_collection_finish
     pytest_sessionfinish = _test_run_slot.pytest_sessionfinish
+
+
+def pytest_configure(config):
+    """A goal's `test:` proof item this run executes gets its `PROVEN` record
+    (task-kinds.md § Kinds → *A `GOAL` row is the fleet's flag*, ruling (3)).
+    The helper lives beside the queue files it writes, so a tree without them
+    installs nothing; a run under `e2e-unified`'s own rootdir never loads this."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "_proof_hook.py"
+    if path.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fauna_proof_hook", str(path))
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        hook.install(config)

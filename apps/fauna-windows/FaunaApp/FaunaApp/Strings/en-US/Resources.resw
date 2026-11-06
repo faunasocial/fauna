@@ -212,14 +212,11 @@
     <data name="tips/sender_unknown" xml:space="preserve"><value>Someone</value></data>
     <data name="tips/amount_unknown" xml:space="preserve"><value>Amount not reported</value></data>
     <data name="tips/more" xml:space="preserve"><value>and {count} more</value></data>
-    <data name="onboarding/welcome/title" xml:space="preserve"><value>Fauna</value></data>
-    <data name="onboarding/welcome/subtitle" xml:space="preserve"><value>Your personal, private communications nest.</value></data>
-    <data name="onboarding/welcome/tagline" xml:space="preserve"><value>Private messaging and file sync,
-built on your own server.</value></data>
     <data name="onboarding/terms/notice" xml:space="preserve"><value>By continuing you agree to the Fauna terms and content guidelines</value></data>
     <data name="onboarding/launch/transient_error" xml:space="preserve"><value>Couldn't reach your nest. Check your connection and try again.</value></data>
     <data name="onboarding/launch/use_different_nest" xml:space="preserve"><value>Use a different nest</value></data>
-    <data name="onboarding/launch/launch_failed" xml:space="preserve"><value>Startup hit a problem. Your data is safe — you can retry, or continue setup below.</value></data>
+    <data name="onboarding/launch/launch_failed" xml:space="preserve"><value>Startup hit a problem. Nothing saved on this device was deleted — restart the app to try again.</value></data>
+    <data name="onboarding/launch/locked_secret_missing" xml:space="preserve"><value>This device doesn't hold this account's secret key, so it can't replace the identity from here. Add the account back with its secret key or recovery kit, then try again.</value></data>
     <data name="onboarding/launch/identity_changed_warning" xml:space="preserve"><value>This nest's identity has changed, or it can no longer prove the identity you previously trusted. It may have been re-deployed or had its key rotated — or someone may be impersonating it. Don't continue unless you were expecting this change.</value></data>
     <data name="onboarding/launch/identity_changed_trust" xml:space="preserve"><value>Trust this nest and continue</value></data>
     <data name="onboarding/launch/identity_fork_warning" xml:space="preserve"><value>This nest's identity history has split: it now shows two competing successors. The one you accepted is {pinned}; the one it presents now is {seen}. Two copies of this nest may be running, or someone may be impersonating it. There is no safe way to trust either from here — contact your nest's admin.</value></data>
@@ -229,11 +226,11 @@ built on your own server.</value></data>
     <data name="onboarding/launch/retire_server" xml:space="preserve"><value>Retire a server</value></data>
     <data name="onboarding/launch/index_newer_build" xml:space="preserve"><value>Your accounts were saved by a newer version of this app, so this version can't read them. Nothing has been lost — update the app and they'll be here.</value></data>
     <data name="onboarding/launch/index_malformed" xml:space="preserve"><value>Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first.</value></data>
-    <data name="onboarding/launch/index_malformed_reset_residual" xml:space="preserve"><value>Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it.</value></data>
+    <data name="onboarding/launch/index_malformed_reset_residual" xml:space="preserve"><value>Starting over clears this app's list of accounts. Your accounts still exist on your nest — you can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit. Some saved data on this device, which can include sign-in keys, can't be reached to clear it and stays behind.</value></data>
     <data name="onboarding/launch/index_newer_build_title" xml:space="preserve"><value>Update needed</value></data>
     <data name="onboarding/launch/index_malformed_title" xml:space="preserve"><value>Your saved accounts can't be read</value></data>
     <data name="onboarding/launch/index_malformed_reset" xml:space="preserve"><value>Start over on this device</value></data>
-    <data name="onboarding/launch/index_malformed_reset_confirm" xml:space="preserve"><value>Remove everything and start over</value></data>
+    <data name="onboarding/launch/index_malformed_reset_confirm" xml:space="preserve"><value>Clear the list and start over</value></data>
     <data name="onboarding/launch/index_malformed_reset_blocked_other_window" xml:space="preserve"><value>Nothing was removed — another Fauna window is using an account on this device. Close it, then start over again.</value></data>
     <data name="onboarding/launch/sign_in_refused" xml:space="preserve"><value>This nest no longer signs you in. Its admin may have suspended or removed your account — nothing on this device has changed. Contact the admin; if they restore your account, try again.</value></data>
     <data name="onboarding/launch/sign_in_refused_title" xml:space="preserve"><value>Can't sign in here</value></data>
@@ -254,7 +251,7 @@ built on your own server.</value></data>
     <data name="onboarding/identity_choice/create_new" xml:space="preserve"><value>Create New Identity</value></data>
     <data name="onboarding/identity_choice/import_existing" xml:space="preserve"><value>Import from Another Device</value></data>
     <data name="onboarding/identity_choice/recover_lost_box" xml:space="preserve"><value>Recover a lost box</value></data>
-    <data name="onboarding/identity_choice/restore_from_recovery_kit" xml:space="preserve"><value>Restore my account from a recovery phrase</value></data>
+    <data name="onboarding/identity_choice/restore_from_recovery_kit" xml:space="preserve"><value>Restore my account from a recovery kit</value></data>
     <data name="onboarding/identity_choice/emergency_lockout_entry" xml:space="preserve"><value>Lock my account for 24 hours</value></data>
     <data name="onboarding/add_account/cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="onboarding/identity_created/title" xml:space="preserve"><value>Identity Created</value></data>
@@ -264,31 +261,31 @@ built on your own server.</value></data>
     <data name="onboarding/identity_created/continue" xml:space="preserve"><value>Continue</value></data>
     <data name="onboarding/identity_created/not_generated" xml:space="preserve"><value>Identity not generated yet</value></data>
     <data name="onboarding/recovery_kit/title" xml:space="preserve"><value>Your Recovery Kit</value></data>
-    <data name="onboarding/recovery_kit/desc" xml:space="preserve"><value>This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device.</value></data>
-    <data name="onboarding/recovery_kit/escrow_deferred" xml:space="preserve"><value>Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe.</value></data>
+    <data name="onboarding/recovery_kit/desc" xml:space="preserve"><value>Your recovery kit is a second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.</value></data>
+    <data name="onboarding/recovery_kit/escrow_deferred" xml:space="preserve"><value>Your kit activates when your account comes online at the end of setup — until then, keep it safe and offline.</value></data>
     <data name="onboarding/recovery_kit/confirm" xml:space="preserve"><value>I've saved it — continue</value></data>
     <data name="onboarding/recovery_kit/skip" xml:space="preserve"><value>Skip for now</value></data>
     <data name="onboarding/recovery_kit/not_minted" xml:space="preserve"><value>Recovery kit not minted yet</value></data>
     <data name="onboarding/recovery_entry/title" xml:space="preserve"><value>Restore from Recovery Kit</value></data>
-    <data name="onboarding/recovery_entry/phrase_label" xml:space="preserve"><value>Recovery phrase</value></data>
-    <data name="onboarding/recovery_entry/desc" xml:space="preserve"><value>Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow.</value></data>
-    <data name="onboarding/recovery_entry/account_hint" xml:space="preserve"><value>If your phrase doesn't name your account, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.</value></data>
+    <data name="onboarding/recovery_entry/phrase_label" xml:space="preserve"><value>Recovery kit</value></data>
+    <data name="onboarding/recovery_entry/desc" xml:space="preserve"><value>Paste your recovery kit (the fauna://recovery link or the 64-character code). Your identity will be restored from the copy of your secret key that only your kit opens.</value></data>
+    <data name="onboarding/recovery_entry/account_hint" xml:space="preserve"><value>If your kit doesn't say where your account lives, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.</value></data>
     <data name="onboarding/recovery_entry/submit" xml:space="preserve"><value>Restore</value></data>
-    <data name="onboarding/recovery_entry/invalid_kit" xml:space="preserve"><value>That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.</value></data>
-    <data name="onboarding/recovery_entry/account_needed" xml:space="preserve"><value>Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.</value></data>
+    <data name="onboarding/recovery_entry/invalid_kit" xml:space="preserve"><value>That isn't a recovery kit. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.</value></data>
+    <data name="onboarding/recovery_entry/account_needed" xml:space="preserve"><value>Enter the handle of the account you're restoring (user@domain) — this kit doesn't say where your account lives.</value></data>
     <data name="onboarding/recovery_entry/account_malformed" xml:space="preserve"><value>Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.</value></data>
     <data name="onboarding/recovery_entry/account_unknown" xml:space="preserve"><value>No account named {account} exists on that nest.</value></data>
-    <data name="onboarding/recovery_entry/no_escrow" xml:space="preserve"><value>This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in.</value></data>
+    <data name="onboarding/recovery_entry/no_escrow" xml:space="preserve"><value>Your kit can't restore this account from here — no copy of your secret key that it opens is available. On a device that's still signed in, open Settings → Account → Recovery Kit. If it offers Restore Kit Recovery, enter this kit and press it; if instead Create Recovery Kit can be pressed, this kit never took effect, so create a new one.</value></data>
     <data name="onboarding/recovery_entry/superseded" xml:space="preserve"><value>This identity was replaced after it was compromised. Import the new identity to continue.</value></data>
-    <data name="onboarding/recovery_entry/refused" xml:space="preserve"><value>That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})</value></data>
+    <data name="onboarding/recovery_entry/refused" xml:space="preserve"><value>That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})</value></data>
     <data name="onboarding/recovery_entry/unreachable" xml:space="preserve"><value>Could not reach that account's nest. Check the handle and your connection, then try again. If the domain itself is gone, enter your handle with your nest's address instead, like alice@192.0.2.10. ({reason})</value></data>
-    <data name="onboarding/recovery_entry/restored_predecessors_lost" xml:space="preserve"><value>Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})</value></data>
+    <data name="onboarding/recovery_entry/restored_predecessors_lost" xml:space="preserve"><value>Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})</value></data>
     <data name="onboarding/emergency_lockout/title" xml:space="preserve"><value>Lock Your Account</value></data>
     <data name="onboarding/emergency_lockout/desc" xml:space="preserve"><value>Lock your account from this device without signing in. Paste your secret key and enter your handle. Nothing you enter here is saved on this device.</value></data>
     <data name="onboarding/emergency_lockout/secret_label" xml:space="preserve"><value>Secret key</value></data>
     <data name="onboarding/emergency_lockout/account_hint" xml:space="preserve"><value>Your handle (user@domain) says where your account lives. If your secret key link names it, you can leave it empty.</value></data>
     <data name="onboarding/emergency_lockout/locked" xml:space="preserve"><value>Your account is locked until {until}. Nothing was saved on this device.</value></data>
-    <data name="onboarding/emergency_lockout/invalid_secret" xml:space="preserve"><value>That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase.</value></data>
+    <data name="onboarding/emergency_lockout/invalid_secret" xml:space="preserve"><value>That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery kit.</value></data>
     <data name="onboarding/emergency_lockout/account_needed" xml:space="preserve"><value>Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives.</value></data>
     <data name="onboarding/emergency_lockout/account_malformed" xml:space="preserve"><value>Enter the full handle including the domain, in the form user@domain.</value></data>
     <data name="onboarding/emergency_lockout/superseded" xml:space="preserve"><value>This identity was replaced after it was compromised, so there is nothing to lock. Import the new identity to continue.</value></data>
@@ -307,10 +304,10 @@ built on your own server.</value></data>
     <data name="onboarding/identity_import/camera_unavailable" xml:space="preserve"><value>Camera Not Available</value></data>
     <data name="onboarding/identity_import/camera_unavailable_hint" xml:space="preserve"><value>Use the paste tab instead.</value></data>
     <data name="onboarding/recovery/title" xml:space="preserve"><value>Recover a lost box</value></data>
-    <data name="onboarding/recovery/subtitle" xml:space="preserve"><value>Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online.</value></data>
+    <data name="onboarding/recovery/subtitle" xml:space="preserve"><value>Choose the box you lost. A new server started with its saved key is the same nest, and Fauna can set one up on a cloud host for you. Your installed Fauna apps then reconnect to it automatically once it's back online, with no warning that its identity changed.</value></data>
     <data name="onboarding/recovery/box_list_label" xml:space="preserve"><value>Your boxes</value></data>
-    <data name="onboarding/recovery/box_item_hint" xml:space="preserve"><value>Recovery key custodied</value></data>
-    <data name="onboarding/recovery/empty_message" xml:space="preserve"><value>No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer.</value></data>
+    <data name="onboarding/recovery/box_item_hint" xml:space="preserve"><value>Server key saved</value></data>
+    <data name="onboarding/recovery/empty_message" xml:space="preserve"><value>No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest.</value></data>
     <data name="onboarding/recovery/method_cloud" xml:space="preserve"><value>Re-provision on a cloud host</value></data>
     <data name="onboarding/recovery/method_selfhosted" xml:space="preserve"><value>Install on my own server</value></data>
     <data name="onboarding/recovery/selfhosted_title" xml:space="preserve"><value>Install on your own server</value></data>
@@ -319,9 +316,9 @@ built on your own server.</value></data>
     <data name="onboarding/recovery/selfhosted_continue" xml:space="preserve"><value>Done</value></data>
     <data name="onboarding/recovery/restore_cta" xml:space="preserve"><value>Restore your data</value></data>
     <data name="onboarding/retire/title" xml:space="preserve"><value>Retire a server</value></data>
-    <data name="onboarding/retire/subtitle" xml:space="preserve"><value>Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved.</value></data>
-    <data name="onboarding/retire/list_label" xml:space="preserve"><value>Servers Fauna created in this account</value></data>
-    <data name="onboarding/retire/empty_message" xml:space="preserve"><value>No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard.</value></data>
+    <data name="onboarding/retire/subtitle" xml:space="preserve"><value>Delete a server Fauna created in your cloud account since 8 July 2026 — on OVH, any server your credentials reach — and clean up the DNS records that belong to it, or, where your provider can hand it out, get your domain's transfer code. Your cloud token is used for this visit only and is never saved.</value></data>
+    <data name="onboarding/retire/list_label" xml:space="preserve"><value>Servers found in this account</value></data>
+    <data name="onboarding/retire/empty_message" xml:space="preserve"><value>No servers created by Fauna were found in this account. Except on OVH, servers created before 8 July 2026 predate the Fauna marker and are not listed — retire those from your provider's dashboard.</value></data>
     <data name="onboarding/retire/domain_label" xml:space="preserve"><value>Domain</value></data>
     <data name="onboarding/retire/secondary_domains_label" xml:space="preserve"><value>Also serves</value></data>
     <data name="onboarding/retire/address_label" xml:space="preserve"><value>Address</value></data>
@@ -339,7 +336,7 @@ built on your own server.</value></data>
     <data name="onboarding/retire/confirm_secondary_domains" xml:space="preserve"><value>Also serves: {domains}</value></data>
     <data name="onboarding/retire/confirm_destroyed" xml:space="preserve"><value>Everything on this server — its disk and every account's data on it — is destroyed and cannot be recovered except from a backup.</value></data>
     <data name="onboarding/retire/confirm_current" xml:space="preserve"><value>This is the server you're signed into. This session's nest will stop existing.</value></data>
-    <data name="onboarding/retire/confirm_dns_removals" xml:space="preserve"><value>Before the server is deleted, these DNS records pointing at it are removed: {records}</value></data>
+    <data name="onboarding/retire/confirm_dns_removals" xml:space="preserve"><value>Before the server is deleted, these DNS records belonging to it are removed: {records}</value></data>
     <data name="onboarding/retire/confirm_dns_none" xml:space="preserve"><value>No DNS records will be removed automatically. The records to remove by hand are listed below.</value></data>
     <data name="onboarding/retire/confirm_by_hand" xml:space="preserve"><value>To remove by hand afterwards: {records}</value></data>
     <data name="onboarding/retire/confirm_name_label" xml:space="preserve"><value>Type the server's name to confirm</value></data>
@@ -393,7 +390,7 @@ built on your own server.</value></data>
     <data name="onboarding/provision/retrieving_dkim" xml:space="preserve"><value>Retrieving email signing key</value></data>
     <data name="onboarding/provision/adding_dkim_record" xml:space="preserve"><value>Adding email DNS record</value></data>
     <data name="onboarding/provision/provisioning_complete" xml:space="preserve"><value>Provisioning complete</value></data>
-    <data name="onboarding/provision/time" xml:space="preserve"><value>This usually takes 2-3 minutes.</value></data>
+    <data name="onboarding/provision/time" xml:space="preserve"><value>This usually takes a few minutes.</value></data>
     <data name="onboarding/provision/server" xml:space="preserve"><value>Provision Server</value></data>
     <data name="onboarding/provision/step/domain" xml:space="preserve"><value>Domain</value></data>
     <data name="onboarding/provision/step/server" xml:space="preserve"><value>Server</value></data>
@@ -462,15 +459,15 @@ built on your own server.</value></data>
     <data name="onboarding/vps_config/update_channel_stable_desc" xml:space="preserve"><value>Released versions. Recommended.</value></data>
     <data name="onboarding/vps_config/update_channel_test_label" xml:space="preserve"><value>Test</value></data>
     <data name="onboarding/vps_config/update_channel_test_desc" xml:space="preserve"><value>Numbered releases being accepted by users before they become Stable.</value></data>
-    <data name="onboarding/vps_config/update_channel_test_desc_same_version" xml:space="preserve"><value>Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks.</value></data>
+    <data name="onboarding/vps_config/update_channel_test_desc_same_version" xml:space="preserve"><value>Numbered releases being accepted by users before they become Stable. Until version 0.2 the server works only with apps of exactly the same version.</value></data>
     <data name="onboarding/vps_config/update_channel_dev_label" xml:space="preserve"><value>Dev</value></data>
     <data name="onboarding/vps_config/update_channel_dev_desc" xml:space="preserve"><value>The newest development builds, before any checking, for people who build the apps from source. Expect breakage.</value></data>
-    <data name="onboarding/vps_config/update_channel_dev_desc_same_version" xml:space="preserve"><value>The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.</value></data>
+    <data name="onboarding/vps_config/update_channel_dev_desc_same_version" xml:space="preserve"><value>The newest development builds, before any checking. Until version 0.2 the server works only with apps built from the same source. Expect breakage.</value></data>
     <data name="onboarding/vps_config/update_channel_stable_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
     <data name="onboarding/vps_config/update_channel_test_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
     <data name="onboarding/vps_config/update_channel_dev_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
     <data name="onboarding/vps_config/mail_mode_label" xml:space="preserve"><value>Run mail on this box</value></data>
-    <data name="onboarding/vps_config/mail_mode_desc" xml:space="preserve"><value>A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS.</value></data>
+    <data name="onboarding/vps_config/mail_mode_desc" xml:space="preserve"><value>A mail box runs email (SMTP, IMAP), which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box, which runs everything except email and can run on the cheapest 1 GB plan, but cannot add email later: the server would have to be set up again with email, on a plan with 2 GB or more.</value></data>
     <data name="onboarding/vps_config/ssh_door_label" xml:space="preserve"><value>Keep an SSH door to this server</value></data>
     <data name="onboarding/vps_config/ssh_door_warning" xml:space="preserve"><value>This reduces your server's security. An SSH door is a second way into the server that Fauna never needs. The key is made on this device and Fauna keeps no copy; the door admits only the address you set the server up from. You alone are responsible for the key, that address and anything done through the door — changes made through it are not supported and may be undone by updates. The door cannot be added later.</value></data>
     <data name="onboarding/nest_provisioning/title" xml:space="preserve"><value>Setting up your nest…</value></data>
@@ -506,6 +503,7 @@ built on your own server.</value></data>
     <data name="onboarding/handle_check/outcome/domain_available_not_buyable_via_provider" xml:space="preserve"><value>{domain} appears to be available, but none of our supported registrars carry .{tld}. You'll need to buy it elsewhere.</value></data>
     <data name="onboarding/handle_check/outcome/domain_available_inside_zone" xml:space="preserve"><value>Nothing is set up at {domain} yet. It sits inside {zone}: if you hold {zone}, continue and pick the DNS provider that hosts it. If not, you can register {domain} on the next page.</value></data>
     <data name="onboarding/handle_check/outcome/registered_no_nest" xml:space="preserve"><value>{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.</value></data>
+    <data name="onboarding/handle_check/outcome/local_no_nest" xml:space="preserve"><value>No nest is running at {domain}. Start a nest there, then check again.</value></data>
     <data name="onboarding/handle_check/outcome/already_on_nest_handle_matches" xml:space="preserve"><value>Welcome back, {handle}.</value></data>
     <data name="onboarding/handle_check/outcome/already_on_nest_handle_differs" xml:space="preserve"><value>You're already registered on {domain} as {old_handle}. Continue to log in as that handle (you can change it after).</value></data>
     <data name="onboarding/handle_check/outcome/user_unregistered" xml:space="preserve"><value>There's a nest at {domain} but you're not registered. Request an invite or paste a code below.</value></data>
@@ -529,6 +527,8 @@ built on your own server.</value></data>
     <data name="onboarding/invite/error/rate_limited" xml:space="preserve"><value>Too many requests. Please try again later.</value></data>
     <data name="onboarding/invite/error/not_found" xml:space="preserve"><value>This invite request was not found. It may have been removed by the admin.</value></data>
     <data name="onboarding/invite/error/transient" xml:space="preserve"><value>{cause}. Try again.</value></data>
+    <data name="onboarding/invite/error/domain_not_hosted" xml:space="preserve"><value>This nest doesn't host addresses on that domain. Go back and choose an address on one of its own domains.</value></data>
+    <data name="onboarding/invite/error/unreachable" xml:space="preserve"><value>Couldn't reach the nest to create your account. Try again.</value></data>
     <data name="onboarding/invite/error/already_registered" xml:space="preserve"><value>This nest already has an account for you, so it won't take a new invite request. Its admin may have suspended your account — contact the admin; if they restore it, sign in again.</value></data>
     <data name="onboarding/invite/error/terminal" xml:space="preserve"><value>Error: {cause}.</value></data>
     <data name="onboarding/oob_code/idle" xml:space="preserve"><value>Have an invite code? Paste it here.</value></data>
@@ -565,7 +565,7 @@ built on your own server.</value></data>
     <data name="onboarding/nat_mode/error/transient" xml:space="preserve"><value>Couldn't save the connection mode: {cause}. Try again.</value></data>
     <data name="onboarding/nat_mode/error/terminal" xml:space="preserve"><value>Couldn't save the connection mode: {cause}.</value></data>
     <data name="onboarding/trust_prompt/title" xml:space="preserve"><value>Trust this box?</value></data>
-    <data name="onboarding/trust_prompt/summary" xml:space="preserve"><value>This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.</value></data>
+    <data name="onboarding/trust_prompt/summary" xml:space="preserve"><value>This box can do more for you if you let it read your mail and calendar, and the posts of the paid tiers you already have: running its virus and spam checks on your mail again when those checks are updated, reading your calendar for itself, and showing the paid posts you publish on the web to the people who pay for them. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.</value></data>
     <data name="onboarding/trust_prompt/grant_button" xml:space="preserve"><value>Yes, trust this box</value></data>
     <data name="onboarding/trust_prompt/skip_button" xml:space="preserve"><value>Not now</value></data>
     <data name="onboarding/trust_prompt/nothing_to_grant" xml:space="preserve"><value>There's nothing to decide yet — this box isn't running anything that would read your content. You can trust it later from Settings → Nests.</value></data>
@@ -580,6 +580,7 @@ built on your own server.</value></data>
     <data name="onboarding/awaiting_dns/copy_button" xml:space="preserve"><value>Copy all</value></data>
     <data name="onboarding/done/finished" xml:space="preserve"><value>Onboarding finished.</value></data>
     <data name="onboarding/session_error/persist_account" xml:space="preserve"><value>Couldn't save your new account: {message}</value></data>
+    <data name="onboarding/session_error/persist_identity" xml:space="preserve"><value>Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is.</value></data>
     <data name="onboarding/session_error/persist_successor" xml:space="preserve"><value>Couldn't save your new identity: {message}</value></data>
     <data name="onboarding/session_error/switch_successor" xml:space="preserve"><value>Couldn't switch to your new identity: {message}</value></data>
     <data name="onboarding/session_error/switch_appended" xml:space="preserve"><value>Couldn't switch to the new account: {message}</value></data>
@@ -617,6 +618,7 @@ built on your own server.</value></data>
     <data name="unlock/unlock_prompt" xml:space="preserve"><value>Your credentials are protected by a passphrase on this machine. Enter it to sign in.</value></data>
     <data name="unlock/create_title" xml:space="preserve"><value>Protect your credentials</value></data>
     <data name="unlock/create_prompt" xml:space="preserve"><value>There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.</value></data>
+    <data name="unlock/keyring_locked_notice" xml:space="preserve"><value>Your system keyring is locked or not set up, so Fauna can't keep your sign-in keys in it and will encrypt them with a passphrase you choose instead. To use the keyring, unlock it or set it up, then restart Fauna before you choose a passphrase.</value></data>
     <data name="unlock/passphrase_label" xml:space="preserve"><value>Passphrase</value></data>
     <data name="unlock/confirm_label" xml:space="preserve"><value>Confirm passphrase</value></data>
     <data name="unlock/unlock_button" xml:space="preserve"><value>Unlock</value></data>
@@ -643,6 +645,8 @@ built on your own server.</value></data>
     <data name="tui_settings/external_media_always" xml:space="preserve"><value>Always open</value></data>
     <data name="tui_settings/external_media_never" xml:space="preserve"><value>Never open (show details only)</value></data>
     <data name="feed/compose_empty" xml:space="preserve"><value>Post cannot be empty</value></data>
+    <data name="feed/imported_notice" xml:space="preserve"><value>Showing the posts you imported from {platform}</value></data>
+    <data name="feed/imported_clear" xml:space="preserve"><value>Show all posts</value></data>
     <data name="feed/video_external_open_confirm_title" xml:space="preserve"><value>Open this video externally?</value></data>
     <data name="feed/compose_gate_preview_empty" xml:space="preserve"><value>Add a public teaser for a gated post</value></data>
     <data name="feed/compose_gate_no_key" xml:space="preserve"><value>This device does not hold the key for tier {tier}</value></data>
@@ -673,8 +677,6 @@ built on your own server.</value></data>
     <data name="feed/delete_post_confirm_title" xml:space="preserve"><value>Delete post?</value></data>
     <data name="feed/error_delete" xml:space="preserve"><value>Failed to delete post: {message}</value></data>
     <data name="feed/report_post" xml:space="preserve"><value>Report post</value></data>
-    <data name="feed/post_muted_placeholder" xml:space="preserve"><value>Muted word</value></data>
-    <data name="feed/post_muted_reveal" xml:space="preserve"><value>Show anyway</value></data>
     <data name="feed/error_muted_keywords" xml:space="preserve"><value>Your muted words are not being applied: {message}</value></data>
     <data name="feed/unverified_source" xml:space="preserve"><value>Unverified</value></data>
     <data name="feed/unverified_source_tooltip" xml:space="preserve"><value>This device could not verify the author's signature on this post.</value></data>
@@ -687,6 +689,7 @@ built on your own server.</value></data>
     <data name="feed/post_type/classified" xml:space="preserve"><value>Listing</value></data>
     <data name="feed/list/title" xml:space="preserve"><value>Feeds</value></data>
     <data name="feed/list/trending" xml:space="preserve"><value>Trending</value></data>
+    <data name="feed/list/local" xml:space="preserve"><value>Local</value></data>
     <data name="feed/list/no_posts" xml:space="preserve"><value>No posts yet.</value></data>
     <data name="feed/list/no_matching_posts" xml:space="preserve"><value>No matching posts.</value></data>
     <data name="feed/list/end_of_feed" xml:space="preserve"><value>End of feed</value></data>
@@ -787,7 +790,7 @@ built on your own server.</value></data>
     <data name="conversations/errors/served_elsewhere" xml:space="preserve"><value>Conversations are open in another instance of this app. Use them there — everything else works here.</value></data>
     <data name="conversations/errors/state_needs_newer_app" xml:space="preserve"><value>This version of the app is too old to open the conversations it saved here. They are intact — update the app to see them again.</value></data>
     <data name="conversations/errors/receive_stopped" xml:space="preserve"><value>New messages stopped arriving because of an internal error. Restart the app (or reload the page) to receive them again.</value></data>
-    <data name="conversations/errors/mail_unopenable" xml:space="preserve"><value>{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.</value></data>
+    <data name="conversations/errors/mail_unopenable" xml:space="preserve"><value>{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.</value></data>
     <data name="conversations/list/title" xml:space="preserve"><value>Conversations</value></data>
     <data name="conversations/list/new_conversation" xml:space="preserve"><value>New Conversation</value></data>
     <data name="conversations/list/sort" xml:space="preserve"><value>Sort</value></data>
@@ -823,8 +826,6 @@ built on your own server.</value></data>
     <data name="conversations/detail/remote_image_blocked" xml:space="preserve"><value>Remote image blocked</value></data>
     <data name="conversations/detail/member_unattested_mark" xml:space="preserve"><value>Was in this group before you recovered your account. Keep them, or remove them if you don't recognise them.</value></data>
     <data name="conversations/detail/member_keep" xml:space="preserve"><value>Keep</value></data>
-    <data name="conversations/detail/muted_word" xml:space="preserve"><value>Muted word</value></data>
-    <data name="conversations/detail/muted_reveal" xml:space="preserve"><value>Show anyway</value></data>
     <data name="conversations/detail/mark_as_spam" xml:space="preserve"><value>Mark as spam</value></data>
     <data name="conversations/detail/report_message" xml:space="preserve"><value>Report message</value></data>
     <data name="conversations/message/signed" xml:space="preserve"><value>Signed</value></data>
@@ -898,6 +899,7 @@ built on your own server.</value></data>
     <data name="conversations/unified/recipient_picker_bridges" xml:space="preserve"><value>Also reaches people on: {bridges}</value></data>
     <data name="conversations/unified/recipient_resolve_error" xml:space="preserve"><value>Lookup failed — try again</value></data>
     <data name="conversations/unified/recipient_resolve_not_found" xml:space="preserve"><value>Not found — check the address</value></data>
+    <data name="conversations/unified/recipient_resolve_not_reachable" xml:space="preserve"><value>Not reachable yet — they need to open Fauna first</value></data>
     <data name="conversations/unified/recipient_resolve_resolved" xml:space="preserve"><value>Resolved</value></data>
     <data name="conversations/unified/recipient_resolve_resolving" xml:space="preserve"><value>Resolving…</value></data>
     <data name="conversations/unified/reply_all" xml:space="preserve"><value>Reply all</value></data>
@@ -1132,10 +1134,6 @@ built on your own server.</value></data>
     <data name="groups/mute_group" xml:space="preserve"><value>Mute Group</value></data>
     <data name="groups/react" xml:space="preserve"><value>React</value></data>
     <data name="groups/message_placeholder" xml:space="preserve"><value>Type a message...</value></data>
-    <data name="groups/message/encrypted" xml:space="preserve"><value>Encrypted</value></data>
-    <data name="groups/message/encrypted_title" xml:space="preserve"><value>End-to-end encrypted via MLS</value></data>
-    <data name="groups/message/signed" xml:space="preserve"><value>Signed</value></data>
-    <data name="groups/message/signed_title" xml:space="preserve"><value>Sender signature verified — content is plaintext in the nest</value></data>
     <data name="atproto_settings/title" xml:space="preserve"><value>AT Protocol</value></data>
     <data name="atproto_settings/app_credentials_heading" xml:space="preserve"><value>App credentials</value></data>
     <data name="atproto_settings/app_credentials_empty" xml:space="preserve"><value>No app credentials yet.</value></data>
@@ -1160,14 +1158,14 @@ built on your own server.</value></data>
     <data name="atproto_settings/session_status_live" xml:space="preserve"><value>Working</value></data>
     <data name="atproto_settings/session_status_suspended" xml:space="preserve"><value>Paused — turn Bluesky back on to let this app work again</value></data>
     <data name="atproto_settings/external_apps_toggle" xml:space="preserve"><value>Allow external apps</value></data>
-    <data name="atproto_settings/external_apps_hint" xml:space="preserve"><value>When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.</value></data>
+    <data name="atproto_settings/external_apps_hint" xml:space="preserve"><value>When this is off, every app it affects is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.</value></data>
     <data name="atproto_settings/depth_heading" xml:space="preserve"><value>Integration depth</value></data>
     <data name="atproto_settings/depth_off_title" xml:space="preserve"><value>Off</value></data>
     <data name="atproto_settings/depth_off_desc" xml:space="preserve"><value>No Bluesky presence.</value></data>
     <data name="atproto_settings/depth_linked_title" xml:space="preserve"><value>Linked account</value></data>
     <data name="atproto_settings/depth_linked_desc" xml:space="preserve"><value>Read, interact, and cross-post through an existing Bluesky account.</value></data>
     <data name="atproto_settings/depth_hosted_visible_title" xml:space="preserve"><value>Hosted here — visible</value></data>
-    <data name="atproto_settings/depth_hosted_visible_desc" xml:space="preserve"><value>This nest holds your identity and publishes your public posts to the Bluesky network.</value></data>
+    <data name="atproto_settings/depth_hosted_visible_desc" xml:space="preserve"><value>This nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network.</value></data>
     <data name="atproto_settings/depth_hosted_full_title" xml:space="preserve"><value>Hosted here — full access</value></data>
     <data name="atproto_settings/depth_hosted_full_desc" xml:space="preserve"><value>Additionally, other Bluesky apps can log in as you through this nest.</value></data>
     <data name="atproto_settings/depth_card_heading" xml:space="preserve"><value>Confirm this change</value></data>
@@ -1183,7 +1181,6 @@ built on your own server.</value></data>
     <data name="atproto_settings/did_method_web_title" xml:space="preserve"><value>did:web</value></data>
     <data name="atproto_settings/did_method_web_desc" xml:space="preserve"><value>Ties your identity to this nest's domain.</value></data>
     <data name="atproto_settings/handle_either_way" xml:space="preserve"><value>Your Bluesky handle will be @{handle} either way.</value></data>
-    <data name="atproto_settings/history_backfill_label" xml:space="preserve"><value>Also publish my existing public posts.</value></data>
     <data name="atproto_settings/history_backfill_count_label" xml:space="preserve"><value>Also publish my {count} existing public posts.</value></data>
     <data name="atproto_settings/hosted_handle_prefix" xml:space="preserve"><value>Your Bluesky handle: @{handle}</value></data>
     <data name="atproto_settings/hosted_method_prefix" xml:space="preserve"><value>Method: {method}</value></data>
@@ -1239,7 +1236,7 @@ built on your own server.</value></data>
     <data name="atproto_settings/card_unlink" xml:space="preserve"><value>The link to {account} is removed. The external account itself is untouched — it keeps existing on its own server and is not migrated.</value></data>
     <data name="atproto_settings/card_mint" xml:space="preserve"><value>A new public identity {handle} is created on the Bluesky network.</value></data>
     <data name="atproto_settings/card_reactivate" xml:space="preserve"><value>Your identity {handle} is restored — the same identity you had before, nothing new is created.</value></data>
-    <data name="atproto_settings/card_publish_consent" xml:space="preserve"><value>Your public posts become visible to everyone on the Bluesky network.</value></data>
+    <data name="atproto_settings/card_publish_consent" xml:space="preserve"><value>Your public posts, apart from posts you imported from another service, become visible to everyone on the Bluesky network.</value></data>
     <data name="atproto_settings/card_deactivate" xml:space="preserve"><value>Publishing stops and the network no longer serves your profile or posts. Your identity is kept — re-enabling restores it exactly.</value></data>
     <data name="atproto_settings/card_no_recall" xml:space="preserve"><value>Copies of already-published posts held by other servers cannot be recalled.</value></data>
     <data name="atproto_settings/card_delete_pointer" xml:space="preserve"><value>"Delete my Bluesky presence" below is the separate, stronger action.</value></data>
@@ -1248,7 +1245,7 @@ built on your own server.</value></data>
     <data name="atproto_settings/card_suspend_plane" xml:space="preserve"><value>Connected apps stop working immediately. Nothing is deleted — your app credentials stay listed, and stepping back up restores them.</value></data>
     <data name="atproto_settings/delete_confirm_sweep" xml:space="preserve"><value>Every post published to Bluesky is deleted, and the network is told to remove them.</value></data>
     <data name="atproto_settings/delete_confirm_identity_kept" xml:space="preserve"><value>Your AT Protocol identity @{handle} is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity.</value></data>
-    <data name="atproto_settings/delete_confirm_apps_disconnected" xml:space="preserve"><value>Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you.</value></data>
+    <data name="atproto_settings/delete_confirm_apps_disconnected" xml:space="preserve"><value>Bluesky apps you are signed in to are disconnected. If you have let other apps post as you, that permission is kept — stop it under Posting from other apps.</value></data>
     <data name="atproto_settings/delete_confirm_level_off" xml:space="preserve"><value>Your Bluesky setting returns to Off.</value></data>
     <data name="atproto_settings/delete_confirm_identity_retired" xml:space="preserve"><value>Your AT Protocol identity @{handle} is also permanently retired once the deletion finishes. This cannot be undone: the identity stops existing on the Bluesky network, and no one — not you, not this nest — can ever restore it. Turning AT Protocol hosting back on later creates a new, different identity.</value></data>
     <data name="atproto_settings/delete_retire_unavailable_web" xml:space="preserve"><value>This identity is tied to your domain, so there is no separate record to retire — it ends when your domain stops serving it.</value></data>
@@ -1257,7 +1254,7 @@ built on your own server.</value></data>
     <data name="atproto_settings/error_nothing_to_delete" xml:space="preserve"><value>There is no Bluesky presence left to delete.</value></data>
     <data name="atproto_settings/error_consent" xml:space="preserve"><value>Could not send your answer: {message}</value></data>
     <data name="atproto_settings/error_consent_gone" xml:space="preserve"><value>That request is no longer waiting for an answer — it may have expired, or you may have already answered it on another device. Start the sign-in again from the app that asked.</value></data>
-    <data name="atproto_settings/contest_detail_contestable" xml:space="preserve"><value>A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.</value></data>
+    <data name="atproto_settings/contest_detail_contestable" xml:space="preserve"><value>A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today.</value></data>
     <data name="atproto_settings/contest_detail_window_closed" xml:space="preserve"><value>A change to your AT Protocol identity {handle} was made with a key this device does not hold, and the time limit for undoing it has passed. The change now stands permanently. Contact whoever runs your nest.</value></data>
     <data name="atproto_settings/contest_detail_genesis" xml:space="preserve"><value>Your AT Protocol identity {handle} was created with a key this device does not hold, so there is no earlier state to return it to. This identity cannot be recovered — create a new one, and contact whoever runs your nest.</value></data>
     <data name="atproto_settings/contest_detail_unauthenticated" xml:space="preserve"><value>The public record of your AT Protocol identity {handle} does not check out: the changes it lists are not signed by keys this identity's own history allows. That points at the record being tampered with, or your connection to it being intercepted — so nothing has been signed or changed from here, and undoing is not offered, because acting on a false record would destroy your real history. Try again from another network, and contact whoever runs your nest.</value></data>
@@ -1266,19 +1263,19 @@ built on your own server.</value></data>
     <data name="atproto_settings/error_request_contest" xml:space="preserve"><value>Could not start undoing the change: {message}</value></data>
     <data name="atproto_settings/error_contest_not_contestable" xml:space="preserve"><value>This change cannot be undone from here.</value></data>
     <data name="atproto_settings/contest_confirm_undo" xml:space="preserve"><value>You are about to undo the change to {handle}, and everything published on top of it, by signing an earlier state of your identity back into place.</value></data>
-    <data name="atproto_settings/contest_confirm_signs" xml:space="preserve"><value>This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step.</value></data>
+    <data name="atproto_settings/contest_confirm_signs" xml:space="preserve"><value>This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you, and Fauna has no way to replace that key today.</value></data>
     <data name="atproto_settings/contest_confirm_directory_rules" xml:space="preserve"><value>The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe.</value></data>
     <data name="critical_alerts/atproto_custody_mismatch" xml:space="preserve"><value>Security alert: the published record of your AT Protocol identity {handle} names a recovery key this device does not hold. Your identity may not be under your control — do not trust it for anything sensitive. You may be able to undo this yourself from Settings → AT Protocol, and there is a time limit; you can also contact whoever runs your nest.</value></data>
     <data name="critical_alerts/atproto_handle_unbound" xml:space="preserve"><value>Security alert: the published record of your AT Protocol identity does not name a handle at {domain}. It is published as {published} instead — people looking for you may be finding someone else. Do not trust this identity for anything sensitive, and contact whoever runs your nest.</value></data>
     <data name="critical_alerts/atproto_handle_unbound_none" xml:space="preserve"><value>Security alert: the published record of your AT Protocol identity names no handle at all, so nobody can find you at {domain}. Do not trust this identity for anything sensitive, and contact whoever runs your nest.</value></data>
-    <data name="critical_alerts/recovery_replacement_pending" xml:space="preserve"><value>Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit.</value></data>
+    <data name="critical_alerts/recovery_replacement_pending" xml:space="preserve"><value>Security alert: someone used your secret key to request a replacement of your recovery kit. If that was not you, someone else has your secret key. Cancel it in Settings → Account → Recovery Kit.</value></data>
     <data name="critical_alerts/recovery_replacement_pending_detail" xml:space="preserve"><value>The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.</value></data>
-    <data name="critical_alerts/domain_expiring_admin" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.</value></data>
-    <data name="critical_alerts/domain_expiring_resident" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
+    <data name="critical_alerts/domain_expiring_admin" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now.</value></data>
+    <data name="critical_alerts/domain_expiring_resident" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
     <data name="critical_alerts/domain_expired_admin" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.</value></data>
-    <data name="critical_alerts/domain_expired_resident" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
+    <data name="critical_alerts/domain_expired_resident" xml:space="preserve"><value>Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
     <data name="critical_alerts/domain_lapsing_admin" xml:space="preserve"><value>Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.</value></data>
-    <data name="critical_alerts/domain_lapsing_resident" xml:space="preserve"><value>Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
+    <data name="critical_alerts/domain_lapsing_resident" xml:space="preserve"><value>Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.</value></data>
     <data name="critical_alerts/eviction_warning" xml:space="preserve"><value>Your account on this nest is being closed by its admin. Your access ends in {days} days, at {suspend_at} UTC, and your account and everything in it will be deleted at {delete_at} UTC. Until your access ends you can export all your data from Settings → Account → Export My Data.</value></data>
     <data name="critical_alerts/eviction_warning_undated" xml:space="preserve"><value>Your account on this nest is being closed by its admin, and it will then be deleted with everything in it. Export all your data now from Settings → Account → Export My Data.</value></data>
     <data name="critical_alerts/eviction_warning_reason" xml:space="preserve"><value>The admin gave this reason: {reason}</value></data>
@@ -1412,6 +1409,8 @@ built on your own server.</value></data>
     <data name="media/versions_loading" xml:space="preserve"><value>Loading versions…</value></data>
     <data name="media/versions_error" xml:space="preserve"><value>Failed to load versions: {message}</value></data>
     <data name="media/version_author" xml:space="preserve"><value>Edited by {author}</value></data>
+    <data name="media/version_author_deposited" xml:space="preserve"><value>Edited by {app} via {author}</value></data>
+    <data name="media/version_author_deposited_unknown" xml:space="preserve"><value>Edited by a connected app via {author}</value></data>
     <data name="media/version_restore" xml:space="preserve"><value>Restore</value></data>
     <data name="media/versions_show_pruned" xml:space="preserve"><value>Show recently pruned</value></data>
     <data name="media/version_pruned_badge" xml:space="preserve"><value>Pruned</value></data>
@@ -1507,17 +1506,20 @@ built on your own server.</value></data>
     <data name="backups/restore_history_row" xml:space="preserve"><value>{kinds} from {source} — {when}</value></data>
     <data name="backups/restore_kinds_mail" xml:space="preserve"><value>mail</value></data>
     <data name="backups/restore_kinds_calendar" xml:space="preserve"><value>calendar</value></data>
+    <data name="backups/restore_kinds_contacts" xml:space="preserve"><value>contacts</value></data>
+    <data name="backups/restore_kinds_posts" xml:space="preserve"><value>posts</value></data>
+    <data name="backups/restore_kinds_conversations" xml:space="preserve"><value>conversations</value></data>
     <data name="backups/restore_confirm_placeholder" xml:space="preserve"><value>Re-type the snapshot id to confirm</value></data>
     <data name="backups/restore_confirm_button" xml:space="preserve"><value>Restore</value></data>
     <data name="backups/restore_progress_idle" xml:space="preserve"><value>Select a snapshot and re-type its id to restore.</value></data>
     <data name="backups/restore_progress_running" xml:space="preserve"><value>Restoring…</value></data>
-    <data name="backups/restore_progress_done" xml:space="preserve"><value>Done — restart the bridge.</value></data>
-    <data name="backups/restore_warning_config_absent" xml:space="preserve"><value>Restored, but the bridge's sign-in keys were not part of the restore — the bridge can't sign in after it restarts until they are restored too.</value></data>
+    <data name="backups/restore_progress_done" xml:space="preserve"><value>Done — restart the mail and calendar service.</value></data>
+    <data name="backups/restore_warning_config_absent" xml:space="preserve"><value>Restored, but this mail and calendar service's sign-in keys were not part of the restore — it can't sign in after it restarts until they are restored too.</value></data>
     <data name="backups/restore_no_snapshots" xml:space="preserve"><value>No local snapshots available to restore.</value></data>
     <data name="backups/restore_source_label" xml:space="preserve"><value>Backup destination</value></data>
     <data name="backups/restore_snapshot_label" xml:space="preserve"><value>Snapshot</value></data>
     <data name="backups/restore_no_destinations" xml:space="preserve"><value>No backup destinations yet — add one under "Backup destinations" above.</value></data>
-    <data name="backups/restore_divergence_banner" xml:space="preserve"><value>{count} MUAs reconnected with newer state</value></data>
+    <data name="backups/restore_divergence_banner" xml:space="preserve"><value>{count} mail or calendar apps reconnected with newer state</value></data>
     <data name="backups/restore_divergence_modal_title" xml:space="preserve"><value>Restore divergence (forensic)</value></data>
     <data name="backups/restore_divergence_detail_row" xml:space="preserve"><value>{collection} · {mua} · client modseq {client} / server modseq {server} · ~{lost} writes lost</value></data>
     <data name="backups/restore_divergence_unknown_mua" xml:space="preserve"><value>(unknown)</value></data>
@@ -1532,7 +1534,7 @@ built on your own server.</value></data>
     <data name="backups/immediate_delete_confirm_button" xml:space="preserve"><value>Delete immediately</value></data>
     <data name="backups/immediate_delete_cancel_button" xml:space="preserve"><value>Cancel</value></data>
     <data name="backups/backup_destinations_title" xml:space="preserve"><value>Backup destinations</value></data>
-    <data name="backups/backup_destinations_desc" xml:space="preserve"><value>Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them.</value></data>
+    <data name="backups/backup_destinations_desc" xml:space="preserve"><value>Replicate your data to another place — a second nest you control, a friend's nest or one of your own devices. Everything that travels there is encrypted, apart from a folder you have made public — the destination cannot read the rest.</value></data>
     <data name="backups/backup_destinations_empty" xml:space="preserve"><value>No backup destinations configured.</value></data>
     <data name="backups/backup_destination_add_button" xml:space="preserve"><value>Add destination</value></data>
     <data name="backups/backup_destination_form_add_title" xml:space="preserve"><value>Add a backup destination</value></data>
@@ -1576,7 +1578,7 @@ built on your own server.</value></data>
     <data name="backups/backup_destination_usage_uncapped" xml:space="preserve"><value>{held} held, no limit set</value></data>
     <data name="backups/backup_destination_usage_unknown" xml:space="preserve"><value>Nothing held yet</value></data>
     <data name="backups/backup_sole_client_destination_warning" xml:space="preserve"><value>Every backup destination you have is one of your own devices. Devices get lost, wiped and replaced — add a nest destination so a copy lives somewhere else.</value></data>
-    <data name="backups/backup_destination_custodian_exposure" xml:space="preserve"><value>This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen.</value></data>
+    <data name="backups/backup_destination_custodian_exposure" xml:space="preserve"><value>This device will keep an offline copy of everything a backup destination keeps. Anyone who can unlock it can read all of it, not just what is on screen.</value></data>
     <data name="backups/backup_orphaned_store_row" xml:space="preserve"><value>This device is still holding {held} of a backup copy. No destination uses it any more.</value></data>
     <data name="backups/backup_destination_reclaim_button" xml:space="preserve"><value>Free up this space</value></data>
     <data name="backups/backup_reclaim_confirm_title" xml:space="preserve"><value>Delete this device's backup copy?</value></data>
@@ -1616,6 +1618,15 @@ built on your own server.</value></data>
     <data name="backups/reseed_refused_other" xml:space="preserve"><value>The nest refused it.</value></data>
     <data name="backups/reseed_gap_sidecarless_segments" xml:space="preserve"><value>{count} parts of your mail arrived without their index, so some mail is still missing. Run the restore again after this device's next backup.</value></data>
     <data name="backups/reseed_gap_unnamed_files" xml:space="preserve"><value>{count} files arrived without their names, so some files are still missing.</value></data>
+    <data name="backups/reseed_refused_not_accepted" xml:space="preserve"><value>You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide.</value></data>
+    <data name="backups/reseed_refused_preflight_stale" xml:space="preserve"><value>The copy changed after you confirmed the restore, so this part was left where it is. Run the restore again to see the copy as it is now.</value></data>
+    <data name="backups/reseed_note_unanchored_rows" xml:space="preserve"><value>{count} files the other nest offered are not in your own record of the backup, so they were left out.</value></data>
+    <data name="backups/reseed_preflight_vouched" xml:space="preserve"><value>{set}: the copy is as new as or newer than what this device last checked on {date} (version {generation}).</value></data>
+    <data name="backups/reseed_preflight_vouched_undated" xml:space="preserve"><value>{set}: the copy is as new as or newer than what this device last checked (version {generation}).</value></data>
+    <data name="backups/reseed_preflight_rolled_back" xml:space="preserve"><value>{set}: the copy is OLDER than what this device last checked (version {generation}, this device saw version {pinned}). Restoring it brings back that older state.</value></data>
+    <data name="backups/reseed_preflight_unvouched" xml:space="preserve"><value>{set}: this device has never checked this copy, so it cannot tell whether it is the newest (version {generation}).</value></data>
+    <data name="backups/reseed_preflight_withheld" xml:space="preserve"><value>{set}: part of the copy is MISSING — this device last checked version {pinned} of it, and the other nest no longer offers it. Restoring brings the rest back without it.</value></data>
+    <data name="backups/reseed_preflight_folders" xml:space="preserve"><value>{count} folders come back as the other nest holds them. This device cannot check that they are complete or the newest.</value></data>
     <data name="backups/backup_audit_recover_button" xml:space="preserve"><value>Recover what your nest lost</value></data>
     <data name="backups/backup_recover_confirm_title" xml:space="preserve"><value>Recover what your nest lost from this backup?</value></data>
     <data name="backups/backup_recover_confirm_body" xml:space="preserve"><value>This copies everything your nest lost back into it from this backup, as new items in the places they were. Nothing is deleted, here or at the backup, and anything you changed or deleted since stays as it is. Running it again never recovers anything twice.</value></data>
@@ -1689,10 +1700,12 @@ built on your own server.</value></data>
     <data name="backups/repo_stats/stored_size" xml:space="preserve"><value>Stored Size</value></data>
     <data name="backups/repo_stats/dedup_ratio" xml:space="preserve"><value>Dedup Ratio</value></data>
     <data name="backups/repo_stats/storage_backend" xml:space="preserve"><value>Storage Backend</value></data>
+    <data name="backups/repo_stats/compression_label" xml:space="preserve"><value>Compression</value></data>
+    <data name="backups/repo_stats/chunk_sizes_label" xml:space="preserve"><value>Chunk Sizes</value></data>
     <data name="backups/repo_stats/encryption" xml:space="preserve"><value>Encryption &amp; Compression</value></data>
     <data name="backups/repo_stats/encryption_algo" xml:space="preserve"><value>ChaCha20-Poly1305</value></data>
-    <data name="backups/repo_stats/compression" xml:space="preserve"><value>zstd level 3</value></data>
-    <data name="backups/repo_stats/chunk_sizes" xml:space="preserve"><value>512 KB - 16 MB avg 4 MB</value></data>
+    <data name="backups/repo_stats/compression" xml:space="preserve"><value>zstd</value></data>
+    <data name="backups/repo_stats/chunk_sizes" xml:space="preserve"><value>up to 8 MB; larger files split into chunks of 2 MB on average, 8 MB at most</value></data>
     <data name="backups/repo_stats/loading_stats" xml:space="preserve"><value>Loading statistics...</value></data>
     <data name="backups/detail/snapshot_id" xml:space="preserve"><value>Snapshot ID</value></data>
     <data name="backups/detail/created" xml:space="preserve"><value>Created</value></data>
@@ -1772,6 +1785,8 @@ built on your own server.</value></data>
     <data name="folders/share_transfer_state_pulling" xml:space="preserve"><value>Receiving</value></data>
     <data name="folders/share_transfer_state_up_to_date" xml:space="preserve"><value>Up to date</value></data>
     <data name="folders/share_transfer_state_limited" xml:space="preserve"><value>Limited by {source}</value></data>
+    <data name="folders/share_transfer_state_unreachable" xml:space="preserve"><value>Could not reach their device</value></data>
+    <data name="folders/share_transfer_state_interrupted" xml:space="preserve"><value>Connection lost; retrying</value></data>
     <data name="folders/share_transfer_source_free_space" xml:space="preserve"><value>free space on this device</value></data>
     <data name="devices/title" xml:space="preserve"><value>Devices</value></data>
     <data name="devices/my_devices" xml:space="preserve"><value>My Devices</value></data>
@@ -1797,6 +1812,9 @@ built on your own server.</value></data>
     <data name="devices/member_enrolled_at" xml:space="preserve"><value>Says it signed in {when}</value></data>
     <data name="devices/member_note" xml:space="preserve"><value>Removing a device here is permanent: there is no undo, and it must sign in again from scratch. A listed device is not necessarily a problem — one that has signed in but not yet registered with the server appears here until it does. Before removing one, compare its fingerprint with the devices you still have: each shows its own on its Devices page, and the one to remove matches none of them. If two appear where you expected one, one of them is a device you hold.</value></data>
     <data name="devices/member_remove_confirm" xml:space="preserve"><value>Yes, remove it permanently</value></data>
+    <data name="devices/rename" xml:space="preserve"><value>Rename</value></data>
+    <data name="devices/rename_label" xml:space="preserve"><value>Device name</value></data>
+    <data name="devices/rename_confirm" xml:space="preserve"><value>Save name</value></data>
     <data name="devices/folders" xml:space="preserve"><value>Folders</value></data>
     <data name="devices/add_folder" xml:space="preserve"><value>Add Folder</value></data>
     <data name="devices/retention" xml:space="preserve"><value>Retention</value></data>
@@ -1826,35 +1844,35 @@ built on your own server.</value></data>
     <data name="devices/nest_place_blank_hint" xml:space="preserve"><value>Leave a box empty to use the default. Empty is a choice — saving applies every box together.</value></data>
     <data name="devices/nest_save" xml:space="preserve"><value>Save Nest Settings</value></data>
     <data name="devices/keyless_posture_badge" xml:space="preserve"><value>Relay only — holds no keys</value></data>
-    <data name="devices/custody_holder_section" xml:space="preserve"><value>Custodians — who holds sealed copies of your data</value></data>
-    <data name="devices/custody_holder_scope" xml:space="preserve"><value>Trusted to hold sealed copies — cannot read them, apart from what you published to everyone</value></data>
+    <data name="devices/custody_holder_section" xml:space="preserve"><value>Custodians — who holds encrypted copies of your data</value></data>
+    <data name="devices/custody_holder_scope" xml:space="preserve"><value>Trusted to hold encrypted copies — cannot read them, apart from what you published to everyone</value></data>
     <data name="devices/custody_receipt_fresh" xml:space="preserve"><value>Last confirmed {when}</value></data>
     <data name="devices/custody_receipt_stale" xml:space="preserve"><value>Stale — last confirmed {when}. Treat this copy as degraded.</value></data>
     <data name="devices/custody_receipt_none" xml:space="preserve"><value>No confirmation yet</value></data>
     <data name="devices/custody_held_bytes" xml:space="preserve"><value>Holding {held} of {cap}</value></data>
     <data name="devices/custody_revoke" xml:space="preserve"><value>Stop trusting this custodian</value></data>
-    <data name="devices/custody_revoke_bound_note" xml:space="preserve"><value>Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before.</value></data>
-    <data name="devices/custody_held_section" xml:space="preserve"><value>Held for others — sealed copies this device keeps</value></data>
+    <data name="devices/custody_revoke_bound_note" xml:space="preserve"><value>Stops future copies and serving on honest holders. Copies already held stay where they are, no more readable to the holder than before.</value></data>
+    <data name="devices/custody_held_section" xml:space="preserve"><value>Held for others — encrypted copies you keep for them</value></data>
     <data name="devices/custody_held_owner" xml:space="preserve"><value>Holding for {owner}</value></data>
-    <data name="devices/custody_held_scope_account" xml:space="preserve"><value>Their account's sealed data — unreadable on this device, apart from what they published to everyone</value></data>
+    <data name="devices/custody_held_scope_account" xml:space="preserve"><value>Their account's encrypted data — unreadable where you hold it, apart from what they published to everyone</value></data>
     <data name="devices/custody_held_restore_address" xml:space="preserve"><value>If they lose every device, they can restore from this nest at {address} — give them this address yourself.</value></data>
     <data name="devices/custody_budget_label" xml:space="preserve"><value>Keep at most (bytes)</value></data>
     <data name="devices/custody_stop" xml:space="preserve"><value>Stop holding</value></data>
     <data name="devices/custody_stopped_bytes_remain" xml:space="preserve"><value>Stopped — stored bytes remain until removed</value></data>
     <data name="devices/custody_remove" xml:space="preserve"><value>Remove and free the space</value></data>
     <data name="devices/custody_remove_done" xml:space="preserve"><value>Removed — the space is free.</value></data>
-    <data name="devices/custody_offer_title" xml:space="preserve"><value>{owner} asks this device to hold sealed copies</value></data>
-    <data name="devices/custody_offer_floor" xml:space="preserve"><value>This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.</value></data>
+    <data name="devices/custody_offer_title" xml:space="preserve"><value>{owner} asks you to hold encrypted copies</value></data>
+    <data name="devices/custody_offer_floor" xml:space="preserve"><value>Their copies would be stored encrypted wherever you hold them, and could not be read there, apart from what they have published to everyone. Of the rest you would see only the shape: what kinds of their data you hold, how much is stored, and when it changes — never the content.</value></data>
     <data name="devices/custody_offer_accept" xml:space="preserve"><value>Hold for them</value></data>
     <data name="devices/custody_offer_decline" xml:space="preserve"><value>Decline</value></data>
     <data name="devices/custody_offer_target_label" xml:space="preserve"><value>Where to hold</value></data>
     <data name="devices/custody_offer_target_device" xml:space="preserve"><value>This device</value></data>
     <data name="devices/custody_offer_target_nest" xml:space="preserve"><value>My nest</value></data>
     <data name="devices/custody_degraded_badge" xml:space="preserve"><value>Degraded — some copies were dropped under the budget</value></data>
-    <data name="devices/custody_mint_button" xml:space="preserve"><value>Ask a friend to hold sealed copies</value></data>
+    <data name="devices/custody_mint_button" xml:space="preserve"><value>Ask a friend to hold encrypted copies</value></data>
     <data name="devices/custody_mint_host_label" xml:space="preserve"><value>Who to ask</value></data>
     <data name="devices/custody_mint_host_placeholder" xml:space="preserve"><value>Choose a contact</value></data>
-    <data name="devices/custody_mint_floor" xml:space="preserve"><value>Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.</value></data>
+    <data name="devices/custody_mint_floor" xml:space="preserve"><value>They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.</value></data>
     <data name="devices/custody_mint_confirm" xml:space="preserve"><value>Send the request</value></data>
     <data name="devices/custody_mint_no_contacts" xml:space="preserve"><value>Start a conversation with them first — the request travels over it.</value></data>
     <data name="devices/paths_placeholder" xml:space="preserve"><value>e.g. Documents, Photos</value></data>
@@ -1880,10 +1898,10 @@ built on your own server.</value></data>
     <data name="devices/folder_audience_shared" xml:space="preserve"><value>Shared</value></data>
     <data name="devices/folder_audience_hint" xml:space="preserve"><value>Private folders are encrypted so only you can read them. Public folders are readable by anyone on the web.</value></data>
     <data name="devices/folder_audience_shared_hint" xml:space="preserve"><value>This folder is shared with other people, so it can't be made private while it's shared. To make it private, remove the sharing in the section below first — or change who it is shared with there.</value></data>
-    <data name="devices/folder_audience_public_bound_hint" xml:space="preserve"><value>This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public.</value></data>
+    <data name="devices/folder_audience_public_bound_hint" xml:space="preserve"><value>This folder is shared with other people and currently public. Pick Shared to encrypt it again so only those people can read it. Anything published while it was public should still be treated as public.</value></data>
     <data name="devices/declassify_title" xml:space="preserve"><value>Make this folder public?</value></data>
     <data name="devices/declassify_body" xml:space="preserve"><value>Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file.</value></data>
-    <data name="devices/declassify_irreversible" xml:space="preserve"><value>Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good.</value></data>
+    <data name="devices/declassify_irreversible" xml:space="preserve"><value>Turning it back later encrypts its files again, but anything published while the folder is public may already have been read or copied, so treat it as public for good.</value></data>
     <data name="devices/declassify_confirm" xml:space="preserve"><value>Make public</value></data>
     <data name="devices/folder_audience_unattested" xml:space="preserve"><value>This folder is public, but this app can't confirm that you made it public. Until you confirm again, up-to-date apps may keep its files encrypted, and your website may not show them.</value></data>
     <data name="devices/folder_audience_reconfirm" xml:space="preserve"><value>Confirm public</value></data>
@@ -1921,11 +1939,14 @@ built on your own server.</value></data>
     <data name="devices/error_set_audience" xml:space="preserve"><value>Failed to change who can see this folder: {message}</value></data>
     <data name="devices/error_serve_website" xml:space="preserve"><value>Failed to change website serving: {message}</value></data>
     <data name="devices/serve_webdav" xml:space="preserve"><value>Serve over WebDAV</value></data>
-    <data name="devices/serve_webdav_hint" xml:space="preserve"><value>Browse and edit this set from any WebDAV client (Finder, GNOME Files, rclone).</value></data>
+    <data name="devices/serve_webdav_hint" xml:space="preserve"><value>Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone).</value></data>
     <data name="devices/serve_webdav_needs_mail" xml:space="preserve"><value>Set up mail first — serving over WebDAV uses your mail encryption key.</value></data>
     <data name="devices/show_on_demand_finder" xml:space="preserve"><value>Show in Finder</value></data>
     <data name="devices/show_on_demand_files" xml:space="preserve"><value>Show in Files</value></data>
     <data name="devices/show_on_demand_hint" xml:space="preserve"><value>Browse this set on demand — files download when opened and can be freed again.</value></data>
+    <data name="devices/on_demand_needs_files_enable" xml:space="preserve"><value>Not shown in Files yet — in the Files app open Browse, choose Edit from the ⋯ menu and turn on Fauna.</value></data>
+    <data name="devices/on_demand_needs_extension_enable" xml:space="preserve"><value>Not shown in Finder yet — turn on Fauna under System Settings → General → Login Items &amp; Extensions → Extensions.</value></data>
+    <data name="devices/on_demand_open_settings" xml:space="preserve"><value>Open System Settings</value></data>
     <data name="devices/on_demand_bound_hint" xml:space="preserve"><value>This set syncs to its bound location; remove the binding to show it on demand instead.</value></data>
     <data name="devices/paywall_tier" xml:space="preserve"><value>Paywall to tier</value></data>
     <data name="devices/paywall_tier_hint" xml:space="preserve"><value>Only subscribers to the chosen tier can view this set's files; other visitors see a teaser.</value></data>
@@ -1943,6 +1964,9 @@ built on your own server.</value></data>
     <data name="devices/error_remove_device" xml:space="preserve"><value>Failed to remove device: {message}</value></data>
     <data name="devices/error_set_p2p_participation" xml:space="preserve"><value>Couldn't change peer transfers: {message}</value></data>
     <data name="devices/error_p2p_remote_enable" xml:space="preserve"><value>Peer transfers can only be turned on from that device itself. From here you can only turn them off.</value></data>
+    <data name="devices/error_rename_device" xml:space="preserve"><value>Couldn't rename the device: {message}</value></data>
+    <data name="devices/error_rename_needs_key" xml:space="preserve"><value>This app can't rename devices until it holds your account key.</value></data>
+    <data name="devices/error_rename_reserved_name" xml:space="preserve"><value>That name is the one an app gives a device you haven't named. Choose another.</value></data>
     <data name="devices/error_remove_fleet_device" xml:space="preserve"><value>Removed the device, but couldn't finish cleanup: {message}</value></data>
     <data name="devices/error_remove_own_device" xml:space="preserve"><value>This is the device you're using, so it wasn't removed. To remove it, sign out on this device.</value></data>
     <data name="devices/error_remove_unverified_device" xml:space="preserve"><value>Couldn't confirm which of your devices this is, so nothing was removed. Try again in a moment.</value></data>
@@ -2099,7 +2123,7 @@ built on your own server.</value></data>
     <data name="sessions/revoke_others_confirm" xml:space="preserve"><value>Yes, Sign Out Everywhere Else</value></data>
     <data name="sessions/revoke_others_cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="sessions/revoke_note" xml:space="preserve"><value>Revoking ends a sign-in and makes whoever held it prove themselves again. It does not sign a device out — a device that holds your secret key or a device grant signs itself straight back in. To end a device for good, remove it under Settings → Devices. If someone else holds your secret key, only your recovery kit ends them (Settings → Account → Recovery Kit → My Identity Was Stolen).</value></data>
-    <data name="sessions/lockout_warning" xml:space="preserve"><value>Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it.</value></data>
+    <data name="sessions/lockout_warning" xml:space="preserve"><value>Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. (On an account that is an admin of its nest, the lock signs every device out but does not stop anyone signing in again.) It does not remove somebody who holds your secret key — they come back when the lock ends, or at once on an account that is an admin of its nest. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use — on a device that holds your secret key, choose My Identity Was Stolen on the Account locked screen (on an account that is an admin of its nest, which is not locked out, under Settings → Account → Recovery Kit). A lock you did not set is itself the sign to use it.</value></data>
     <data name="sessions/lockout_confirm_placeholder" xml:space="preserve"><value>Type LOCK to confirm</value></data>
     <data name="sessions/lockout_button" xml:space="preserve"><value>Lock for 24 Hours</value></data>
     <data name="sessions/lockout_wrong_word" xml:space="preserve"><value>Type {word} exactly to lock the account.</value></data>
@@ -2113,16 +2137,16 @@ built on your own server.</value></data>
     <data name="settings/identity_export/show_qr" xml:space="preserve"><value>Show QR Code</value></data>
     <data name="settings/identity_export/hide_qr" xml:space="preserve"><value>Hide QR Code</value></data>
     <data name="settings/recovery_kit/title" xml:space="preserve"><value>Recovery Kit</value></data>
-    <data name="settings/recovery_kit/desc" xml:space="preserve"><value>An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device.</value></data>
-    <data name="settings/recovery_kit/status_never_created" xml:space="preserve"><value>No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back.</value></data>
-    <data name="settings/recovery_kit/status_registered" xml:space="preserve"><value>Your recovery kit is active, and a sealed copy of your identity secret is stored for it.</value></data>
-    <data name="settings/recovery_kit/status_registered_no_escrow" xml:space="preserve"><value>Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this.</value></data>
-    <data name="settings/recovery_kit/status_replacement_pending" xml:space="preserve"><value>A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.</value></data>
+    <data name="settings/recovery_kit/desc" xml:space="preserve"><value>A second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.</value></data>
+    <data name="settings/recovery_kit/status_never_created" xml:space="preserve"><value>No recovery kit. If every copy of your secret key is lost, your account cannot be recovered, and if someone steals it, you cannot take it back.</value></data>
+    <data name="settings/recovery_kit/status_registered" xml:space="preserve"><value>Your recovery kit is active, and the copy of your secret key that only your kit opens is stored.</value></data>
+    <data name="settings/recovery_kit/status_registered_no_escrow" xml:space="preserve"><value>Your recovery kit is active, but the copy of your secret key that only your kit opens is not stored, so the kit cannot recover this account right now. Enter your kit below and press Restore Kit Recovery to fix this.</value></data>
+    <data name="settings/recovery_kit/status_replacement_pending" xml:space="preserve"><value>A replacement of your recovery kit was requested with your secret key alone, and takes effect in {days} days. Cancel it below if it was not you.</value></data>
     <data name="settings/recovery_kit/status_loading" xml:space="preserve"><value>Checking your recovery kit…</value></data>
     <data name="settings/recovery_kit/create" xml:space="preserve"><value>Create Recovery Kit</value></data>
     <data name="settings/recovery_kit/replace" xml:space="preserve"><value>Replace Using My Kit</value></data>
     <data name="settings/recovery_kit/lost" xml:space="preserve"><value>I Lost My Kit</value></data>
-    <data name="settings/recovery_kit/escrow_reseal" xml:space="preserve"><value>Restore Phrase Recovery</value></data>
+    <data name="settings/recovery_kit/escrow_reseal" xml:space="preserve"><value>Restore Kit Recovery</value></data>
     <data name="settings/recovery_kit/sweep_retry" xml:space="preserve"><value>Finish Moving Your Groups</value></data>
     <data name="settings/recovery_kit/sweep_retry_no_old_state" xml:space="preserve"><value>This device does not have the conversation history from your previous identity, so it cannot finish the move. If another of your devices still has those conversations, press Finish Moving Your Groups there; otherwise ask another member of each group to remove the old identity and add your new one.</value></data>
     <data name="settings/recovery_kit/sweep_retry_not_landed" xml:space="preserve"><value>No move of this account has been recorded, so there is nothing to finish. If you have just taken your account back, wait a moment and try once more.</value></data>
@@ -2147,8 +2171,8 @@ built on your own server.</value></data>
     <data name="settings/recovery_kit/status_failed" xml:space="preserve"><value>Could not check your recovery kit: {message}</value></data>
     <data name="settings/recovery_kit/action_failed" xml:space="preserve"><value>Could not update your recovery kit: {message}</value></data>
     <data name="settings/recovery_kit/veto_failed" xml:space="preserve"><value>Could not cancel the pending replacement: {message}</value></data>
-    <data name="settings/recovery_kit/kit_phrase_placeholder" xml:space="preserve"><value>Paste your recovery phrase (fauna://recovery link or 64-character code)</value></data>
-    <data name="settings/recovery_kit/kit_phrase_required" xml:space="preserve"><value>Paste the recovery phrase for this account first.</value></data>
+    <data name="settings/recovery_kit/kit_phrase_placeholder" xml:space="preserve"><value>Paste your recovery kit (fauna://recovery link or 64-character code)</value></data>
+    <data name="settings/recovery_kit/kit_phrase_required" xml:space="preserve"><value>Paste the recovery kit for this account first.</value></data>
     <data name="settings/recovery_kit/sweep_none" xml:space="preserve"><value>Your conversations were not running, so your groups still include your old identity, and your new one is not in them. Press Finish Moving Your Groups below to complete it now, or ask another member of each group to remove the old identity and add your new one.</value></data>
     <data name="settings/recovery_kit/sweep_failed" xml:space="preserve"><value>Your account moved to your new identity, but your groups could not be updated: {reason}. Your old identity may still be able to read them.</value></data>
     <data name="settings/recovery_kit/sweep_all_removed" xml:space="preserve"><value>Your old identity was removed from all {groups} of your group conversations.</value></data>
@@ -2165,7 +2189,7 @@ built on your own server.</value></data>
     <data name="settings/recovery_kit/review_remove_partial" xml:space="preserve"><value>Removed {who} from {removed} of {groups} of your group conversations. The rest still include them — try again, or ask another member of those groups to remove them.</value></data>
     <data name="settings/recovery_kit/review_remove_done_here" xml:space="preserve"><value>Removed {who} from {removed} of your group conversations.</value></data>
     <data name="settings/recovery_kit/review_remove_none_here" xml:space="preserve"><value>{who} is not in any of your group conversations on this device.</value></data>
-    <data name="settings/recovery_kit/review_remove_folder_seats" xml:space="preserve"><value>They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the set, if it is not yours — then choose Remove again.</value></data>
+    <data name="settings/recovery_kit/review_remove_folder_seats" xml:space="preserve"><value>They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again.</value></data>
     <data name="settings/recovery_kit/review_remove_unsynced_seats" xml:space="preserve"><value>They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.</value></data>
     <data name="settings/recovery_kit/review_verdict_failed" xml:space="preserve"><value>Removed {who} from your group conversations, but your review list could not be updated yet: {reason}. They may still be listed here until it succeeds.</value></data>
     <data name="settings/recovery_kit/backup_regrant_running" xml:space="preserve"><value>Restarting your backups under your new identity…</value></data>
@@ -2201,7 +2225,7 @@ built on your own server.</value></data>
     <data name="settings/recovery_kit/drafts_reseal_failed" xml:space="preserve"><value>Your unsent drafts could not be recovered yet: {reason}. They are safe, and this will be retried the next time you sign in.</value></data>
     <data name="settings/icloud_backup/title" xml:space="preserve"><value>iCloud Backup</value></data>
     <data name="settings/icloud_backup/toggle" xml:space="preserve"><value>Back up identity to iCloud Keychain</value></data>
-    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices.</value></data>
+    <data name="settings/icloud_backup/footer" xml:space="preserve"><value>When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.</value></data>
     <data name="settings/check_for_updates" xml:space="preserve"><value>Check for Updates</value></data>
     <data name="settings/up_to_date" xml:space="preserve"><value>Up to date</value></data>
     <data name="settings/check_failed" xml:space="preserve"><value>Check failed</value></data>
@@ -2229,7 +2253,7 @@ built on your own server.</value></data>
     <data name="settings/mail/enable_title" xml:space="preserve"><value>Enable mail</value></data>
     <data name="settings/mail/enable_subtitle" xml:space="preserve"><value>Allow a third-party mail app to connect over IMAP and SMTP</value></data>
     <data name="settings/mail/disable_title" xml:space="preserve"><value>Disable mail?</value></data>
-    <data name="settings/mail/disable_warning" xml:space="preserve"><value>This revokes all your mail credentials and clears your mail encryption key. Third-party mail apps (IMAP/CalDAV) will stop working until you re-enable mail.</value></data>
+    <data name="settings/mail/disable_warning" xml:space="preserve"><value>Mail apps you connected can no longer send or read mail until you turn mail back on. Calendar, contacts and file apps that sign in with the same password keep working. Your mail keys stay, so your earlier mail stays readable, and turning mail back on needs no new set-up.</value></data>
     <data name="settings/mail/disable_confirm" xml:space="preserve"><value>Disable mail</value></data>
     <data name="settings/mail/status_disabled" xml:space="preserve"><value>Mail is disabled</value></data>
     <data name="settings/mail/status_enabled" xml:space="preserve"><value>All up to date</value></data>
@@ -2310,7 +2334,7 @@ built on your own server.</value></data>
     <data name="settings/account_page/data_export" xml:space="preserve"><value>Data Export</value></data>
     <data name="settings/account_page/export_my_data" xml:space="preserve"><value>Export My Data</value></data>
     <data name="settings/account_page/delete_account" xml:space="preserve"><value>Delete Account</value></data>
-    <data name="settings/account_page/delete_confirm_text" xml:space="preserve"><value>This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail.</value></data>
+    <data name="settings/account_page/delete_confirm_text" xml:space="preserve"><value>This permanently removes your handle and data from this nest. Your key is not affected. Take your data first: Export My Data, in Settings → Account, downloads what your nest holds for you, your mail included; to move your mailbox to another mail service, use Export mailbox, among the mail pages in Settings.</value></data>
     <data name="settings/account_page/connected_services" xml:space="preserve"><value>Connected Services</value></data>
     <data name="settings/account_page/usage" xml:space="preserve"><value>Usage</value></data>
     <data name="settings/account_page/bridges_description" xml:space="preserve"><value>Connect to other social networks</value></data>
@@ -2477,7 +2501,7 @@ built on your own server.</value></data>
     <data name="settings/storage_desc" xml:space="preserve"><value>Account storage usage.</value></data>
     <data name="settings/about" xml:space="preserve"><value>About</value></data>
     <data name="settings/about_name" xml:space="preserve"><value>Fauna for Windows</value></data>
-    <data name="settings/about_desc" xml:space="preserve"><value>Encrypted messaging, contacts, and file sync.</value></data>
+    <data name="settings/about_desc" xml:space="preserve"><value>Your feed, messages, mail, calendar and files, on a server you control.</value></data>
     <data name="settings/danger_zone_desc" xml:space="preserve"><value>Permanently delete your account and all associated data. This action cannot be undone.</value></data>
     <data name="settings/delete_confirm_placeholder" xml:space="preserve"><value>Type DELETE to confirm</value></data>
     <data name="settings/general" xml:space="preserve"><value>General</value></data>
@@ -2490,6 +2514,7 @@ built on your own server.</value></data>
     <data name="settings/errors/update_inbox" xml:space="preserve"><value>Failed to update inbox mode</value></data>
     <data name="settings/errors/change_handle" xml:space="preserve"><value>Failed to change handle</value></data>
     <data name="settings/errors/delete_account" xml:space="preserve"><value>Deletion failed</value></data>
+    <data name="settings/errors/icloud_backup" xml:space="preserve"><value>The copy to iCloud Keychain could not be made, so the backup stays off</value></data>
     <data name="settings/errors/export" xml:space="preserve"><value>Export failed</value></data>
     <data name="settings/errors/export_status" xml:space="preserve"><value>Export failed: {status}</value></data>
     <data name="settings/errors/create_filter" xml:space="preserve"><value>Failed to create filter</value></data>
@@ -2505,8 +2530,8 @@ built on your own server.</value></data>
     <data name="nests/view_now" xml:space="preserve"><value>Now</value></data>
     <data name="nests/view_history" xml:space="preserve"><value>History</value></data>
     <data name="nests/not_trusted" xml:space="preserve"><value>This nest is not trusted to read any of your content.</value></data>
-    <data name="nests/escrow_holder_badge" xml:space="preserve"><value>Holds your recovery escrow</value></data>
-    <data name="nests/custody_nest_label" xml:space="preserve"><value>{host}'s nest — trusted to hold sealed copies</value></data>
+    <data name="nests/escrow_holder_badge" xml:space="preserve"><value>Holds the copy your recovery kit opens</value></data>
+    <data name="nests/custody_nest_label" xml:space="preserve"><value>{host}'s nest — trusted to hold encrypted copies</value></data>
     <data name="nests/custody_restore_button" xml:space="preserve"><value>Restore from a custodian nest…</value></data>
     <data name="nests/custody_restore_input_label" xml:space="preserve"><value>The custodian nest's address, as its host gave it to you (for example https://nest.example)</value></data>
     <data name="nests/custody_restore_submit" xml:space="preserve"><value>Restore</value></data>
@@ -2517,9 +2542,10 @@ built on your own server.</value></data>
     <data name="nests/custody_restore_revoked" xml:space="preserve"><value>you revoked this nest's custody</value></data>
     <data name="nests/custody_restore_not_admitted" xml:space="preserve"><value>That nest didn't let this device in. The address may be wrong, the nest may be down, or it may hold nothing for this account — this device can't tell which.</value></data>
     <data name="nests/custody_restore_restored" xml:space="preserve"><value>Restored {count} of your account's records.</value></data>
-    <data name="nests/custody_restore_sealed" xml:space="preserve"><value>{count} came back sealed and stay unreadable until this device has their key.</value></data>
+    <data name="nests/custody_restore_sealed" xml:space="preserve"><value>{count} came back still encrypted and stay unreadable until this device has their key.</value></data>
     <data name="nests/custody_restore_nothing_new" xml:space="preserve"><value>Nothing new — this device already has everything that nest holds for you.</value></data>
     <data name="nests/custody_restore_mismatch" xml:space="preserve"><value>Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest.</value></data>
+    <data name="nests/custody_restore_unchecked" xml:space="preserve"><value>Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest.</value></data>
     <data name="nests/trusted_to_read" xml:space="preserve"><value>Trusted to read:</value></data>
     <data name="nests/scope_mail" xml:space="preserve"><value>Mail — and the spam-filter model and training history derived from it</value></data>
     <data name="nests/scope_calendar" xml:space="preserve"><value>Calendar</value></data>
@@ -2541,11 +2567,11 @@ built on your own server.</value></data>
     <data name="nests/grant_unattested_mark" xml:space="preserve"><value>Given before you recovered this account — still active. Keep it, or revoke it if you don't recognise it.</value></data>
     <data name="nests/grant_keep_button" xml:space="preserve"><value>Keep</value></data>
     <data name="nests/bound_note_standing" xml:space="preserve"><value>On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.</value></data>
-    <data name="nests/bound_note_bounded_mail" xml:space="preserve"><value>This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail sealed under that period's rotating keys, so content sealed before the schedule caught up may still be unreadable to it.</value></data>
+    <data name="nests/bound_note_bounded_mail" xml:space="preserve"><value>This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.</value></data>
     <data name="nests/history_minted" xml:space="preserve"><value>Trusted to read {scope} · {when}</value></data>
     <data name="nests/history_renewed" xml:space="preserve"><value>Trust renewed: {scope} · {when}</value></data>
     <data name="nests/history_revoked" xml:space="preserve"><value>Trust revoked: {scope} · {when}</value></data>
-    <data name="nests/backup_scope_seal" xml:space="preserve"><value>Backs up your messages for you</value></data>
+    <data name="nests/backup_scope_seal" xml:space="preserve"><value>Encrypts and uploads the backups of your mail, calendar, contacts and posts</value></data>
     <data name="nests/backup_scope_writer" xml:space="preserve"><value>Writes your backups to {destination}</value></data>
     <data name="nests/backup_since" xml:space="preserve"><value>Trusted since:</value></data>
     <data name="nests/backup_status_active" xml:space="preserve"><value>Active</value></data>
@@ -2585,10 +2611,10 @@ built on your own server.</value></data>
     <data name="nests/list_title" xml:space="preserve"><value>Your linked nests</value></data>
     <data name="nests/unlink" xml:space="preserve"><value>Unlink</value></data>
     <data name="nests/capabilities_label" xml:space="preserve"><value>Syncs:</value></data>
-    <data name="nests/capability_account_replica" xml:space="preserve"><value>sealed copy of your account settings</value></data>
+    <data name="nests/capability_account_replica" xml:space="preserve"><value>encrypted copy of your account settings</value></data>
     <data name="nests/expiry_label" xml:space="preserve"><value>Expires:</value></data>
     <data name="nests/expiry_never" xml:space="preserve"><value>Never expires</value></data>
-    <data name="nests/link_recovery_keys_differ" xml:space="preserve"><value>These two nests hold different recovery keys for this account, so they can't be linked.</value></data>
+    <data name="nests/link_recovery_keys_differ" xml:space="preserve"><value>These two nests know different recovery kits for this account, so they can't be linked.</value></data>
     <data name="nests/forward_queue_summary" xml:space="preserve"><value>{count} of your posts are waiting to reach your relay.</value></data>
     <data name="nests/forward_queue_stuck" xml:space="preserve"><value>{count} of them have been refused for more than eight hours. Check that this nest is allowed to forward your posts on the relay — linking the relay again from here grants that — or stop forwarding them below.</value></data>
     <data name="nests/forward_queue_last_error" xml:space="preserve"><value>Last attempt failed: {error}</value></data>
@@ -2597,7 +2623,7 @@ built on your own server.</value></data>
     <data name="linked_nests/title" xml:space="preserve"><value>Linked nests</value></data>
     <data name="linked_nests/unlink" xml:space="preserve"><value>Unlink</value></data>
     <data name="logs/title" xml:space="preserve"><value>Logs</value></data>
-    <data name="logs/description" xml:space="preserve"><value>Recent activity recorded on this device, newest first. No message contents or secrets are ever logged — only what happened, when, and where.</value></data>
+    <data name="logs/description" xml:space="preserve"><value>Recent activity recorded on this device, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.</value></data>
     <data name="logs/filter_label" xml:space="preserve"><value>Severity</value></data>
     <data name="logs/filter_all" xml:space="preserve"><value>All</value></data>
     <data name="logs/level_error" xml:space="preserve"><value>Error</value></data>
@@ -2840,7 +2866,7 @@ built on your own server.</value></data>
     <data name="mail_import/microsoft_admin_consent_fmt" xml:space="preserve"><value>Your organisation's administrator has to approve Fauna first. They can do so at {url}</value></data>
     <data name="mail_import/microsoft_failed" xml:space="preserve"><value>Could not sign in with Microsoft. Try again.</value></data>
     <data name="mail_import/microsoft_sign_in_again" xml:space="preserve"><value>Sign in with Microsoft again</value></data>
-    <data name="mail_import/microsoft_unavailable" xml:space="preserve"><value>Microsoft sign-in is not available yet.</value></data>
+    <data name="mail_import/microsoft_unavailable" xml:space="preserve"><value>Microsoft sign-in is not available in this version of Fauna.</value></data>
     <data name="mail_import/microsoft_session_sign_in_again" xml:space="preserve"><value>The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept.</value></data>
     <data name="mail_import/resume_needs_password" xml:space="preserve"><value>Enter the password for your old mailbox again to resume the import.</value></data>
     <data name="mail_import/resume_needs_microsoft" xml:space="preserve"><value>Sign in with Microsoft again to resume the import.</value></data>
@@ -2899,7 +2925,7 @@ built on your own server.</value></data>
     <data name="mail_import/next" xml:space="preserve"><value>Next</value></data>
     <data name="mail_import/back" xml:space="preserve"><value>Back</value></data>
     <data name="archive_import/title" xml:space="preserve"><value>Import from other services</value></data>
-    <data name="archive_import/description" xml:space="preserve"><value>Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates and audiences. The archive itself stays in a sealed folder on your nest.</value></data>
+    <data name="archive_import/description" xml:space="preserve"><value>Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.</value></data>
     <data name="archive_import/unavailable" xml:space="preserve"><value>Importing needs a session that holds your identity key; this one does not.</value></data>
     <data name="archive_import/source_title" xml:space="preserve"><value>Step 1 — Where the archive comes from</value></data>
     <data name="archive_import/source_help_facebook" xml:space="preserve"><value>On Facebook, open Settings &amp; privacy → Settings → Accounts Center → Your information and permissions → Download your information. Choose "Download to device", format JSON, any media quality. The download link expires after a few days, so save the zip as soon as it is ready.</value></data>
@@ -2917,7 +2943,7 @@ built on your own server.</value></data>
     <data name="archive_import/scope_audience_mode_label" xml:space="preserve"><value>Audience</value></data>
     <data name="archive_import/audience_original" xml:space="preserve"><value>Keep original audiences</value></data>
     <data name="archive_import/audience_only_me" xml:space="preserve"><value>Only me</value></data>
-    <data name="archive_import/scope_audience_summary_fmt" xml:space="preserve"><value>{known} posts and albums have a recorded audience and import to it; {unknown} have none recorded and will be visible only to you.</value></data>
+    <data name="archive_import/scope_audience_summary_fmt" xml:space="preserve"><value>{known} posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; {unknown} have none recorded and will be visible only to you.</value></data>
     <data name="archive_import/scope_audience_summary_only_me" xml:space="preserve"><value>Everything will be visible only to you.</value></data>
     <data name="archive_import/scope_hidden_tiers_unavailable" xml:space="preserve"><value>This nest predates hidden tiers, so only public posts can be imported now. Update the nest, then import again to pick up the rest.</value></data>
     <data name="archive_import/scope_date_from_placeholder" xml:space="preserve"><value>From date (optional, YYYY-MM-DD)</value></data>
@@ -2927,8 +2953,9 @@ built on your own server.</value></data>
     <data name="archive_import/start_button" xml:space="preserve"><value>Start import</value></data>
     <data name="archive_import/progress_title" xml:space="preserve"><value>Step 5 — Importing</value></data>
     <data name="archive_import/progress_summary_fmt" xml:space="preserve"><value>{state} · {imported} of {total} · {skipped} skipped</value></data>
-    <data name="archive_import/progress_timing_fmt" xml:space="preserve"><value>{elapsed} elapsed · about {eta} left</value></data>
     <data name="archive_import/progress_timing_estimating_fmt" xml:space="preserve"><value>{elapsed} elapsed · estimating the time left</value></data>
+    <data name="archive_import/progress_line_fmt" xml:space="preserve"><value>{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · about {eta} left</value></data>
+    <data name="archive_import/progress_line_estimating_fmt" xml:space="preserve"><value>{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · estimating the time left</value></data>
     <data name="archive_import/progress_row_fmt" xml:space="preserve"><value>{imported} of {count} · {skipped} skipped</value></data>
     <data name="archive_import/state_running" xml:space="preserve"><value>Importing</value></data>
     <data name="archive_import/state_paused" xml:space="preserve"><value>Paused</value></data>
@@ -2941,9 +2968,20 @@ built on your own server.</value></data>
     <data name="archive_import/error_log_title" xml:space="preserve"><value>Skipped records</value></data>
     <data name="archive_import/done_title" xml:space="preserve"><value>Step 6 — Done</value></data>
     <data name="archive_import/done_summary_fmt" xml:space="preserve"><value>{imported} imported · {skipped} skipped</value></data>
+    <data name="archive_import/done_unplaced_comments_fmt" xml:space="preserve"><value>{count} comments could not be placed under a post</value></data>
+    <data name="archive_import/done_summary_unplaced_fmt" xml:space="preserve"><value>{imported} imported · {skipped} skipped · {count} comments could not be placed under a post</value></data>
+    <data name="archive_import/done_summary_links_fmt" xml:space="preserve"><value>{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post</value></data>
+    <data name="archive_import/done_summary_unplaced_links_fmt" xml:space="preserve"><value>{imported} imported · {skipped} skipped · {count} comments could not be placed under a post · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post</value></data>
+    <data name="archive_import/link_prompt_fmt" xml:space="preserve"><value>Is {contact} the “{archived_name}” from your {platform} friends?</value></data>
+    <data name="archive_import/link_prompt_unnamed_fmt" xml:space="preserve"><value>Is {contact} one of your {platform} friends?</value></data>
+    <data name="archive_import/link_yes" xml:space="preserve"><value>Yes, link</value></data>
+    <data name="archive_import/link_no" xml:space="preserve"><value>No</value></data>
+    <data name="archive_import/linked_fmt" xml:space="preserve"><value>Linked: {platform}</value></data>
+    <data name="archive_import/linked_unmatched_fmt" xml:space="preserve"><value>Linked: {platform} · {unmatched} could not be matched to a post</value></data>
+    <data name="archive_import/unlink" xml:space="preserve"><value>Unlink</value></data>
     <data name="archive_import/view_imported_button" xml:space="preserve"><value>View imported posts</value></data>
     <data name="archive_import/review_skipped_button" xml:space="preserve"><value>Review skipped</value></data>
-    <data name="archive_import/profile_prefill_button" xml:space="preserve"><value>Use the archive's profile name and bio</value></data>
+    <data name="archive_import/profile_prefill_button" xml:space="preserve"><value>Use the archive's profile name, bio, links and picture</value></data>
     <data name="archive_import/folder_link_fmt" xml:space="preserve"><value>Archive folder: {folder}</value></data>
     <data name="archive_import/category_posts" xml:space="preserve"><value>Posts</value></data>
     <data name="archive_import/category_albums" xml:space="preserve"><value>Albums</value></data>
@@ -3021,7 +3059,7 @@ built on your own server.</value></data>
     <data name="nostr/settings/inbound_title" xml:space="preserve"><value>Inbound to feed</value></data>
     <data name="nostr/settings/inbound_subtitle" xml:space="preserve"><value>Show events from followed Nostr users in your feed</value></data>
     <data name="nostr/settings/expose_title" xml:space="preserve"><value>Expose content</value></data>
-    <data name="nostr/settings/expose_subtitle" xml:space="preserve"><value>Allow Nostr users to see your Fauna content</value></data>
+    <data name="nostr/settings/expose_subtitle" xml:space="preserve"><value>Serve your public posts, apart from posts you imported from another service, to Nostr users from your nest's relay</value></data>
     <data name="nostr/relays/title" xml:space="preserve"><value>Relays</value></data>
     <data name="nostr/relays/none" xml:space="preserve"><value>No relays configured. Default relays will be used.</value></data>
     <data name="nostr/relays/add" xml:space="preserve"><value>Add Relay</value></data>
@@ -3083,14 +3121,13 @@ built on your own server.</value></data>
     <data name="status/inbox_privacy/open" xml:space="preserve"><value>Open</value></data>
     <data name="status/inbox_privacy/open_desc" xml:space="preserve"><value>Anyone can message you directly.</value></data>
     <data name="status/inbox_privacy/allow_knock" xml:space="preserve"><value>Allow Knocks</value></data>
-    <data name="status/inbox_privacy/allow_knock_desc" xml:space="preserve"><value>New contacts must send a knock request first.</value></data>
+    <data name="status/inbox_privacy/allow_knock_desc" xml:space="preserve"><value>New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
     <data name="status/inbox_privacy/contacts_only" xml:space="preserve"><value>Contacts Only</value></data>
-    <data name="status/inbox_privacy/contacts_only_desc" xml:space="preserve"><value>Only confirmed contacts can message you.</value></data>
+    <data name="status/inbox_privacy/contacts_only_desc" xml:space="preserve"><value>Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.</value></data>
     <data name="status/inbox_privacy/closed" xml:space="preserve"><value>Closed</value></data>
     <data name="status/inbox_privacy/closed_desc" xml:space="preserve"><value>No new messages accepted.</value></data>
     <data name="status/encryption/key_packages" xml:space="preserve"><value>Key Packages</value></data>
     <data name="status/encryption/available" xml:space="preserve"><value>{count} available</value></data>
-    <data name="status/encryption/low_keys" xml:space="preserve"><value>Low key packages. Publishing more...</value></data>
     <data name="status/encryption/checking" xml:space="preserve"><value>Checking encryption status...</value></data>
     <data name="status/encryption/publishing" xml:space="preserve"><value>Publishing...</value></data>
     <data name="status/encryption/mls_engine" xml:space="preserve"><value>MLS Engine</value></data>
@@ -3103,7 +3140,7 @@ built on your own server.</value></data>
     <data name="status/notifications/disabling" xml:space="preserve"><value>Disabling...</value></data>
     <data name="status/notifications/permission_denied" xml:space="preserve"><value>Notification permission was denied.</value></data>
     <data name="status/notifications/title" xml:space="preserve"><value>Push Notifications</value></data>
-    <data name="status/notifications/content_encrypted" xml:space="preserve"><value>Notification content is encrypted end-to-end.</value></data>
+    <data name="status/notifications/content_encrypted" xml:space="preserve"><value>Notification content is encrypted end-to-end, apart from a generic alert and the number of unread items, which Apple's notification service carries in the clear.</value></data>
     <data name="status/notifications/registered" xml:space="preserve"><value>Registered with server</value></data>
     <data name="status/notifications/denied_title" xml:space="preserve"><value>Notifications Disabled</value></data>
     <data name="status/notifications/denied_hint" xml:space="preserve"><value>Enable notifications in system Settings to receive alerts.</value></data>
@@ -3134,14 +3171,12 @@ built on your own server.</value></data>
     <data name="status/spam/save" xml:space="preserve"><value>Save Spam Preferences</value></data>
     <data name="status/change_handle/placeholder" xml:space="preserve"><value>new-handle</value></data>
     <data name="status/change_handle/changing" xml:space="preserve"><value>Changing...</value></data>
-    <data name="status/danger_zone/delete_hint" xml:space="preserve"><value>Permanently removes your handle and data from this node. Your key is not affected.</value></data>
     <data name="status/admin_section/title" xml:space="preserve"><value>Nest Administration</value></data>
     <data name="status/admin_section/description" xml:space="preserve"><value>You are an admin of this nest.</value></data>
     <data name="status/admin_section/dashboard" xml:space="preserve"><value>Admin Dashboard</value></data>
     <data name="status/self_host/title" xml:space="preserve"><value>Run your own nest</value></data>
     <data name="status/build/title" xml:space="preserve"><value>Build</value></data>
     <data name="status/build/commit" xml:space="preserve"><value>Commit</value></data>
-    <data name="status/build/verify_hint" xml:space="preserve"><value>Verify this build: clone the repo at this commit, build locally, and compare file hashes.</value></data>
     <data name="admin/aliases" xml:space="preserve"><value>Aliases</value></data>
     <data name="admin/exit" xml:space="preserve"><value>Exit admin</value></data>
     <data name="admin/actor_id_fallback_label" xml:space="preserve"><value>actor {short}…</value></data>
@@ -3326,7 +3361,7 @@ built on your own server.</value></data>
     <data name="admin/nest_page/title" xml:space="preserve"><value>Nest</value></data>
     <data name="admin/nest_page/description" xml:space="preserve"><value>Nest-wide settings for this deployment.</value></data>
     <data name="admin/nest_page/retire_title" xml:space="preserve"><value>Retire this server</value></data>
-    <data name="admin/nest_page/retire_desc" xml:space="preserve"><value>Delete this server at your cloud provider and remove the DNS records that point at it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.</value></data>
+    <data name="admin/nest_page/retire_desc" xml:space="preserve"><value>If Fauna created this server in your cloud account since 8 July 2026, when it began marking the servers it creates, or it is on OVH, delete it there and clean up the DNS records that belong to it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.</value></data>
     <data name="admin/nest_page/retire_button" xml:space="preserve"><value>Retire this server…</value></data>
     <data name="admin/nest_page/load_settings_error" xml:space="preserve"><value>Failed to load nest settings: {message}</value></data>
     <data name="admin/nest_page/update_setting_error" xml:space="preserve"><value>Failed to update nest setting: {message}</value></data>
@@ -3410,7 +3445,7 @@ built on your own server.</value></data>
     <data name="admin/nest_page/rotate_seed_mismatch" xml:space="preserve"><value>This nest reported a different identity than the one that was sent. Nothing further was changed; check the nest before trying again.</value></data>
     <data name="admin/nest_page/rotate_seed_failed" xml:space="preserve"><value>Couldn't rotate the deployment identity: {cause}</value></data>
     <data name="admin/nest_page/takedown_label" xml:space="preserve"><value>Legal takedown</value></data>
-    <data name="admin/nest_page/takedown_desc" xml:space="preserve"><value>One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever.</value></data>
+    <data name="admin/nest_page/takedown_desc" xml:space="preserve"><value>One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever.</value></data>
     <data name="admin/nest_page/takedown_content_id_label" xml:space="preserve"><value>Content id</value></data>
     <data name="admin/nest_page/takedown_type_post" xml:space="preserve"><value>Post</value></data>
     <data name="admin/nest_page/takedown_type_conversation" xml:space="preserve"><value>Conversation message</value></data>
@@ -3420,13 +3455,13 @@ built on your own server.</value></data>
     <data name="admin/nest_page/takedown_arm_restore" xml:space="preserve"><value>Restore…</value></data>
     <data name="admin/nest_page/takedown_blocked_no_content" xml:space="preserve"><value>Enter the content id of the item named by the legal obligation.</value></data>
     <data name="admin/nest_page/takedown_blocked_no_reference" xml:space="preserve"><value>A legal reference is required — a takedown without one is refused.</value></data>
-    <data name="admin/nest_page/takedown_confirm_takedown" xml:space="preserve"><value>Take down {content_type} {content_id}, citing "{reference}"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.</value></data>
+    <data name="admin/nest_page/takedown_confirm_takedown" xml:space="preserve"><value>Take down {content_type} {content_id}, citing "{reference}"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit record keeps this action.</value></data>
     <data name="admin/nest_page/takedown_confirm_restore" xml:space="preserve"><value>Overturn the takedown of {content_type} {content_id}? The content serves again; the takedown record remains as history.</value></data>
     <data name="admin/nest_page/takedown_confirm_button_takedown" xml:space="preserve"><value>Confirm takedown</value></data>
     <data name="admin/nest_page/takedown_confirm_button_restore" xml:space="preserve"><value>Confirm restore</value></data>
     <data name="admin/nest_page/takedown_cancel_button" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/nest_page/takedown_working" xml:space="preserve"><value>Submitting…</value></data>
-    <data name="admin/nest_page/takedown_done" xml:space="preserve"><value>Taken down. A tombstone is served in its place and the author of a post can appeal.</value></data>
+    <data name="admin/nest_page/takedown_done" xml:space="preserve"><value>Taken down. A tombstone is served in its place and the author can appeal.</value></data>
     <data name="admin/nest_page/takedown_restored" xml:space="preserve"><value>Restored. The content is served again; the takedown stays on record.</value></data>
     <data name="admin/nest_page/takedown_failed" xml:space="preserve"><value>The nest refused the request: {error}</value></data>
     <data name="admin/nest_page/reports_label" xml:space="preserve"><value>Reports</value></data>
@@ -3446,17 +3481,17 @@ built on your own server.</value></data>
     <data name="admin/nest_page/block_blocked_not_item" xml:space="preserve"><value>A block is of one post or message. An account report has the account levers — suspension on the users page.</value></data>
     <data name="admin/nest_page/block_item_post" xml:space="preserve"><value>post</value></data>
     <data name="admin/nest_page/block_item_message" xml:space="preserve"><value>message</value></data>
-    <data name="admin/nest_page/block_confirm_block" xml:space="preserve"><value>Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.</value></data>
+    <data name="admin/nest_page/block_confirm_block" xml:space="preserve"><value>Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author keeps their view of it — its photos and files are withheld from the author too, and an author on another nest keeps a message only on the devices that already had it — and can appeal, and a permanent audit record keeps this action. Nothing is deleted.</value></data>
     <data name="admin/nest_page/block_confirm_unblock" xml:space="preserve"><value>Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.</value></data>
     <data name="admin/nest_page/block_confirm_button_block" xml:space="preserve"><value>Confirm block</value></data>
     <data name="admin/nest_page/block_confirm_button_unblock" xml:space="preserve"><value>Confirm unblock</value></data>
-    <data name="admin/nest_page/block_done" xml:space="preserve"><value>Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.</value></data>
+    <data name="admin/nest_page/block_done" xml:space="preserve"><value>Blocked. A notice is shown in its place, the author can appeal, and the report is recorded as acted on.</value></data>
     <data name="admin/nest_page/block_restored" xml:space="preserve"><value>Unblocked. The item is served again; the block stays on record.</value></data>
     <data name="admin/nest_page/block_failed" xml:space="preserve"><value>The nest refused the request: {error}</value></data>
     <data name="admin/nest_page/block_cancel_button" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/nest_page/block_working" xml:space="preserve"><value>Submitting…</value></data>
     <data name="admin/nest_page/blocked_label" xml:space="preserve"><value>Blocked items</value></data>
-    <data name="admin/nest_page/blocked_desc" xml:space="preserve"><value>Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was.</value></data>
+    <data name="admin/nest_page/blocked_desc" xml:space="preserve"><value>Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves except its author — its photos and files from the author too, and an author on another nest keeps a message only on the devices that already had it — with a notice in its place. Unblock serves it again exactly as it was.</value></data>
     <data name="admin/nest_page/blocked_loading" xml:space="preserve"><value>Loading blocked items…</value></data>
     <data name="admin/nest_page/blocked_empty" xml:space="preserve"><value>Nothing is blocked.</value></data>
     <data name="admin/nest_page/oauth_label" xml:space="preserve"><value>Outside-app sign-in keys</value></data>
@@ -3494,19 +3529,19 @@ built on your own server.</value></data>
     <data name="admin/calendar_page/title" xml:space="preserve"><value>Calendar</value></data>
     <data name="admin/calendar_page/description" xml:space="preserve"><value>Calendar (CalDAV) sync for this deployment.</value></data>
     <data name="admin/calendar_page/enabled_label" xml:space="preserve"><value>Enable calendar (CalDAV) on this nest</value></data>
-    <data name="admin/calendar_page/enabled_subtitle" xml:space="preserve"><value>Serve calendar sync (CalDAV) for all users. Needs only a real domain with a public certificate — no email infrastructure — so calendar can run with or without email. The shared mail-and-calendar bridge runs whenever this or Enable mail is on.</value></data>
+    <data name="admin/calendar_page/enabled_subtitle" xml:space="preserve"><value>Serve calendar sync (CalDAV) for all users. It needs no email infrastructure, so calendar can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.</value></data>
     <data name="admin/calendar_page/caldav_port_label" xml:space="preserve"><value>CalDAV port</value></data>
-    <data name="admin/calendar_page/caldav_port_desc" xml:space="preserve"><value>The port the calendar (CalDAV) server listens on for desktop or IP-only nests that have no domain — reach it at https://this-host:port/. Default 8443. On a domain nest this is ignored: CalDAV is served at mail.your-domain on port 443.</value></data>
+    <data name="admin/calendar_page/caldav_port_desc" xml:space="preserve"><value>The port calendar, contacts and file apps use when they reach this nest directly at its own address — a nest at home or on a desktop computer. Default 8443. On a server in the cloud with a domain, they are served at your domain's mail server name (mail. followed by your domain) on the standard port, 443, and this setting does not apply.</value></data>
     <data name="admin/calendar_page/caldav_port_save" xml:space="preserve"><value>Save port</value></data>
     <data name="admin/calendar_page/caldav_port_invalid" xml:space="preserve"><value>Enter a port number between 1 and 65535.</value></data>
     <data name="admin/contacts_page/title" xml:space="preserve"><value>Contacts</value></data>
     <data name="admin/contacts_page/description" xml:space="preserve"><value>Contact (CardDAV) sync for this deployment.</value></data>
     <data name="admin/contacts_page/enabled_label" xml:space="preserve"><value>Enable contacts (CardDAV) on this nest</value></data>
-    <data name="admin/contacts_page/enabled_subtitle" xml:space="preserve"><value>Serve contact sync (CardDAV) for all users. Rides the same server and certificate as calendar — no email infrastructure — so contacts can run with or without email or calendar. The shared bridge runs whenever this, Enable calendar, or Enable mail is on.</value></data>
+    <data name="admin/contacts_page/enabled_subtitle" xml:space="preserve"><value>Serve contact sync (CardDAV) for all users. It needs no email infrastructure, so contacts can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.</value></data>
     <data name="admin/files_page/title" xml:space="preserve"><value>Files</value></data>
     <data name="admin/files_page/description" xml:space="preserve"><value>File (WebDAV) sync for this deployment.</value></data>
     <data name="admin/files_page/enabled_label" xml:space="preserve"><value>Enable files (WebDAV) on this nest</value></data>
-    <data name="admin/files_page/enabled_subtitle" xml:space="preserve"><value>Serve file access (WebDAV) for all users. Rides the same server and certificate as calendar and contacts — no email infrastructure — so files can run with or without email, calendar, or contacts. Nothing is served until a user flags a folder for WebDAV. The shared bridge runs whenever this, Enable contacts, Enable calendar, or Enable mail is on.</value></data>
+    <data name="admin/files_page/enabled_subtitle" xml:space="preserve"><value>Serve file access (WebDAV) for all users. It needs no email infrastructure, so files can run with or without email. Nothing is served until a user flags a folder for WebDAV. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.</value></data>
     <data name="admin/invite_requests_page/title" xml:space="preserve"><value>Invite Requests</value></data>
     <data name="admin/invite_requests_page/description" xml:space="preserve"><value>Review and approve or deny invite requests submitted by users.</value></data>
     <data name="admin/invite_requests_page/empty" xml:space="preserve"><value>No pending invite requests.</value></data>
@@ -3532,7 +3567,7 @@ built on your own server.</value></data>
     <data name="admin/services_page/disabled" xml:space="preserve"><value>Disabled</value></data>
     <data name="admin/services_page/manage_dns" xml:space="preserve"><value>Manage DNS</value></data>
     <data name="admin/logs_page/title" xml:space="preserve"><value>Nest Logs</value></data>
-    <data name="admin/logs_page/description" xml:space="preserve"><value>Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where.</value></data>
+    <data name="admin/logs_page/description" xml:space="preserve"><value>Recent activity recorded on the nest, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.</value></data>
     <data name="admin/logs_page/empty" xml:space="preserve"><value>No nest log entries yet.</value></data>
     <data name="admin/logs_page/audit_title" xml:space="preserve"><value>Admin actions</value></data>
     <data name="admin/logs_page/audit_empty" xml:space="preserve"><value>No admin actions recorded yet.</value></data>
@@ -3598,7 +3633,7 @@ built on your own server.</value></data>
     <data name="admin/mail_page/title" xml:space="preserve"><value>Mail</value></data>
     <data name="admin/mail_page/description" xml:space="preserve"><value>Box-wide mail policy — enable mail and tune the inbound perimeter and authentication enforcement. DKIM, TLS, and DNS records are managed automatically.</value></data>
     <data name="admin/mail_page/enabled_label" xml:space="preserve"><value>Enable mail</value></data>
-    <data name="admin/mail_page/enabled_subtitle" xml:space="preserve"><value>Run the mail subsystem (SMTP / IMAP / CalDAV) for this nest.</value></data>
+    <data name="admin/mail_page/enabled_subtitle" xml:space="preserve"><value>Run mail (SMTP and IMAP) for this nest.</value></data>
     <data name="admin/mail_page/health_title" xml:space="preserve"><value>Mail health</value></data>
     <data name="admin/mail_page/health_state_off" xml:space="preserve"><value>Mail: off</value></data>
     <data name="admin/mail_page/health_state_bridge_down" xml:space="preserve"><value>Mail: mail service not connected</value></data>
@@ -3622,7 +3657,7 @@ built on your own server.</value></data>
     <data name="admin/mail_page/health_never" xml:space="preserve"><value>Never</value></data>
     <data name="admin/mail_page/health_status_line" xml:space="preserve"><value>{state} — last delivered: {delivered} · last received: {received}</value></data>
     <data name="admin/mail_page/health_delist" xml:space="preserve"><value>Request removal from the blocklist</value></data>
-    <data name="admin/mail_page/health_sender_dashboards_note" xml:space="preserve"><value>Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).</value></data>
+    <data name="admin/mail_page/health_sender_dashboards_note" xml:space="preserve"><value>Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and Microsoft run themselves. If you want their view of how your mail is received, sign up with each through its link. Fauna doesn't connect to them.</value></data>
     <data name="admin/mail_page/health_sender_dashboard_gmail" xml:space="preserve"><value>Gmail Postmaster Tools</value></data>
     <data name="admin/mail_page/health_sender_dashboard_outlook" xml:space="preserve"><value>Outlook SNDS</value></data>
     <data name="admin/mail_page/health_recheck" xml:space="preserve"><value>Check again</value></data>
@@ -3637,15 +3672,15 @@ built on your own server.</value></data>
     <data name="admin/mail_page/forward_srs_secret_rotate_confirm" xml:space="preserve"><value>Rotate the forwarding secret? Bounces to mail forwarded before still come back while the old secret is kept.</value></data>
     <data name="admin/mail_page/forward_srs_secret_rotated" xml:space="preserve"><value>Forwarding secret rotated. The previous one is still honoured for bounces to mail already forwarded.</value></data>
     <data name="admin/mail_page/auto_enable_new_users_label" xml:space="preserve"><value>Auto-enable mail for new users</value></data>
-    <data name="admin/mail_page/auto_enable_new_users_subtitle" xml:space="preserve"><value>New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.</value></data>
+    <data name="admin/mail_page/auto_enable_new_users_subtitle" xml:space="preserve"><value>New users automatically get a mailbox at their handle on first sign-in — or, while mail is off and calendars or contacts are served, a password for their calendar and contacts apps. Each user can still turn their own mail off.</value></data>
     <data name="admin/mail_page/microsoft_group_title" xml:space="preserve"><value>Microsoft sign-in for the Outlook import</value></data>
-    <data name="admin/mail_page/microsoft_group_desc" xml:space="preserve"><value>The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.</value></data>
+    <data name="admin/mail_page/microsoft_group_desc" xml:space="preserve"><value>The Outlook import signs in to Microsoft with your organisation's own app registration: enter its application (client) ID and, if you like, its directory. Until one is entered, the import's Sign in with Microsoft does nothing. Clear both fields and save to remove it.</value></data>
     <data name="admin/mail_page/microsoft_requirements" xml:space="preserve"><value>The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory.</value></data>
     <data name="admin/mail_page/microsoft_client_id_label" xml:space="preserve"><value>Application (client) ID</value></data>
     <data name="admin/mail_page/microsoft_tenant_label" xml:space="preserve"><value>Directory (tenant)</value></data>
     <data name="admin/mail_page/microsoft_tenant_subtitle" xml:space="preserve"><value>A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.</value></data>
     <data name="admin/mail_page/microsoft_save" xml:space="preserve"><value>Save Microsoft registration</value></data>
-    <data name="admin/mail_page/microsoft_using_default" xml:space="preserve"><value>Using the default registration.</value></data>
+    <data name="admin/mail_page/microsoft_using_default" xml:space="preserve"><value>No registration entered — the Outlook import's Sign in with Microsoft does nothing until one is.</value></data>
     <data name="admin/mail_page/microsoft_using_own" xml:space="preserve"><value>Using your organisation's registration.</value></data>
     <data name="admin/mail_page/microsoft_client_id_invalid" xml:space="preserve"><value>The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.</value></data>
     <data name="admin/mail_page/microsoft_tenant_invalid" xml:space="preserve"><value>The directory must be a tenant ID, a domain name, or common, organizations or consumers.</value></data>
@@ -3759,13 +3794,14 @@ built on your own server.</value></data>
     <data name="admin/mail_page/alias_wildcard_prefix_subtitle" xml:space="preserve"><value>Allow name-prefixed aliases that route to the same user.</value></data>
     <data name="admin/mail_page/alias_save" xml:space="preserve"><value>Save alias policy</value></data>
     <data name="admin/mail_page/dmarc_group_title" xml:space="preserve"><value>DMARC reports</value></data>
-    <data name="admin/mail_page/dmarc_group_desc" xml:space="preserve"><value>The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.</value></data>
+    <data name="admin/mail_page/dmarc_group_desc" xml:space="preserve"><value>The reports peer mail servers send about mail claiming to be from your domains, how long they are kept, and whether your nest sends reports of its own.</value></data>
     <data name="admin/mail_page/dmarc_ruf_publish_label" xml:space="preserve"><value>Ask for forensic reports</value></data>
     <data name="admin/mail_page/dmarc_ruf_warning" xml:space="preserve"><value>Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.</value></data>
     <data name="admin/mail_page/dmarc_fo_mode_label" xml:space="preserve"><value>Report a message when</value></data>
     <data name="admin/mail_page/dmarc_aggregate_retention_label" xml:space="preserve"><value>Keep aggregate reports (days, 1–365)</value></data>
     <data name="admin/mail_page/dmarc_forensic_retention_label" xml:space="preserve"><value>Keep forensic reports (days, 1–90)</value></data>
     <data name="admin/mail_page/dmarc_forensic_retention_warning" xml:space="preserve"><value>Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.</value></data>
+    <data name="admin/mail_page/dmarc_outbound_aggregate_label" xml:space="preserve"><value>Send daily DMARC reports to other domains</value></data>
     <data name="admin/mail_page/dmarc_save" xml:space="preserve"><value>Save DMARC policy</value></data>
     <data name="admin/dns/title" xml:space="preserve"><value>DNS</value></data>
     <data name="admin/dns/description" xml:space="preserve"><value>Every DNS record each of your domains needs, with the exact value to set and a live check against public DNS.</value></data>
@@ -3784,7 +3820,7 @@ built on your own server.</value></data>
     <data name="admin/dns/add_domain" xml:space="preserve"><value>Add domain</value></data>
     <data name="admin/dns/add_domain_placeholder" xml:space="preserve"><value>example.com</value></data>
     <data name="admin/dns/add_domain_submit" xml:space="preserve"><value>Add</value></data>
-    <data name="admin/dns/add_domain_primary_warning" xml:space="preserve"><value>This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.</value></data>
+    <data name="admin/dns/add_domain_primary_warning" xml:space="preserve"><value>This becomes your nest's primary domain, which can never be removed, only renamed onto a different domain.</value></data>
     <data name="admin/dns/primary_badge" xml:space="preserve"><value>Primary</value></data>
     <data name="admin/dns/remove" xml:space="preserve"><value>Remove</value></data>
     <data name="admin/dns/remove_confirm_title" xml:space="preserve"><value>Remove {domain}?</value></data>
@@ -3922,6 +3958,7 @@ built on your own server.</value></data>
     <data name="moderation/report/reason/other" xml:space="preserve"><value>Something else</value></data>
     <data name="moderation/report/note_label" xml:space="preserve"><value>Anything the admins should know? (optional)</value></data>
     <data name="moderation/report/include_text_label" xml:space="preserve"><value>Include the text of this message — the admins will be able to read it</value></data>
+    <data name="moderation/report/include_text_label_post" xml:space="preserve"><value>Include the text of this post — the admins will be able to read it</value></data>
     <data name="moderation/report/block_author_label" xml:space="preserve"><value>Also block this person</value></data>
     <data name="moderation/report/submit" xml:space="preserve"><value>Send report</value></data>
     <data name="moderation/report/cancel" xml:space="preserve"><value>Cancel</value></data>
@@ -3958,7 +3995,7 @@ built on your own server.</value></data>
     <data name="moderation/legal_takedown/tombstone" xml:space="preserve"><value>Removed under legal obligation ({reference})</value></data>
     <data name="moderation/admin_block/notice" xml:space="preserve"><value>Blocked by this nest's admin after a report: {reason}</value></data>
     <data name="muted_words/title" xml:space="preserve"><value>Muted words</value></data>
-    <data name="muted_words/description" xml:space="preserve"><value>A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.</value></data>
+    <data name="muted_words/description" xml:space="preserve"><value>A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it.</value></data>
     <data name="muted_words/input_placeholder" xml:space="preserve"><value>Add a word to mute</value></data>
     <data name="muted_words/add" xml:space="preserve"><value>Mute word</value></data>
     <data name="muted_words/empty" xml:space="preserve"><value>You haven’t muted any words yet.</value></data>
@@ -3987,7 +4024,7 @@ built on your own server.</value></data>
     <data name="personalization/publish_sheet_title" xml:space="preserve"><value>Publish this topic</value></data>
     <data name="personalization/publish_name_label" xml:space="preserve"><value>Public name for this list</value></data>
     <data name="personalization/publish_name_placeholder" xml:space="preserve"><value>e.g. Small orange cats</value></data>
-    <data name="personalization/publish_limitation_note" xml:space="preserve"><value>You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published anonymously: nothing links the list back to you or your account.</value></data>
+    <data name="personalization/publish_limitation_note" xml:space="preserve"><value>You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though the posts you choose can still say something about you.</value></data>
     <data name="personalization/publish_exemplars_title" xml:space="preserve"><value>Posts to include</value></data>
     <data name="personalization/publish_exemplars_empty" xml:space="preserve"><value>This topic hasn’t scored any of the posts loaded so far. Open a feed it ranks, then try again.</value></data>
     <data name="personalization/publish_exemplar_include" xml:space="preserve"><value>Include</value></data>
@@ -4000,7 +4037,7 @@ built on your own server.</value></data>
     <data name="personalization/publish_kind_model" xml:space="preserve"><value>Word-pattern model</value></data>
     <data name="personalization/publish_kind_unknown" xml:space="preserve"><value>{kind}</value></data>
     <data name="personalization/publish_name_label_model" xml:space="preserve"><value>Public name for this model</value></data>
-    <data name="personalization/publish_limitation_note_model" xml:space="preserve"><value>You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published anonymously, and it’s built only from posts you marked by hand: nothing you merely read or watched goes into it.</value></data>
+    <data name="personalization/publish_limitation_note_model" xml:space="preserve"><value>You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though someone who compares its word patterns with public posts may be able to guess which of them you marked. It’s built only from posts you marked by hand: nothing you merely read or watched goes into it.</value></data>
     <data name="personalization/publish_corpus_size" xml:space="preserve"><value>Built from {included} public examples of your {marked} marked posts.</value></data>
     <data name="personalization/publish_ngrams_title" xml:space="preserve"><value>Word patterns to include</value></data>
     <data name="personalization/publish_ngrams_empty" xml:space="preserve"><value>No word pattern appears in at least 3 of this topic’s public examples yet, so there’s nothing that can be shared without quoting a single post. Mark a few more public posts for this topic, then try again.</value></data>
@@ -4293,12 +4330,12 @@ built on your own server.</value></data>
     <data name="notifications/row_security_admin_action_expired" xml:space="preserve"><value>Security: the pending admin action {action_type} (#{action_id}) on {target} expired without the approvals it needed. Nothing changed.</value></data>
     <data name="notifications/row_security_new_token" xml:space="preserve"><value>Security: new sign-in from a different IP address ({ip}). If this was not you, change your keys and contact your nest administrator.</value></data>
     <data name="notifications/row_security_admin_change" xml:space="preserve"><value>Security: an administrative change ({change_type}) was made to {target}. If you did not request it, contact your nest administrator.</value></data>
-    <data name="notifications/row_security_recovery_replacement_pending" xml:space="preserve"><value>Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.</value></data>
-    <data name="notifications/row_security_recovery_replacement_landed" xml:space="preserve"><value>Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.</value></data>
+    <data name="notifications/row_security_recovery_replacement_pending" xml:space="preserve"><value>Security: a recovery kit replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.</value></data>
+    <data name="notifications/row_security_recovery_replacement_landed" xml:space="preserve"><value>Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.</value></data>
     <data name="notifications/row_security_recovery_replacement_cancelled" xml:space="preserve"><value>Security: the pending recovery key replacement was cancelled by {cancelled_by}.</value></data>
     <data name="notifications/row_security_identity_succeeded" xml:space="preserve"><value>Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.</value></data>
-    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.</value></data>
-    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.</value></data>
     <data name="widget/description" xml:space="preserve"><value>Shows unread message count and quick compose</value></data>
     <data name="widget/unread_label" xml:space="preserve"><value>unread</value></data>
     <data name="markdown/bold" xml:space="preserve"><value>Bold</value></data>
@@ -4515,7 +4552,7 @@ built on your own server.</value></data>
     <data name="error/email/no_handle" xml:space="preserve"><value>You need to set a handle for your account before you can send email.</value></data>
     <data name="error/email/permission_denied" xml:space="preserve"><value>You can only send email from your own address. Check the account you are sending from.</value></data>
     <data name="error/email/rate_limited" xml:space="preserve"><value>You have reached your sending limit for now. Try again later.</value></data>
-    <data name="error/sync/device_limit_exceeded" xml:space="preserve"><value>This account already has as many devices as its plan allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.</value></data>
+    <data name="error/sync/device_limit_exceeded" xml:space="preserve"><value>This account already has as many devices as its tier allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.</value></data>
     <data name="error/send/generic" xml:space="preserve"><value>Something went wrong. Please try again.</value></data>
     <data name="error/send/auth_required" xml:space="preserve"><value>Sign in again to send this message.</value></data>
     <data name="error/send/not_supported" xml:space="preserve"><value>This action is not available for this conversation.</value></data>
@@ -4537,7 +4574,7 @@ built on your own server.</value></data>
     <data name="errors/secret_key_invalid" xml:space="preserve"><value>Secret key must be exactly 64 hexadecimal characters</value></data>
     <data name="errors/nest_unreachable" xml:space="preserve"><value>Cannot connect to nest at the specified URL</value></data>
     <data name="errors/nest_timeout" xml:space="preserve"><value>Nest did not come online within the expected time</value></data>
-    <data name="errors/snapshot_device_unknown" xml:space="preserve"><value>This snapshot's owning device is unknown, so its files cannot be downloaded.</value></data>
+    <data name="errors/snapshot_download_no_device_id" xml:space="preserve"><value>This device could not load its own identity, so snapshot files cannot be downloaded here. Restart the app; if that does not help, sign in again.</value></data>
     <data name="errors/no_identity" xml:space="preserve"><value>No identity configured</value></data>
     <data name="errors/not_connected_to_nest" xml:space="preserve"><value>Not connected to your nest — no active session</value></data>
     <data name="errors/nostr_nsec_required" xml:space="preserve"><value>Enter your nsec</value></data>
@@ -4559,7 +4596,7 @@ built on your own server.</value></data>
     <data name="errors/nest_identity_changed" xml:space="preserve"><value>The identity of {host} has changed and could no longer be verified. For your safety, the connection was stopped.</value></data>
     <data name="errors/recovery_identity_unreadable" xml:space="preserve"><value>This session's identity secret is unreadable: {detail}</value></data>
     <data name="errors/recovery_superseded" xml:space="preserve"><value>This identity has already been succeeded by another one. Import your new identity to continue.</value></data>
-    <data name="errors/recovery_no_escrow" xml:space="preserve"><value>No sealed copy of your identity secret is stored for this recovery kit, so it cannot recover this account right now.</value></data>
+    <data name="errors/recovery_no_escrow" xml:space="preserve"><value>The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.</value></data>
     <data name="errors/recovery_not_registered" xml:space="preserve"><value>No recovery key is registered for this identity, so there is nothing to recover from.</value></data>
     <data name="errors/recovery_already_succeeded" xml:space="preserve"><value>This identity has already been succeeded and cannot be recovered again.</value></data>
     <data name="errors/recovery_invalid_nonce" xml:space="preserve"><value>That recovery request has expired or was already used. Please try again.</value></data>
@@ -4640,9 +4677,9 @@ built on your own server.</value></data>
     <data name="provisioning/linode/help" xml:space="preserve"><value>Create a Personal Access Token at cloud.linode.com → Profile → API Tokens.</value></data>
     <data name="provisioning/linode/api_token" xml:space="preserve"><value>API token</value></data>
     <data name="provisioning/linode/location" xml:space="preserve"><value>Region</value></data>
-    <data name="provisioning/managed/disabled" xml:space="preserve"><value>Managed subdomains on fauna.social are coming soon. For now, pick another option.</value></data>
     <data name="region/blocked_notice" xml:space="preserve"><value>Not shown in {region} — blocked under the policy of {authority}</value></data>
     <data name="region/collapsed_notice" xml:space="preserve"><value>Hidden in {region} under the policy of {authority} — select to show</value></data>
+    <data name="region/sealed_note" xml:space="preserve"><value>Hidden from you on this device — nothing was removed, detected or reported</value></data>
     <data name="region/reveal_button" xml:space="preserve"><value>Show</value></data>
     <data name="region/section_title" xml:space="preserve"><value>Region</value></data>
     <data name="region/declared" xml:space="preserve"><value>Your region: {region}</value></data>
@@ -4660,6 +4697,9 @@ built on your own server.</value></data>
     <data name="region/stale_warning" xml:space="preserve"><value>Could not check for policy updates recently — the policies above stay in force</value></data>
     <data name="nest_rules/blocked_notice" xml:space="preserve"><value>Not shown on {nest} — blocked under this nest’s rules</value></data>
     <data name="nest_rules/collapsed_notice" xml:space="preserve"><value>Hidden on {nest} under this nest’s rules — select to show</value></data>
+    <data name="nest_rules/joining_heading" xml:space="preserve"><value>Rules of {nest}. By continuing you accept them.</value></data>
+    <data name="nest_rules/not_applied_newer_version" xml:space="preserve"><value>These rules were written by a newer version of Fauna, so none of them apply on this device. Update the app to see and apply them.</value></data>
+    <data name="nest_rules/not_applied_malformed" xml:space="preserve"><value>These rules contain an error, so none of them apply on this device.</value></data>
     <data name="nest_rules/changed_notice" xml:space="preserve"><value>{nest} changed its rules — see what is in force</value></data>
     <data name="nest_rules/reveal_button" xml:space="preserve"><value>Show</value></data>
     <data name="nest_rules/settings_title" xml:space="preserve"><value>Rules of {nest}</value></data>
@@ -4718,10 +4758,11 @@ built on your own server.</value></data>
     <data name="connected_apps/unnamed" xml:space="preserve"><value>Unnamed app</value></data>
     <data name="connected_apps/signer_pending" xml:space="preserve"><value>Waiting to connect…</value></data>
     <data name="connected_apps/scope_nostr_sign" xml:space="preserve"><value>Sign Nostr events with your key</value></data>
-    <data name="connected_apps/scope_mail" xml:space="preserve"><value>Read and send your mail, and sync your calendar, contacts and files</value></data>
+    <data name="connected_apps/scope_mail" xml:space="preserve"><value>Read and send your mail while mail is on, and sync your calendar, contacts and files</value></data>
     <data name="connected_apps/requests_heading" xml:space="preserve"><value>Requests</value></data>
     <data name="connected_apps/consent_ends_holder" xml:space="preserve"><value>This app now uses a new key. Approving ends the access its earlier key was given.</value></data>
     <data name="connected_apps/consent_ends_writer" xml:space="preserve"><value>This app now signs with a new key. Approving ends its earlier key's permission to write.</value></data>
+    <data name="connected_apps/consent_assistant_reach" xml:space="preserve"><value>Whatever you allow here, the AI assistant you connect can read or do — and if that assistant runs on a company's servers, that company's service can too. You can disconnect it here at any time.</value></data>
     <data name="connected_apps/connect_heading" xml:space="preserve"><value>Connect an app</value></data>
     <data name="connected_apps/connect_hint" xml:space="preserve"><value>If an app on another device shows you a code, type it here.</value></data>
     <data name="connected_apps/connect_placeholder" xml:space="preserve"><value>Code from the app</value></data>
@@ -4766,8 +4807,8 @@ built on your own server.</value></data>
     <data name="connected_apps/error_secret" xml:space="preserve"><value>Could not read the secret: {message}</value></data>
     <data name="connected_apps/error_record" xml:space="preserve"><value>Could not read what your nest did for this app: {message}</value></data>
     <data name="connected_apps/error_external_apps" xml:space="preserve"><value>Failed to change the external-apps switch: {message}</value></data>
-    <data name="connected_apps/oracle_ops" xml:space="preserve"><value>Your nest used your keys for this app {count} times in the current window</value></data>
-    <data name="connected_apps/oracle_ops_one" xml:space="preserve"><value>Your nest used your keys for this app once in the current window</value></data>
+    <data name="connected_apps/oracle_ops" xml:space="preserve"><value>Fauna acted for this app {count} times in the current window</value></data>
+    <data name="connected_apps/oracle_ops_one" xml:space="preserve"><value>Fauna acted for this app once in the current window</value></data>
     <data name="connected_apps/oracle_requests" xml:space="preserve"><value>{count} requests answered in all</value></data>
     <data name="connected_apps/oracle_requests_one" xml:space="preserve"><value>1 request answered in all</value></data>
     <data name="connected_apps/oracle_latest" xml:space="preserve"><value>Most recent, {time}: {operation} — {detail}</value></data>

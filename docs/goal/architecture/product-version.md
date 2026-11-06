@@ -48,8 +48,9 @@ source. The cheap merge gate **`version-lockstep-check`**
 (a dedicated dev-fleet checker) refuses any merge where a surface drifts —
 its check functions are the machine-readable enumeration of the surfaces. Today:
 Android `versionName`/`versionCode` (arithmetic owned by
-[`installers/android.md`](installers/android.md) § Versioning), the two Apple
-`Info.plist` files plus every pbxproj `MARKETING_VERSION`
+[`installers/android.md`](installers/android.md) § Versioning), the three Apple
+`Info.plist` files (macOS, iOS, and the Fauna Kids iOS app's
+`Info-Kids.plist`) plus every pbxproj `MARKETING_VERSION`
 ([`installers/macos.md`](installers/macos.md) § Versioning), windows
 `Package.wxs` `Version` plus the `ShellDllName` coupling
 ([`installers/windows.md`](installers/windows.md) § Shell Extension), the snap
@@ -100,7 +101,7 @@ not oblige any app to ship it" rule: sparse per-store histories are no longer
 expected — a store skipping a number now means a reship carve-out, and the
 table says so.*
 
-**The public website is a surface of the train: fauna.social deploys at every version's sync, and the version's public tag refuses without it (ruled by the owner 2026-10-16).** The deploy builds the private commit the sync's `Sync-Point:` names — the commit the public tree was made from — so the site's "what works where" page and the public repository's catalog are one commit's rendering, and it runs once that sync's squash-merge lands on public `main`, before the tag and the promote (which follow hours or days later and would leave the site behind the repository it describes). It stays an act of the version's attempt, taken by the release session after the version's one go, never a push trigger: a merge to private `main` never publishes the site by itself. The tag gate reads a green deploy at the internal tag's commit live, as it reads the release Environments ([`release-table.md`](release-table.md) § Tag gate and release table); a deploy that would publish a site text still in draft is refused ([`public-texts.md`](public-texts.md) § Classes).
+**The public website is a surface of the train: fauna.social deploys at every version's sync, and the version's public tag refuses without it (ruled by the owner 2026-10-16).** The deploy builds the private commit the sync's `Sync-Point:` names — the commit the public tree was made from — so the site's "what works where" page and the public repository's catalog are one commit's rendering, and it runs once that sync's squash-merge lands on public `main`, before the tag and the promote (which follow hours or days later and would leave the site behind the repository it describes). It stays an act of the version's attempt, taken by the release session after the version's one go, never a push trigger: a merge to private `main` never publishes the site by itself. The tag gate reads a green deploy at the internal tag's commit live, as it reads the release Environments ([`release-table.md`](release-table.md) § Tag gate and release table); a deploy that would publish a site text still in draft is refused ([`public-texts.md`](public-texts.md) § Classes). **Amended by the owner 2026-10-24: the deploy moves to the end of the release.** fauna.social/apps links each released file at its version, so a deploy before the release files exist links files that are not there yet. The deploy therefore runs once the version's release workflows have published their files at the tag; it does not wait for the promote or the release flip, which can follow days later. The tag gate reads a green site *build* at the internal tag's commit instead of a deploy, which still refuses a site that does not build before anything is tagged. For the hours between the release's files and the deploy, the site still describes the previous version; the owner prefers that to dead links. The draft refusal is unchanged.
 
 ### Reships: a store re-upload mints a NEW product patch
 
@@ -167,10 +168,16 @@ considered:
 
 ## Current values
 
-All lockstep surfaces: **`0.1.5`** (bumped 2026-10-18: the first tagged
+All lockstep surfaces: **`0.1.6`** (bumped 2026-11-05: the everyday
+train — feed, posts, conversations, contacts, notifications, folders and
+sharing at parity on every app — and the first version promoted and
+released; Android push moved to `0.1.7`; no store has accepted an upload of it yet). Before that,
+**`0.1.5`** (bumped 2026-10-18: the first tagged
 train, cut from a `main` tip on the release-attempt shape and carrying
 everything landed since `0.1.4`; Android push is deferred to `0.1.6`; no store has accepted an upload of it
-yet). Before that, **`0.1.4`** (bumped 2026-10-11: the parity train,
+yet; its public tag `v0.1.5` was pushed on 2026-10-22 and its GitHub Release
+stays a pre-release — owner-ruled 2026-10-23, 0.1.5 is not promoted and
+`0.1.6` is the first version promoted and released, [`release-table.md`](release-table.md)). Before that, **`0.1.4`** (bumped 2026-10-11: the parity train,
 which catches the apps up on most of what `0.1.3` shipped on only some; no store has accepted an upload of it
 yet. **Its public commit is the 2026-10-17 squash-merge of its sync, and the public image `:test` + `:0.1.4` is staged and signed, not promoted. Owner-ruled 2026-10-17, taking the recommendation: 0.1.4 takes NO `v0.1.4` tag and no installer release — it stays published-and-staged, because its source is not on `main` (the retired base-pin-plus-cherry-picks shape, [`release-attempt.md`](release-attempt.md) § The release attempt), it carries RUSTSEC-2026-0367..0369 against `zip`, and nothing can promote it while the organisation's nests are firewalled; `0.1.5` is the first tagged train, cut from `main` on the attempt shape.**) Before that, **`0.1.3`** (bumped 2026-10-07 under § Version
 strings are never reused or re-meant → *An upload spends the string*: the
@@ -196,7 +203,7 @@ linux channels have shipped nothing.
 ## Implementation status today
 
 - **Fully implemented as of the ratifying commit**: source and every lockstep
-  surface agree at `0.1.5`; `version-lockstep-check` (+ its `-test` companion)
+  surface agree at `0.1.6`; `version-lockstep-check` (+ its `-test` companion)
   runs in the cheap tier on both merge scripts.
 - The metainfo's `<releases>` list is empty — nothing has shipped; the first
   entry is appended when the linux channels first ship (an empty history
@@ -207,10 +214,11 @@ linux channels have shipped nothing.
   ([`feature-catalog.md`](feature-catalog.md) § Implementation status today,
   step 4). Until then the rule binds the maintainer cutting a release, not a
   gate.
+- **The 2026-10-24 amendment (the deploy at the end of the release) is built, not yet exercised on a release (first: 0.1.6):** `fauna-publish build-site <version>` dispatches `deploy-site.yml` with its `build_only` input at the sync point (a run titled `Build fauna.social at <sha>`, uploading nothing), and `fauna-publish tag` refuses without a green build there, a deploy counting as one; `fauna-publish deploy-site <version>` refuses until the public Release `v<version>` exists, is not a draft, and carries every file `installer/downloads.json` at the sync point links, whichever workflow publishes it. Separately, two site deploys of 2026-10-24 ran from private `main` past the sync point, on the owner's word, to publish the `/apps` page and three site fixes before the 0.1.6 sync.
 - **The site surface of the train (2026-10-17) is built:** `fauna-publish
   deploy-site <version>` dispatches `deploy-site.yml` at the sync point (the
-  workflow's `commit` input, named in the run's title) and `fauna-publish tag`
-  refuses without a green run there. The live site was last deployed 2026-09-26; the 0.1.4 sync's
+  workflow's `commit` input, named in the run's title); the tag's check of it
+  became a build check under the amendment above. The live site was last deployed 2026-09-26; the 0.1.4 sync's
   deploy is refused by its draft check — its tree wraps the code-signing policy
   page while that text was still a draft. The page and `/terms` were approved in
   public-texts round 1 (landed 2026-10-19, after 0.1.4's sync point), and the
@@ -243,5 +251,5 @@ linux channels have shipped nothing.
   browser-opening link — android's Settings root gained an About section for
   it, carrying `settings-app-version` from `fauna_ffi_build_version()` — and on
   macOS (Settings → General's About block) and iOS (a new Settings-root About
-  section, like android's) 2026-10-22 as a browser-opening link; windows to
-  follow).
+  section, like android's) 2026-10-22 as a browser-opening link, and on
+  windows (Settings → General's About block, through `UrlOpener`) 2026-10-28).

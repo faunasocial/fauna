@@ -21,6 +21,7 @@
   import { onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import {
     loadEventDrafts,
+    onEventDraftRestored,
     resumeEventDraft,
     scheduleEventDraftSave,
     clearEventDraft,
@@ -169,6 +170,7 @@
   let unsubPush: (() => void) | null = null;
   let unsubReconnect: (() => void) | null = null;
   let unsubStore: (() => void) | null = null;
+  let unsubDraftRestored: (() => void) | null = null;
 
   // The reminder preset catalog (value + localized label), populated in
   // onMount from the shared `reminder_presets` map (events.md § Reminders) —
@@ -203,9 +205,12 @@
     // sidebar AND the New Event opener (`{#if calendars.length > 0}`), so a slow
     // or wedged connection would leave the page with no way to compose at all —
     // a draft convenience taking out the feature it decorates. The restore is
-    // free to land whenever it lands, because `resumeDraftIfAny` is idempotent
-    // and runs from BOTH doors: here when the load resolves, and again from the
-    // New Event opener. The page never needs the draft to render.
+    // free to land whenever it lands — the shared load retries a lost read for
+    // minutes — because `resumeDraftIfAny` is idempotent and runs from every
+    // door: when the restore fills the rail, when the face resolves (a remount
+    // after an earlier restore), and from the New Event opener. The page never
+    // needs the draft to render.
+    unsubDraftRestored = onEventDraftRestored(resumeDraftIfAny);
     void loadEventDrafts().then(resumeDraftIfAny).catch(() => {
       // No identity yet / transport down: composing still works, unpersisted.
       // `loadEventDrafts` already logs the interesting half (a failed restore);
@@ -267,6 +272,7 @@
   });
 
   onDestroy(() => {
+    unsubDraftRestored?.();
     unsubPush?.();
     unsubReconnect?.();
     unsubStore?.();
@@ -1186,8 +1192,10 @@
       {:else}
         <h2 data-testid={IDS.EVENT_DETAIL_SUMMARY}>{selectedEvent.summary}</h2>
         <div class="detail-meta">
+          <!-- The stored RFC-3339 halves verbatim (the start alone when the
+               event has no end), as tui, linux and apple paint the range. -->
           <p data-testid={IDS.EVENT_DETAIL_TIME} class="detail-dates">
-            {new Date(selectedEvent.dtstart).toLocaleString()} &ndash; {new Date(selectedEvent.dtend).toLocaleString()}
+            {selectedEvent.dtend ? `${selectedEvent.dtstart} – ${selectedEvent.dtend}` : selectedEvent.dtstart}
           </p>
           {#if selectedEvent.location}
             <p data-testid={IDS.EVENT_DETAIL_LOCATION} class="detail-location">{t.events.location}: {selectedEvent.location}</p>

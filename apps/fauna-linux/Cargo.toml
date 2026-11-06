@@ -111,6 +111,9 @@ e2e-agent = [
     "fauna-e2e-agent/e2e-agent",
     "fauna-client-backup/e2e-agent",
     "fauna-sync-engine/e2e-agent",
+    # The `fake` payment provider in the provider form's kind select — compiled
+    # out of a production build (`fauna-payments` src/lib.rs, the module gate).
+    "fauna-client-payments?/test-helpers",
     # The Nests trust facet's render clock (`trust_facet_advance_clock`) —
     # `trust_clock`'s setter gates on `debug_assertions OR e2e-agent`, so a
     # RELEASE-profile e2e build needs this forward (convention 15).
@@ -168,28 +171,44 @@ e2e-agent = [
     "fauna-client-search/test-helpers",
     "fauna-onboarding-machine/test-helpers",
     "fauna-onboarding-machine/test-observer",
+    # `ArchiveImportMachine::set_{pause,hold}_after_records_for_test` — the
+    # archive-import journeys' causal anchors (convention 14), armed by the
+    # `archive_import_{pause,hold}_after` agent commands. A debug build reaches
+    # them through the crate's `debug_assertions` arm; this forward keeps a
+    # RELEASE-profile e2e build able to run those journeys (tui's twin).
+    "fauna-archive-import-machine/test-helpers",
 ]
+
+# The app is the library; the binary only expands the build-commit stamp, so a
+# commit recompiles the thin bin alone (`src/lib.rs`'s crate doc). The library
+# keeps the binary's crate name so the app's `tracing` targets stay
+# `fauna_desktop::…`. The unit tests live with the modules in the lib; the app
+# has no doc examples.
+[lib]
+name = "fauna_desktop"
+path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 name = "fauna-desktop"
 path = "src/main.rs"
+test = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(feature, values("e2e-agent", "store-safe", "payments", "p2p-share"))',
 ] }
 
-[build-dependencies]
-# The one derivation of `FAUNA_BUILD_COMMIT` — the commit the Status page's
-# `status-build-sha` names (`ui/status.md` § State & data shape, the build leg).
-fauna-build-commit = { path = "../../libs/fauna-build-commit" }
-
 [dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT`, the `commit!()` macro — the
+# commit the Status page's `status-build-sha` names (`ui/status.md` § State &
+# data shape, the build leg).
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
 # Process-wide dial budget; the e2e reset arm clears it (`dial_budget::clear_for_test`,
 # `test-helpers` forwarded from `e2e-agent`).
 fauna-ws-substrate = { workspace = true }
 # Core — direct Rust dependency, no FFI boundary
-fauna-core ={ path = "../../libs/fauna-core", features = ["qr_render", "local-clock"] }
+fauna-core ={ path = "../../libs/fauna-core", features = ["qr_render", "local-clock", "network"] }
 # Generated element-id constants (build-system.md § Generated element-id constants).
 fauna-ui-ids = { path = "../../libs/fauna-ui-ids" }
 # Shared string table generated from i18n/strings/en.yaml (`just i18n-generate`),
@@ -406,7 +425,7 @@ fauna-credential-store = { workspace = true }
 # connection-management surface (knocks inbox, contacts roster, inbox-acceptance
 # policy). Replaces the legacy `fauna_nest_http::paths::{knocks,contacts}` +
 # `inbox::mode_for_actor` HTTP call-sites.
-fauna-client-contacts = { path = "../../libs/fauna-client-contacts" }
+fauna-client-contacts = { path = "../../libs/fauna-client-contacts", features = ["native"] }
 fauna-client-conversations = { path = "../../libs/fauna-client-conversations" }
 # The T16 custody facet's shared PURE half (`ui/devices.md` § Custody facet):
 # the three folds + `fold_custody_facet`, and the receipt-status / held-bytes
@@ -608,6 +627,16 @@ openmls = { workspace = true }
 # `local-clock`: the bubble paints `dm-message-warmup-deferred` from the shared
 # `message::warmup_deferred_text`, which formats the release in local time.
 fauna-conversations = { path = "../../libs/fauna-conversations", features = ["local-clock"] }
+# The Settings → Import from other services wizard (`behavior/archive-import.md`
+# § The wizard and its machine): the shared page-level `ArchiveImportMachine`,
+# consumed directly over its native `rpc-glue` builder like tui (priority #2, no
+# FFI hop). `conversations-sink` adds the `Archive` rail's thread source
+# (`threads::ArchiveThreads`), registered on the conversations session at login.
+fauna-archive-import-machine = { path = "../../libs/fauna-archive-import-machine", features = [
+    "rpc-glue",
+    "conversations-sink",
+    "feed-sink",
+] }
 
 # GTK4 + libadwaita
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
@@ -687,7 +716,7 @@ ksni = { path = "../../libs/ksni" }
 notify-rust = "4"
 
 # Credential storage (freedesktop Secret Service)
-secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
 
 # Hex encoding for actor IDs
 hex = { workspace = true }

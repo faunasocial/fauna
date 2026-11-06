@@ -8,6 +8,7 @@ import com.fauna.ffi.FfiRegionPlaceholder
 import com.fauna.ffi.FfiRegionPlane
 import com.fauna.ffi.FfiRegionSource
 import com.fauna.ffi.FfiRegionView
+import com.fauna.ffi.regionSealedNoteOwed
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import uniffi.fauna_conversations.ThreadEncryption
 import uniffi.fauna_core.ContentLabelEntry
 import java.util.Collections
 
@@ -156,7 +158,7 @@ object RegionPlaneHost {
     /**
      * One item's render decision with the region composed in — the region, the
      * session nest's rules ([NestRulesHost], `nest-rules.md` § The nest source
-     * in the engine), the guardian floor and document, and the viewer's own
+     * in the engine), the guardian's rules, and the viewer's own
      * thresholds, strictest-wins in shared Rust, in the ONE composed call. With
      * no plane open the family-only verdict stands and no placeholder exists.
      */
@@ -165,7 +167,7 @@ object RegionPlaneHost {
         inputs: ContentPolicyInputs,
         subject: RegionSubject,
     ): RegionRenderDecision {
-        // The viewer's own reports are a third input beside the family floor and
+        // The viewer's own reports are a third input beside the guardian's rules and
         // the region (moderation.md § Corollary): fold them under the region's
         // answer below.
         val reported = inputs.isReported(subject.reportKey, subject.reportAuthor)
@@ -320,10 +322,28 @@ data class RegionRenderDecision(
     val guardianPlaceholder: FfiGuardianPlaceholder? = null,
 ) {
     /** The guardian rule's reason, verbatim, to paint beside the family-policy
-     *  frame (`content-policy-blocked-reason`) — `null` for a floor, the viewer's
+     *  frame (`content-policy-blocked-reason`) — `null` for the viewer's
      *  own threshold, a report or any other source (`nest-rules.md` § The shared
      *  rule editor → *The reason is the member's to read*). */
     val guardianReason: String? get() = guardianPlaceholder?.reason?.takeIf { it.isNotEmpty() }
+
+    /**
+     * Does the region placeholder owe the sealed-item sentence
+     * (`region.sealed_note`)? The shared `regionSealedNoteOwed` — the rule linux
+     * and tui read off their engine (`region-blocking.md` § Implementation status
+     * today) — over this decision, the open thread's `capabilities.encryption`
+     * and whether Guardian Notify counts the item ([ContentPolicyInputs.notifyWouldCount]).
+     * `false` without a region placeholder or when the viewer's own report hid
+     * the item, with no FFI call.
+     */
+    fun sealedNote(
+        encryption: ThreadEncryption,
+        inputs: ContentPolicyInputs,
+        labels: List<ContentLabelEntry>,
+    ): Boolean {
+        if (placeholder == null || reported) return false
+        return regionSealedNoteOwed(true, verdict, encryption, inputs.notifyWouldCount(labels))
+    }
 
     /** Whether the region blocks this item — convention 17's verdict side. */
     val isRegionBlocked: Boolean get() = placeholder?.verb == "block"

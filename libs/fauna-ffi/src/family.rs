@@ -22,7 +22,7 @@ use fauna_client_family::family::{
 };
 #[cfg(feature = "value-format")]
 use fauna_core::format::{PolicySummaryLine, ReachPolicyOption};
-use fauna_core::obligation::{ContentFloor, ContentPolicy};
+use fauna_core::obligation::ContentPolicy;
 use fauna_core::screen_time::ScreenTimePolicy;
 
 use crate::{FfiError, stringify};
@@ -160,43 +160,21 @@ pub fn reach_policy_summary(policy: FfiReachPolicy) -> Vec<PolicySummaryLine> {
 
 // ── Content-policy faces (v1.x content pillar) ─────────────────────────
 //
-// The native twins of the web `contentFloorOptions` / `contentFloorLabel` /
-// `contentRenderVerdict` wasm exports and linux's `crate::content_policy` module
-// (`family-safety.md` § Content policy). The guardian editor's four per-category
-// content selects (`family-policy-content-*-select`) render one shared option
-// catalog; the feed + conversations render paths call `content_render_verdict` to
-// collapse/block a labeled item. All `value-format`-gated for the same
+// The native twin of the web `contentRenderVerdict` wasm export and linux's
+// `crate::content_policy` module (`family-safety.md` § Content policy): the feed
+// + conversations render paths call `content_render_verdict` to collapse/block a
+// labeled item. All `value-format`-gated for the same
 // uniffi-bindgen-go reason as the reach-policy catalogs above (they cross a
 // `fauna_core` type / would drag `ContentLabelEntry` into the Go build). Rule
 // assembly stays entirely in shared Rust (priority #2) — no client re-derives the
 // strictest-wins compose.
 
-/// The canonical content-floor picker options (`inherit / collapse / block`, in
-/// the ratified order), wire value + i18n label key. The guardian's four
-/// per-category content selects render this one catalog, so their value list
-/// cannot drift from what `fauna.family.policy.update` accepts. Mirrors
-/// [`unknown_sender_options`].
-#[cfg(feature = "value-format")]
-#[uniffi::export]
-pub fn content_floor_options() -> Vec<ReachPolicyOption> {
-    fauna_core::format::content_floor_options()
-}
-
-/// The localized label for a stored content-floor wire value, failing closed to
-/// `block` (this knob's strict option) for anything unrecognized — never the
-/// permissive `inherit`. See [`unknown_sender_label`] for the shared safety rule.
-#[cfg(feature = "value-format")]
-#[uniffi::export]
-pub fn content_floor_label(value: String) -> fauna_core::localized::LocalizedText {
-    fauna_core::format::content_floor_label(&value)
-}
-
 /// The client render verdict for one piece of content — the native twin of the
 /// web `contentRenderVerdict` / linux `content_policy::verdict_for`
 /// (`family-safety.md` § Content policy). Composes, **strictest-wins**, the
 /// viewer's OWN spam/phishing thresholds (→ `collapse`, the every-user un-darking
-/// of moderation.md § item 1) with, when supervised, the guardian's per-category
-/// floor (`collapse`/`block`), and returns one of
+/// of moderation.md § item 1) with, when supervised, the guardian's rule
+/// document (`collapse`/`block`), and returns one of
 /// `"show" | "badge" | "collapse" | "block"`.
 ///
 /// Rule assembly stays entirely in shared Rust (priority #2) — this is a thin
@@ -205,8 +183,8 @@ pub fn content_floor_label(value: String) -> fauna_core::localized::LocalizedTex
 /// only the ingredients it already holds: `labels` (the reduced
 /// `{ category, confidence_per_mille }` shape already on the feed post /
 /// message snapshots), the guardian `content_policy` straight off `familyStatus`
-/// (`None` for an unsupervised viewer — an unparseable floor stays fail-closed to
-/// `block` via [`ContentFloor::from_wire`]), and the viewer's own per-mille
+/// (`None` for an unsupervised viewer — a document this build cannot read stays
+/// fail-closed to `block`), and the viewer's own per-mille
 /// thresholds (both `None` until the client has spam preferences → no own-threshold
 /// rule composes; a half-known pair is likewise no rule, the shared
 /// `ViewerThresholds` pairing).
@@ -407,14 +385,14 @@ pub fn content_render_for_item_with_nest(
 /// (`family-safety.md` § The account age band → the kids-app bullet, item (4)),
 /// none in every other build.
 #[cfg(all(feature = "value-format", feature = "kids-floor"))]
-const COMPILED_CONTENT_FLOOR: Option<&ContentPolicy> =
+const COMPILED_CONTENT_FLOOR: Option<&fauna_core::obligation::CompiledFloor> =
     Some(&fauna_core::obligation::KIDS_CONTENT_FLOOR);
 #[cfg(all(feature = "value-format", not(feature = "kids-floor")))]
-const COMPILED_CONTENT_FLOOR: Option<&ContentPolicy> = None;
+const COMPILED_CONTENT_FLOOR: Option<&fauna_core::obligation::CompiledFloor> = None;
 
 /// The guardian policy every FFI render face composes: the caller's guardian
 /// `content_policy` with this build's [`COMPILED_CONTENT_FLOOR`] applied
-/// strictest-wins (`fauna_core::obligation::with_compiled_floor`). The one
+/// (`fauna_core::obligation::with_compiled_floor`). The one
 /// place a face resolves its guardian input, so no face can render past the
 /// kids floor. Guardian Notify ([`guardian_enforced_categories`]) deliberately
 /// does NOT come through here — `content_notify` is not floored.
@@ -530,6 +508,31 @@ pub fn content_notice_line(category: String, count: u32) -> PolicySummaryLine {
 #[uniffi::export]
 pub fn notify_report_min_interval_secs() -> u32 {
     fauna_core::obligation::NOTIFY_REPORT_MIN_INTERVAL_SECS as u32
+}
+
+/// Does a region placeholder owe the sealed-item sentence
+/// (`region.sealed_note`)? The native twin of the web `regionSealedNote` wasm
+/// export — both over `fauna_core::obligation::region_sealed_note_owed_for`,
+/// the reduced-input form of the rule linux and tui read off their
+/// `ContentPolicyState` (`region-blocking.md` § Implementation status today).
+/// `region_drove`: the placeholder is the region's and the viewer's own report
+/// did not hide the item; `verdict`: the render's wire verdict; `encryption`:
+/// the open thread's `capabilities.encryption` (only end-to-end is sealed);
+/// `notify_counted`: Guardian Notify counted this item (the content_notify knob
+/// on and the guardian floor biting on its labels).
+#[uniffi::export]
+pub fn region_sealed_note_owed(
+    region_drove: bool,
+    verdict: String,
+    encryption: fauna_conversations::capabilities::ThreadEncryption,
+    notify_counted: bool,
+) -> bool {
+    fauna_core::obligation::region_sealed_note_owed_for(
+        region_drove,
+        &verdict,
+        encryption.is_sealed(),
+        notify_counted,
+    )
 }
 
 /// One drained **Guardian Notify** batch — [`FfiNotifyAccumulator::take_due`]'s
@@ -1070,22 +1073,15 @@ impl From<FfiReachPolicy> for ReachPolicy {
 }
 
 /// FFI mirror of [`fauna_core::obligation::ContentPolicy`] — the guardian's
-/// per-category render floor (`family-safety.md` § Content policy). Each field
-/// is a closed-enum string `inherit` | `collapse` | `block`, the same
-/// string-knob convention as [`FfiReachPolicy`]'s `feed_sources`; a floor value
-/// the client build cannot name renders fail-closed as `block`.
+/// content rules (`family-safety.md` § Content policy): its rule document.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiContentPolicy {
-    pub nsfw: String,
-    pub spam: String,
-    pub phishing: String,
-    pub commercial: String,
     /// The guardian's rule document (`ContentPolicy.document`), as its
     /// canonical dag-cbor — what the shared rule editor reads
     /// (`FfiRuleEditor::for_guardian`) and writes back
     /// (`FfiRuleEditor::document_bytes`). `None`: the guardian has authored
-    /// none. Bytes this build cannot read render fail-closed, as an unknown
-    /// floor does (`nest-rules.md` § Implementation status today).
+    /// none. Bytes this build cannot read render fail-closed
+    /// (`nest-rules.md` § The shared rule editor (b)).
     #[uniffi(default = None)]
     pub document: Option<Vec<u8>>,
 }
@@ -1122,7 +1118,7 @@ pub struct FfiRegionRule {
     pub factor: String,
     pub min_permille: u16,
     /// A closed-enum string, `collapse` | `block` — the same string-knob
-    /// convention as [`FfiContentPolicy`]'s floors.
+    /// string-knob convention as [`FfiReachPolicy`]'s knobs.
     pub verdict: String,
     pub reason_code: String,
     /// `{ lang → text }`, with a required `default` entry. The authority's own
@@ -1354,18 +1350,9 @@ impl FfiRegionRuleSet {
 
 impl From<ContentPolicy> for FfiContentPolicy {
     fn from(p: ContentPolicy) -> Self {
-        let ContentPolicy {
-            nsfw,
-            spam,
-            phishing,
-            commercial,
-            document,
-        } = p;
+        // A compiled-in floor is render input only and never crosses here.
+        let ContentPolicy { document, .. } = p;
         FfiContentPolicy {
-            nsfw: nsfw.as_str().to_string(),
-            spam: spam.as_str().to_string(),
-            phishing: phishing.as_str().to_string(),
-            commercial: commercial.as_str().to_string(),
             // A document the canonical encoder refuses (a float in a catch-all,
             // which no decoded document carries) crosses as bytes no build
             // reads, so it fails closed rather than vanishing.
@@ -1378,11 +1365,8 @@ impl From<ContentPolicy> for FfiContentPolicy {
 impl From<FfiContentPolicy> for ContentPolicy {
     fn from(p: FfiContentPolicy) -> Self {
         ContentPolicy {
-            nsfw: ContentFloor::from_wire(&p.nsfw),
-            spam: ContentFloor::from_wire(&p.spam),
-            phishing: ContentFloor::from_wire(&p.phishing),
-            commercial: ContentFloor::from_wire(&p.commercial),
             document: p.document.as_deref().map(guardian_document_from_bytes),
+            compiled_floor: None,
         }
     }
 }
@@ -1758,10 +1742,10 @@ mod supervision_fold_tests {
 
     fn a_full_policy() -> ReachPolicy {
         ReachPolicy {
-            content_policy: Some(ContentPolicy {
-                nsfw: ContentFloor::Block,
-                ..Default::default()
-            }),
+            content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "nsfw",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )])),
             content_notify: Some(true),
             screen_time: Some(ScreenTimePolicy {
                 window_start: Some(1260),
@@ -1843,8 +1827,10 @@ mod supervision_fold_tests {
         assert_eq!(fold.supervised_by.handle, "parent@example.org");
         assert_eq!(fold.supervised_by.actor_id, vec![0xab, 0xcd, 0x01]);
         assert_eq!(
-            fold.content_policy.expect("the floor rides the fold").nsfw,
-            "block"
+            fold.content_policy
+                .expect("the guardian's rules ride the fold")
+                .document,
+            FfiContentPolicy::from(a_full_policy().content_policy.unwrap()).document
         );
         assert!(fold.content_notify, "the Notify knob rides the fold");
         assert_eq!(
@@ -2443,33 +2429,30 @@ mod content_policy_tests {
         }
     }
 
+    /// A guardian document with one category rule per non-`inherit` value
+    /// (`collapse` | `block`), in nsfw / spam / phishing / commercial order; any
+    /// other value makes the document bytes this build cannot read.
     fn floor(nsfw: &str, spam: &str, phishing: &str, commercial: &str) -> FfiContentPolicy {
-        FfiContentPolicy {
-            nsfw: nsfw.into(),
-            spam: spam.into(),
-            phishing: phishing.into(),
-            commercial: commercial.into(),
-            document: None,
+        use fauna_core::content_policy::ContentVerdict;
+        let mut rules = Vec::new();
+        for (category, value) in [
+            ("nsfw", nsfw),
+            ("spam", spam),
+            ("phishing", phishing),
+            ("commercial", commercial),
+        ] {
+            match value {
+                "inherit" => {}
+                "collapse" => rules.push((category, ContentVerdict::Collapse)),
+                "block" => rules.push((category, ContentVerdict::Block)),
+                _ => {
+                    return FfiContentPolicy {
+                        document: Some(vec![0xff]),
+                    };
+                }
+            }
         }
-    }
-
-    #[test]
-    fn options_and_label_pass_through_shared() {
-        // The catalog is the ratified `inherit / collapse / block`, in order.
-        let opts = content_floor_options();
-        assert_eq!(
-            opts.iter().map(|o| o.value.as_str()).collect::<Vec<_>>(),
-            ["inherit", "collapse", "block"]
-        );
-        // An unparseable stored value labels fail-closed as `block`, never `inherit`.
-        assert_eq!(
-            content_floor_label("collapse".into()).key,
-            "family.value_collapse"
-        );
-        assert_eq!(
-            content_floor_label("garbage".into()).key,
-            "family.value_block"
-        );
+        ContentPolicy::category_rules(&rules).into()
     }
 
     #[test]
@@ -2583,13 +2566,7 @@ mod content_policy_tests {
         // The two faces must never disagree — the verdict-only one is exactly
         // this one with an empty chain, which is what keeps an app that has not
         // yet gained its region render correct rather than merely compiling.
-        let policy = FfiContentPolicy {
-            nsfw: "collapse".into(),
-            spam: "block".into(),
-            phishing: "inherit".into(),
-            commercial: "inherit".into(),
-            document: None,
-        };
+        let policy = floor("collapse", "block", "inherit", "inherit");
         for labels in [
             vec![],
             vec![label("nsfw", 900)],
@@ -2680,9 +2657,9 @@ mod content_policy_tests {
     }
 
     #[test]
-    fn verdict_unparseable_floor_fails_closed_to_block() {
-        // A floor value this build cannot name renders fail-closed as `block`
-        // (the guardian floor triggers at GUARDIAN_FLOOR_TRIGGER_PERMILLE = 500‰).
+    fn verdict_unreadable_document_fails_closed_to_block() {
+        // A document this build cannot read renders fail-closed as `block`
+        // (triggering at GUARDIAN_FLOOR_TRIGGER_PERMILLE = 500‰).
         let policy = floor("weirdnewvalue", "inherit", "inherit", "inherit");
         assert_eq!(
             content_render_verdict(vec![label("nsfw", 600)], Some(policy), None, None),
@@ -2740,13 +2717,11 @@ mod kids_floor_tests {
     }
 
     fn inherit_all() -> FfiContentPolicy {
-        FfiContentPolicy {
-            nsfw: "inherit".into(),
-            spam: "inherit".into(),
-            phishing: "inherit".into(),
-            commercial: "collapse".into(),
-            document: None,
-        }
+        ContentPolicy::category_rules(&[(
+            "commercial",
+            fauna_core::content_policy::ContentVerdict::Collapse,
+        )])
+        .into()
     }
 
     #[test]
@@ -2812,14 +2787,30 @@ mod notify_accumulator_tests {
         }
     }
 
+    /// A guardian document with one category rule per non-`inherit` value
+    /// (`collapse` | `block`), in nsfw / spam / phishing / commercial order; any
+    /// other value makes the document bytes this build cannot read.
     fn floor(nsfw: &str, spam: &str, phishing: &str, commercial: &str) -> FfiContentPolicy {
-        FfiContentPolicy {
-            nsfw: nsfw.into(),
-            spam: spam.into(),
-            phishing: phishing.into(),
-            commercial: commercial.into(),
-            document: None,
+        use fauna_core::content_policy::ContentVerdict;
+        let mut rules = Vec::new();
+        for (category, value) in [
+            ("nsfw", nsfw),
+            ("spam", spam),
+            ("phishing", phishing),
+            ("commercial", commercial),
+        ] {
+            match value {
+                "inherit" => {}
+                "collapse" => rules.push((category, ContentVerdict::Collapse)),
+                "block" => rules.push((category, ContentVerdict::Block)),
+                _ => {
+                    return FfiContentPolicy {
+                        document: Some(vec![0xff]),
+                    };
+                }
+            }
         }
+        ContentPolicy::category_rules(&rules).into()
     }
 
     #[test]

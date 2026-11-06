@@ -1,0 +1,24 @@
+{
+  "likes_media_likes": [
+    {
+      "title": "friend.one",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/p/FIXTURE1/",
+          "value": "ð\u009f\u0091\u008d",
+          "timestamp": 1603000000
+        }
+      ]
+    },
+    {
+      "title": "friend.two",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/p/FIXTURE2/",
+          "value": "ð\u009f\u0091\u008d",
+          "timestamp": 1603000000
+        }
+      ]
+    }
+  ]
+}

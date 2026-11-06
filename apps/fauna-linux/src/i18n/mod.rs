@@ -38,8 +38,15 @@ pub fn resolve_key(key: &str) -> String {
 /// English `summary`, or the default — `behavior/notifications.md`
 /// § Localized body), its localized arm resolved through this app's table.
 /// The row and its desktop toast both paint this, so the two never disagree.
+/// A fauna-native row's sender is named as the viewer calls them, through the
+/// overlay projection the roster row reads (§ Localized body → *The sender
+/// arg*, [`fauna_client_notifications::notification_text_naming`]).
 pub fn notification_text(item: &fauna_client_notifications::notifications::NotifItem) -> String {
-    resolve_notification_text(fauna_client_notifications::notification_text(item))
+    let overlays = crate::conversations::overlays::projection();
+    resolve_notification_text(fauna_client_notifications::notification_text_naming(
+        item,
+        |id| overlays.known_peer_label(id),
+    ))
 }
 
 /// [`notification_text`] for a `fauna.notification` push — the desktop toast
@@ -187,6 +194,13 @@ pub fn nostr_link_mode_label(mode: &str) -> String {
 /// isn't a per-app match (priority #2, `docs/goal/ui/media.md` § Layout & flow).
 pub fn media_sort_label(value: &str) -> String {
     fauna_core::format::media_sort_label(value).resolve(strings::lookup)
+}
+
+/// Resolve the shared [`fauna_core::format::media_sort_direction_label`]
+/// `media-sort-direction` value (`"ascending"`/`"descending"`) into a display
+/// string (`docs/goal/ui/media.md` § Layout & flow, *Sort direction*).
+pub fn media_sort_direction_label(value: &str) -> String {
+    fauna_core::format::media_sort_direction_label(value == "descending").resolve(strings::lookup)
 }
 
 /// Resolve the shared [`fauna_protocol::email::filter_action_label`]

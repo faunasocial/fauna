@@ -17,12 +17,15 @@ from pathlib import Path
 
 #: Path fragments of Swift that never compiles into a Release build (or is
 #: generated, so a human did not write it): the gitignored generated bindings,
-#: the built xcframework, SwiftPM build output, and the SwiftPM/Xcode
-#: test-target directories.
+#: the built xcframework, SwiftPM and xcodebuild build output, and the
+#: SwiftPM/Xcode test-target directories.
 _NOT_HAND_WRITTEN_RELEASE_CODE = (
     "/generated/",
     "/FaunaFFI.xcframework/",
     "/.build/",
+    # The `mac-app` recipe's xcodebuild derived data, which copies the generated
+    # bindings under `Build/Products/<config>/include/`.
+    "/.xcode-build/",
     "/FaunaKit/Tests/",
     "/FaunaiOSTests/",
     "/Fauna-macOSTests/",

@@ -271,6 +271,35 @@ async fn generate_forwarder_ndr(
         return Ok(BounceOutcome::SuppressedBackscatter);
     }
 
+    // 1b. The SPF-hardfail and DMARC-reject/quarantine suppressors apply as to
+    //     any bounce (`mail-forwarding.md` § Suppression matches the outbound
+    //     shape), over the source message's verdicts the MTA carried on
+    //     `forward_message`. The forwarded-5xx suppressor is NOT asked here: it
+    //     governs the bounce to the original sender, and the forwarder is the
+    //     principal who must learn its rule is broken.
+    let policy = db.get_outbound_policy().await?.effective();
+    let verdicts = MailVerdicts {
+        spf: row.inbound_verdicts.spf.clone(),
+        dmarc: row.inbound_verdicts.dmarc.clone(),
+        dmarc_policy: row.inbound_verdicts.dmarc_policy.clone(),
+    };
+    if let Some(reason_kind) = backscatter::should_suppress(
+        &verdicts,
+        &row.original_sender,
+        false,
+        false,
+        &suppressor_toggles_from_outbound(&policy),
+    ) {
+        db.mark_outbound_suppressed(row.id, map_suppress(reason_kind))
+            .await?;
+        tracing::info!(
+            id = row.id,
+            reason = ?reason_kind,
+            "forward NDR suppressed (backscatter)"
+        );
+        return Ok(BounceOutcome::SuppressedBackscatter);
+    }
+
     // 2. NDR rate-limit per (forwarder, source-msgid) over the admin-
     //    configured window (`:209`). The key is the forwarding actor (hex),
     //    distinct from the original-sender bucket the to-sender path uses.
@@ -542,6 +571,27 @@ mod tests {
         msgid: &str,
         rule: &str,
     ) -> OutboundRow {
+        seed_forwarded_with(
+            db,
+            forwarder,
+            original_sender,
+            downstream,
+            msgid,
+            rule,
+            verdicts("pass", "pass", "none"),
+        )
+        .await
+    }
+
+    async fn seed_forwarded_with(
+        db: &CacheDb,
+        forwarder: &[u8; 32],
+        original_sender: &str,
+        downstream: &str,
+        msgid: &str,
+        rule: &str,
+        v: InboundVerdictsSnapshot,
+    ) -> OutboundRow {
         let raw =
             b"From: bob@external.test\r\nTo: alice@fwd.test\r\nMessage-ID: <m@x>\r\nSubject: hi\r\n\r\nbody"
                 .to_vec();
@@ -551,7 +601,7 @@ mod tests {
                 original_sender,
                 recipients: &[downstream],
                 raw_message: &raw,
-                inbound_verdicts: verdicts("pass", "pass", "none"),
+                inbound_verdicts: v,
                 is_forwarded: true,
                 forward_actor_id: Some(forwarder),
                 forward_rule_id: Some(rule),
@@ -638,6 +688,77 @@ mod tests {
             format!("forwarder:{}", hex::encode(forwarder))
         );
         assert_eq!(bh[0]["original_msgid"], "src-1@external.test");
+    }
+
+    /// Backscatter suppression applies to the forwarder NDR as to any bounce
+    /// (`mail-forwarding.md` § Suppression matches the outbound shape): a
+    /// forward of mail whose sender hardfailed SPF, or failed DMARC under
+    /// `p=reject`, earns no NDR while the admin's switch is on; switched off,
+    /// the forwarder gets it.
+    #[tokio::test]
+    async fn forwarded_permfail_of_a_failing_sender_follows_the_backscatter_switches() {
+        let state = test_state().await;
+        let db: &CacheDb = &state.db;
+        db.add_mail_domain("fwd.test", true, "testing", "none", None, None)
+            .await
+            .unwrap();
+        let forwarder = [7u8; 32];
+        crate::test_support::seed_recipient_seal_key(
+            db,
+            &forwarder,
+            &crate::test_support::FIXTURE_MSEK,
+        )
+        .await;
+        db.set_handle(&forwarder, "fwbs").await.unwrap();
+        let failing = [
+            ("spf", verdicts("fail", "none", "none")),
+            ("dmarc", verdicts("pass", "fail", "reject")),
+        ];
+        for (what, v) in failing.clone() {
+            let row = seed_forwarded_with(
+                db,
+                &forwarder,
+                "forged@sender.test",
+                "alice@example.net",
+                &format!("on-{what}@sender.test"),
+                "forward-all",
+                v,
+            )
+            .await;
+            assert_eq!(
+                generate_permfail_bounce(&state, &row, "550 5.1.1 nope", 1_000_000)
+                    .await
+                    .unwrap(),
+                BounceOutcome::SuppressedBackscatter,
+                "{what}: suppression on must withhold the forwarder NDR"
+            );
+        }
+        db.put_outbound_policy(OutboundPolicyOverrides {
+            suppress_ndr_spf_hardfail: Some(false),
+            suppress_ndr_dmarc_reject: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        for (what, v) in failing {
+            let row = seed_forwarded_with(
+                db,
+                &forwarder,
+                "forged@sender.test",
+                "alice@example.net",
+                &format!("off-{what}@sender.test"),
+                "forward-all",
+                v,
+            )
+            .await;
+            assert_eq!(
+                generate_permfail_bounce(&state, &row, "550 5.1.1 nope", 1_000_000)
+                    .await
+                    .unwrap(),
+                BounceOutcome::BouncedToForwarder,
+                "{what}: suppression off must send the forwarder NDR"
+            );
+        }
     }
 
     /// The forwarder NDR's RFC 3464 DSN names the rule, the original sender,

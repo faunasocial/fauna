@@ -37,7 +37,7 @@ use fauna_core::content_policy::{
 };
 use fauna_core::localized::LocalizedText;
 use fauna_core::obligation::{
-    ContentFloor, ContentPolicy, GUARDIAN_FLOOR_CATEGORIES, GUARDIAN_FLOOR_TRIGGER_PERMILLE,
+    ContentPolicy, GUARDIAN_FLOOR_CATEGORIES, GUARDIAN_FLOOR_TRIGGER_PERMILLE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,8 +49,9 @@ mod view;
 
 pub use guardian_rules::GuardianRules;
 pub use nest_rules::{
-    AcceptedNestRules, NestRuleLine, NestRulesBook, NestRulesNotApplied, NestRulesRead,
-    NestRulesRefusal, NestRulesSummary, SignedNestRules, StoredNestRules,
+    AcceptedNestRules, NestPlaceholder, NestRuleLine, NestRulesBook, NestRulesNotApplied,
+    NestRulesRead, NestRulesRefusal, NestRulesSummary, SignedNestRules, StoredNestRules,
+    nest_placeholder,
 };
 pub use view::{
     CategoryOption, KindOption, LabelerOption, LevelOption, ReasonEntry, RuleEditorView, RuleRow,
@@ -234,37 +235,9 @@ impl RuleEditor {
     }
 
     /// Open the guardian's editor over a ward's content policy: its rule
-    /// document, with every floor still set shown as a category rule beside it
-    /// (`nest-rules.md` § Implementation status today — a set floor keeps
-    /// binding, and storing a document clears the floors, so the document the
-    /// editor writes must carry them). A floor has no reason of its own; the
-    /// guardian writes one before the document can be saved.
+    /// document (`nest-rules.md` § The shared rule editor (b)).
     pub fn load_guardian(policy: Option<&ContentPolicy>) -> Self {
-        let mut editor = Self::load(policy.and_then(|p| p.document.clone()), Publisher::Guardian);
-        let Some(policy) = policy else {
-            return editor;
-        };
-        if !editor.is_editable() {
-            return editor;
-        }
-        for category in GUARDIAN_FLOOR_CATEGORIES {
-            let verdict = match policy.floor_for(category) {
-                ContentFloor::Inherit => continue,
-                ContentFloor::Collapse => ContentVerdict::Collapse,
-                // An unknown floor renders blocked, so it is shown as what binds.
-                ContentFloor::Block | ContentFloor::Unknown => ContentVerdict::Block,
-            };
-            let reason_code = editor.mint_reason_code();
-            editor.document.rules.push(ContentRule {
-                factor: category.to_string(),
-                min_permille: GUARDIAN_FLOOR_TRIGGER_PERMILLE,
-                verdict,
-                reason_code,
-                reason: BTreeMap::new(),
-                extra: BTreeMap::new(),
-            });
-        }
-        editor
+        Self::load(policy.and_then(|p| p.document.clone()), Publisher::Guardian)
     }
 
     pub fn publisher(&self) -> &Publisher {

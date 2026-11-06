@@ -34,12 +34,12 @@ public final class RestoreVM {
     /// Bound by `restore-confirm-input`. The friction bar arms only when this
     /// exactly equals the selected snapshot's id (`backups.md` § Where logic lives).
     public var confirmText = ""
-    /// The two decorative `restore-kind-checkbox`es (mail, calendar), both checked
-    /// by default. They render for parity + the spec but do not gate the local
-    /// single-kind-per-snapshot restore (the mail+calendar pair-restore they'd
-    /// drive is the destination flow, blocked on backup-Plan 4) — matching android.
-    public var mailChecked = true
-    public var calendarChecked = true
+    /// The five `restore-kind-checkbox`es, one per `RestoreKind.all` entry in the
+    /// shared `KIND_ENTRIES` order, all ticked by default. A picked snapshot whose
+    /// kind is unticked does not arm `restore-confirm-button` (`backups.md`
+    /// § Restore from backup destination) — web's `restoreKindTicked`, android's
+    /// `LocalRestoreSection` shape.
+    public var kindTicked: [Bool] = RestoreKind.all.map { _ in true }
     /// Whether ≥1 backup destination is configured — gates `restore-source-select`
     /// enabled/disabled (the only wired effect of the decorative source picker).
     public private(set) var hasDestinations = false
@@ -94,12 +94,29 @@ public final class RestoreVM {
         // (android's `LocalRestoreVM.refresh` does the same).
         progress = .idle
         configAbsent = false
-        guard let api else { return }
-        guard let list = try? await api.fetchMessageKindSnapshots() else { return }
-        snapshots = list
-        if selectedSnapshotId == nil { selectedSnapshotId = snapshots.first?.id }
+        guard let api, await reloadSnapshots() else { return }
         hasDestinations = !((try? await api.listBackupDestinations()) ?? []).isEmpty
         await loadHistory()
+    }
+
+    /// (Re)read `restore-snapshot-select`'s snapshots — on hydrate, and after
+    /// every Backups-page gesture that changes which snapshots exist, so a
+    /// snapshot just taken is offered without a page re-entry (`backups.md`
+    /// § Snapshot-list shape → *Kind entries*). The selection is kept while its
+    /// snapshot is still listed, else falls to the first. A failed read keeps the
+    /// picker as it was and answers `false`.
+    @discardableResult
+    public func reloadSnapshots() async -> Bool {
+        guard let api else { return false }
+        guard let list = try? await api.fetchMessageKindSnapshots() else { return false }
+        // The read suspended: a re-`configure` for another account means this is
+        // the outgoing account's list.
+        guard self.api === api else { return false }
+        snapshots = list
+        if !list.contains(where: { $0.id == selectedSnapshotId }) {
+            selectedSnapshotId = list.first?.id
+        }
+        return true
     }
 
     /// (Re)load `restore_history` + one `list_restore_divergence` per row. Called on
@@ -126,12 +143,22 @@ public final class RestoreVM {
 
     // MARK: - Local restore action
 
-    /// The `restore-confirm-button` enabled predicate: a snapshot is selected, the
-    /// typed text exactly equals its id, and no restore is in flight. Mirrors
-    /// linux `recompute_enabled` / android `confirmEnabled`.
+    /// The `restore-confirm-button` enabled predicate: a snapshot is selected, its
+    /// kind's box is ticked, the typed text exactly equals its id, and no restore
+    /// is in flight. Mirrors linux `recompute_enabled` / android `confirmEnabled`.
     public var confirmEnabled: Bool {
         guard let id = selectedSnapshotId, !confirmText.isEmpty else { return false }
-        return confirmText == String(id) && progress != .running
+        return confirmText == String(id) && selectedKindTicked && progress != .running
+    }
+
+    /// Whether the picked snapshot's kind box is ticked; a kind with no box is not
+    /// the checkboxes' to refuse (web's `selectedKindTicked`).
+    public var selectedKindTicked: Bool {
+        guard let id = selectedSnapshotId,
+              let s = snapshots.first(where: { $0.id == id }),
+              let i = RestoreKind.all.firstIndex(where: { $0.token == s.messageKind })
+        else { return true }
+        return kindTicked[i]
     }
 
     /// Dispatch `restore_message_kind` for the selected snapshot (one call — no
@@ -170,9 +197,10 @@ public final class RestoreVM {
 
     /// Label for a `restore-snapshot-select` option, via the shared
     /// `snapshotRestoreOptionLabel` — android/linux/tui/windows consume the
-    /// same logic.
+    /// same logic. The kind is named by its checkbox label, never the wire token
+    /// (a kind with no box falls back to the token).
     public func snapshotLabel(_ s: FfiSnapshotSummary) -> String {
-        snapshotRestoreOptionLabel(messageKind: s.messageKind, id: s.id)
+        snapshotRestoreOptionLabel(messageKind: RestoreKind.label(for: s.messageKind), id: s.id)
     }
 
     /// The current picker selection's label (backs `restore-snapshot-select`'s
@@ -227,6 +255,31 @@ public final class RestoreVM {
     /// Locale-formatted completed-at (epoch seconds → medium date + short time).
     static func formatWhen(_ secs: Int64) -> String {
         ValueFormat.absoluteDate(epochMs: secs * 1000, withTime: true)
+    }
+}
+
+/// One restore kind's `restore-kind-checkbox`: the wire token a snapshot's
+/// `message_kind` carries and its localized label. The five rows follow the shared
+/// Rust `KIND_ENTRIES` order (mail, calendar, card, post, conv); the table is not
+/// projected over FFI, so the Apple apps carry it over their own generated strings
+/// as web and android do (`backups.md` § Implementation status today).
+public struct RestoreKind: Sendable {
+    public let token: String
+    public let label: String
+
+    public static var all: [RestoreKind] {
+        [
+            RestoreKind(token: "mail", label: L.backups.restoreKindsMail),
+            RestoreKind(token: "calendar", label: L.backups.restoreKindsCalendar),
+            RestoreKind(token: "card", label: L.backups.restoreKindsContacts),
+            RestoreKind(token: "post", label: L.backups.restoreKindsPosts),
+            RestoreKind(token: "conv", label: L.backups.restoreKindsConversations),
+        ]
+    }
+
+    /// The checkbox label for a wire token; a token with no box keeps the token.
+    public static func label(for token: String?) -> String? {
+        all.first(where: { $0.token == token })?.label ?? token
     }
 }
 

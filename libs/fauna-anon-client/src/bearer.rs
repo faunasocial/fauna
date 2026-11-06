@@ -273,7 +273,9 @@ pub async fn mint_bearer_over_silent_challenge(
         .map_err(AnonClientError::Trust)?;
     }
 
-    let identity = reply.identity();
+    // The identity names the actor whose key signed this challenge, so a
+    // follower can tell it from another account's (`MintedIdentity`).
+    let identity = reply.identity(signing_key.verifying_key().to_bytes());
     Ok(MintedBearer::at_receipt(
         reply.token,
         reply.token_id,
@@ -503,7 +505,7 @@ mod tests {
             tier: "free".into(),
             ..Default::default()
         };
-        let identity = reply.identity();
+        let identity = reply.identity([3u8; 32]);
         let minted = MintedBearer::at_receipt_on(
             None,
             reply.token,
@@ -515,6 +517,7 @@ mod tests {
         assert_eq!(
             minted.identity,
             Some(MintedIdentity {
+                actor_id: [3u8; 32],
                 handle: "alice".into(),
                 domain: "nest.example".into(),
                 tier: "free".into(),

@@ -90,7 +90,7 @@ public struct PushNotificationsRows: View {
         // "On failure (permission denied, or the platform's push APIs
         // unavailable) the toggle settles back off and an inline error message
         // renders" (settings.md). It is also the only witness a user has that
-        // the `aps-environment` entitlement is still missing.
+        // the build lacks the `aps-environment` entitlement (macOS, unsigned iOS).
         if let message = state.error {
             Text(message)
                 .font(.caption)

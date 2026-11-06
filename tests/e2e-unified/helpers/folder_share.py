@@ -50,12 +50,12 @@ def content_key_get(nest, actor, set_name: str):
 def headless_member(nest, prefix: str) -> dict:
     """A handled actor with real published KeyPackages, so an owner's share can
     admit them — a person on the roster who never opens an app."""
-    from common.auth import register_handled_actor
     from conftest import MAIL_PRIMARY_DOMAIN
+    from helpers.admin_wire import admit_adult
     from tests.api import conv_api
 
-    actor = register_handled_actor(
-        nest["port"], handle=prefix + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
+    actor = admit_adult(
+        nest, prefix + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN, token=True
     )
     stored = conv_api.keypackage_upload(
         nest["port"], actor, conv_api.mint_key_packages(actor["signing_key"].encode(), 2)

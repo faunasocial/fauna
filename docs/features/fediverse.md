@@ -107,20 +107,20 @@ Stamped 2026-10-08 at f7e52bc137.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | |
-| windows |  no run recorded | |
-| macos |  no run recorded | |
-| ios |  no run recorded | |
+| web | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
+| linux | ✅ full | 0.1.5-dev+c5ea29af standalone |
+| windows | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
+| macos | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
+| ios | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | |
+| tui | ⚠ partial | 0.1.5-dev+c5ea29af standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_activitypub_live.py::test_activitypub_live_serving_surface` | linux (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/live/test_activitypub_federation_live.py::test_activitypub_federation_live_three_party` | linux (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_reply_to_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_a_quote_of_a_fediverse_post_reaches_its_author` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_follow_is_auto_accepted_and_delivered` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_post_is_pushed_to_follower_then_chased_by_delete` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_webfinger_discovery` | nest (linux): passed |
@@ -156,14 +156,14 @@ Stamped 2026-10-08 at f7e52bc137.
 | 24 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_a_post_that_was_not_public_never_enters_your_feed` | nest (linux): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_only_followed_or_addressed_posts_enter_your_feed` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_delete_after_federation_is_off_still_reaches_the_followers` | nest (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_bridges_follow_requests.py::test_follow_requests_are_listed_and_approved_or_refused_on_the_card` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 27 | app | `tests/e2e-unified/tests/test_feed_fediverse_reply.py::test_replying_or_quoting_with_federation_off_is_refused_inline` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_bridges_follow_requests.py::test_follow_requests_are_listed_and_approved_or_refused_on_the_card` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_approving_a_request_sends_accept_and_later_posts_reach_it` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_refusing_a_request_sends_reject_and_later_posts_do_not_reach_it` | nest (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_a_held_back_follow_is_listed_as_a_request` | nest (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_turning_auto_accept_back_on_accepts_the_waiting_requests` | nest (linux): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFederation::test_actor_document_says_whether_followers_are_approved_by_hand` | nest (linux): passed |
 | 32 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubFollowerDelivery::test_liking_or_boosting_is_refused_while_federation_is_off` | nest (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone` | web (linux): passed, tui (linux): passed |
-| 34 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone` | web (linux): passed, tui (linux): passed |
+| 33 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_dm_arrives_as_a_fediverse_room_and_the_reply_reaches_that_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 34 | app | `tests/e2e-unified/tests/test_bridged_dm_legs.py::test_a_fediverse_room_started_from_the_picker_by_account_reaches_the_resolved_peer_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

@@ -191,8 +191,8 @@ fn main() -> Result<()> {
         .collect::<Result<_>>()?;
 
     tracing::info!("execing {binary}");
-    nix::unistd::execvp(&c_binary, &c_argv).context("execvp")?;
-    unreachable!()
+    // `execvp` returns only on failure: its success type is `Infallible`.
+    match nix::unistd::execvp(&c_binary, &c_argv).context("execvp")? {}
 }
 
 /// Raise `CAP_NET_BIND_SERVICE` into the inheritable + ambient capability sets,

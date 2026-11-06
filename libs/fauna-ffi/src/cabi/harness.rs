@@ -67,6 +67,10 @@
 //!   consent request, through the consent machine's shared `answer_consent`
 //!   over the seams the apps wire: the consent-time grants planned, recorded,
 //!   deposited, then the resolve.
+//! - [`fauna_harness_enable_mail`] — an owner's first mail enable through the
+//!   shared `MailSettingsMachine` over a [`Seat`]'s mail custody: the MSEK in
+//!   the sealed custody and the recipient seal key published, with no app seat
+//!   left running (a capability host's deposit adoption reads that custody).
 //! - [`fauna_harness_topic_create`] / [`fauna_harness_topic_train`] /
 //!   [`fauna_harness_cues_record_and_flush`] — the personalization planes an
 //!   app writes and the nest only stores sealed: a trained topic minted through
@@ -82,6 +86,12 @@
 //!   pass report read back as each pass ends. The one difference from an
 //!   app's leg is the relay root it trusts
 //!   ([`fauna_iroh::peer_leg_transport_trusting`]).
+//! - [`fauna_harness_conv_forge_delete`] — a real MLS member of a victim's
+//!   conversation (its key packages published, the Welcome joined through the
+//!   shared `ingest_welcome`, the log walked with `poll_inbound_conv`) that
+//!   seals a `Delete` of the victim's message claiming the victim sent it: the
+//!   forgery no app's UI can send, for a witness that every copy ignores it
+//!   (`message-reactions.md` § Reactions & message delete).
 //!
 //! **How an app-less process reaches custody.** The account's folder-key
 //! custody is the account plane's `fauna.state.folder-keys` kind and nothing
@@ -99,10 +109,14 @@
 //!   account store for the length of the call, exactly as a seat does
 //!   ([`Seat`]: `AccountStoreRuntime::start` as the seed-holding principal over
 //!   a store and a credential slot under a temp dir that dies with the call).
-//!   What that leaves on the account is what a real second device signing in
-//!   leaves: one fleet enrollment per call, and one self-registered
-//!   `sync_devices` row per account ([`seat_device_id`]). A test counting an
-//!   account's devices creates its sets through an app, not through here.
+//!   What that leaves on the account is what a device that signed in and
+//!   signed out leaves: its published rows, its retired enrollment, and one
+//!   `sync_devices` row per account ([`seat_device_id`]), named `e2e-harness`.
+//!   A seat is a discarded machine, so [`Seat::stop`] signs it out
+//!   (`e2e-launch-isolation.md` convention 10): a seat left enrolled kept a
+//!   live grant whose walk mark held the fleet scope's retention gate for the
+//!   rest of the run. A test counting an account's devices creates its sets
+//!   through an app, not through here.
 //!
 //! **Test surface, compiled out of release artifacts** (e2e convention 15,
 //! owned by `e2e-automation-surface-gating.md`): the module exists only under
@@ -116,10 +130,11 @@
 //! failure only — bad arguments, no connection, no nonce to sign under — with
 //! the message in `fauna_ffi_last_error`.
 
+use std::collections::HashMap;
 use std::ffi::c_char;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use fauna_client::{NestClient, NestClientError};
+use fauna_client::{AuthClient, NestClient, NestClientError};
 use fauna_client_account_runtime::folder_keys::PlaneFolderKeys;
 use fauna_client_folders::{FolderKeyReader, FoldersClient};
 use fauna_client_sync::{RecordSigning, SetNonceSource};
@@ -253,19 +268,65 @@ unsafe fn decode_call(
     })
 }
 
+/// Every identity's [`AuthClient`] this process has signed in, by (nest URL,
+/// actor) — so the held bearer outlives the one-call connection, the way an
+/// app holds one sign-in across its reconnects. A sign-in spends one
+/// `fauna.auth.challenge` from the anonymous per-source budget (60 a minute),
+/// and under `--nest docker` every harness dial reaches the nest from the one
+/// gateway address: a sign-in per export call made the seeding fixtures spend
+/// that budget in seconds (`testing.md` § Default app and nest mode, the
+/// shipped-limit fit rule — the harness reduces its calls, the budget stays).
+/// The Python twin is `clients/ws_rpc_admin_client.py::_BEARERS`.
+type SignedIn = Mutex<HashMap<(String, String), Arc<AuthClient>>>;
+
+fn signed_in() -> &'static SignedIn {
+    static AUTH: OnceLock<SignedIn> = OnceLock::new();
+    AUTH.get_or_init(Default::default)
+}
+
 /// Connect as `identity`, run `op`, disconnect — one connection per call, so
 /// no supervisor outlives the test that dialled it (nests come and go on
-/// reused ports across a run).
+/// reused ports across a run). The sign-in is [`signed_in`]'s; a held one that
+/// will not connect any more — the nest restarted, or another nest now answers
+/// on the port — is dropped and the dial retried once on a fresh sign-in.
 fn with_client<T, F, Fut>(nest_url: String, identity: ActorKeypair, op: F) -> Result<T, FfiError>
 where
     F: FnOnce(Arc<NestClient>) -> Fut,
     Fut: std::future::Future<Output = Result<T, FfiError>>,
 {
-    let nest = NestClient::new(nest_url, identity);
+    let key = (
+        nest_url.trim_end_matches('/').to_string(),
+        identity.actor_id_hex(),
+    );
+    let held = signed_in()
+        .lock()
+        .expect("sign-in cache poisoned")
+        .get(&key)
+        .cloned();
     runtime()?.block_on(async move {
-        nest.connect()
-            .await
-            .map_err(|e| err(format!("connect: {e}")))?;
+        let fresh = || Arc::new(AuthClient::new(nest_url.clone(), identity.clone_keypair()));
+        let reused = held.is_some();
+        let mut auth = held.unwrap_or_else(fresh);
+        // `connect_and_wait`, not `connect()`: a held sign-in satisfies the
+        // mint from its cache, and `connect()` is `Ok` over any non-terminal
+        // failure, its supervisor retrying — only waiting for `Connected`
+        // tells a held sign-in that will not connect any more.
+        let within = crate::nest_client::CONNECT_TIMEOUT;
+        let mut nest = NestClient::with_auth(Arc::clone(&auth));
+        if let Err(first) = nest.connect_and_wait(within).await {
+            if !reused {
+                return Err(err(format!("connect: {first}")));
+            }
+            auth = fresh();
+            nest = NestClient::with_auth(Arc::clone(&auth));
+            nest.connect_and_wait(within)
+                .await
+                .map_err(|e| err(format!("connect: {e}")))?;
+        }
+        signed_in()
+            .lock()
+            .expect("sign-in cache poisoned")
+            .insert(key, auth);
         let result = op(Arc::clone(&nest)).await;
         nest.disconnect().await;
         result
@@ -281,6 +342,9 @@ fn custody_reader(nest: &Arc<NestClient>, identity: &ActorKeypair) -> Arc<dyn Fo
 /// The `sync_devices` row every harness seat of one account enrolls on — one
 /// id per account, so however many sets a run creates app-lessly the account
 /// gains one self-registered device row, not one per call.
+/// The name [`Seat::start`] gives that row — never a name an app seat carries.
+const HARNESS_SEAT_LABEL: &str = "e2e-harness";
+
 fn seat_device_id(identity: &ActorKeypair) -> String {
     hex::encode(blake3::derive_key(
         "fauna e2e harness seat device id v1",
@@ -306,8 +370,30 @@ impl Seat {
     /// Start the runtime over `nest` (connected as `identity`) and wait out its
     /// prologue pass, so the enrollment is published and whatever the account
     /// already holds is walked before the caller writes.
+    ///
+    /// The row is then NAMED [`HARNESS_SEAT_LABEL`], as a desktop's provisioner
+    /// names its own: left on the enrollment's placeholder it would share
+    /// `SELF_REGISTER_LABEL` with every phone of the account (a phone names no
+    /// row), and a journey finding the phone's card by its name would find this
+    /// row instead — a sibling's request then waits on a device that never
+    /// comes back.
     async fn start(nest: &Arc<NestClient>, identity: &ActorKeypair) -> Result<Self, FfiError> {
-        Self::start_on(nest, identity, seat_device_id(identity), None).await
+        let device_id = seat_device_id(identity);
+        let seat = Self::start_on(nest, identity, device_id.clone(), None).await?;
+        if !fauna_client_sync::register_this_machine(
+            Arc::clone(nest),
+            identity,
+            device_id,
+            HARNESS_SEAT_LABEL.to_string(),
+        )
+        .await
+        {
+            seat.stop().await;
+            return Err(err(
+                "name the harness seat's device row (fauna.sync.register refused)",
+            ));
+        }
+        Ok(seat)
     }
 
     /// [`Self::start`] enrolled on the device row `device_id`, with the peer
@@ -349,6 +435,7 @@ impl Seat {
             owed_nests: None,
             peer_transport,
             enrollment_target_device_id: device_id,
+            enrollment_device_label: None,
         })
         .await
         .map_err(|e| err(format!("start the seat's account runtime: {e:#}")))?;
@@ -376,14 +463,39 @@ impl Seat {
             .map_err(|e| err(format!("the seat's publishing pass: {e:#}")))
     }
 
-    /// Close the store; the machine's enrollment stays, as a lost device's does.
+    /// The machine principal this seat enrolled, in the form an app provisions
+    /// its out-of-process File Provider host with — the slot
+    /// `machine_change_signer_carriage` reads, here this seat's own; `None`
+    /// until the seat holds a `SyncWrite` grant.
+    fn signer_carriage(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Option<fauna_sync_engine::principal_bundle::ChangeSignerCarriage> {
+        let credentials = fauna_credential_store::CredentialStore::with_file_backend(
+            CRED_NAMESPACE,
+            self._dir.path().join("creds"),
+        );
+        fauna_sync_engine::principal_bundle::load_change_signer_carriage(&credentials, actor_id)
+    }
+
+    /// Sign the seat out: retire its enrollment nest-side, then close the store.
+    /// The machine dies with the call, and a shared account's fleet scope is
+    /// only reclaimed past the lowest walk mark holding a live grant
+    /// (`fleet-scope-reclamation.md` § *Fleet-scope reclamation*, clause (1)).
     async fn stop(self) {
+        self.handle.shutdown_for_sign_out().await;
+    }
+
+    /// Close the store and leave the machine enrolled, for a seat whose
+    /// principal outlives it: [`fauna_harness_machine_principal`] hands it to a
+    /// host process, and [`fauna_harness_peer_seat_hold`] leaves a device behind.
+    async fn stop_enrolled(self) {
         self.handle.shutdown().await;
     }
 }
 
-/// Connect as `identity`, host a [`Seat`] for the length of `op`, then close
-/// it and disconnect — the scaffold every export that writes the account plane
+/// Connect as `identity`, host a [`Seat`] for the length of `op`, then sign it
+/// out and disconnect — the scaffold every export that writes the account plane
 /// runs inside, so the seat never outlives the call whatever `op` answers.
 fn with_seat<T>(
     nest_url: String,
@@ -1067,6 +1179,63 @@ pub unsafe extern "C" fn fauna_harness_sign_custody_witness(
     unsafe { write_out(body(), out) }
 }
 
+/// Enroll one more machine of the account whose seed is `secret` and hand back
+/// its principal as the carriage an app provisions an out-of-process File
+/// Provider host with (`machine_change_signer_carriage`): the seat's own
+/// first sign-in mints the writer key, enrolls the device and certifies it
+/// `SyncWrite`, and its pass publishes the enrollment, so the account plane
+/// wraps its custody to this machine as to any other. A capability host keys
+/// the plane's folder custody as the enrolled device it is a process of
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host), so a
+/// headless File Provider run needs one before its engine opens a set.
+///
+/// `request` is the empty dag-cbor array. `out` receives
+/// `{"ok": [writer_secret, device_authorization]}` (32 bytes, the canonical
+/// `EmbedAsBytes` grant) or `{"err": RpcError}`.
+///
+/// # Safety
+///
+/// As [`fauna_harness_create_set`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_machine_principal(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    request: *const u8,
+    request_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let actor_id = call.identity.actor_id().0;
+        let seat_identity = call.identity.clone_keypair();
+        with_client(call.nest_url, call.identity, |nest| async move {
+            let seat = Seat::start(&nest, &seat_identity).await?;
+            let result = async {
+                let pass_errors = seat.publish().await?;
+                if !pass_errors.is_empty() {
+                    return Err(err(format!("the seat's publishing pass: {pass_errors:?}")));
+                }
+                let carriage = seat.signer_carriage(&actor_id).ok_or_else(|| {
+                    err("the seat's first sign-in left no SyncWrite principal in its slot")
+                })?;
+                let reply: Result<_, NestClientError> = Ok((
+                    fauna_protocol::ByteBuf::from(carriage.writer_secret.to_vec()),
+                    fauna_protocol::ByteBuf::from(carriage.device_authorization),
+                ));
+                outcome!(reply)
+            }
+            .await;
+            // The principal is the reply: a host process signs as this machine.
+            seat.stop_enrolled().await;
+            result
+        })
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
 /// Mint the **custody capability row** on the owner's own nest, as the account
 /// whose seed is `secret` — the owner's half of a custody a host then deposits
 /// a hosting row for (`account-replica-posture.md` § The custody grant +
@@ -1430,6 +1599,232 @@ pub unsafe extern "C" fn fauna_harness_create_link(
                 Err(fauna_client_share::CreateError::Mismatch) => {
                     Err(err("the nest answered for another token"))
                 }
+            }
+        })
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
+/// The pace of [`fauna_harness_conv_forge_delete`]'s wait for the victim's
+/// Welcome and message — a poll of the nest, never an assertion's clock.
+const FORGE_POLL_PACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The one inbox kind [`fauna_harness_conv_forge_delete`]'s member applies: a
+/// Welcome, joined through the shared [`ingest_welcome`] exactly as a client's
+/// drain backstop joins it. Every other kind is left un-acked, never dropped.
+///
+/// [`ingest_welcome`]: fauna_conversations::backends::fauna_mls::ingest_welcome
+struct ForgerInboxApply<'a> {
+    backend: &'a fauna_conversations::backends::fauna_mls::FaunaMlsBackend,
+    manager: &'a fauna_conversations::manager::ConversationsManager,
+    joined: &'a Mutex<Vec<fauna_mls::types::ChannelId>>,
+}
+
+impl fauna_client_inbox::InboxApply for ForgerInboxApply<'_> {
+    type Error = String;
+
+    async fn apply_welcome(
+        &self,
+        welcome: fauna_protocol::inbox::WelcomeInbox,
+    ) -> Result<(), Self::Error> {
+        let channel_hex = welcome
+            .channel_id
+            .ok_or_else(|| "welcome inbox item missing channel_id".to_string())?;
+        let channel = fauna_mls::types::ChannelId::from_hex(&channel_hex)
+            .map_err(|e| format!("welcome channel id: {e}"))?;
+        fauna_conversations::backends::fauna_mls::ingest_welcome(
+            self.backend,
+            self.manager,
+            &channel_hex,
+            &welcome.welcome_bytes,
+            welcome.nest_url.as_deref().unwrap_or_default(),
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        self.joined.lock().expect("joined poisoned").push(channel);
+        Ok(())
+    }
+
+    async fn apply_contact_request(&self, _tuple_bytes: Vec<u8>) -> Result<(), Self::Error> {
+        Err("the forging member applies Welcomes only".to_string())
+    }
+
+    async fn apply_security_notice(
+        &self,
+        _notice: fauna_protocol::inbox::SecurityNoticeInbox,
+    ) -> Result<(), Self::Error> {
+        Err("the forging member applies Welcomes only".to_string())
+    }
+}
+
+/// Be a **real MLS member that forges a delete**: the actor `secret` names
+/// joins the victim's conversation as an ordinary client would, then seals a
+/// `ChannelMessageBody::Delete` naming the victim's message with the inner
+/// `sender` set to the VICTIM — the forgery `message-reactions.md` § Reactions
+/// & message delete says every copy drops (`delete.sender == target.sender`,
+/// where the claimant is the MLS-authenticated leaf, not the claim). No app's
+/// UI can send a delete on someone else's message, so this is the witness's
+/// only door to the other half of that promise; the shared-Rust pin of the
+/// same shape is `fauna-conversations`'
+/// `forged_cross_sender_delete_does_not_tombstone_victim_message`.
+///
+/// The member is the production receive side over the real nest: an
+/// in-memory [`MlsEngine`](fauna_mls::engine::MlsEngine) under a
+/// [`FaunaMlsBackend`](fauna_conversations::backends::fauna_mls::FaunaMlsBackend)
+/// over [`fauna_client_conversations::NestConversationsRpc`]. It uploads
+/// one-time key packages (so the victim's resolve finds it addressable),
+/// writes `ready_path`, then — until `budget_secs` runs out — drains its inbox
+/// through the shared [`fauna_client_inbox::drain`] (a Welcome joins through
+/// `ingest_welcome`) and walks each joined channel with `poll_inbound_conv`,
+/// until a message whose body is `target_body` has arrived. Its sequence comes
+/// off the member's own copy's message id (`conv:<channel>:<seq>`), the very
+/// id a genuine `Delete` names. The forged delete then goes out through
+/// `fauna.conversations.channel.send` as any application message does.
+///
+/// The engine lives for the call only, so everything — the key packages, the
+/// join, the forgery — happens inside it: a test runs it on a thread and lets
+/// the victim send once `ready_path` exists.
+///
+/// `request` is the dag-cbor array `[victim_actor_hex, target_body,
+/// ready_path, budget_secs]`. `out` receives `{"ok": [channel_hex,
+/// target_seq, delete_seq]}` — the channel, the victim message's sequence
+/// and the forged delete's — or `{"err": RpcError}` when the nest refused the
+/// send. A budget spent before the message arrived is a non-zero return.
+///
+/// # Safety
+///
+/// As [`fauna_harness_create_set`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_conv_forge_delete(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    request: *const u8,
+    request_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_conversations::backend::ConversationsRpc;
+    use fauna_conversations::backends::fauna_mls::{FaunaMlsBackend, poll_inbound_conv};
+    use fauna_conversations::manager::ConversationsManager;
+    use fauna_mls::engine::MlsEngine;
+    use fauna_mls::types::{ChannelEnvelope, ChannelMessage, ChannelMessageBody};
+
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let (victim_hex, target_body, ready_path, budget_secs): (String, String, String, u32) =
+            decode_request!(call.req)?;
+        let victim = fauna_core::identity::ActorId::from_hex(&victim_hex)
+            .map_err(|e| err(format!("victim_actor_hex: {e}")))?;
+        let identity = call.identity;
+        let self_actor = identity.actor_id();
+        let engine = Arc::new(
+            MlsEngine::new_in_memory(identity.clone_keypair())
+                .map_err(|e| err(format!("the member's MLS engine: {e}")))?,
+        );
+        let budget = std::time::Duration::from_secs(u64::from(budget_secs));
+        with_client(call.nest_url, identity, |nest| async move {
+            let rpc = Arc::new(fauna_client_conversations::NestConversationsRpc::new(
+                Arc::clone(&nest),
+            ));
+            let backend = Arc::new(FaunaMlsBackend::new(
+                Arc::clone(&engine),
+                rpc.clone(),
+                "e2e-forger",
+                self_actor,
+            ));
+            let manager = ConversationsManager::new();
+            manager.register_backend(backend.clone());
+
+            let packages = engine
+                .generate_key_packages_bytes(4)
+                .map_err(|e| err(format!("mint key packages: {e}")))?;
+            rpc.keypackage_upload(packages, false)
+                .await
+                .map_err(|e| err(format!("upload key packages: {e}")))?;
+            std::fs::write(&ready_path, b"ready")
+                .map_err(|e| err(format!("write {ready_path}: {e}")))?;
+
+            let inbox = fauna_client_inbox::InboxClient::new(Arc::clone(&nest));
+            let joined = Mutex::new(Vec::new());
+            let apply = ForgerInboxApply {
+                backend: &backend,
+                manager: &manager,
+                joined: &joined,
+            };
+            let mut cursors: HashMap<String, i64> = HashMap::new();
+            let deadline = tokio::time::Instant::now() + budget;
+            let (channel, target_seq) = 'found: loop {
+                fauna_client_inbox::drain(&inbox, &apply, 0)
+                    .await
+                    .map_err(|e| err(format!("inbox drain: {e}")))?;
+                let channels = joined.lock().expect("joined poisoned").clone();
+                for channel in &channels {
+                    let after = cursors.entry(channel.to_string()).or_insert(0);
+                    poll_inbound_conv(&backend, &manager, channel, after, 0)
+                        .await
+                        .map_err(|e| err(format!("walk channel {channel}: {e}")))?;
+                }
+                for summary in manager.snapshot().threads {
+                    let Some(detail) = manager.thread_detail(summary.thread_id) else {
+                        continue;
+                    };
+                    for message in detail.messages.iter().filter(|m| m.body == target_body) {
+                        // `conv:<channel hex>:<seq>` — the id a genuine delete names.
+                        let mut parts = message.message_id.0.splitn(3, ':');
+                        let (Some("conv"), Some(hex), Some(seq)) =
+                            (parts.next(), parts.next(), parts.next())
+                        else {
+                            continue;
+                        };
+                        let Some(channel) = channels.iter().find(|c| c.to_string() == hex) else {
+                            continue;
+                        };
+                        let seq: u64 = seq.parse().map_err(|e| {
+                            err(format!("message id {}: {e}", message.message_id.0))
+                        })?;
+                        break 'found (*channel, seq);
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(err(format!(
+                        "no message {target_body:?} reached the member within {budget_secs}s \
+                         (channels joined: {})",
+                        channels.len()
+                    )));
+                }
+                tokio::time::sleep(FORGE_POLL_PACE).await;
+            };
+
+            // The forgery: an authenticated member claims to be the victim
+            // deleting her own message.
+            let forged = ChannelMessage {
+                sender: victim,
+                sequence: target_seq,
+                channel_epoch: 0,
+                body: ChannelMessageBody::Delete { target_seq },
+                timestamp: fauna_core::data::Timestamp::now(),
+            };
+            let sealed = engine
+                .encrypt(&channel, &forged)
+                .map_err(|e| err(format!("seal the forged delete: {e}")))?;
+            let envelope = ChannelEnvelope::Application(sealed)
+                .to_bytes()
+                .map_err(|e| err(format!("encode the envelope: {e}")))?;
+            match rpc
+                .channel_send(channel.to_string(), envelope, None, Vec::new())
+                .await
+            {
+                Ok(delete_seq) => fauna_core::encoding::canonical_encode(&(
+                    channel.to_string(),
+                    target_seq,
+                    delete_seq,
+                ))
+                .map(Outcome::Ok)
+                .map_err(encode_err),
+                Err(e) => Err(err(format!("send the forged delete: {e}"))),
             }
         })
     };
@@ -2088,6 +2483,197 @@ pub unsafe extern "C" fn fauna_harness_answer_consent(
             .map(Outcome::Ok)
             .map_err(encode_err)
         })
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
+/// Enable mail for the account whose seed is `secret`, app-less: the shared
+/// [`fauna_client_mail_settings::MailSettingsMachine`] built by the same
+/// `rpc_glue::build_mail_settings_machine` every native app builds its Mail
+/// settings page with, over a [`Seat`]'s mail custody and grant log, sent
+/// `EnableMail` with one generated plain credential, then one publishing pass.
+/// So the account's MSEK rests in the sealed mail custody (`fauna.state.mail`)
+/// and its recipient seal key is published, as an app's first enable leaves
+/// them — what a capability host reads to adopt a third-party deposit
+/// (`on-demand-files-apple.md` § Apple File Provider binding → *Third-party
+/// deposit adoption on a capability host*, consequence (1)), with no app seat
+/// left running beside it.
+///
+/// `request` is the empty dag-cbor array. `out` receives `{"ok": true}` — the
+/// machine's snapshot reads enabled — or a local failure carrying the
+/// snapshot's error line.
+///
+/// # Safety
+///
+/// As [`fauna_harness_create_set`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_enable_mail(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    request: *const u8,
+    request_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_client_mail_settings::{CredentialKind, MailSettingsAction, SecretBytes};
+
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let node_url = call.nest_url.clone();
+        with_seat(
+            call.nest_url,
+            call.identity,
+            async |nest, identity, seat| {
+                let machine = fauna_client_mail_settings::rpc_glue::build_mail_settings_machine(
+                    Arc::clone(nest),
+                    identity.clone_keypair(),
+                    Arc::new(seat.handle.clone()),
+                    &node_url,
+                    Arc::new(seat.handle.clone()),
+                    Some(Arc::new(fauna_client_folders::CustodyServedSets(Arc::new(
+                        seat.custody(),
+                    )))),
+                );
+                let password = hex::encode(rand::random::<[u8; 16]>());
+                let dispatched = machine
+                    .dispatch(MailSettingsAction::EnableMail {
+                        display_name: "default".into(),
+                        kind: CredentialKind::Plain,
+                        secret: SecretBytes::from(password.into_bytes()),
+                    })
+                    .await;
+                let snapshot = machine.snapshot();
+                if dispatched.is_err() || !snapshot.enabled {
+                    return Err(err(format!(
+                        "EnableMail left mail off: {dispatched:?}, error line {:?}",
+                        snapshot.error
+                    )));
+                }
+                let pass_errors = seat.publish().await?;
+                if !pass_errors.is_empty() {
+                    return Err(err(format!("the seat's publishing pass: {pass_errors:?}")));
+                }
+                let reply: Result<bool, NestClientError> = Ok(true);
+                outcome!(reply)
+            },
+        )
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
+/// Mint one **content trust** the Nests page's scope-first picker offers, as
+/// the account whose seed is `secret`, app-less: the shared
+/// [`fauna_client_pair::LinkedNestsMachine`] built by the same
+/// `build_linked_nests_machine_with_trust` every native app builds its Nests
+/// page with, over a [`Seat`]'s grant log, mail custody, period keys and
+/// blessings; hydrated, so the home row's `mint_options` are the catalog
+/// `view_model::mint_options` derives, then sent
+/// [`LinkedNestsAction::Mint`](fauna_client_pair::LinkedNestsAction::Mint) with
+/// the option's own scope and its first holder candidate — the gesture an
+/// app's confirm runs (record the signed Mint event, publish it, then deposit
+/// the blob). The default duration applies (a one-off window on an unblessed
+/// nest).
+///
+/// `request` is the dag-cbor array `[use_case]`: `"mail"` or `"calendar"`.
+/// `out` receives `{"ok": true}`; a use case the catalog does not offer (mail
+/// off, no holder of the role), or a mint the machine refused, is a local
+/// failure carrying the snapshot's error line.
+///
+/// # Safety
+///
+/// As [`fauna_harness_create_set`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_mint_trust(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    request: *const u8,
+    request_len: u32,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_client_account_runtime::blessed_nests::PlaneBlessedNests;
+    use fauna_client_account_runtime::period_keys::PlanePeriodKeys;
+    use fauna_client_pair::{LinkedNestsAction, TrustMintUseCase};
+
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let call = unsafe { decode_call(nest_url, secret, secret_len, request, request_len)? };
+        let (use_case,): (String,) = decode_request!(call.req)?;
+        let wanted = match use_case.as_str() {
+            "mail" => TrustMintUseCase::Mail,
+            "calendar" => TrustMintUseCase::Calendar,
+            other => return Err(err(format!("no mint use case {other:?} (mail | calendar)"))),
+        };
+        with_seat(
+            call.nest_url,
+            call.identity,
+            async |nest, identity, seat| {
+                let resolver = |seat: &Seat| {
+                    let handle = seat.handle.clone();
+                    move || Some(handle.clone())
+                };
+                let machine = fauna_client_pair::build_linked_nests_machine_with_trust(
+                    Arc::clone(nest),
+                    identity.clone_keypair(),
+                    Arc::new(seat.handle.clone()),
+                    Arc::new(seat.handle.clone()),
+                    Arc::new(PlaneBlessedNests::new(resolver(seat))),
+                    Arc::new(PlanePeriodKeys::new(resolver(seat))),
+                    Arc::new(seat.handle.clone()),
+                );
+                machine
+                    .hydrate()
+                    .await
+                    .map_err(|e| err(format!("hydrate the Nests page: {e}")))?;
+                let snapshot = machine.snapshot();
+                let home = snapshot
+                    .home
+                    .ok_or_else(|| err("the Nests page rendered no home row"))?;
+                let option = home
+                    .mint_options
+                    .iter()
+                    .find(|o| o.use_case == wanted)
+                    .ok_or_else(|| {
+                        err(format!(
+                            "the picker offers no {use_case:?} option; it offers {:?} \
+                             (error line {:?})",
+                            home.mint_options
+                                .iter()
+                                .map(|o| o.use_case)
+                                .collect::<Vec<_>>(),
+                            snapshot.error,
+                        ))
+                    })?;
+                let holder = option
+                    .holder_candidates
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| err(format!("the {use_case:?} option names no holder")))?;
+                let minted = machine
+                    .dispatch(LinkedNestsAction::Mint {
+                        nest_id: home.nest_id.clone(),
+                        holder_bridge_id: holder,
+                        scope: option.scope.clone(),
+                        duration: None,
+                    })
+                    .await;
+                if let Err(e) = minted {
+                    return Err(err(format!(
+                        "the {use_case:?} mint refused: {e} (error line {:?})",
+                        machine.snapshot().error
+                    )));
+                }
+                let pass_errors = seat.publish().await?;
+                if !pass_errors.is_empty() {
+                    return Err(err(format!("the seat's publishing pass: {pass_errors:?}")));
+                }
+                let reply: Result<bool, NestClientError> = Ok(true);
+                outcome!(reply)
+            },
+        )
     };
     // SAFETY: per the `# Safety` section above.
     unsafe { run(body, out) }
@@ -2865,7 +3451,7 @@ pub unsafe extern "C" fn fauna_harness_peer_seat_hold(
                 }
                 tokio::time::sleep(PEER_SEAT_PASS_PACE).await;
             };
-            seat.stop().await;
+            seat.stop_enrolled().await;
             fauna_core::encoding::canonical_encode(&result?)
                 .map(Outcome::Ok)
                 .map_err(encode_err)

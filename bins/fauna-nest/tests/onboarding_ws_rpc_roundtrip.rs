@@ -192,12 +192,64 @@ async fn nest_handshake_read_learns_the_identity_the_commit_binds() {
 }
 
 #[tokio::test]
-async fn register_on_closed_nest_maps_to_failed() {
+async fn read_nest_rules_names_the_proven_identity_and_carries_the_signed_rules() {
+    // The joining surfaces' pre-sign-in read (`nest-rules.md` § Acceptance at
+    // joining): the identity is the one the handshake proves, and the rules
+    // the nest serves verify against it.
+    let (base, db) = start_with_db().await;
+    let api = connect(&base).await;
+    let none = api.read_nest_rules().await.expect("a nest with no rules");
+    assert_eq!(none.content_policy, None);
+    assert_eq!(none.nest_id.len(), 64);
+
+    let mut doc = fauna_core::content_policy::ContentPolicyDocument::empty();
+    doc.rules.push(fauna_core::content_policy::ContentRule {
+        factor: "spam".into(),
+        min_permille: 350,
+        verdict: fauna_core::content_policy::ContentVerdict::Collapse,
+        reason_code: "rule-1".into(),
+        reason: [(
+            fauna_core::content_policy::REASON_DEFAULT_KEY.to_string(),
+            "No spam".to_string(),
+        )]
+        .into(),
+        extra: Default::default(),
+    });
+    // Stored unsigned: the nest serves its rules re-signed by its current
+    // identity (`content_policy_handlers::rules_in_force`).
+    let stored = fauna_nest::db::content_policy::StoredNestContentPolicy {
+        domain: "rules.test".into(),
+        policy: fauna_protocol::content_policy::SignedContentPolicy {
+            document: fauna_core::content_policy::encode_document(&doc).unwrap(),
+            sequence: 1,
+            issued_at: 1_700_000_000,
+            signature: vec![0; 64],
+            extra: Default::default(),
+        },
+    };
+    assert!(
+        db.put_nest_content_policy(&stored, None, &[1; 32])
+            .await
+            .unwrap()
+    );
+    let read = connect(&base).await.read_nest_rules().await.expect("rules");
+    assert_eq!(read.nest_id, none.nest_id);
+    let key: [u8; 32] = hex::decode(&read.nest_id).unwrap().try_into().unwrap();
+    let verified = read
+        .content_policy
+        .expect("the rules ride the self-description")
+        .verify(&key)
+        .expect("signed by the proven identity");
+    assert_eq!(verified.rules.len(), 1);
+}
+
+#[tokio::test]
+async fn register_on_closed_nest_maps_to_refused() {
     let base = start().await;
     let api = connect(&base).await;
     let (_, actor_hex) = keypair(5);
-    // `for_test` disables open registration → `registration_closed`. The wizard
-    // treats register as binary, so any failure is `Failed`.
+    // `for_test` disables open registration → `registration_closed`. A nest
+    // refusal keeps its code (`Refused`); only a transport fault is `Failed`.
     let body = RegisterBody {
         actor_id: actor_hex,
         handle: "bob".into(),
@@ -211,8 +263,8 @@ async fn register_on_closed_nest_maps_to_failed() {
         .await
         .expect_err("registration is closed on a for_test nest");
     assert!(
-        matches!(err, RegisterError::Failed { .. }),
-        "register failure → Failed, got {err:?}"
+        matches!(&err, RegisterError::Refused { code, .. } if code == "fauna.account.registration_closed"),
+        "a closed nest's register → Refused(registration_closed), got {err:?}"
     );
 }
 

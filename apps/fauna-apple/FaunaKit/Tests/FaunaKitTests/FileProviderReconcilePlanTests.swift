@@ -23,6 +23,72 @@ import Testing
     /// owner record and the toggle store run at injected temp paths, never the
     /// app-group container or the user domain (testing.md § conventions point
     /// 10); the `NSFileProviderManager` add/remove calls are the only live inch.
+    /// The row model of the one-time OS enable and its input mapping
+    /// (`on-demand-files-apple.md` § Apple File Provider binding, *The one-time
+    /// OS enable*). The rule is pinned in Rust; what stays here is the reading
+    /// reaching the rule, and each OS's caption and door. The stores run at
+    /// injected temp paths.
+    @Suite struct FileProviderOSEnableNoticeTests {
+        private let actor = String(repeating: "aa", count: 32)
+        private let docs = PresenceSet(
+            name: "docs", folderId: "local:1", thisDeviceAccepts: true, role: .own)
+        private var docsId: String { "local%3A1@\(actor)" }
+
+        private func withPrefs(
+            _ body: (FfiOnDemandPrefsStore, URL) throws -> Void
+        ) throws {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("fauna-os-enable-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try body(
+                FileProviderDomainPrefs.open(at: dir.appendingPathComponent("prefs.json")),
+                dir.appendingPathComponent("owners.json"))
+        }
+
+        @Test func aDisabledRegisteredDomainReachesTheRow() throws {
+            try withPrefs { prefs, owners in
+                let noticed = try FileProviderCoordinator.osEnableNotices(
+                    actorHex: actor, sets: [docs], boundSets: [], prefs: prefs,
+                    registered: [RegisteredPresence(identifier: docsId, userEnabled: false)],
+                    ownersAt: owners)
+                #expect(noticed == [docsId])
+                #expect(FolderOSEnableNotice.row(domainId: docsId, noticed: noticed) != nil)
+            }
+        }
+
+        @Test func anEnabledOrBoundDomainDoesNot() throws {
+            try withPrefs { prefs, owners in
+                let enabled = try FileProviderCoordinator.osEnableNotices(
+                    actorHex: actor, sets: [docs], boundSets: [], prefs: prefs,
+                    registered: [RegisteredPresence(identifier: docsId, userEnabled: true)],
+                    ownersAt: owners)
+                #expect(enabled.isEmpty)
+                let bound = try FileProviderCoordinator.osEnableNotices(
+                    actorHex: actor, sets: [docs], boundSets: ["local:1"], prefs: prefs,
+                    registered: [RegisteredPresence(identifier: docsId, userEnabled: false)],
+                    ownersAt: owners)
+                #expect(bound.isEmpty)
+                #expect(FolderOSEnableNotice.row(domainId: docsId, noticed: bound) == nil)
+            }
+        }
+
+        @Test func aRowWithNoIdentityCarriesNone() {
+            #expect(FolderOSEnableNotice.row(domainId: nil, noticed: [docsId]) == nil)
+        }
+
+        @Test func eachOSSaysItsOwnStepsAndOnlyMacOSHasADoor() throws {
+            let mac = try #require(
+                FolderOSEnableNotice.row(domainId: docsId, noticed: [docsId], onMac: true))
+            #expect(mac.caption == L.devices.onDemandNeedsExtensionEnable)
+            #expect(mac.settingsURL?.scheme == "x-apple.systempreferences")
+            let ios = try #require(
+                FolderOSEnableNotice.row(domainId: docsId, noticed: [docsId], onMac: false))
+            #expect(ios.caption == L.devices.onDemandNeedsFilesEnable)
+            #expect(ios.settingsURL == nil)
+        }
+    }
+
     @Suite struct FileProviderReconcilePlanTests {
         private let a = String(repeating: "aa", count: 32)
         private let b = String(repeating: "bb", count: 32)
@@ -151,6 +217,25 @@ import Testing
             #expect(p.remove.map(\.identifier) == [scopedId(sharedDocs, b)])
         }
 
+        /// A set toggled off before an identity succession stays off after it
+        /// (sync-agent.md § The per-actor scope follows the account across a
+        /// succession): the successor's reconcile carries A's toggle to B
+        /// before its plan, so B's `docs` is not desired while `pics` is, and
+        /// a second reconcile changes nothing.
+        @Test func aSetToggledOffBeforeASuccessionStaysOffAfterIt() throws {
+            let dir = tempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let prefs = FfiOnDemandPrefsStore(path: dir.appendingPathComponent("prefs.json").path)
+            FileProviderDomainPrefs.setEnabled(false, domainId: scopedId(docs, a), store: prefs)
+
+            for _ in 0..<2 {
+                FileProviderCoordinator.carryOnDemandPrefs(actorHex: b, predecessors: [a], prefs: prefs)
+                let p = try plan([docs, pics], registered: [], actorHex: b, dir: dir)
+                #expect(p.add.map(\.scopedId) == [scopedId(pics, b)])
+            }
+            #expect(prefs.isEnabled(scopedId: scopedId(docs, a)), "the predecessor key is dropped")
+        }
+
         /// A writer member's local-folder binding outranks the shared set's
         /// domain, exactly as an owner's does (one local presence per set).
         @Test func aBoundSharedSetIsSubtracted() throws {
@@ -196,18 +281,35 @@ import Testing
                 .allowsWriting, .allowsAddingSubItems, .allowsRenaming, .allowsDeleting,
                 .allowsReparenting,
             ]
-            let readerFile = FileProviderItemCapabilities.capabilities(isFolder: false, readOnly: true)
-            let readerDir = FileProviderItemCapabilities.capabilities(isFolder: true, readOnly: true)
+            let readerFile = FileProviderItemCapabilities.capabilities(
+                isFolder: false, readOnly: true, kept: false)
+            let readerDir = FileProviderItemCapabilities.capabilities(
+                isFolder: true, readOnly: true, kept: false)
             #expect(readerFile.intersection(write).isEmpty)
             #expect(readerDir.intersection(write).isEmpty)
             #expect(readerFile.contains(.allowsReading))
             #expect(readerDir.contains([.allowsReading, .allowsContentEnumerating]))
             #expect(
-                FileProviderItemCapabilities.capabilities(isFolder: false, readOnly: false)
+                FileProviderItemCapabilities.capabilities(isFolder: false, readOnly: false, kept: false)
                     .contains([.allowsWriting, .allowsDeleting, .allowsRenaming]))
             #expect(
-                FileProviderItemCapabilities.capabilities(isFolder: true, readOnly: false)
+                FileProviderItemCapabilities.capabilities(isFolder: true, readOnly: false, kept: false)
                     .contains(.allowsAddingSubItems))
+        }
+
+        /// macOS keeps by content policy (`FileProviderKeep`): the capability
+        /// that carries the keep on iOS is deprecated here and advertised on
+        /// nothing, the iOS leg being `test_file_provider_eviction.py`'s.
+        @Test func noMacOSItemAdvertisesTheEvictingCapability() {
+            for isFolder in [false, true] {
+                for readOnly in [false, true] {
+                    for kept in [false, true] {
+                        let capabilities = FileProviderItemCapabilities.capabilities(
+                            isFolder: isFolder, readOnly: readOnly, kept: kept)
+                        #expect(capabilities.rawValue & (1 << 6) == 0)
+                    }
+                }
+            }
         }
 
         /// A malformed account fails the plan (the reconcile logs and skips)

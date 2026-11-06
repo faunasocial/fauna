@@ -16,8 +16,9 @@
 //!
 //! **What the element publishes** (`drivers/base.py::get_attr`): `state` ∈
 //! `idle` / `loading` / `playing` / `error` as a `test-attr-state-*` class,
-//! `source` (the nest-relative path the reader was opened on, `sealed:<hash>`
-//! for opened bytes, `""` before a tap) and `position` (`"0.000"` until a player
+//! `source` (the nest-relative path the reader was opened on; for held bytes
+//! the shared [`held_video_source`] spelling — `sealed:<hash>` for a sealed
+//! item, `home:<hash>` for a foreign-homed clip; `""` before a tap) and `position` (`"0.000"` until a player
 //! stands in the slot; the automation agent then reads the live stream's
 //! [`played_position_us`] off the `gtk::Video` child — an ended stream's whole
 //! length, never the 0 GTK resets an ended stream's timestamp to).
@@ -31,12 +32,17 @@
 //! another post carrying the same bytes stays idle until it is tapped itself.
 //!
 //! **The player feeds the cue probe.** Every `timestamp` / `ended` report the
-//! stream makes is noted, per-mille through the shared
-//! [`played_per_mille`], into the player's unread peak; the feed's cue probe
-//! takes it for the post's row each sample ([`take_played_pm`], the contract on
-//! [`fauna_feed::CueRow::media_played_pm`]), which is what lets a video played
+//! stream makes is noted on the feed's shared tracker
+//! (`CueTracker::note_played`, through `feed::viewport::note_played`), which
+//! clamps it per-mille and holds the per-post peak itself, so the shell keeps
+//! no store of its own; that is what lets a video played
 //! to the end derive the media `watch-complete` (`engagement-cues.md` § Cue
-//! vocabulary & derivation).
+//! vocabulary & derivation). The player's engagement rides the same path: the
+//! tap engages it (`loading` counts), the stream's own `playing` / `ended` /
+//! `error` reports move it, a superseding tap tears it down, and the probe
+//! relays it to the tracker each sample ([`is_engaged`] →
+//! `CueTracker::note_playing`) — a play is attention, wherever its card sits
+//! (§ Cue vocabulary & derivation, *A play is attention*).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -45,8 +51,7 @@ use std::sync::Arc;
 use fauna_client::RangedNestReader;
 use fauna_core::load_cache::Finished;
 use fauna_core::render::RenderBlock;
-use fauna_core::scoring::cues::played_per_mille;
-use fauna_feed::PlaybackSource;
+use fauna_feed::{HeldVideo, PlaybackSource, held_video_source};
 use fauna_ui_ids as ids;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -86,7 +91,7 @@ enum Fetched {
     /// shared post-blob plane (anonymous, pinned, capped, content-verified) —
     /// the ranged reader dials only this nest.
     Home {
-        path: String,
+        hash: String,
         bytes: Vec<u8>,
     },
     Sealed {
@@ -114,7 +119,7 @@ impl PlaybackResolver for LivePlayback {
                     (Some(home), RenderBlock::Video { hash, .. }) => {
                         match blobs.get(Some(home), hash).await {
                             Ok(bytes) => Fetched::Home {
-                                path: url,
+                                hash: hash.clone(),
                                 bytes: bytes.to_vec(),
                             },
                             Err(e) => Fetched::Failed(format!("home video {hash}: {e}")),
@@ -139,11 +144,7 @@ impl PlaybackResolver for LivePlayback {
                     let stream = RangedNestStream::new(Arc::new(reader), client.runtime_handle());
                     Ok((path, stream.upcast()))
                 }
-                Ok(Fetched::Home { path, bytes }) => {
-                    let stream =
-                        gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(bytes));
-                    Ok((path, stream.upcast()))
-                }
+                Ok(Fetched::Home { hash, bytes }) => Ok(held_stream(HeldVideo::Home, hash, bytes)),
                 Ok(Fetched::Sealed { hash }) => {
                     let fetched = client
                         .fetch_post_blob_bytes(&hash, home)
@@ -154,11 +155,7 @@ impl PlaybackResolver for LivePlayback {
                     // the player opened, never as ciphertext.
                     match crate::feed::post_media::open_fetched_post_image(&manager, &hash, fetched)
                     {
-                        Finished::Loaded(bytes) => {
-                            let stream =
-                                gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(bytes));
-                            Ok((format!("sealed:{hash}"), stream.upcast()))
-                        }
+                        Finished::Loaded(bytes) => Ok(held_stream(HeldVideo::Sealed, hash, bytes)),
                         Finished::Failed | Finished::Transient => {
                             Err(format!("sealed video {hash} did not open"))
                         }
@@ -172,6 +169,13 @@ impl PlaybackResolver for LivePlayback {
         });
         rx
     }
+}
+
+/// Bytes the app holds, as the player's stream and the `source` they publish —
+/// the shared [`held_video_source`] spelling for their arm.
+fn held_stream(held: HeldVideo, hash: String, bytes: Vec<u8>) -> (String, gio::InputStream) {
+    let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(bytes));
+    (held_video_source(held, hash), stream.upcast())
 }
 
 /// The element's published phase.
@@ -201,9 +205,10 @@ struct Player {
     source: String,
     media: Option<gtk::MediaStream>,
     generation: u64,
-    /// The highest per-mille the stream reported since the cue probe last took
-    /// it ([`take_played_pm`]); `None` when it has made no progress since.
-    unread_pm: Option<u32>,
+    /// Whether the user is attending this player ([`is_engaged`]): set by the
+    /// tap, then by the stream's own reports — rolling is engaged; paused,
+    /// ended or errored is not.
+    engaged: bool,
 }
 
 thread_local! {
@@ -306,7 +311,7 @@ fn tap(key: Key, block: RenderBlock, resolver: &Rc<dyn PlaybackResolver>) {
         source: String::new(),
         media: None,
         generation,
-        unread_pm: None,
+        engaged: true,
     }));
     if let Some(previous) = previous {
         if let Some(media) = &previous.media {
@@ -330,7 +335,7 @@ fn tap(key: Key, block: RenderBlock, resolver: &Rc<dyn PlaybackResolver>) {
         match resolved {
             Ok((source, stream)) => {
                 let media: gtk::MediaStream = gtk::MediaFile::for_input_stream(&stream).upcast();
-                for property in ["prepared", "playing", "error"] {
+                for property in ["prepared", "playing", "ended", "error"] {
                     media.connect_notify_local(Some(property), move |media, _| {
                         settle(generation, media);
                     });
@@ -349,7 +354,10 @@ fn tap(key: Key, block: RenderBlock, resolver: &Rc<dyn PlaybackResolver>) {
             }
             Err(reason) => {
                 tracing::warn!(target: "feed", video = %key.video, %reason, "inline playback failed");
-                with_current(generation, |p| p.phase = Phase::Error);
+                with_current(generation, |p| {
+                    p.phase = Phase::Error;
+                    p.engaged = false;
+                });
                 repaint(&key);
             }
         }
@@ -369,10 +377,13 @@ fn with_current(generation: u64, f: impl FnOnce(&mut Player)) {
 }
 
 /// The stream's own report moves the phase: `playing` once it is prepared and
-/// rolling, `error` on its error (the player is dropped; a tap retries).
+/// rolling, `error` on its error (the player is dropped; a tap retries). It
+/// moves the engagement too: rolling is engaged, a pause, the end or an error
+/// is not.
 fn settle(generation: u64, media: &gtk::MediaStream) {
     let mut key = None;
     with_current(generation, |p| {
+        p.engaged = media.error().is_none() && media.is_playing() && !media.is_ended();
         let phase = if let Some(error) = media.error() {
             tracing::warn!(target: "feed", video = %p.key.video, %error, "inline player error");
             p.media = None;
@@ -392,7 +403,7 @@ fn settle(generation: u64, media: &gtk::MediaStream) {
     }
 }
 
-/// Note the stream's progress into the live player's unread peak. An ended
+/// Note the stream's progress on the cue tracker. An ended
 /// stream reads as played to its end, whatever its last timestamp said.
 fn note_stream(generation: u64, media: &gtk::MediaStream) {
     note_progress(
@@ -416,23 +427,18 @@ fn played_position(ended: bool, timestamp: i64, duration: i64) -> f64 {
 }
 
 fn note_progress(generation: u64, position: f64, duration: f64) {
-    let Some(pm) = played_per_mille(position, duration) else {
-        return;
-    };
     with_current(generation, |p| {
-        p.unread_pm = Some(p.unread_pm.map_or(pm, |seen| seen.max(pm)));
+        crate::feed::viewport::note_played(&p.key.post, position, duration);
     });
 }
 
-/// The cue probe's read: the peak the live player reached on `post_id` since
-/// the last take, cleared by the take; `None` when the post has no player or
-/// it made no progress since (the contract on
-/// [`fauna_feed::CueRow::media_played_pm`]).
-pub(crate) fn take_played_pm(post_id: &str) -> Option<u32> {
-    PLAYER.with_borrow_mut(|p| {
-        p.as_mut()
-            .filter(|p| p.key.post == post_id)
-            .and_then(|p| p.unread_pm.take())
+/// Whether the live player on `post_id` is engaged — the cue probe relays it to
+/// the tracker each sample (`CueTracker::note_playing`); `false` when the post
+/// has no player (never tapped, or torn down by a tap elsewhere).
+pub(crate) fn is_engaged(post_id: &str) -> bool {
+    PLAYER.with_borrow(|p| {
+        p.as_ref()
+            .is_some_and(|p| p.key.post == post_id && p.engaged)
     })
 }
 
@@ -651,42 +657,50 @@ mod tests {
         });
     }
 
-    /// The cue probe takes the peak the player reported since its last take —
-    /// an ended stream as the whole play — and nothing for a post the player
-    /// is not on; a second take with no progress between is no reading.
+    /// A play is attention: the tap engages the player (still loading
+    /// counts), a failed resolve disengages it, and a tap on another post
+    /// tears the first down — the probe relays exactly this to the tracker.
     #[test]
-    fn the_cue_probe_takes_the_peak_since_its_last_take() {
-        on_private_context(|_| {
+    fn the_tap_engages_the_player_and_an_error_or_a_tap_elsewhere_ends_it() {
+        on_private_context(|ctx| {
             let resolver = Rc::new(Scripted::default());
-            let host = build_post_video_from("p1", video("a1b2"), resolver.clone());
-            press(&host);
-            let generation = GENERATION.with(Cell::get);
-            assert_eq!(take_played_pm("p1"), None, "nothing played yet");
-
-            note_progress(generation, 0.0, 0.0);
-            assert_eq!(
-                take_played_pm("p1"),
-                None,
-                "a preparing stream reads nothing"
+            let first = build_post_video_from("p1", video("aa11"), resolver.clone());
+            let second = build_post_video_from("p2", video("bb22"), resolver.clone());
+            assert!(
+                !is_engaged("p1"),
+                "never autoplay: nothing engaged before a tap"
             );
-            note_progress(generation, 3_000_000.0, 5_000_000.0);
-            note_progress(generation, 1_000_000.0, 5_000_000.0);
-            assert_eq!(take_played_pm("p2"), None, "another post has no player");
-            assert_eq!(take_played_pm("p1"), Some(600), "the peak, not the latest");
-            assert_eq!(take_played_pm("p1"), None, "taken once");
 
-            note_progress(generation, 5_000_000.0, 5_000_000.0);
-            note_progress(generation + 1, 2_000_000.0, 5_000_000.0);
-            assert_eq!(
-                take_played_pm("p1"),
-                Some(1000),
-                "a stale player notes nothing"
-            );
+            press(&first);
+            assert!(is_engaged("p1"), "loading counts");
+            press(&second);
+            assert!(!is_engaged("p1"), "torn down by a tap elsewhere");
+            assert!(is_engaged("p2"));
+
+            let tx = resolver.pending.borrow_mut().pop().unwrap();
+            tx.try_send(Err("no".into())).unwrap();
+            while ctx.iteration(false) {}
+            assert_eq!(state(&second).as_deref(), Some("error"));
+            assert!(!is_engaged("p2"), "an error disengages");
         });
     }
 
     /// A stream that played to its end reads its whole length, whatever its
     /// timestamp: GTK resets an ended stream's timestamp to 0.
+    /// Held bytes publish the shared spelling for their arm, never the
+    /// projection's path the player never read (render-model.md § D6c →
+    /// *Inline playback*, the held-bytes `source` ruling).
+    #[test]
+    fn held_bytes_publish_their_arm_and_hash() {
+        let (source, _) = held_stream(HeldVideo::Home, "ab12".into(), vec![1, 2]);
+        assert_eq!(source, "home:ab12");
+        let (source, stream) = held_stream(HeldVideo::Sealed, "cd34".into(), vec![7]);
+        assert_eq!(source, "sealed:cd34");
+        let mut buf = [0u8; 4];
+        let n = stream.read(&mut buf[..], gio::Cancellable::NONE).unwrap();
+        assert_eq!(&buf[..n], &[7]);
+    }
+
     #[test]
     fn an_ended_stream_reads_as_played_to_its_end() {
         assert_eq!(played_position(false, 2_500_000, 5_000_000), 2_500_000.0);

@@ -126,11 +126,17 @@ impl GrantEventScope {
 }
 
 /// `(base kind, folded factor)` of a raw `kind` string. A lone `<ns>:<hex>`
-/// token is a factor on a kind-less tuple; a bare word is a plain kind.
+/// token is a factor on a kind-less tuple; a bare word is a plain kind. The
+/// one `<ns>:` token that is a kind, never a factor, is a `deposit` twin's
+/// folder token ([`DEPOSIT_FOLDER_TOKEN_PREFIX`]) — no factor namespace is
+/// spelled `folder:`, so a lone folder token keeps its slot when a writer
+/// factor is folded in after it.
 fn split_kind(kind: &str) -> (&str, Option<&str>) {
     match kind.split_once(GRANT_SCOPE_FACTOR_SEPARATOR) {
         Some((head, factor)) => (head, Some(factor)),
-        None if kind.contains(':') => ("", Some(kind)),
+        None if kind.contains(':') && !kind.starts_with(DEPOSIT_FOLDER_TOKEN_PREFIX) => {
+            ("", Some(kind))
+        }
         None => (kind, None),
     }
 }
@@ -213,6 +219,77 @@ pub fn content_write_authorizations(events: &[GrantEvent]) -> BTreeMap<String, B
         }
     }
     out
+}
+
+/// The token a `deposit` tuple's folder rides in on the log twin — the
+/// event's [`GrantEventScope`] is frozen and carries no `set`, so the twin
+/// folds the folder into `kind` as `folder:<id>`, the writer factor after it
+/// (`kind: "folder:17 writer:<hex>"`; `folder-deposit.md` § The depositor
+/// signs, the owner's device verifies → *The tuple names its writer, and the
+/// log twin names the folder*).
+pub const DEPOSIT_FOLDER_TOKEN_PREFIX: &str = "folder:";
+
+/// The `folder:<id>` token naming `folder_id` — the decimal spelling the
+/// blob's `deposit` tuple carries in its `set`.
+#[must_use]
+pub fn deposit_folder_token(folder_id: i64) -> String {
+    format!("{DEPOSIT_FOLDER_TOKEN_PREFIX}{folder_id}")
+}
+
+/// The folder id a `folder:<id>` token names, or `None` for any other string
+/// — including a non-canonical spelling of the id (refused, never repaired,
+/// so one folder has one token).
+#[must_use]
+pub fn parse_deposit_folder_token(token: &str) -> Option<i64> {
+    let digits = token.strip_prefix(DEPOSIT_FOLDER_TOKEN_PREFIX)?;
+    let id = digits.parse::<i64>().ok()?;
+    (id.to_string() == digits).then_some(id)
+}
+
+/// **Who may deposit into each folder, by the owner's own word** — every
+/// `(folder, writer)` pair a `Mint` or `Renew` event of `events` declares
+/// through a `deposit` tuple whose `kind` carries the folder token and a
+/// writer factor (`folder-deposit.md` § The depositor signs, the owner's
+/// device verifies). The adopter admits a parked item only under a writer
+/// this names for the item's folder.
+///
+/// **Ever minted, revoked or not**, as [`content_write_authorizations`] and
+/// for its reasons (`folder-deposit.md` § … → *Ever minted, revoked or
+/// not*): an accepted item is the user's, a parked item carries no trusted
+/// time, and what ends a principal's depositing is the nest's door. A
+/// `Revoke` event's own scope authorizes nothing; a tuple with no writer
+/// factor or no canonical folder token is skipped. Signature verification is
+/// the caller's — the log is the succession ledger's chain-signed fold.
+#[must_use]
+pub fn deposit_authorizations(events: &[GrantEvent]) -> BTreeMap<i64, BTreeSet<[u8; 32]>> {
+    let mut out: BTreeMap<i64, BTreeSet<[u8; 32]>> = BTreeMap::new();
+    for event in events {
+        if event.kind == GrantEventKind::Revoke {
+            continue;
+        }
+        for tuple in event.scope.iter().filter(|t| t.class == CLASS_DEPOSIT) {
+            let (Some(folder), Some(writer)) = (
+                tuple.base_kind().and_then(parse_deposit_folder_token),
+                tuple.factor().and_then(parse_writer_factor),
+            ) else {
+                continue;
+            };
+            out.entry(folder).or_default().insert(writer);
+        }
+    }
+    out
+}
+
+/// The writers [`deposit_authorizations`] names for **one** folder — the fold
+/// narrowed to `folder_id`, empty when the log authorizes none there. The one
+/// narrowing every custody source's `FolderKeyReader::deposit_writers` calls
+/// (the seat's account runtime, the cold replica), so a writer authorized for
+/// folder A is never admitted for folder B by a source that forgot to narrow.
+#[must_use]
+pub fn deposit_writers_for(events: &[GrantEvent], folder_id: i64) -> BTreeSet<[u8; 32]> {
+    deposit_authorizations(events)
+        .remove(&folder_id)
+        .unwrap_or_default()
 }
 
 /// One signed, immutable entry in the owner's capability-grant event log.
@@ -484,6 +561,104 @@ mod tests {
             )]),
             "the revoked grant's mint still authorizes its rows; a Revoke's own \
              scope and a writer-less tuple authorize nothing"
+        );
+    }
+
+    fn deposit_tuple(folder: &str, writer: Option<&[u8; 32]>) -> GrantEventScope {
+        let scope = GrantEventScope {
+            class: CLASS_DEPOSIT.into(),
+            kind: Some(folder.into()),
+            tier: None,
+        };
+        match writer {
+            Some(w) => scope.with_factor(&writer_factor(w)),
+            None => scope,
+        }
+    }
+
+    #[test]
+    fn the_deposit_folder_token_round_trips_canonically() {
+        assert_eq!(deposit_folder_token(17), "folder:17");
+        assert_eq!(deposit_folder_token(-2), "folder:-2");
+        assert_eq!(parse_deposit_folder_token("folder:17"), Some(17));
+        assert_eq!(parse_deposit_folder_token("folder:-2"), Some(-2));
+        for bad in [
+            "folder:017",
+            "folder:+17",
+            "folder:",
+            "folder:x",
+            "17",
+            "writer:17",
+        ] {
+            assert_eq!(parse_deposit_folder_token(bad), None, "{bad}");
+        }
+        // The twin's kind reads back as the folder token and the writer factor.
+        let w = [0x33; 32];
+        let t = deposit_tuple("folder:17", Some(&w));
+        assert_eq!(
+            t.kind.as_deref(),
+            Some(format!("folder:17 {}", writer_factor(&w)).as_str())
+        );
+        assert_eq!(t.base_kind(), Some("folder:17"));
+        assert_eq!(t.factor(), Some(writer_factor(&w).as_str()));
+    }
+
+    #[test]
+    fn deposit_authority_is_every_minted_writer_per_folder_revoked_or_not() {
+        let (principal, other) = ([0x11; 32], [0x22; 32]);
+        let mut minted = mint_event([1u8; 16], [2u8; 32]);
+        minted.scope = vec![
+            deposit_tuple("folder:17", Some(&principal)),
+            deposit_tuple("folder:18", Some(&principal)),
+            // A content.write tuple names no folder.
+            write_tuple("ext.example.com.notes", &other),
+        ];
+        let mut renewed = mint_event([4u8; 16], [2u8; 32]);
+        renewed.kind = GrantEventKind::Renew;
+        renewed.scope = vec![deposit_tuple("folder:17", Some(&other))];
+        let mut revoke = mint_event([1u8; 16], [2u8; 32]);
+        revoke.kind = GrantEventKind::Revoke;
+        revoke.scope = vec![deposit_tuple("folder:19", Some(&other))];
+        let mut writerless = mint_event([3u8; 16], [2u8; 32]);
+        writerless.scope = vec![
+            deposit_tuple("folder:20", None),
+            // The pre-ruling twin: the class and nothing else.
+            GrantEventScope {
+                class: CLASS_DEPOSIT.into(),
+                kind: None,
+                tier: None,
+            },
+            deposit_tuple("folder:021", Some(&principal)),
+        ];
+
+        let authority = deposit_authorizations(&[minted, renewed, revoke, writerless]);
+        assert_eq!(
+            authority,
+            BTreeMap::from([
+                (17, BTreeSet::from([principal, other])),
+                (18, BTreeSet::from([principal])),
+            ]),
+            "a Mint and a Renew authorize; a Revoke's own scope, a writer-less \
+             tuple and a non-canonical folder token authorize nothing"
+        );
+    }
+
+    /// The per-folder narrowing every custody source shares: a writer
+    /// authorized for folder A only is absent from folder B's answer.
+    #[test]
+    fn deposit_writers_for_narrows_to_one_folder() {
+        let writer = [0x33; 32];
+        let mut minted = mint_event([1u8; 16], [2u8; 32]);
+        minted.scope = vec![deposit_tuple("folder:17", Some(&writer))];
+        let events = [minted];
+        assert_eq!(
+            deposit_writers_for(&events, 17),
+            BTreeSet::from([writer]),
+            "the authorized folder answers its writer"
+        );
+        assert!(
+            deposit_writers_for(&events, 18).is_empty(),
+            "another folder answers none of folder 17's writers"
         );
     }
 

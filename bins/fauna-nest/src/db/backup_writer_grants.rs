@@ -31,6 +31,14 @@
 //!   the holder's covered-folder mirror sets are renamed under the writer.
 //!   Naming anyone else is refused and changes nothing.
 //!
+//! **`in_force_only`** (the device's automatic carry always sets it) adds one
+//! condition ahead of every arm: a revoked seat is left as it is and the
+//! registration answers [`WriterSeatOutcome::Revoked`]. The check reads the
+//! seat inside the same transaction that would write it, so an owner's revoke
+//! that lands between the carry's seat read and its handover is never undone
+//! (`segment-backup-protocol.md` § Cross-location backup protocol → *The
+//! writer seat*, *How the seat moves*).
+//!
 //! Revoke = mark the row (idempotent); the seat stays held. That refuses the
 //! next `fauna.federation.backup.write_token.mint`; an already-minted token
 //! stays valid for its one remaining TTL, the accepted contract restated from
@@ -70,6 +78,9 @@ pub enum WriterSeatOutcome {
     /// `succeeds` named a predecessor where the owner has no seat at all
     /// (`None`).
     Held { holder: Option<[u8; 32]> },
+    /// Refused, nothing changed: the request asked for a seat in force only
+    /// and the owner's seat here is revoked — it still names its holder.
+    Revoked,
 }
 
 impl CacheDb {
@@ -85,22 +96,29 @@ impl CacheDb {
         owner_actor_id: &[u8],
         writer_nest_id: &[u8; 32],
         succeeds: Option<&[u8; 32]>,
+        in_force_only: bool,
     ) -> Result<WriterSeatOutcome> {
         let now = now_epoch_secs();
         let conn = self.conn.lock().await;
         let tx = conn
             .unchecked_transaction()
             .context("begin backup writer registration")?;
-        let seat: Option<Vec<u8>> = tx
+        let seat: Option<(Vec<u8>, bool)> = tx
             .query_row(
-                "SELECT writer_nest_id FROM backup_writer_grants WHERE owner_actor_id = ?1",
+                "SELECT writer_nest_id, revoked FROM backup_writer_grants
+                 WHERE owner_actor_id = ?1",
                 rusqlite::params![owner_actor_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .context("read the backup writer seat")?;
+        // The carry's freeze, decided here and not on the device's earlier
+        // read: a revoked seat is never re-granted by an automatic act.
+        if in_force_only && seat.as_ref().is_some_and(|(_, revoked)| *revoked) {
+            return Ok(WriterSeatOutcome::Revoked);
+        }
         let holder: Option<[u8; 32]> = seat
-            .map(|h| blob_to_array(h.as_slice(), "writer_nest_id"))
+            .map(|(h, _)| blob_to_array(h.as_slice(), "writer_nest_id"))
             .transpose()?;
 
         let refresh = "UPDATE backup_writer_grants
@@ -311,7 +329,7 @@ mod tests {
     const WRITER_3: [u8; 32] = [0x33; 32];
 
     async fn register(db: &CacheDb, owner: &[u8; 32], writer: &[u8; 32]) -> WriterSeatOutcome {
-        db.register_backup_writer(owner, writer, None)
+        db.register_backup_writer(owner, writer, None, false)
             .await
             .unwrap()
     }
@@ -512,7 +530,7 @@ mod tests {
 
         // Naming anyone but the holder is refused and changes nothing.
         assert_eq!(
-            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_3))
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_3), false)
                 .await
                 .unwrap(),
             WriterSeatOutcome::Held {
@@ -522,7 +540,7 @@ mod tests {
         assert_eq!(seat(&db, &OWNER_A).await.writer_nest_id, WRITER_1.to_vec());
         // So is naming a predecessor where the owner has no seat.
         assert_eq!(
-            db.register_backup_writer(&OWNER_B, &WRITER_2, Some(&WRITER_1))
+            db.register_backup_writer(&OWNER_B, &WRITER_2, Some(&WRITER_1), false)
                 .await
                 .unwrap(),
             WriterSeatOutcome::Held { holder: None }
@@ -540,7 +558,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1))
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1), false)
                 .await
                 .unwrap(),
             WriterSeatOutcome::Seated
@@ -590,12 +608,69 @@ mod tests {
 
         // Repeating the completed handover is a plain refresh.
         assert_eq!(
-            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1))
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1), false)
                 .await
                 .unwrap(),
             WriterSeatOutcome::Seated
         );
         assert_eq!(seat(&db, &OWNER_A).await.seated_at, 5);
+    }
+
+    /// `in_force_only` — the carry's registration — leaves a revoked seat as
+    /// it is, on the handover arm and on the holder's refresh arm alike (a
+    /// device whose list predates another device's carry and the owner's
+    /// revoke of the successor reaches the latter), and moves a seat in force.
+    #[tokio::test]
+    async fn in_force_only_never_re_grants_a_revoked_seat() {
+        let db = CacheDb::open_in_memory().unwrap();
+        register(&db, &OWNER_A, &WRITER_1).await;
+        db.revoke_backup_writer_grant(&OWNER_A, &WRITER_1)
+            .await
+            .unwrap();
+
+        // The handover arm.
+        assert_eq!(
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1), true)
+                .await
+                .unwrap(),
+            WriterSeatOutcome::Revoked
+        );
+        let held = seat(&db, &OWNER_A).await;
+        assert_eq!(held.writer_nest_id, WRITER_1.to_vec(), "the seat stays put");
+        assert!(held.revoked, "and stays revoked");
+
+        // The same handover in force moves the seat; a revoke of the
+        // successor then holds against the holder's own refresh arm.
+        db.register_backup_writer(&OWNER_A, &WRITER_1, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1), true)
+                .await
+                .unwrap(),
+            WriterSeatOutcome::Seated
+        );
+        db.revoke_backup_writer_grant(&OWNER_A, &WRITER_2)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.register_backup_writer(&OWNER_A, &WRITER_2, Some(&WRITER_1), true)
+                .await
+                .unwrap(),
+            WriterSeatOutcome::Revoked
+        );
+        let held = seat(&db, &OWNER_A).await;
+        assert_eq!(held.writer_nest_id, WRITER_2.to_vec());
+        assert!(held.revoked);
+
+        // An owner with no seat is unaffected by the flag: a predecessor named
+        // where no seat exists is still refused as held by no one.
+        assert_eq!(
+            db.register_backup_writer(&OWNER_B, &WRITER_2, Some(&WRITER_1), true)
+                .await
+                .unwrap(),
+            WriterSeatOutcome::Held { holder: None }
+        );
     }
 
     #[tokio::test]

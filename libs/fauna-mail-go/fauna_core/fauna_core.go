@@ -1199,6 +1199,62 @@ func (_ FfiDestroyerCertStatusView) Destroy(value CertStatusView) {
 	value.Destroy()
 }
 
+// A [`LocalizedText`] whose template arguments may themselves be
+// translatable: `nested` maps an argument name to the text that fills it (a
+// byte size, a duration, a category word, a described scope), and wins over
+// `text.args` of the same name. One level deep — a nested text's own args are
+// data — so it crosses UniFFI as a plain record; a line that would need two
+// levels gets a template of its own instead.
+//
+// Lives here beside [`LocalizedText`] for the same reason: every shared crate
+// that composes a page's lines (connected apps, archive import, …) hands the
+// apps the *same* type — one `uniffi::Record` registration, one resolver per
+// app (`resolveComposedText` in FaunaKit, `resolveComposed` on android and
+// web, [`ComposedText::resolve`] for the Rust apps).
+type ComposedText struct {
+	Text   LocalizedText
+	Nested map[string]LocalizedText
+}
+
+func (r *ComposedText) Destroy() {
+	FfiDestroyerLocalizedText{}.Destroy(r.Text)
+	FfiDestroyerMapStringLocalizedText{}.Destroy(r.Nested)
+}
+
+type FfiConverterComposedText struct{}
+
+var FfiConverterComposedTextINSTANCE = FfiConverterComposedText{}
+
+func (c FfiConverterComposedText) Lift(rb RustBufferI) ComposedText {
+	return LiftFromRustBuffer[ComposedText](c, rb)
+}
+
+func (c FfiConverterComposedText) Read(reader io.Reader) ComposedText {
+	return ComposedText{
+		FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterMapStringLocalizedTextINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterComposedText) Lower(value ComposedText) C.RustBuffer {
+	return LowerIntoRustBuffer[ComposedText](c, value)
+}
+
+func (c FfiConverterComposedText) LowerExternal(value ComposedText) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ComposedText](c, value))
+}
+
+func (c FfiConverterComposedText) Write(writer io.Writer, value ComposedText) {
+	FfiConverterLocalizedTextINSTANCE.Write(writer, value.Text)
+	FfiConverterMapStringLocalizedTextINSTANCE.Write(writer, value.Nested)
+}
+
+type FfiDestroyerComposedText struct{}
+
+func (_ FfiDestroyerComposedText) Destroy(value ComposedText) {
+	value.Destroy()
+}
+
 // The per-row content-label data unit (`moderation.md` § Per-row badge data
 // path, ratified 2026-07-16) — one classifier verdict on one content item.
 // `confidence_per_mille` is the 0–1000 scaling of the classifier's 0.0–1.0
@@ -5706,6 +5762,54 @@ func (_ FfiDestroyerMapStringString) Destroy(mapValue map[string]string) {
 	for key, value := range mapValue {
 		FfiDestroyerString{}.Destroy(key)
 		FfiDestroyerString{}.Destroy(value)
+	}
+}
+
+type FfiConverterMapStringLocalizedText struct{}
+
+var FfiConverterMapStringLocalizedTextINSTANCE = FfiConverterMapStringLocalizedText{}
+
+func (c FfiConverterMapStringLocalizedText) Lift(rb RustBufferI) map[string]LocalizedText {
+	return LiftFromRustBuffer[map[string]LocalizedText](c, rb)
+}
+
+func (_ FfiConverterMapStringLocalizedText) Read(reader io.Reader) map[string]LocalizedText {
+	result := make(map[string]LocalizedText)
+	length := readInt32(reader)
+	for i := int32(0); i < length; i++ {
+		key := FfiConverterStringINSTANCE.Read(reader)
+		value := FfiConverterLocalizedTextINSTANCE.Read(reader)
+		result[key] = value
+	}
+	return result
+}
+
+func (c FfiConverterMapStringLocalizedText) Lower(value map[string]LocalizedText) C.RustBuffer {
+	return LowerIntoRustBuffer[map[string]LocalizedText](c, value)
+}
+
+func (c FfiConverterMapStringLocalizedText) LowerExternal(value map[string]LocalizedText) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[map[string]LocalizedText](c, value))
+}
+
+func (_ FfiConverterMapStringLocalizedText) Write(writer io.Writer, mapValue map[string]LocalizedText) {
+	if len(mapValue) > math.MaxInt32 {
+		panic("map[string]LocalizedText is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(mapValue)))
+	for key, value := range mapValue {
+		FfiConverterStringINSTANCE.Write(writer, key)
+		FfiConverterLocalizedTextINSTANCE.Write(writer, value)
+	}
+}
+
+type FfiDestroyerMapStringLocalizedText struct{}
+
+func (_ FfiDestroyerMapStringLocalizedText) Destroy(mapValue map[string]LocalizedText) {
+	for key, value := range mapValue {
+		FfiDestroyerString{}.Destroy(key)
+		FfiDestroyerLocalizedText{}.Destroy(value)
 	}
 }
 

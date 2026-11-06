@@ -122,14 +122,11 @@ public final class FamilyVM {
     /// same discipline as linux's `unknown_peer_dm_edited`.
     public var draftUnknownPeerDm = "allow"
     public var unknownPeerDmTouched = false
-    /// The v1.x content pillar's four per-category render floors
-    /// (`inherit | collapse | block`; family-safety.md § Content policy) and the
-    /// Guardian Notify knob. Same editor, same save — they ride the one
-    /// `fauna.family.policy.update` the reach knobs already use.
-    public var draftContentNsfw = "inherit"
-    public var draftContentSpam = "inherit"
-    public var draftContentPhishing = "inherit"
-    public var draftContentCommercial = "inherit"
+    /// The content pillar's Guardian Notify knob (family-safety.md § Guardian
+    /// Notify). Same editor, same save — it rides the one
+    /// `fauna.family.policy.update` the reach knobs already use; the guardian's
+    /// content rules save apart, through the shared rule editor
+    /// (`FamilyRulesSection`).
     public var draftContentNotify = false
     /// The v1.x screen-time pillar's three inputs (`family-safety.md` §
     /// Screen time), typed `"HH:MM"` / whole minutes exactly as the guardian
@@ -206,10 +203,6 @@ public final class FamilyVM {
         draftFeedSources = "allow"
         draftUnknownPeerDm = "allow"
         unknownPeerDmTouched = false
-        draftContentNsfw = "inherit"
-        draftContentSpam = "inherit"
-        draftContentPhishing = "inherit"
-        draftContentCommercial = "inherit"
         draftContentNotify = false
         draftScreenWindowStart = ""
         draftScreenWindowEnd = ""
@@ -323,17 +316,9 @@ public final class FamilyVM {
             ward.policy.unknownPeerDm ?? "allow", options: unknownPeerDmOptions(), label: unknownPeerDmLabel(value:))
         unknownPeerDmTouched = false
 
-        // The content floors normalize through the SAME fail-closed rule as the
-        // reach knobs above (family-safety.md:265 — "a rule value a client
-        // cannot parse renders fail-closed"), so an unnameable floor from a
-        // newer nest displays — and saves back — as `block`, never `inherit`.
-        // An absent `content_policy` is the unsupervised-equivalent default:
-        // every floor `inherit`.
-        let content = ward.policy.contentPolicy
-        draftContentNsfw = Self.normalizedFloor(content?.nsfw)
-        draftContentSpam = Self.normalizedFloor(content?.spam)
-        draftContentPhishing = Self.normalizedFloor(content?.phishing)
-        draftContentCommercial = Self.normalizedFloor(content?.commercial)
+        // The content rules are the rule editor's (`FamilyRulesSection` loads
+        // them off the ward's stored document); only the Notify knob is a draft
+        // of this form.
         draftContentNotify = ward.policy.contentNotify ?? false
 
         // The screen-time pillar's three inputs — a `nil` bound renders as an
@@ -346,15 +331,6 @@ public final class FamilyVM {
         draftScreenDailyMinutes = screenTime?.dailyMinutes.map { String($0) } ?? ""
     }
 
-    /// A stored content-floor value normalized onto the shared catalog,
-    /// fail-closed via the same label-key match the reach knobs use. `nil` (no
-    /// content policy stored at all) is the `inherit` default.
-    private static func normalizedFloor(_ wire: String?) -> String {
-        guard let wire else { return "inherit" }
-        return FamilyReachPolicyFormat.normalizedWire(
-            wire, options: contentFloorOptions(), label: contentFloorLabel(value:))
-    }
-
     /// `fauna.family.policy.update` — persist the shared editor onto the
     /// selected ward, then re-read (never optimistic).
     public func savePolicy() async {
@@ -363,15 +339,19 @@ public final class FamilyVM {
         errorMessage = nil
         defer { isSaving = false }
         do {
-            // Parse the three screen-time inputs FIRST — a parse failure (or
-            // the nest's own half-set-window/out-of-range refusal, surfaced
-            // by `policyUpdate` below) must land in `errorMessage` exactly
-            // like any other save failure, never a silent partial save.
+            // Parse the three screen-time inputs FIRST, then pre-validate the
+            // whole window with the nest's own `ScreenTimePolicy::validate`
+            // (`family-safety.md` § Where logic lives, write validation): a
+            // half-set or empty window is refused HERE, before any request,
+            // and lands in `errorMessage` exactly like any other save failure.
             // **Write no policy logic here**: parsing, formatting and the
             // half-set-pair / range refusal all live in shared Rust.
             let windowStart = try parseTimeOfDay(input: draftScreenWindowStart)
             let windowEnd = try parseTimeOfDay(input: draftScreenWindowEnd)
             let dailyMinutes = try parseDailyMinutes(input: draftScreenDailyMinutes)
+            let screenTime = FfiScreenTimePolicy(
+                windowStart: windowStart, windowEnd: windowEnd, dailyMinutes: dailyMinutes)
+            try validateScreenTime(policy: screenTime)
             try await family.policyUpdate(
                 supervisedActorId: wardId,
                 policy: FfiReachPolicy(
@@ -379,19 +359,14 @@ public final class FamilyVM {
                     unknownSenderMail: draftUnknownSender,
                     federationContact: draftFederation,
                     feedSources: draftFeedSources,
-                    // The content pillar is now edited here, so it goes out
-                    // **present** — replace semantics, matching linux/web/
-                    // android.
-                    contentPolicy: FfiContentPolicy(
-                        nsfw: draftContentNsfw,
-                        spam: draftContentSpam,
-                        phishing: draftContentPhishing,
-                        commercial: draftContentCommercial),
+                    // The content pillar is the rule editor's, saved by its
+                    // own button (`save_content_rules`); this form sends it
+                    // **absent**, so a reach save never rewrites the rules.
+                    contentPolicy: nil,
                     // Screen time is now edited here too, so it goes out
                     // **present** as well — an all-nil policy is an explicit
                     // "no window, no budget", not "leave unchanged".
-                    screenTime: FfiScreenTimePolicy(
-                        windowStart: windowStart, windowEnd: windowEnd, dailyMinutes: dailyMinutes),
+                    screenTime: screenTime,
                     contentNotify: draftContentNotify,
                     // The bridge-DM gate stays `Option<String>` on the wire —
                     // absent means "leave unchanged" (family-safety.md §
@@ -589,8 +564,18 @@ public final class FamilyVM {
         if let used = usageTodayMinutes {
             lines.append(usageTodayLine(usedMinutes: used, budgetMinutes: policy.screenTime?.dailyMinutes))
         }
+        // A line a rule of the guardian's document makes carries that rule's
+        // reason, appended verbatim as "{label}: {value} — {reason}"
+        // (`nest-rules.md` § The shared rule editor → *The reason is the
+        // member's to read*): the entry for the UI language, else the required
+        // `default` one.
         return lines
-            .map { "\(renderLocalizedText($0.label)): \(renderLocalizedText($0.value))" }
+            .map { line in
+                let text = "\(renderLocalizedText(line.label)): \(renderLocalizedText(line.value))"
+                let reason = line.reason.flatMap { $0[RegionStore.uiLang] ?? $0["default"] }
+                guard let reason, !reason.isEmpty else { return text }
+                return "\(text) — \(reason)"
+            }
             .joined(separator: "\n")
     }
 

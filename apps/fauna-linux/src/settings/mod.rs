@@ -6,6 +6,7 @@ pub mod admin_files;
 pub mod admin_mail;
 pub mod admin_mail_reports;
 pub mod admin_web;
+pub mod archive_import;
 pub mod atproto;
 pub mod connected_apps;
 pub mod email_filters;

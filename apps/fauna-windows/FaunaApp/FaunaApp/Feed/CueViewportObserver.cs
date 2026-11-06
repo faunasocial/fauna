@@ -27,17 +27,77 @@ namespace FaunaApp.Feed;
 /// hold-vs-leave decision and the noise floor all live in the shared tracker now. It only
 /// samples honest geometry (raw row rects, in the <see cref="ScrollViewer"/>'s own
 /// coordinate space) into <see cref="FfiCueTracker.Sample"/>, and reports whatever it
-/// returns via <c>FfiFeedManager.RecordObservation</c>. <c>media_played_pm</c> is always
-/// <c>null</c>: no client, windows included, has any video-playback UI today — the
-/// <c>post-image</c>/<c>video-thumbnail</c> elements are stills-only.
+/// returns via <c>FfiFeedManager.RecordObservation</c>.
+///
+/// <para><b>Playback:</b> a list card's inline player (<c>Controls.VideoThumbnailView</c>)
+/// hands each progress reading and its end to the live page's tracker
+/// (<see cref="NotePlayed"/> → <c>FfiCueTracker.NotePlayed</c>), which holds the post's
+/// unread peak and takes it for the post's media row at the next sample — the
+/// tracker-held form of the shared <c>CueRow.media_played_pm</c> contract — so the rows
+/// here pass no played fraction of their own, and a video played to its end derives
+/// the media <c>watch-complete</c>. apple's <c>VideoThumbnailView(onPlayed:)</c> is the
+/// twin.</para>
+///
+/// <para><b>The tracker is the auth's, not this page's</b>
+/// (<c>Core.FeedManagerHost.CueTrackerFor</c>): what it holds — the frozen test clock
+/// included — outlives a trip off the Feed page. <see cref="Unwire"/> drains it, so a
+/// later mount still starts with nothing tracked.</para>
+///
+/// <para><b>Records reach the engine one batch at a time, in the order their samples
+/// were taken</b> (<see cref="Emit"/>, apple's <c>CueViewportObserver.record</c>
+/// twin): every batch chains behind the one before, so a test step that awaits its own
+/// sample's batch has waited out every earlier one too — the sampling tick's included.</para>
 /// </summary>
 internal sealed class CueViewportObserver
 {
+    /// <summary>The observer sampling the Feed page on screen, if any — what a player's
+    /// reading is handed to. Set by <see cref="Wire"/>, cleared by <see cref="Unwire"/>;
+    /// UI thread only.</summary>
+    private static CueViewportObserver? _live;
+
+    /// <summary>The last batch of exposures handed to the engine — every
+    /// <see cref="Emit"/> chains behind it. Process-wide rather than per mount, so a
+    /// page leave's drain and the next mount's first records stay in order too. UI
+    /// thread only; never faults (<see cref="EmitAsync"/> reports each failure).</summary>
+    private static Task _recording = Task.CompletedTask;
+
+    /// <summary>An inline player's reading on <paramref name="postId"/>'s media, both in
+    /// seconds, handed to the live page's tracker. With no Feed page wired (a player in
+    /// the post-detail dialog over another page) there is no list to sample, so it is
+    /// dropped.</summary>
+    internal static void NotePlayed(string postId, double position, double duration)
+    {
+        if (_live?.Tracker is not { } tracker)
+        {
+            Core.Logs.E2eTrace.Write($"[cue] played post={Short(postId)} dropped: no live feed capture");
+            return;
+        }
+        tracker.NotePlayed(postId, position, duration);
+        Core.Logs.E2eTrace.Write($"[cue] played post={Short(postId)} position={position:0.###} duration={duration:0.###}");
+    }
+
+    /// <summary>Whether <paramref name="postId"/>'s inline player is engaged, handed to the
+    /// live page's tracker (<c>FfiCueTracker.NotePlaying</c>; engagement-cues.md § Cue
+    /// vocabulary &amp; derivation, <em>A play is attention</em>): an engaged media row is
+    /// attended whatever its visible fraction, so the tapped card that grows with its player
+    /// under the 50 % gate still counts. The twin of <see cref="NotePlayed"/>, dropped the same
+    /// way with no Feed page wired.</summary>
+    internal static void NotePlaying(string postId, bool playing)
+    {
+        if (_live?.Tracker is not { } tracker)
+        {
+            Core.Logs.E2eTrace.Write($"[cue] playing post={Short(postId)} dropped: no live feed capture");
+            return;
+        }
+        tracker.NotePlaying(postId, playing);
+        Core.Logs.E2eTrace.Write($"[cue] playing post={Short(postId)} {(playing ? "engaged" : "released")}");
+    }
+
+    private static string Short(string postId) => postId[..Math.Min(12, postId.Length)];
     private readonly ListView _list;
     private readonly Func<FfiFeedManager?> _manager;
     private readonly Action<string> _onError;
 
-    private FfiCueTracker? _tracker;
     private DispatcherTimer? _timer;
     private ScrollViewer? _scrollViewer;
     private bool _wired;
@@ -49,8 +109,13 @@ internal sealed class CueViewportObserver
         _onError = onError;
     }
 
+    /// <summary>The auth's ONE tracker (<c>Core.FeedManagerHost.CueTrackerFor</c>) for
+    /// the manager this page observes, or <c>null</c> while there is none.</summary>
+    private FfiCueTracker? Tracker
+        => _manager() is { } manager ? Core.FeedManagerHost.CueTrackerFor(manager) : null;
+
     /// <summary>
-    /// Wire the observer: build the shared tracker with windows' leave model, attach the
+    /// Wire the observer: mark it the live capture, attach the
     /// scroll-position extra-sample hook, and start the tick at the shared
     /// <c>FaunaFfiMethods.CueSampleIntervalMs()</c> cadence (never a re-declared literal).
     /// Call once from <c>FeedPage.Page_Loaded</c>, BEFORE <c>FfiFeedManager.HydrateCues()</c>
@@ -62,7 +127,7 @@ internal sealed class CueViewportObserver
         if (_wired) return;
         _wired = true;
 
-        _tracker = new FfiCueTracker(LeaveModel.HoldUnmeasured);
+        _live = this;
 
         // WinUI's ListView template always contains exactly one internal
         // ScrollViewer, but there is no public API to reach it directly.
@@ -82,7 +147,9 @@ internal sealed class CueViewportObserver
 
     /// <summary>
     /// Stop the tick + scroll hook and flush every still-tracked card — mirrors linux's
-    /// unmap handling (off-screen is off-viewport). Call from
+    /// unmap handling (off-screen is off-viewport). The tracker itself is the auth's and
+    /// stays: the drain empties it, so nothing it held is credited across the gap.
+    /// Call from
     /// <c>FeedPage.OnNavigatedFrom</c>: <c>FeedPage</c> isn't cached
     /// (<c>NavigationCacheMode.Disabled</c>, the default), so a live
     /// <see cref="DispatcherTimer"/> left running would otherwise keep sampling a
@@ -102,13 +169,23 @@ internal sealed class CueViewportObserver
         _scrollViewer = null;
 
         FlushAll();
-        _tracker?.Dispose();
-        _tracker = null;
+        if (ReferenceEquals(_live, this)) _live = null;
     }
 
-    private void Timer_Tick(object? sender, object e) => Sample();
+    private void Timer_Tick(object? sender, object e) => SampleUnlessAStepHolds();
 
-    private void ScrollViewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e) => Sample();
+    private void ScrollViewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e) => SampleUnlessAStepHolds();
+
+    /// <summary>The capture's own sample (the tick, a scroll) — skipped only while a
+    /// test step holds the capture (<c>HoldCaptureForTest</c>), so the step's own
+    /// sample is the first to read the layout it moved.</summary>
+    private void SampleUnlessAStepHolds()
+    {
+#if DEBUG || FAUNA_E2E_AGENT
+        if (_stepHolds > 0) return;
+#endif
+        Sample();
+    }
 
     /// <summary>
     /// One honest sample: walk every row in the non-virtualizing <c>PostsList</c>
@@ -129,7 +206,7 @@ internal sealed class CueViewportObserver
     /// </summary>
     private void Sample()
     {
-        if (_tracker is null) return;
+        if (Tracker is not { } tracker) return;
 
         var viewportHeight = _scrollViewer?.ViewportHeight ?? _list.ActualHeight;
         var referenceFrame = (UIElement?)_scrollViewer ?? _list;
@@ -153,41 +230,57 @@ internal sealed class CueViewportObserver
             {
                 continue; // not yet connected to the visual tree
             }
-            // media_played_pm is always null — no client has any video-playback UI yet.
+            // No played fraction of our own: the tracker holds the player's (NotePlayed).
             rows.Add(new CueRow(post.PostId, top, container.ActualHeight, post.PlaysMedia, null));
         }
 
-        var monoNowMs = (ulong)Environment.TickCount64;
-        var wallNowMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        Emit(_tracker.Sample(rows.ToArray(), windowPostIds.ToArray(), 0, viewportHeight, monoNowMs, wallNowMs));
+        Emit(tracker.Sample(rows.ToArray(), windowPostIds.ToArray(), 0, viewportHeight, MonoNowMs(), WallNowMs()));
     }
+
+    /// <summary>The monotonic reading every sample passes (never a wall clock: an NTP
+    /// step must not inflate dwell) — and the one the test clock freezes at.</summary>
+    internal static ulong MonoNowMs() => (ulong)Environment.TickCount64;
+
+    /// <summary>The wall reading every sample passes (the engine's pace gate reads it
+    /// as <c>observed_at_ms</c>) — and the one the test clock freezes at.</summary>
+    internal static ulong WallNowMs() => (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     private void FlushAll()
     {
-        if (_tracker is null) return;
-        var wallNowMs = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        Emit(_tracker.DrainAll(wallNowMs));
+        if (Tracker is not { } tracker) return;
+        Emit(tracker.DrainAll(WallNowMs()));
     }
 
     /// <summary>
     /// Hand the finished exposures to the shared engine (<c>FfiFeedManager.
     /// RecordObservation</c>) — already past the tracker's own single-sample noise floor,
-    /// so no shell-side filtering is needed or correct here. A failure surfaces via the
-    /// page's <c>onError</c> callback (the <c>error-message</c> element), mirroring
-    /// linux/android's error-surfacing convention.
+    /// so no shell-side filtering is needed or correct here — behind every earlier batch
+    /// (<see cref="_recording"/>). Not awaited by the tick: the capture never waits on
+    /// the engine. A failure surfaces via the page's <c>onError</c> callback (the
+    /// <c>error-message</c> element), mirroring linux/android's error-surfacing
+    /// convention.
     /// </summary>
     private void Emit(CueObservation[] observations)
     {
         if (observations.Length == 0) return;
         var manager = _manager();
         if (manager is null) return;
-        _ = EmitAsync(manager, observations);
+        _recording = RecordAfterAsync(_recording, manager, observations);
+    }
+
+    private async Task RecordAfterAsync(Task previous, FfiFeedManager manager, CueObservation[] observations)
+    {
+        await previous;
+        await EmitAsync(manager, observations);
     }
 
     private async Task EmitAsync(FfiFeedManager manager, CueObservation[] observations)
     {
         foreach (var o in observations)
         {
+            Core.Logs.E2eTrace.Write(
+                $"[cue] emit post={Short(o.contentId)} media={o.isMedia} "
+                + $"played_pm={o.mediaPlayedPm?.ToString() ?? "none"} long_ms={o.dwellMsAtLongVisibility} ended={o.endedBy}");
             try
             {
                 // Relayed whole: the tracker stamped how each exposure ended
@@ -200,4 +293,56 @@ internal sealed class CueViewportObserver
             }
         }
     }
+
+#if DEBUG || FAUNA_E2E_AGENT
+    // ── Test-step doors (the e2e cue-clock commands, Feed/FeedCueClockCommands) ──
+    // Compiled out of release artifacts with the agent that calls them (testing.md
+    // convention 15).
+
+    /// <summary>The observer sampling the Feed page on screen, or <c>null</c> off it.</summary>
+    internal static CueViewportObserver? LiveForTest => _live;
+
+    /// <summary>The post list's own <see cref="ScrollViewer"/> — what a user's scroll
+    /// moves — or <c>null</c> if the template never gave one.</summary>
+    internal ScrollViewer? ScrollViewerForTest => _scrollViewer;
+
+    /// <summary>How many test steps hold the capture's own samples; UI thread only.</summary>
+    private int _stepHolds;
+
+    /// <summary>Hold the capture's own samples (the tick, the scroll hook) until the
+    /// returned handle is disposed. A pixel step moves the list and then samples it
+    /// itself: without the hold, the scroll's own sample ends the exposure first and
+    /// hands it to the engine, whose train can re-rank the feed while the step still
+    /// waits for its frame — and the step's sample then reads a re-ordered list, in
+    /// which a card the step never moved has left view too.</summary>
+    internal IDisposable HoldCaptureForTest()
+    {
+        _stepHolds++;
+        return new StepHold(this);
+    }
+
+    private sealed class StepHold(CueViewportObserver observer) : IDisposable
+    {
+        private bool _released;
+
+        public void Dispose()
+        {
+            if (_released) return;
+            _released = true;
+            observer._stepHolds--;
+        }
+    }
+
+    /// <summary>One sample of the mounted list, taken now, after a layout pass. Returns
+    /// the tracker's probe as THIS sample left it and the batch it handed the engine,
+    /// which completes once that batch — and every batch before it, the tick's
+    /// included — is recorded, the engine's train and any put included: the step's
+    /// record barrier. The caller awaits it before acking.</summary>
+    internal (string? Probe, Task Recorded) SampleNowForTest()
+    {
+        _list.UpdateLayout();
+        Sample();
+        return (Tracker?.ProbeForTest(), _recording);
+    }
+#endif
 }

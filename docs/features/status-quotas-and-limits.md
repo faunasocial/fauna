@@ -58,13 +58,13 @@ Stamped 2026-09-22 at e9f79fdf25.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
-| windows | ✅ full | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ⚠ partial | 0.1.5-dev+36883152.dirty standalone |
+| linux | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| windows | ✅ full | 0.1.5-dev+36883152.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+b6bf85de standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -74,15 +74,15 @@ Stamped 2026-09-22 at e9f79fdf25.
 | 2 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_byte_volume_cell_is_readable_rather_than_a_raw_count` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_no_raw_i18n_key_reaches_the_feature_limits_screen` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_an_admin_limit_reaches_the_screen_naming_the_admin` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_status_copy_buttons_copy_your_identity_and_your_nests_address` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_your_nest_and_its_version` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_says_when_your_last_sync_pass_finished` | web (linux): skipped, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_pending_sync_backlog` | web (linux): skipped, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_encryption_state_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_the_build_you_are_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_status_copy_buttons_copy_your_identity_and_your_nests_address` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_your_nest_and_its_version` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_says_when_your_last_sync_pass_finished` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_pending_sync_backlog` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_encryption_state_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_the_build_you_are_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_events_bytes_move_the_one_storage_number_mail_reads` | nest (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_admin_turned_off_shows_restricted_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_family.py::test_family_guardian_feature_limit_reaches_the_wards_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_family.py::test_family_guardian_feature_limit_reaches_the_wards_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_an_admin_authors_a_limit_on_the_nest_page_and_it_binds_with_attribution` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_looser_value_is_never_refused_but_says_it_has_no_effect` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

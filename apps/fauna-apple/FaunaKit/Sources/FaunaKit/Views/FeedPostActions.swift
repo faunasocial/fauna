@@ -81,7 +81,6 @@ public struct FeedPostActionsButton: View {
     @State private var showTargetSheet = false
     @State private var targetVerb: TrainVerb = .moreLikeThis
     @State private var targetRows: [FfiTrainedTopicRow] = []
-    @State private var selectedTargetFactor: String?
     /// Own-post delete confirm step (`dm-message-delete-button`/
     /// `-delete-confirm-button` precedent, `DmMessageBubble.swift`).
     @State private var confirmDelete = false
@@ -208,7 +207,8 @@ public struct FeedPostActionsButton: View {
         }
         .buttonStyle(.borderless)
         .accessibilityIdentifier(Ids.feedPostReportButton)
-        .automationActivate(Ids.feedPostReportButton, perform: open)
+        .automationActivate(
+            Ids.feedPostReportButton, text: { L.feed.reportPost }, perform: open)
     }
 
     /// Own-post delete row (feed.md § State & data shape → Post deletion) —
@@ -443,33 +443,20 @@ public struct FeedPostActionsButton: View {
 
     /// The factor-target sheet (`feed-post-train-target-sheet`): shown when
     /// the current feed's composition does not single out one trained topic.
-    /// Populated async-after-open (mirrors windows/linux — the sheet appears
-    /// immediately, options land when the sealed-registry read resolves).
+    /// A list of tappable rows — one tap trains the post into that topic with
+    /// the verb that opened the sheet (`targetVerb`), toggling as
+    /// train-in-context does — and "New trained topic…" always last
+    /// (topic-factors.md § Authoring surface & picker). Populated
+    /// async-after-open (the sheet appears immediately, rows land when the
+    /// sealed-registry read resolves).
     @ViewBuilder private var targetSheet: some View {
+        let rows = targetRows.filter { $0.factorKey != nil }
         VStack(alignment: .leading, spacing: 8) {
             Text(L.feed.trainTargetTitle).font(.subheadline.weight(.semibold))
 
-            if targetRows.isEmpty {
-                Text(L.personalization.trainedTopicsEmpty)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Picker("", selection: $selectedTargetFactor) {
-                    ForEach(targetRows, id: \.id) { row in
-                        if let key = row.factorKey {
-                            Text(row.name).tag(Optional(key))
-                        }
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                targetRow(row, index: index)
             }
-
-            Button(L.common.save) {
-                guard let factor = selectedTargetFactor else { return }
-                Task { await dispatchTrain(factor: factor, verb: targetVerb, alreadyMarked: false) }
-            }
-            .disabled(selectedTargetFactor == nil)
 
             Button(L.personalization.trainedFactorCreate) {
                 showTargetSheet = false
@@ -477,12 +464,42 @@ public struct FeedPostActionsButton: View {
             }
             .buttonStyle(.borderless)
             .font(.caption)
+            .accessibilityIdentifier(Ids.feedPostTrainTargetNewButton)
+            .automationActivate(
+                Ids.feedPostTrainTargetNewButton, text: { L.personalization.trainedFactorCreate }
+            ) {
+                showTargetSheet = false
+                onNavigateToPersonalization()
+            }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.feedPostTrainTargetSheet)
         .automationValue(Ids.feedPostTrainTargetSheet, text: { "" })
+    }
+
+    /// One topic row of the target sheet: its `factor` test-attr is the minted
+    /// `topic:<hex>` key's hex alone (the `personalization-trained-factor-item`
+    /// convention). A tap trains with the opening verb; the already-marked
+    /// verb's topic un-marks.
+    private func targetRow(_ row: FfiTrainedTopicRow, index: Int) -> some View {
+        let key = row.factorKey ?? ""
+        let hex = key.hasPrefix("topic:") ? String(key.dropFirst("topic:".count)) : ""
+        let verb = targetVerb
+        let action: () -> Void = {
+            let marked = vm.manager?.exampleLabelFor(postId: postId, factor: key) == verb
+            Task { await dispatchTrain(factor: key, verb: verb, alreadyMarked: marked) }
+        }
+        return Button(action: action) {
+            Text(row.name).font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier(Ids.feedPostTrainTargetItem)
+        .automationActivate(
+            Ids.feedPostTrainTargetItem, text: { row.name }, value: { hex }, perform: action
+        )
+        .automationScope(Ids.feedPostTrainTargetItem, index: index)
     }
 }
 

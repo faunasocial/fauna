@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import require_surface, require_surface
 from i18n.strings import S
 
 # reclaim_cycle: the events area's representative in the post-reclaim gate — under
@@ -47,9 +47,10 @@ def test_month_day_cell_click_opens_day_view(logged_in_app):
     """Single-clicking a month-grid day cell drills into Day view **for that date**.
 
     Microsoft Outlook month→day interaction (events.md § Layout & flow). Rolled
-    out per app; declared ``skip_unbuilt`` on apps that do not yet expose
-    ``events-day-cell`` (events.md § Implementation status today), so the staged
-    rollout stays a counted, down-only debt rather than an invisible skip.
+    out per app; an app outside the surface registry's ``events-day-cell`` entry
+    is declared unbuilt (events.md § Implementation status today), so the staged
+    rollout stays a counted, down-only debt rather than an invisible skip, and an
+    app inside it that exposes no cell is a red.
 
     ⚠ **Asserting the timeline is merely *visible* cannot catch a wrong-day
     drill-in, and that is all this test did until 2026-08-12.** windows shipped a
@@ -81,13 +82,11 @@ def test_month_day_cell_click_opens_day_view(logged_in_app):
 
     # Day 15 is always inside the current month the grid opens on.
     target = date.today().replace(day=15).isoformat()
-    if not ev.has_day_cell(target):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="events-day-cell",
-            detail="month cells paint as untagged chrome, so there is nothing to drill from",
-            tracked="events.md § Implementation status today (Month day-cell drill-in row)",
-        )
+    require_surface(logged_in_app.driver, "events-day-cell")
+    assert ev.has_day_cell(target), (
+        f"the month grid exposes no events-day-cell-{target}: "
+        f"{logged_in_app.driver.diagnose(f'events-day-cell-{target}')}"
+    )
 
     ev.click_day_cell(target)
     assert logged_in_app.driver.is_visible("calendar-day-timeline"), (
@@ -95,16 +94,10 @@ def test_month_day_cell_click_opens_day_view(logged_in_app):
         f"{logged_in_app.driver.diagnose('calendar-day-timeline')}"
     )
 
-    if not ev.has_time_slot(9, 0):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="events-time-slot",
-            detail=(
-                "the day timeline paints no per-15-min slot targets, so the day it "
-                "shows cannot be read back"
-            ),
-            tracked="events.md § Implementation status today (Month day-cell drill-in row)",
-        )
+    assert ev.has_time_slot(9, 0), (
+        "every app paints the per-15-min slot targets, but this grid has no "
+        f"events-time-slot-09-00: {logged_in_app.driver.diagnose('events-time-slot-09-00')}"
+    )
 
     ev.click_time_slot(9, 0)
     assert logged_in_app.driver.is_visible("event-dtstart"), (
@@ -127,8 +120,8 @@ def test_month_double_click_day_cell_opens_new_event_prefilled(logged_in_app):
     Single-click drills into Day view (slice 1); double-click opens the new-event
     compose with ``event-dtstart`` prefilled to the cell's date **at the day's
     working start (09:00)**. A calendar must be selected (the compose lives in
-    the calendar-scoped events section). Declared ``skip_unbuilt`` on apps that
-    do not yet expose ``events-day-cell``.
+    the calendar-scoped events section). Gated on the surface registry's
+    ``events-day-cell`` entry.
 
     ⚠ **The date alone is not a discriminator — asserting it was this test's
     whole content until 2026-08-12, and three apps carried the bug it was written
@@ -162,13 +155,11 @@ def test_month_double_click_day_cell_opens_new_event_prefilled(logged_in_app):
 
     # Day 15 is always inside the current month the grid opens on.
     target = date.today().replace(day=15).isoformat()
-    if not ev.has_day_cell(target):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="events-day-cell",
-            detail="month cells paint as untagged chrome, so there is nothing to double-click",
-            tracked="events.md § Implementation status today (Month day-cell drill-in row)",
-        )
+    require_surface(logged_in_app.driver, "events-day-cell")
+    assert ev.has_day_cell(target), (
+        f"the month grid exposes no events-day-cell-{target}: "
+        f"{logged_in_app.driver.diagnose(f'events-day-cell-{target}')}"
+    )
 
     ev.double_click_day_cell(target)
     assert logged_in_app.driver.is_visible("event-dtstart"), (
@@ -452,8 +443,9 @@ def test_switch_to_day_view(logged_in_app):
     cal = _unique("cal")
     ev.create_calendar(cal)
     ev.select_calendar(cal)
-    # Create an event today at 14:00 — CurrentDay defaults to today, so it lands
-    # in the day column and a calendar-event-block is rendered.
+    # Create an event today at 14:00 — anchored on today, so it lands in the day
+    # column and a calendar-event-block is rendered.
+    ev.anchor_on_today()
     ev.create_event(summary="Review", start=_future_dt(0, 14), end=_future_dt(0, 15))
     ev.switch_view("day")
     assert logged_in_app.driver.is_visible("calendar-day-timeline"), (
@@ -466,16 +458,16 @@ def test_switch_to_day_view(logged_in_app):
 
 
 # Marked only where `EventsActions.event_block_layout` can read where a block
-# sits: tui's block text, and web's, linux's, macOS's, iOS's and windows' drawn geometry
-# measured against the grid's own time-slot markers. The other GUI apps position blocks in pixels
-# the action layer does not measure yet, so marking them would record a pass
-# that asserted nothing about side by side. They join through the cross-app lift
-# row minted with this witness.
+# sits: tui's block text, and web's, linux's, macOS's, iOS's, windows' and android's drawn
+# geometry measured against the grid's own time-slot markers. Android's band text
+# is read through the bridge's get_text (host-tested in TimelineColumnContentTest);
+# its run on a device is not yet witnessed (android e2e venue).
 @pytest.mark.web
 @pytest.mark.linux
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.tui
 @pytest.mark.feature("calendar-and-events")
 def test_day_timeline_bands_all_day_events_and_sets_clashes_side_by_side(logged_in_app):
@@ -495,6 +487,7 @@ def test_day_timeline_bands_all_day_events_and_sets_clashes_side_by_side(logged_
     cal = _unique("layout-cal")
     ev.create_calendar(cal)
     ev.select_calendar(cal)
+    ev.anchor_on_today()
 
     all_day = _unique("AllDay")
     clash_a, clash_b = _unique("ClashA"), _unique("ClashB")
@@ -550,8 +543,8 @@ def test_day_view_empty_slot_click_opens_quick_create_prefilled(logged_in_app):
     empty-slot quick-create must exist on a NON-empty day, which is exactly
     what linux lacked until 2026-08-01 (its pre-slot-marker background gesture
     shipped, but the whole affordance was absent on windows/android/tui and
-    time-less on apple — events.md § Implementation status today). Declared
-    ``skip_unbuilt`` on apps that do not yet expose ``events-time-slot``.
+    time-less on apple — events.md § Implementation status today). Every app
+    paints the slots now, so a missing one is asserted, never skipped.
     """
     from datetime import date
 
@@ -560,17 +553,15 @@ def test_day_view_empty_slot_click_opens_quick_create_prefilled(logged_in_app):
     cal = _unique("slot-cal")
     ev.create_calendar(cal)
     ev.select_calendar(cal)
+    ev.anchor_on_today()
     ev.create_event(summary="Slotted", start=_future_dt(0, 14), end=_future_dt(0, 15))
     ev.switch_view("day")
     ev.wait_for_event_block("Slotted")
 
-    if not ev.has_time_slot(9, 15):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="events-time-slot",
-            detail="the day timeline paints no per-15-min slot targets, so there is nothing to click",
-            tracked="events.md § Implementation status today (empty-time-slot quick-create bullet)",
-        )
+    assert ev.has_time_slot(9, 15), (
+        "every app paints the per-15-min slot targets, but this grid has no "
+        f"events-time-slot-09-15: {logged_in_app.driver.diagnose('events-time-slot-09-15')}"
+    )
 
     ev.click_time_slot(9, 15)
     assert logged_in_app.driver.is_visible("event-dtstart"), (
@@ -596,8 +587,8 @@ def test_week_view_empty_slot_click_opens_quick_create_with_slot_time(logged_in_
     day column and the driver resolves the first showing match, whose column
     date is locale-dependent (week start) — the exact date+time pairing is
     pinned by the Day-view test above, where the single column is unambiguous.
-    Declared ``skip_unbuilt`` on apps that do not yet expose
-    ``events-time-slot``.
+    Every app paints the slots now, so a missing one is asserted, never
+    skipped.
     """
     ev = logged_in_app.events
     ev.navigate()
@@ -609,13 +600,10 @@ def test_week_view_empty_slot_click_opens_quick_create_with_slot_time(logged_in_
         f"week view should render the grid: {logged_in_app.driver.diagnose('calendar-week-grid')}"
     )
 
-    if not ev.has_time_slot(13, 30):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="events-time-slot",
-            detail="the week grid paints no per-15-min slot targets, so there is nothing to click",
-            tracked="events.md § Implementation status today (empty-time-slot quick-create bullet)",
-        )
+    assert ev.has_time_slot(13, 30), (
+        "every app paints the per-15-min slot targets, but this grid has no "
+        f"events-time-slot-13-30: {logged_in_app.driver.diagnose('events-time-slot-13-30')}"
+    )
 
     ev.click_time_slot(13, 30)
     assert logged_in_app.driver.is_visible("event-dtstart"), (
@@ -652,7 +640,7 @@ def test_event_card_rsvp(logged_in_app):
     AFTER the card click to confirm the RSVP actually persisted against the
     right event, not just that the button didn't error.
 
-    Declared ``skip_unbuilt`` on apps that do not paint the card-level trio.
+    Gated on the surface registry's ``event-card-rsvp`` entry.
     This file carries no app markers, so it collects everywhere. The gate was
     added 2026-07-31 for tui (found by the day-cell slice's adjacent-suite
     sweep, the same class as `test_contacts.py`'s `contacts-no-matches`) and
@@ -660,8 +648,9 @@ def test_event_card_rsvp(logged_in_app):
     **android**, which paints `event-rsvp-*` only on the separate
     invited-events quick-list and not on the main event-card — events.md
     § Implementation status today, ui.yaml's `event-card` platform note.
-    The gate is capability-probed rather than app-name-keyed, so it resolves
-    itself when android lifts the surface. Counted debt beats an invisible red.
+    Since 2026-10-25 the gate reads the registry instead of probing the card:
+    a probe that skips on absence would also hide a regression on an app that
+    had built it. Android's lift adds it to the entry.
 
     The ``>= 1`` is not the vacuous presence check it resembles: a
     Fauna-created event starts with an **empty** roster and no ORGANIZER
@@ -675,18 +664,7 @@ def test_event_card_rsvp(logged_in_app):
     ev.create_calendar(cal_name)
     ev.select_calendar(cal_name)
     ev.create_event("Standup", _future_dt(10, 9), _future_dt(10, 9, 30))
-    if not ev.has_card_rsvp():
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="event-rsvp-going/-interested/-decline (card-level)",
-            detail=(
-                "the main agenda card paints no rsvp-button-group, so there "
-                "is nothing to click; the detail-page trio is built and "
-                "covered by test_event_rsvp (android: the trio exists only on "
-                "the separate invited-events quick-list)"
-            ),
-            tracked="events.md § Implementation status today (event-card-level inline RSVP)",
-        )
+    require_surface(logged_in_app.driver, "event-card-rsvp")
     ev.rsvp_on_card("Standup", status="going")
     assert ev.event_rsvp_count("Standup") >= 1, (
         f"card-level RSVP should have registered an attendee: "
@@ -722,21 +700,7 @@ def test_event_invite_attendee(logged_in_app):
     `AttendeeRow` renders the resulting roster). android e2e enablement remains
     its own follow-up (the docstring above's per-app split).
     """
-    if not (
-        logged_in_app.driver.is_linux()
-        or logged_in_app.driver.is_web()
-        or logged_in_app.driver.is_windows()
-        or logged_in_app.driver.is_tui()
-        or logged_in_app.driver.is_macos()
-        or logged_in_app.driver.is_ios()
-    ):
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="the email-attendee-entry encrypted-CalDAV path",
-            detail="linux + web + windows + tui + macOS + iOS have it; android "
-            "e2e enablement is the remaining cross-app follow-on (route-3)",
-            tracked="caldav-server.md",
-        )
+    require_surface(logged_in_app.driver, "email-attendee-encrypted-caldav")
     cal_name = _unique("invite-cal")
     ev = logged_in_app.events
     ev.navigate()
@@ -778,19 +742,6 @@ def test_month_navigation(logged_in_app):
     assert label_before != label_after
 
 
-# The apps consuming the shared `caltime::pan` policy. The ones still absent step
-# a whole month (or nothing) in week/day view, so widening this list is a build
-# — a lift onto the shared policy — not a marker change.
-#
-# ⚠ For apple the lift was not only the pan. `calendar-date-label` rendered the
-# **month** in every view mode, so the day-view assertions below could not move
-# it at all inside one month and the agenda assertion would have been the vacuous
-# one this file's docstrings warn about. The label had to become range-aware
-# (month / week span / day / "Upcoming") in the same change, exactly as linux's
-# `update_date_label` already was.
-PAN_POLICY_APPS = ("linux", "tui", "web", "macos", "ios", "windows")
-
-
 @pytest.mark.feature("calendar-and-events")
 def test_pan_moves_one_visible_range_per_view(logged_in_app):
     """`events-prev/next-month` pans **one visible range**, not always a month.
@@ -811,13 +762,7 @@ def test_pan_moves_one_visible_range_per_view(logged_in_app):
     ev = logged_in_app.events
     ev.navigate()
 
-    if app_name(logged_in_app.driver) not in PAN_POLICY_APPS:
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="the shared caltime::pan visible-range policy",
-            detail="events-prev/next-month still steps a month (or nothing) outside month view",
-            tracked="events.md § Where logic lives (view-mode + visible-range lift)",
-        )
+    require_surface(logged_in_app.driver, "caltime-pan-visible-range")
 
     ev.switch_view("day")
     start = ev.date_label()
@@ -871,13 +816,7 @@ def test_pan_is_inert_in_the_date_unfiltered_agenda(logged_in_app):
     ev = logged_in_app.events
     ev.navigate()
 
-    if app_name(logged_in_app.driver) not in PAN_POLICY_APPS:
-        skip_unbuilt(
-            logged_in_app.driver,
-            surface="the shared caltime::pan visible-range policy",
-            detail="agenda-view pan still moves the anchor date invisibly",
-            tracked="events.md § Where logic lives (view-mode + visible-range lift)",
-        )
+    require_surface(logged_in_app.driver, "caltime-pan-visible-range")
 
     # The anchor as the finest-grained view renders it, before anything moves.
     ev.switch_view("day")

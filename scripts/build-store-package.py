@@ -7,10 +7,11 @@
     python scripts/build-store-package.py --grade <msix> --arch arm64 --identity-name … --publisher …
 
 `--grade` reads a finished package back and checks it is a Store upload (identity,
-capabilities, every PE's arch, no symbols, no automation surface, and — for the
-`store-safe` flavour the Store ships, the default — no payments, zaps or
-peer-to-peer sharing plane in its native core); the public
-`release-store-windows.yml` workflow grades every package it builds with it.
+capabilities, every PE's arch, no symbols, no automation surface, and its store
+flavour's excision in its native core: for `store-no-payments`, the Store's and the
+default, no payments or zaps plane and the peer-to-peer sharing plane present; for
+`store-safe`, none of the three); the public `release-store-windows.yml` workflow
+grades every package it builds with it.
 
 This script PACKS. The payload it packs — the self-contained WinUI publish, the sync
 agent and the shell extension, all in their shipped flavour — is built and staged by
@@ -300,19 +301,33 @@ _COMIMAGE_FLAGS_32BITREQUIRED = 0x2
 STORE_CAPABILITIES = {"runFullTrust"}
 _MANIFEST_NS = "{http://schemas.microsoft.com/appx/manifest/foundation/windows10}"
 
-# The Store package's flavour: `store-safe`, for now (installers/windows.md § Store
-# distribution, the flavour paragraph, owner ruling 2026-10-14) -- the payments
-# plane compiled away, and zaps and peer-to-peer sharing with it. `full` is the
-# direct-download MSI's build, graded only when a new ruling returns the Store to
-# it. What a store-safe core must NOT carry is the native column of `just
-# windows-store-safe-check` (its PAY_KIND_PATS and P2P_NATIVE_PATS): the kind strings
-# and the UniFFI names of the excised planes, all plain UTF-8 in a Rust cdylib.
-FLAVOURS = ("store-safe", "full")
-STORE_SAFE_ABSENT = (
-    b"fauna.payments.", b"fauna.tips.", b"fauna.nostr.zap_signers.",
+# The Store package's flavour (installers/windows.md § Store distribution, the
+# flavour paragraph; dynamic-features.md § The App-Store escape hatch -> *The store
+# flavors*): `store-no-payments` -- the payments plane and zaps compiled away,
+# peer-to-peer sharing kept -- from the first version whose recorded commit carries
+# the Windows leg; `store-safe` (sharing gone too, owner ruling 2026-10-14) for a
+# commit older than that. `full` is the direct-download MSI's build, graded only when
+# a new ruling returns the Store to it. What a core carries or must not is the native
+# column of `just windows-store-safe-check` (its PAY_KIND_PATS and P2P_NATIVE_PATS):
+# the kind strings and the UniFFI names of each plane, all plain UTF-8 in a Rust
+# cdylib. STORE_FLAVOUR is the default of `--flavour` and of the public Store
+# workflow's `flavour` input (test_public_workflows_shape.py holds the two together).
+PAYMENTS_NATIVE = (b"fauna.payments.", b"fauna.tips.", b"fauna.nostr.zap_signers.")
+P2P_SHARE_NATIVE = (
     b"uniffi_fauna_ffi_fn_func_offline_share_", b"FfiCeremonySeat",
     b"share_plane_view", b"FfiSharePlaneView",
 )
+STORE_SAFE_ABSENT = PAYMENTS_NATIVE + P2P_SHARE_NATIVE
+# flavour -> (markers its core must NOT carry, markers it MUST carry). A flavour that
+# keeps a plane asserts it present: absence alone would pass a core that fell back to
+# store-safe, the flavour store-no-payments exists to differ from.
+FLAVOUR_CORE = {
+    "store-no-payments": (PAYMENTS_NATIVE, P2P_SHARE_NATIVE),
+    "store-safe": (STORE_SAFE_ABSENT, ()),
+    "full": ((), ()),
+}
+FLAVOURS = tuple(FLAVOUR_CORE)
+STORE_FLAVOUR = "store-no-payments"
 
 
 def pe_arch_problem(data, arch):
@@ -350,7 +365,7 @@ def pe_arch_problem(data, arch):
         return f"is a malformed PE image ({e})"
 
 
-def grade_package(msix_path, arch, identity_name, publisher, version, flavour="store-safe"):
+def grade_package(msix_path, arch, identity_name, publisher, version, flavour=STORE_FLAVOUR):
     """Every reason the package at `msix_path` is not a valid `arch` Store upload
     of the `flavour` build."""
     import tempfile
@@ -400,18 +415,24 @@ def grade_package(msix_path, arch, identity_name, publisher, version, flavour="s
                         f.write(z.read(member))
             problems += [f"automation surface: {hit}" for hit in automation_surface_hits(tmp)]
 
-        if flavour == "store-safe":
+        absent, present = FLAVOUR_CORE[flavour]
+        if absent or present:
             ffi = _FFI_DLL.replace(os.sep, "/")
             if ffi not in names:
                 # An absent core is an empty scan, which reads as a clean excision.
-                problems.append(f"{ffi} is missing, so the store-safe excision cannot be graded")
+                problems.append(f"{ffi} is missing, so the {flavour} excision cannot be graded")
             else:
                 data = z.read(ffi)
-                for marker in STORE_SAFE_ABSENT:
+                for marker in absent:
                     n = data.count(marker)
                     if n:
                         problems.append(f"{ffi} carries {n} '{marker.decode()}' occurrence(s); "
-                                        "a store-safe core carries none of the excised planes")
+                                        f"a {flavour} core carries none of the planes it excises")
+                for marker in present:
+                    if marker not in data:
+                        problems.append(f"{ffi} carries no '{marker.decode()}'; a {flavour} core "
+                                        "keeps peer-to-peer sharing, so this one fell back to "
+                                        "another flavour")
     return problems
 
 
@@ -517,10 +538,13 @@ def main():
                          "only capability, every PE built for that arch, no .pdb, no "
                          "automation surface, and the --flavour's excision. Exit 1 on "
                          "any finding")
-    ap.add_argument("--flavour", choices=FLAVOURS, default="store-safe",
-                    help="with --grade: the build the package must be. `store-safe` "
-                         "(the Store's, the default) also refuses a fauna_ffi.dll "
-                         "carrying the payments, zaps or peer-to-peer sharing planes")
+    ap.add_argument("--flavour", choices=FLAVOURS, default=STORE_FLAVOUR,
+                    help="with --grade: the build the package must be. "
+                         f"`{STORE_FLAVOUR}` (the Store's, the default) refuses a "
+                         "fauna_ffi.dll carrying the payments or zaps plane and one "
+                         "missing the peer-to-peer sharing plane; `store-safe` (a "
+                         "recorded commit older than the Windows store-no-payments "
+                         "leg) refuses all three planes")
     ap.add_argument("--package-wxs", default=None,
                     help="with --grade: the Package.wxs whose version the package must "
                          "carry (default: this tree's)")

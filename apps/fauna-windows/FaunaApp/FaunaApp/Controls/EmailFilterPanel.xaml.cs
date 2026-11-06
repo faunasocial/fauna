@@ -30,8 +30,8 @@ internal sealed class FilterItem
     /// (no <c>IValueConverter</c>; the property IS a <see cref="Visibility"/>, so
     /// the classic <c>{Binding}</c> engine sets the DP with no conversion step,
     /// and this codebase has no existing bool→Visibility converter to reuse).
-    /// True only when <see cref="FaunaFfiMethods.EmailFilterIsEditableFor"/> says the
-    /// single-dialog-covered shape holds (single rule + a dialog-covered rule/action).</summary>
+    /// True only when <see cref="FaunaFfiMethods.EmailFilterIsEditable"/> says the
+    /// full form covers the stored shape (single rule + a form-covered rule/action).</summary>
     public Visibility EditVisibility { get; set; } = Visibility.Collapsed;
 
     /// <summary>Whether the post-succession review pair
@@ -59,11 +59,6 @@ public sealed partial class EmailFilterPanel : UserControl
 
     private readonly ObservableCollection<FilterItem> _filters = new();
 
-    /// <summary>The action kinds the form collects inputs for (<c>SUPPORTED_ACTION_KINDS</c>)
-    /// — what <see cref="FaunaFfiMethods.EmailFilterIsEditableFor"/> gates a stored filter
-    /// against (<c>fauna-ffi</c> exports no constant; android's list is the same).</summary>
-    private static readonly string[] SupportedActionKinds = { "Allow", "Discard", "Reject", "Forward" };
-
     /// <summary>The id of the filter currently being edited, or <c>null</c> when
     /// <see cref="AddFilterForm"/> is in create mode. Gates whether
     /// <see cref="CreateFilterButton"/>'s click handler creates or updates, and
@@ -75,8 +70,11 @@ public sealed partial class EmailFilterPanel : UserControl
     /// <see cref="LoadFiltersAsync"/> so a nav-readiness regression test can
     /// DETERMINISTICALLY widen the initial load window (set via the
     /// <c>email_filter_load_delay_ms</c> test command; see <c>App</c>.HandleTestCommand).
-    /// Consumed — reset to 0 — by the next load. Zero in production.</summary>
+    /// Consumed — reset to 0 — by the next load. Compiled out of Release with the
+    /// agent that sets it (convention 15).</summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static int TestLoadDelayMs;
+#endif
 
     // ── e2e nav-readiness barrier ──
     // Completed at the END of the initial LoadFiltersAsync so a hosting page can gate its
@@ -142,8 +140,10 @@ public sealed partial class EmailFilterPanel : UserControl
         // stale for `testDelayMs` ms so a nav-readiness regression can prove an immediate
         // post-navigate read is honoured. Consumed here regardless of NestClient, so a
         // deliberately-armed delay is never silently dropped by an early return.
+#if DEBUG || FAUNA_E2E_AGENT
         var testDelayMs = TestLoadDelayMs;
         TestLoadDelayMs = 0;
+#endif
 
         if (NestClient is null) { _loadComplete.TrySetResult(); return; }
 
@@ -151,7 +151,9 @@ public sealed partial class EmailFilterPanel : UserControl
         LoadingRing.Visibility = Visibility.Visible;
         try
         {
+#if DEBUG || FAUNA_E2E_AGENT
             if (testDelayMs > 0) await Task.Delay(testDelayMs);
+#endif
             // NO ConfigureAwait(false): the continuation mutates `_filters` (bound to
             // FilterList.ItemsSource) + LoadingRing — off-thread bound-state mutation
             // throws a silent COMException (reference_windows_vm_configureawait_comexception),
@@ -172,7 +174,7 @@ public sealed partial class EmailFilterPanel : UserControl
                     Action = S.Resolve(FaunaFfiMethods.EmailFilterActionLabel(f.action)),
                     Rules = f.rules,
                     ActionValue = f.action,
-                    EditVisibility = FaunaFfiMethods.EmailFilterIsEditableFor(f.rules, f.action, SupportedActionKinds)
+                    EditVisibility = FaunaFfiMethods.EmailFilterIsEditable(f.rules, f.action)
                         ? Visibility.Visible
                         : Visibility.Collapsed,
                     MarkVisibility = InheritedFilterMarks.Contains(f.id)
@@ -203,9 +205,10 @@ public sealed partial class EmailFilterPanel : UserControl
 
         var name = FilterNameInput.Text.Trim();
         var ruleValue = FilterRuleValue.Text.Trim();
-        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(ruleValue)) return;
-
         var ruleType = (FilterRuleType.SelectedItem as ComboBoxItem)?.Tag as string ?? "SenderIs";
+        // A spam-score condition reads its score input, not the value field.
+        if (string.IsNullOrEmpty(name)
+            || (ruleType != "SpamScoreAtLeast" && string.IsNullOrEmpty(ruleValue))) return;
 
         // Adopt the shared form→typed-variant encoders (fauna_protocol::email::
         // encode_filter_{rule,action}, UniFFI-exported) instead of hand-rolling the map
@@ -215,10 +218,16 @@ public sealed partial class EmailFilterPanel : UserControl
         // throws — bail like the panel's other silent errors.
         FfiEmailFilterRule rule;
         FfiEmailFilterAction action;
+        int priority;
         try
         {
-            rule = FaunaFfiMethods.EncodeEmailFilterRule(ruleType, ruleValue);
+            rule = FaunaFfiMethods.EncodeEmailFilterRuleInputs(new FfiFilterRuleInputs(
+                ruleType,
+                ruleValue,
+                FilterRuleHeaderValueInput.Text.Trim(),
+                FilterRuleSpamScoreInput.Text.Trim()));
             action = FaunaFfiMethods.EncodeEmailFilterActionInputs(ReadActionInputs());
+            priority = FaunaFfiMethods.ParseEmailFilterPriority(FilterPriorityInput.Text.Trim());
         }
         catch (FfiException)
         {
@@ -226,6 +235,7 @@ public sealed partial class EmailFilterPanel : UserControl
         }
 
         var editingId = _editingFilterId;
+        var continueOnMatch = FilterContinueBox.IsChecked ?? false;
 
         CreateRing.IsActive = true;
         CreateRing.Visibility = Visibility.Visible;
@@ -237,16 +247,21 @@ public sealed partial class EmailFilterPanel : UserControl
             // it COMExceptions silently, so the created/saved filter never appears.
             if (editingId is { } id)
             {
-                await NestClient.EmailFiltersUpdateAsync(id, name, new[] { rule }, "all", action, 0);
+                await NestClient.EmailFiltersUpdateAsync(id, name, new[] { rule }, "all", action, priority, continueOnMatch);
             }
             else
             {
-                await NestClient.EmailFiltersCreateAsync(name, new[] { rule }, "all", action, 0);
+                await NestClient.EmailFiltersCreateAsync(name, new[] { rule }, "all", action, priority, continueOnMatch);
             }
 
             FilterNameInput.Text = string.Empty;
             FilterRuleValue.Text = string.Empty;
+            FilterRuleHeaderValueInput.Text = string.Empty;
+            FilterRuleSpamScoreInput.Text = string.Empty;
+            SelectComboItemByTag(FilterRuleType, "SenderIs");
             WriteActionInputs(new FfiFilterActionInputs("Allow", string.Empty, string.Empty, true));
+            FilterPriorityInput.Text = string.Empty;
+            FilterContinueBox.IsChecked = false;
             AddFilterToggle.IsChecked = false;
             AddFilterForm.Visibility = Visibility.Collapsed;
             SetCreateMode();
@@ -295,14 +310,18 @@ public sealed partial class EmailFilterPanel : UserControl
             var fresh = await NestClient.EmailFiltersGetAsync(filter.Id);
             if (fresh.rules.Length != 1) return; // shouldn't happen given the row's edit gate
 
-            var describedRule = FaunaFfiMethods.DescribeEmailFilterRule(fresh.rules[0]);
+            var describedRule = FaunaFfiMethods.DescribeEmailFilterRuleInputs(fresh.rules[0]);
             var describedAction = FaunaFfiMethods.DescribeEmailFilterActionInputs(fresh.action);
             if (describedRule is null || describedAction is null) return; // same — the gate should have hidden edit
 
             FilterNameInput.Text = fresh.name;
             FilterRuleValue.Text = describedRule.value;
+            FilterRuleHeaderValueInput.Text = describedRule.headerValue;
+            FilterRuleSpamScoreInput.Text = describedRule.spamScore;
             SelectComboItemByTag(FilterRuleType, describedRule.kind);
             WriteActionInputs(describedAction);
+            FilterPriorityInput.Text = fresh.priority.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            FilterContinueBox.IsChecked = fresh.continueOnMatch;
 
             SetEditMode(fresh.id);
             AddFilterToggle.IsChecked = true;
@@ -329,7 +348,12 @@ public sealed partial class EmailFilterPanel : UserControl
             kind,
             _rejectReason,
             FilterForwardAddressInput.Text.Trim(),
-            FilterKeepLocalCopyBox.IsChecked ?? true);
+            FilterKeepLocalCopyBox.IsChecked ?? true,
+            FilterFileIntoMailboxInput.Text.Trim(),
+            FilterAddLabelInput.Text.Trim(),
+            FilterAutoReplySubjectInput.Text,
+            FilterAutoReplyBodyInput.Text,
+            FilterAutoReplyIntervalInput.Text.Trim());
     }
 
     /// <summary>Load <paramref name="inputs"/> into the form (the edit pre-populate,
@@ -340,16 +364,34 @@ public sealed partial class EmailFilterPanel : UserControl
         SelectComboItemByTag(FilterActionSelect, inputs.kind);
         FilterForwardAddressInput.Text = inputs.forwardAddress;
         FilterKeepLocalCopyBox.IsChecked = inputs.keepLocalCopy;
+        FilterFileIntoMailboxInput.Text = inputs.fileIntoMailbox;
+        FilterAddLabelInput.Text = inputs.label;
+        FilterAutoReplySubjectInput.Text = inputs.autoReplySubject;
+        FilterAutoReplyBodyInput.Text = inputs.autoReplyBody;
+        FilterAutoReplyIntervalInput.Text = inputs.autoReplyIntervalHours;
     }
 
-    /// <summary>The Forward inputs show only while the action reads Forward.
+    /// <summary>Each action's inputs show only while that action is selected.
     /// Fires once during <c>InitializeComponent</c> (the default item's
     /// <c>IsSelected</c>), before the named inputs exist — hence the null guard.</summary>
     private void FilterActionSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (ForwardInputs is null) return;
+        if (AutoReplyInputs is null) return;
         var kind = (FilterActionSelect.SelectedItem as ComboBoxItem)?.Tag as string;
         ForwardInputs.Visibility = kind == "Forward" ? Visibility.Visible : Visibility.Collapsed;
+        FilterFileIntoMailboxInput.Visibility = kind == "FileInto" ? Visibility.Visible : Visibility.Collapsed;
+        FilterAddLabelInput.Visibility = kind == "AddLabel" ? Visibility.Visible : Visibility.Collapsed;
+        AutoReplyInputs.Visibility = kind == "AutoReply" ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The header-value and spam-score inputs show only for their
+    /// condition kind. Same null guard as <see cref="FilterActionSelect_SelectionChanged"/>.</summary>
+    private void FilterRuleType_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (FilterRuleSpamScoreInput is null) return;
+        var kind = (FilterRuleType.SelectedItem as ComboBoxItem)?.Tag as string;
+        FilterRuleHeaderValueInput.Visibility = kind == "HeaderContains" ? Visibility.Visible : Visibility.Collapsed;
+        FilterRuleSpamScoreInput.Visibility = kind == "SpamScoreAtLeast" ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Select the <see cref="ComboBoxItem"/> whose <c>Tag</c> equals

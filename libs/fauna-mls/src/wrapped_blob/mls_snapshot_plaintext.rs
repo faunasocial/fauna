@@ -18,7 +18,9 @@
 //! dag-cbor (`fauna_cbor`) keeps map keys length-first sorted, and serde
 //! ignores unknown fields, so older decoders still parse newer blobs.
 
-use crate::wrapped_blob::format::{GrantWindow, UnwrapError, WrapError};
+use crate::wrapped_blob::format::{
+    GrantWindow, MailRecordEnvelope, RecordKind, UnwrapError, WrapError,
+};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -161,6 +163,47 @@ pub struct MlsSnapshotPlaintext {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub generation_retired_at_unix: Vec<u64>,
+    /// One 32-byte **calendar root** ([`derive_calendar_root`]) per **prior**
+    /// MSEK generation, newest first — aligned with `leaf_init_keypairs[1..]`
+    /// exactly like [`Self::mail_epoch_grace_roots`], whose shape this is
+    /// verbatim. The current generation's root re-derives from the session MSEK
+    /// and is never carried. Rotation grace for every calendar body at rest
+    /// (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*): the
+    /// MDA's calendar ring is `[derive(session MSEK)] ++ these`
+    /// ([`StandingDavRing::from_msek_and_grace_roots`]). **Additive + omitted
+    /// when empty.**
+    #[serde(
+        rename = "calendar_grace_roots",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub calendar_grace_roots: Vec<ByteBuf>,
+    /// [`Self::calendar_grace_roots`]' twin for the address book: one 32-byte
+    /// **card root** ([`derive_card_root`]) per prior generation
+    /// (§ Path B-sibling-6). **Additive + omitted when empty.**
+    #[serde(
+        rename = "card_grace_roots",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub card_grace_roots: Vec<ByteBuf>,
+}
+
+impl MlsSnapshotPlaintext {
+    /// The carried grace roots of DAV `kind`, borrowed as 32-byte arrays (the
+    /// decoder enforced the length) — what
+    /// [`StandingDavRing::from_msek_and_grace_roots`] takes.
+    #[must_use]
+    pub fn dav_grace_roots(&self, kind: DavKind) -> Vec<&[u8; 32]> {
+        let roots = match kind {
+            DavKind::Calendar => &self.calendar_grace_roots,
+            DavKind::Card => &self.card_grace_roots,
+        };
+        roots
+            .iter()
+            .filter_map(|r| r.as_slice().try_into().ok())
+            .collect()
+    }
 }
 
 impl Default for MlsSnapshotPlaintext {
@@ -175,6 +218,8 @@ impl Default for MlsSnapshotPlaintext {
             mail_epoch_grace_roots: Vec::new(),
             index_seg_grace_keys: Vec::new(),
             generation_retired_at_unix: Vec::new(),
+            calendar_grace_roots: Vec::new(),
+            card_grace_roots: Vec::new(),
         }
     }
 }
@@ -238,12 +283,18 @@ impl MlsSnapshotPlaintext {
                 )));
             }
         }
-        for (i, key) in snap.index_seg_grace_keys.iter().enumerate() {
-            if key.len() != 32 {
-                return Err(UnwrapError::InvalidFormat(format!(
-                    "index_seg_grace_keys[{i}] must be 32 bytes, got {}",
-                    key.len()
-                )));
+        for (field, list) in [
+            ("index_seg_grace_keys", &snap.index_seg_grace_keys),
+            ("calendar_grace_roots", &snap.calendar_grace_roots),
+            ("card_grace_roots", &snap.card_grace_roots),
+        ] {
+            for (i, key) in list.iter().enumerate() {
+                if key.len() != 32 {
+                    return Err(UnwrapError::InvalidFormat(format!(
+                        "{field}[{i}] must be 32 bytes, got {}",
+                        key.len()
+                    )));
+                }
             }
         }
         let priors = snap.leaf_init_keypairs.len().saturating_sub(1);
@@ -308,8 +359,10 @@ pub fn derive_recipient_xwing_keypair(msek: &[u8; 32]) -> fauna_pq_kem::XWingKey
     fauna_pq_kem::derive_keypair(msek, RECIPIENT_MLKEM_DERIVE_CONTEXT, &x25519_secret)
 }
 
-/// The `content.read{mail|calendar}` capability-grant payload for an owner's
-/// standing mail secret: the recipient's X-Wing mail secret serialized as
+/// The `content.read{mail}` capability-grant payload for an owner's standing
+/// mail secret (the calendar grant wraps its own,
+/// [`derive_recipient_calendar_capability_secret`]): the recipient's X-Wing
+/// mail secret serialized as
 /// `x25519_secret(32) ∥ mlkem_decaps_key(2400)` (the `derive_recipient_xwing_keypair`
 /// secret halves).
 ///
@@ -330,6 +383,334 @@ pub fn derive_recipient_mail_capability_secret(msek: &[u8; 32]) -> Vec<u8> {
     payload.extend_from_slice(kp.secret.x25519_secret());
     payload.extend_from_slice(kp.secret.mlkem_decaps_key());
     payload
+}
+
+// ── Calendar and card recipient keypairs (`owner-key-material.md`
+// § Path B-sibling-5 / § Path B-sibling-6, designed 2026-10-23) ──
+//
+// Each DAV kind gets its own standing keypair, two steps off MSEK: a
+// per-kind ROOT (`derive_key(<kind>.root context, MSEK)`), then the X25519
+// half (`derive_key(<kind>.recipient-hpke context, root)` → RFC 9180
+// `DeriveKeyPair`) and the ML-KEM-768 half (`expand(root, <kind>.recipient-
+// mlkem context)`) of an X-Wing keypair. The root is what rotation grace
+// carries (one per prior generation, `MlsSnapshotPlaintext::
+// calendar_grace_roots` / `card_grace_roots`), and the root a later calendar
+// content-sealing epoch would derive its per-epoch keys from — so a kind
+// adopting epochs changes no carriage. Golden-byte-pinned below.
+
+/// Domain-separation context for the **calendar root**
+/// (`calendar_root = BLAKE3::derive_key(context, MSEK)`). Versioned + dated per
+/// `key-material-hierarchy.md` rule #3.
+pub const CALENDAR_ROOT_DERIVE_CONTEXT: &str = "fauna.calendar.root.v1 2026-10-23";
+/// Context for the X25519 half of the recipient-calendar keypair, keyed by the
+/// calendar root.
+pub const RECIPIENT_CALENDAR_HPKE_DERIVE_CONTEXT: &str =
+    "fauna.calendar.recipient-hpke.v1 2026-10-23";
+/// Context for the ML-KEM-768 half of the recipient-calendar X-Wing keypair,
+/// keyed by the calendar root (the mail ML-KEM context's undated shape).
+pub const RECIPIENT_CALENDAR_MLKEM_DERIVE_CONTEXT: &str = "fauna.calendar.recipient-mlkem.v1";
+/// Domain-separation context for the **card root** — the calendar root's twin.
+pub const CARD_ROOT_DERIVE_CONTEXT: &str = "fauna.card.root.v1 2026-10-23";
+/// Context for the X25519 half of the recipient-card keypair.
+pub const RECIPIENT_CARD_HPKE_DERIVE_CONTEXT: &str = "fauna.card.recipient-hpke.v1 2026-10-23";
+/// Context for the ML-KEM-768 half of the recipient-card X-Wing keypair.
+pub const RECIPIENT_CARD_MLKEM_DERIVE_CONTEXT: &str = "fauna.card.recipient-mlkem.v1";
+
+/// Which DAV kind a body belongs to — the selector of root, keypair, envelope
+/// kind and AAD for everything CalDAV ([`Self::Calendar`]) and CardDAV
+/// ([`Self::Card`]) seal at rest (`owner-key-material.md` § Path B-sibling-5,
+/// § Path B-sibling-6). Mail is not a DAV kind: its standing keypair derives
+/// straight from MSEK ([`derive_recipient_hpke_keypair`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DavKind {
+    Calendar,
+    Card,
+}
+
+impl DavKind {
+    /// The envelope kind a body of this DAV kind is sealed as.
+    #[must_use]
+    pub const fn record_kind(self) -> RecordKind {
+        match self {
+            Self::Calendar => RecordKind::Calendar,
+            Self::Card => RecordKind::Card,
+        }
+    }
+
+    const fn root_context(self) -> &'static str {
+        match self {
+            Self::Calendar => CALENDAR_ROOT_DERIVE_CONTEXT,
+            Self::Card => CARD_ROOT_DERIVE_CONTEXT,
+        }
+    }
+
+    const fn hpke_context(self) -> &'static str {
+        match self {
+            Self::Calendar => RECIPIENT_CALENDAR_HPKE_DERIVE_CONTEXT,
+            Self::Card => RECIPIENT_CARD_HPKE_DERIVE_CONTEXT,
+        }
+    }
+
+    const fn mlkem_context(self) -> &'static str {
+        match self {
+            Self::Calendar => RECIPIENT_CALENDAR_MLKEM_DERIVE_CONTEXT,
+            Self::Card => RECIPIENT_CARD_MLKEM_DERIVE_CONTEXT,
+        }
+    }
+}
+
+/// Derive a generation's 32-byte root for DAV `kind` from its MSEK — the one
+/// value rotation grace carries for that kind. [`Zeroizing`], the mail-epoch
+/// root's custody rule ([`derive_mail_epoch_root`] → *Custody of the returned
+/// bytes*): the root is complete for every read of its kind and generation.
+#[must_use]
+pub fn derive_dav_root(kind: DavKind, msek: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(blake3::derive_key(kind.root_context(), msek))
+}
+
+/// [`derive_dav_root`] for the calendar (`owner-key-material.md`
+/// § Path B-sibling-5 → *Root*).
+#[must_use]
+pub fn derive_calendar_root(msek: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    derive_dav_root(DavKind::Calendar, msek)
+}
+
+/// [`derive_dav_root`] for the address book (§ Path B-sibling-6).
+#[must_use]
+pub fn derive_card_root(msek: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    derive_dav_root(DavKind::Card, msek)
+}
+
+/// Compile-time pins, the mail-epoch root's twins: revert either return type
+/// to `[u8; 32]` and the build fails here.
+const _CALENDAR_ROOT_IS_NOT_COPY: fn(&[u8; 32]) -> Zeroizing<[u8; 32]> = derive_calendar_root;
+const _CARD_ROOT_IS_NOT_COPY: fn(&[u8; 32]) -> Zeroizing<[u8; 32]> = derive_card_root;
+
+/// Derive the standing recipient X25519 keypair of DAV `kind` from that kind's
+/// `root`. Returns `(secret, public)`; deterministic in the root, so every
+/// device holding the account's mail custody derives the identical pair.
+#[must_use]
+pub fn derive_recipient_dav_hpke_keypair(kind: DavKind, root: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let ikm = blake3::derive_key(kind.hpke_context(), root);
+    crate::wrapped_blob::envelope::derive_x25519_keypair_from_ikm(&ikm)
+}
+
+/// Derive the standing recipient **X-Wing** keypair of DAV `kind` from its
+/// `root` — the mail X-Wing shape: the X25519 half IS
+/// [`derive_recipient_dav_hpke_keypair`]'s, the ML-KEM-768 half derives from
+/// the same root under the kind's ML-KEM context.
+#[must_use]
+pub fn derive_recipient_dav_xwing_keypair(
+    kind: DavKind,
+    root: &[u8; 32],
+) -> fauna_pq_kem::XWingKeyPair {
+    let (x25519_secret, _x25519_public) = derive_recipient_dav_hpke_keypair(kind, root);
+    fauna_pq_kem::derive_keypair(root, kind.mlkem_context(), &x25519_secret)
+}
+
+/// The public halves of an owner's calendar and card recipient X-Wing
+/// keypairs — what an app registers with the nest and what every sealer
+/// seals to. Public material only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DavSealPubkeys {
+    /// 32-byte X25519 public half of the recipient-calendar keypair.
+    pub calendar_pubkey: [u8; 32],
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-calendar X-Wing
+    /// keypair.
+    pub calendar_mlkem_ek: Vec<u8>,
+    /// 32-byte X25519 public half of the recipient-card keypair.
+    pub card_pubkey: [u8; 32],
+    /// 1184-byte ML-KEM-768 encapsulation key of the recipient-card X-Wing
+    /// keypair.
+    pub card_mlkem_ek: Vec<u8>,
+}
+
+impl DavSealPubkeys {
+    /// Both DAV kinds' public halves from one MSEK — through
+    /// [`derive_recipient_dav_xwing_keypair`], so what an app registers is by
+    /// construction what the MDA and every app open with. The one derivation:
+    /// the mail-settings machine and the FFI both consume it.
+    #[must_use]
+    pub fn derive(msek: &[u8; 32]) -> Self {
+        let public = |kind: DavKind| {
+            derive_recipient_dav_xwing_keypair(kind, &derive_dav_root(kind, msek)).public
+        };
+        let calendar = public(DavKind::Calendar);
+        let card = public(DavKind::Card);
+        Self {
+            calendar_pubkey: *calendar.x25519_public(),
+            calendar_mlkem_ek: calendar.mlkem_encaps_key().to_vec(),
+            card_pubkey: *card.x25519_public(),
+            card_mlkem_ek: card.mlkem_encaps_key().to_vec(),
+        }
+    }
+}
+
+/// The recipient-calendar X25519 keypair from the calendar root.
+#[must_use]
+pub fn derive_recipient_calendar_hpke_keypair(root: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    derive_recipient_dav_hpke_keypair(DavKind::Calendar, root)
+}
+
+/// The recipient-calendar X-Wing keypair from the calendar root.
+#[must_use]
+pub fn derive_recipient_calendar_xwing_keypair(root: &[u8; 32]) -> fauna_pq_kem::XWingKeyPair {
+    derive_recipient_dav_xwing_keypair(DavKind::Calendar, root)
+}
+
+/// The recipient-card X25519 keypair from the card root.
+#[must_use]
+pub fn derive_recipient_card_hpke_keypair(root: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    derive_recipient_dav_hpke_keypair(DavKind::Card, root)
+}
+
+/// The recipient-card X-Wing keypair from the card root.
+#[must_use]
+pub fn derive_recipient_card_xwing_keypair(root: &[u8; 32]) -> fauna_pq_kem::XWingKeyPair {
+    derive_recipient_dav_xwing_keypair(DavKind::Card, root)
+}
+
+/// `x25519_secret(32) ∥ mlkem_decaps_key(2400)` of an X-Wing keypair — the
+/// one byte layout every standing and per-epoch capability payload shares.
+fn xwing_capability_payload(kp: &fauna_pq_kem::XWingKeyPair) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(32 + fauna_pq_kem::MLKEM768_DECAPS_KEY_LEN);
+    payload.extend_from_slice(kp.secret.x25519_secret());
+    payload.extend_from_slice(kp.secret.mlkem_decaps_key());
+    payload
+}
+
+/// The standing capability payload of DAV `kind` for an MSEK — in
+/// [`derive_recipient_mail_capability_secret`]'s exact byte contract, so a
+/// holder's 32-vs-2432 length-dispatch opener is unchanged. Never the root:
+/// a root would convey every future epoch of the kind.
+#[must_use]
+pub fn derive_recipient_dav_capability_secret(kind: DavKind, msek: &[u8; 32]) -> Vec<u8> {
+    xwing_capability_payload(&derive_recipient_dav_xwing_keypair(
+        kind,
+        &derive_dav_root(kind, msek),
+    ))
+}
+
+/// The `content.read{calendar}` grant payload: the standing recipient-calendar
+/// secret (`owner-key-material.md` § Path B-sibling-5 → *Capability payload*).
+/// Opens `calendar-record` envelopes only.
+#[must_use]
+pub fn derive_recipient_calendar_capability_secret(msek: &[u8; 32]) -> Vec<u8> {
+    derive_recipient_dav_capability_secret(DavKind::Calendar, msek)
+}
+
+/// The standing recipient-card secret in the same byte contract. No
+/// `content.read{card}` scope is minted today (§ Path B-sibling-6); this is the
+/// payload one would carry.
+#[must_use]
+pub fn derive_recipient_card_capability_secret(msek: &[u8; 32]) -> Vec<u8> {
+    derive_recipient_dav_capability_secret(DavKind::Card, msek)
+}
+
+/// One DAV kind's **standing ring** — one keypair per MSEK generation, newest
+/// first — the per-kind sibling of the standing mail set
+/// ([`derive_standing_mail_keypairs`]). Every holder derives the same ring:
+/// the owner's apps from `msek` + `prior_mseks` ([`Self::from_mseks`]), the MDA
+/// from the session MSEK + the snapshot's grace roots of the kind
+/// ([`Self::from_msek_and_grace_roots`]) — so whatever one can open, the other
+/// can (§ Path B-sibling-5 → *Snapshot carriage*). It opens records of its own
+/// kind only: [`Self::open`] refuses any other envelope kind before a trial.
+pub struct StandingDavRing {
+    kind: DavKind,
+    keypairs: Vec<StandingMailKeypair>,
+}
+
+impl std::fmt::Debug for StandingDavRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StandingDavRing")
+            .field("kind", &self.kind)
+            .field("generations", &self.keypairs.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl StandingDavRing {
+    /// The ring over per-generation `roots` of `kind`, newest first.
+    #[must_use]
+    pub fn from_roots(kind: DavKind, roots: &[&[u8; 32]]) -> Self {
+        let keypairs = roots
+            .iter()
+            .map(|root| {
+                let xwing = derive_recipient_dav_xwing_keypair(kind, root);
+                StandingMailKeypair::new_hybrid(
+                    xwing.secret.x25519_secret(),
+                    xwing.secret.mlkem_decaps_key(),
+                )
+            })
+            .collect();
+        Self { kind, keypairs }
+    }
+
+    /// The ring over an MSEK history — `msek` the current generation, then
+    /// `prior_mseks` newest first (the custody's order) — each generation's
+    /// root derived here and dropped.
+    #[must_use]
+    pub fn from_mseks(kind: DavKind, msek: &[u8; 32], prior_mseks: &[[u8; 32]]) -> Self {
+        let roots: Vec<Zeroizing<[u8; 32]>> = std::iter::once(msek)
+            .chain(prior_mseks)
+            .map(|m| derive_dav_root(kind, m))
+            .collect();
+        let refs: Vec<&[u8; 32]> = roots.iter().map(|r| &**r).collect();
+        Self::from_roots(kind, &refs)
+    }
+
+    /// The MDA's ring: the current generation's root re-derived from the
+    /// session `msek` (never carried), then the snapshot's grace roots of the
+    /// kind as carried (newest first).
+    #[must_use]
+    pub fn from_msek_and_grace_roots(
+        kind: DavKind,
+        msek: &[u8; 32],
+        grace_roots: &[&[u8; 32]],
+    ) -> Self {
+        let current = derive_dav_root(kind, msek);
+        let refs: Vec<&[u8; 32]> = std::iter::once(&*current)
+            .chain(grace_roots.iter().copied())
+            .collect();
+        Self::from_roots(kind, &refs)
+    }
+
+    /// The DAV kind this ring opens.
+    #[must_use]
+    pub fn kind(&self) -> DavKind {
+        self.kind
+    }
+
+    /// How many generations the ring holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.keypairs.len()
+    }
+
+    /// Whether the ring holds no generation.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keypairs.is_empty()
+    }
+
+    /// Open a sealed record of this ring's kind, newest generation first.
+    ///
+    /// # Errors
+    ///
+    /// `UnwrapError::InvalidFormat` for an envelope of any other kind (refused
+    /// before any trial), `UnwrapError::HpkeFailed` when no generation opens it.
+    pub fn open(&self, envelope: &MailRecordEnvelope) -> Result<Vec<u8>, UnwrapError> {
+        let kind = self.kind.record_kind();
+        if envelope.kind != kind.as_str() {
+            return Err(UnwrapError::InvalidFormat(format!(
+                "expected kind={}, got {}",
+                kind.as_str(),
+                envelope.kind
+            )));
+        }
+        open_record_standing(kind, envelope, &self.keypairs, &[], None)
+            .ok_or(UnwrapError::HpkeFailed)
+    }
 }
 
 // ── Mail content-sealing epochs (design spec 2026-07-18; goal
@@ -710,7 +1091,27 @@ pub fn generation_trial_order(
 /// of [`super::open_mail_epoch_chain`] on both the MDA and the client.
 #[must_use]
 pub fn open_mail_record_standing(
-    envelope: &crate::wrapped_blob::MailRecordEnvelope,
+    envelope: &MailRecordEnvelope,
+    keypairs: &[StandingMailKeypair],
+    retired_at_unix: &[u64],
+    seal_basis_unix: Option<u64>,
+) -> Option<Vec<u8>> {
+    open_record_standing(
+        RecordKind::Mail,
+        envelope,
+        keypairs,
+        retired_at_unix,
+        seal_basis_unix,
+    )
+}
+
+/// [`open_mail_record_standing`] for a record of any `kind` — the trial shared
+/// by the mail set and every [`StandingDavRing`]; a record of another kind
+/// opens under no keypair (each open checks the kind first).
+#[must_use]
+pub fn open_record_standing(
+    kind: RecordKind,
+    envelope: &MailRecordEnvelope,
     keypairs: &[StandingMailKeypair],
     retired_at_unix: &[u64],
     seal_basis_unix: Option<u64>,
@@ -721,9 +1122,9 @@ pub fn open_mail_record_standing(
             let kp = &keypairs[i];
             match kp.mlkem_dk.as_deref() {
                 Some(dk) => {
-                    crate::wrapped_blob::unseal_mail_record_hybrid(envelope, &kp.x25519_secret, dk)
+                    crate::wrapped_blob::unseal_record_hybrid(kind, envelope, &kp.x25519_secret, dk)
                 }
-                None => crate::wrapped_blob::unseal_mail_record(envelope, &kp.x25519_secret),
+                None => crate::wrapped_blob::unseal_record(kind, envelope, &kp.x25519_secret),
             }
             .ok()
         })
@@ -798,11 +1199,24 @@ pub fn build_mls_snapshot_plaintext(
         .copied()
         .take(mseks.len().saturating_sub(1))
         .collect();
+    // The calendar and card roots of the PRIOR generations — the same
+    // skip-the-current slice, so index i of every prior list describes
+    // `leaf_init_keypairs[i + 1]` (`owner-key-material.md` § Path
+    // B-sibling-5 → *Snapshot carriage*).
+    let dav_grace_roots = |kind: DavKind| -> Vec<ByteBuf> {
+        mseks
+            .iter()
+            .skip(1)
+            .map(|msek| ByteBuf::from(derive_dav_root(kind, msek).to_vec()))
+            .collect()
+    };
     MlsSnapshotPlaintext {
         leaf_init_keypairs,
         mail_epoch_grace_roots,
         index_seg_grace_keys,
         generation_retired_at_unix,
+        calendar_grace_roots: dav_grace_roots(DavKind::Calendar),
+        card_grace_roots: dav_grace_roots(DavKind::Card),
         ..Default::default()
     }
 }
@@ -1111,15 +1525,21 @@ mod tests {
         );
         let bytes = snap.to_canonical_bytes().unwrap();
         // The full 32-byte hash, as bytes (a hex string literal reads as key
-        // material to the publish scan).
+        // material to the publish scan). RE-PINNED 2026-10-23: the snapshot
+        // gained the additive `calendar_grace_roots` / `card_grace_roots`
+        // (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*),
+        // which a five-generation snapshot carries.
         assert_eq!(
             blake3::hash(&bytes).as_bytes(),
             &[
-                0xf3, 0xb0, 0x78, 0x40, 0xc1, 0xeb, 0x51, 0x85, 0x33, 0x08, 0xa1, 0x3e, 0x5d, 0x4f,
-                0x77, 0xc3, 0x24, 0x5f, 0xaf, 0x9a, 0xd0, 0x3b, 0x68, 0x84, 0xaa, 0x1a, 0x3f, 0x5b,
-                0xca, 0x05, 0xf0, 0xb8,
+                0x68, 0xfa, 0xa4, 0x87, 0xae, 0xec, 0xbf, 0xf1, 0x44, 0xc0, 0xe5, 0x5e, 0x86, 0x19,
+                0x5e, 0x07, 0xca, 0xff, 0xf8, 0x9a, 0xe4, 0x25, 0xa8, 0x7e, 0xd3, 0xca, 0xcf, 0x93,
+                0x72, 0x75, 0x83, 0x9b,
             ],
         );
+        for needle in [&b"calendar_grace_roots"[..], &b"card_grace_roots"[..]] {
+            assert!(bytes.windows(needle.len()).any(|w| w == needle));
+        }
         let needle = b"generation_retired_at_unix";
         assert!(bytes.windows(needle.len()).any(|w| w == needle));
         let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
@@ -1598,5 +2018,295 @@ mod tests {
         let wrong_mdk: [u8; fauna_pq_kem::MLKEM768_DECAPS_KEY_LEN] =
             wrong[32..].try_into().unwrap();
         assert!(unseal_mail_record_hybrid(&envelope, &wrong_sk, &wrong_mdk).is_err());
+    }
+
+    // ── calendar and card keypairs (§ Path B-sibling-5 / -6, 2026-10-23) ──
+
+    /// Golden bytes for every new derivation: the two roots, both keypairs'
+    /// X25519 halves, a hash of both ML-KEM encapsulation keys and of both
+    /// capability payloads. Calendar and card bodies at rest depend on these
+    /// being eternal once the first one is sealed.
+    #[test]
+    fn calendar_and_card_golden_bytes_pin_every_derive_context() {
+        // Expected values as byte arrays: a hex string literal reads as key
+        // material to the publish scan.
+        let msek = [7u8; 32];
+        let cal_root = derive_calendar_root(&msek);
+        let card_root = derive_card_root(&msek);
+        assert_eq!(
+            hex::encode(*cal_root),
+            hex::encode([
+                0x29, 0x20, 0x32, 0xf2, 0x09, 0x6c, 0xa6, 0x40, 0xe1, 0x46, 0xa0, 0x95, 0x6d, 0xd5,
+                0x5f, 0x34, 0x34, 0x03, 0xeb, 0x0b, 0x1e, 0x51, 0x22, 0x1d, 0x62, 0x2b, 0xc4, 0x70,
+                0xc9, 0x3c, 0x20, 0xc7,
+            ])
+        );
+        assert_eq!(
+            hex::encode(*card_root),
+            hex::encode([
+                0x19, 0x6c, 0x4f, 0x62, 0x37, 0x1a, 0x52, 0xd7, 0xc9, 0xdd, 0x22, 0xa9, 0xae, 0xc8,
+                0xff, 0x3b, 0x87, 0x94, 0x9a, 0x69, 0xce, 0x14, 0x56, 0x7e, 0x7e, 0x6e, 0xcb, 0xea,
+                0x60, 0xec, 0xce, 0xda,
+            ])
+        );
+        let (cal_sk, cal_pk) = derive_recipient_calendar_hpke_keypair(&cal_root);
+        let (card_sk, card_pk) = derive_recipient_card_hpke_keypair(&card_root);
+        assert_eq!(
+            hex::encode(cal_sk),
+            hex::encode([
+                0x27, 0x39, 0x36, 0x71, 0xe7, 0x27, 0x45, 0x6f, 0xe4, 0x93, 0x8b, 0x80, 0x59, 0x54,
+                0x38, 0xab, 0xc2, 0xb2, 0xfe, 0xd9, 0x76, 0x41, 0xc9, 0x44, 0x91, 0xd7, 0xcb, 0x60,
+                0x34, 0xfb, 0xf6, 0xb4,
+            ])
+        );
+        assert_eq!(
+            hex::encode(cal_pk),
+            hex::encode([
+                0xbf, 0x36, 0x00, 0xd9, 0xd0, 0x22, 0x79, 0x69, 0xb8, 0xa1, 0x5d, 0x02, 0x89, 0x39,
+                0xc1, 0x83, 0x0f, 0xce, 0x02, 0xa5, 0xc0, 0x5c, 0xa0, 0x5f, 0x51, 0x74, 0x5f, 0x3e,
+                0x73, 0x8f, 0xe6, 0x67,
+            ])
+        );
+        assert_eq!(
+            hex::encode(card_sk),
+            hex::encode([
+                0x9d, 0x30, 0x0f, 0x45, 0xb5, 0x22, 0x5b, 0x8a, 0x96, 0x01, 0x26, 0x52, 0xa5, 0xa4,
+                0x05, 0xd4, 0xc3, 0x0d, 0x1a, 0x77, 0xdb, 0xa5, 0x1b, 0x8c, 0x46, 0x03, 0xc1, 0x81,
+                0x6a, 0xa1, 0x3c, 0x45,
+            ])
+        );
+        assert_eq!(
+            hex::encode(card_pk),
+            hex::encode([
+                0x05, 0xd9, 0x53, 0x21, 0x8d, 0xc0, 0x52, 0x83, 0x3f, 0xa6, 0xbe, 0x0f, 0x81, 0xf0,
+                0x4a, 0x61, 0x39, 0xae, 0x1a, 0x44, 0x38, 0xb5, 0xc8, 0xca, 0xaf, 0xe6, 0x87, 0x50,
+                0xae, 0xee, 0x74, 0x46,
+            ])
+        );
+        let cal_ek = derive_recipient_calendar_xwing_keypair(&cal_root);
+        let card_ek = derive_recipient_card_xwing_keypair(&card_root);
+        assert_eq!(
+            hex::encode(blake3::hash(cal_ek.public.mlkem_encaps_key()).as_bytes()),
+            hex::encode([
+                0x48, 0x48, 0x7b, 0x40, 0x46, 0x30, 0x9f, 0xb2, 0x67, 0x05, 0x5d, 0x73, 0xc0, 0xb3,
+                0x73, 0x12, 0x5a, 0x2f, 0x46, 0x5c, 0xa5, 0x1e, 0x62, 0x62, 0xfb, 0x28, 0xda, 0x72,
+                0x3e, 0xa9, 0x87, 0x8a,
+            ])
+        );
+        assert_eq!(
+            hex::encode(blake3::hash(card_ek.public.mlkem_encaps_key()).as_bytes()),
+            hex::encode([
+                0x30, 0x21, 0xe2, 0x0b, 0x5c, 0x6f, 0x8a, 0xcb, 0x6e, 0x01, 0xc9, 0x69, 0x27, 0x5f,
+                0x13, 0xb7, 0xcb, 0xae, 0xe4, 0x83, 0xc9, 0xd0, 0xf8, 0xf8, 0xd5, 0x19, 0xa4, 0x4d,
+                0x1e, 0x8c, 0x60, 0x87,
+            ])
+        );
+        assert_eq!(
+            hex::encode(
+                blake3::hash(&derive_recipient_calendar_capability_secret(&msek)).as_bytes()
+            ),
+            hex::encode([
+                0x00, 0x66, 0xa7, 0xa3, 0x98, 0x00, 0x86, 0xb3, 0x39, 0x71, 0x25, 0x70, 0xe7, 0x3f,
+                0x1a, 0xdc, 0x64, 0xe2, 0xd3, 0x7c, 0x41, 0x75, 0x1a, 0x31, 0xd6, 0x86, 0x08, 0xc4,
+                0x04, 0xfb, 0x2d, 0x65,
+            ])
+        );
+        assert_eq!(
+            hex::encode(blake3::hash(&derive_recipient_card_capability_secret(&msek)).as_bytes()),
+            hex::encode([
+                0x37, 0x95, 0x4d, 0x5d, 0xd6, 0x45, 0x2d, 0xae, 0x44, 0x6d, 0xc2, 0x88, 0x94, 0xe5,
+                0x0c, 0x36, 0x62, 0x83, 0x58, 0x02, 0x1f, 0x8d, 0xef, 0x40, 0xb4, 0x91, 0xd9, 0x2b,
+                0xe2, 0xb2, 0xaa, 0xf6,
+            ])
+        );
+    }
+
+    /// Rule #3's domain separation is real: the calendar, card and mail keys of
+    /// one MSEK are pairwise distinct, each X-Wing keypair reuses its own X25519
+    /// half, and both payloads keep the mail payload's 2432-byte contract.
+    #[test]
+    fn dav_keypairs_are_domain_separated_and_keep_the_payload_contract() {
+        let msek = [11u8; 32];
+        let (_, mail_pk) = derive_recipient_hpke_keypair(&msek);
+        let (_, cal_pk) = derive_recipient_calendar_hpke_keypair(&derive_calendar_root(&msek));
+        let (_, card_pk) = derive_recipient_card_hpke_keypair(&derive_card_root(&msek));
+        assert_ne!(mail_pk, cal_pk);
+        assert_ne!(mail_pk, card_pk);
+        assert_ne!(cal_pk, card_pk);
+        assert_ne!(*derive_calendar_root(&msek), *derive_card_root(&msek));
+        assert_ne!(*derive_calendar_root(&msek), *derive_mail_epoch_root(&msek));
+        let cal_xwing = derive_recipient_calendar_xwing_keypair(&derive_calendar_root(&msek));
+        assert_eq!(cal_xwing.public.x25519_public(), &cal_pk);
+        assert_ne!(
+            cal_xwing.public.mlkem_encaps_key(),
+            derive_recipient_xwing_keypair(&msek)
+                .public
+                .mlkem_encaps_key()
+        );
+        let mail = derive_recipient_mail_capability_secret(&msek);
+        for payload in [
+            derive_recipient_calendar_capability_secret(&msek),
+            derive_recipient_card_capability_secret(&msek),
+        ] {
+            assert_eq!(payload.len(), mail.len());
+            assert_ne!(payload[..32], mail[..32]);
+        }
+        // Fleet-consistent: another derivation of the same MSEK agrees.
+        assert_eq!(
+            derive_recipient_calendar_capability_secret(&msek),
+            derive_recipient_calendar_capability_secret(&msek)
+        );
+    }
+
+    /// Open a record with a 2432-byte capability payload under `kind`.
+    fn open_with_payload(
+        kind: RecordKind,
+        envelope: &MailRecordEnvelope,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, UnwrapError> {
+        let sk: [u8; 32] = payload[..32].try_into().unwrap();
+        let dk: [u8; fauna_pq_kem::MLKEM768_DECAPS_KEY_LEN] = payload[32..].try_into().unwrap();
+        crate::wrapped_blob::unseal_record_hybrid(kind, envelope, &sk, &dk)
+    }
+
+    /// **The test that pins the design** (`owner-key-material.md` § Path
+    /// B-sibling-5 → *Capability payload*): a `content.read{calendar}` payload
+    /// opens a `calendar-record` and NOT a `mail-record` or a `card-record`; a
+    /// `content.read{mail}` payload opens no `calendar-record`; a card ring
+    /// opens no calendar record. Each refusal is tried both ways — under the
+    /// record's own kind (the key misses) and under the payload's kind (the
+    /// envelope kind refuses) — so neither layer alone carries the guarantee.
+    #[test]
+    fn a_calendar_payload_opens_calendar_records_and_nothing_else() {
+        use crate::wrapped_blob::{seal_record_to_recipient_xwing, seal_to_recipient_xwing};
+        let msek = [23u8; 32];
+        let cal_pub = derive_recipient_calendar_xwing_keypair(&derive_calendar_root(&msek)).public;
+        let card_pub = derive_recipient_card_xwing_keypair(&derive_card_root(&msek)).public;
+        let mail_pub = derive_recipient_xwing_keypair(&msek).public;
+        let calendar_record =
+            seal_record_to_recipient_xwing(RecordKind::Calendar, b"VEVENT", &cal_pub).unwrap();
+        let card_record =
+            seal_record_to_recipient_xwing(RecordKind::Card, b"VCARD", &card_pub).unwrap();
+        let mail_record = seal_to_recipient_xwing(b"RFC 5322", &mail_pub).unwrap();
+
+        let calendar_payload = derive_recipient_calendar_capability_secret(&msek);
+        let mail_payload = derive_recipient_mail_capability_secret(&msek);
+
+        assert_eq!(
+            open_with_payload(RecordKind::Calendar, &calendar_record, &calendar_payload).unwrap(),
+            b"VEVENT"
+        );
+        for kind in [RecordKind::Mail, RecordKind::Calendar] {
+            assert!(open_with_payload(kind, &mail_record, &calendar_payload).is_err());
+        }
+        for kind in [RecordKind::Card, RecordKind::Calendar] {
+            assert!(open_with_payload(kind, &card_record, &calendar_payload).is_err());
+        }
+        for kind in [RecordKind::Calendar, RecordKind::Mail] {
+            assert!(open_with_payload(kind, &calendar_record, &mail_payload).is_err());
+        }
+        assert_eq!(
+            open_with_payload(RecordKind::Mail, &mail_record, &mail_payload).unwrap(),
+            b"RFC 5322"
+        );
+        // The mail opener family refuses the calendar record by kind.
+        let mail_ring = derive_standing_mail_keypairs(&[msek]);
+        assert!(open_mail_record_standing(&calendar_record, &mail_ring, &[], None).is_none());
+        // A card ring opens no calendar record; a calendar ring opens its own.
+        let card_ring = StandingDavRing::from_mseks(DavKind::Card, &msek, &[]);
+        assert!(matches!(
+            card_ring.open(&calendar_record),
+            Err(UnwrapError::InvalidFormat(_))
+        ));
+        assert_eq!(card_ring.open(&card_record).unwrap(), b"VCARD");
+        let cal_ring = StandingDavRing::from_mseks(DavKind::Calendar, &msek, &[]);
+        assert_eq!(cal_ring.open(&calendar_record).unwrap(), b"VEVENT");
+        assert!(cal_ring.open(&mail_record).is_err());
+    }
+
+    /// The snapshot carries one calendar and one card root per PRIOR
+    /// generation (never the current one), aligned with the leaf list; the
+    /// MDA's ring built from the session MSEK + those roots equals the apps'
+    /// ring from the MSEK history — a calendar body sealed two rotations ago
+    /// opens through both.
+    #[test]
+    fn snapshot_carries_dav_grace_roots_and_both_rings_agree() {
+        let mseks = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let snap = build_mls_snapshot_plaintext(&mseks, &[300, 200]);
+        assert_eq!(snap.calendar_grace_roots.len(), 2);
+        assert_eq!(snap.card_grace_roots.len(), 2);
+        assert_eq!(
+            snap.calendar_grace_roots[1].as_slice(),
+            derive_calendar_root(&[3u8; 32]).as_slice()
+        );
+        assert_eq!(
+            snap.card_grace_roots[0].as_slice(),
+            derive_card_root(&[2u8; 32]).as_slice()
+        );
+        let current_cal = derive_calendar_root(&[1u8; 32]);
+        assert!(
+            !snap
+                .calendar_grace_roots
+                .iter()
+                .any(|r| r.as_slice() == current_cal.as_slice()),
+            "the current generation's calendar root must never ride the snapshot"
+        );
+
+        let bytes = snap.to_canonical_bytes().unwrap();
+        let decoded = MlsSnapshotPlaintext::from_canonical_bytes(&bytes).unwrap();
+        assert_eq!(decoded.calendar_grace_roots, snap.calendar_grace_roots);
+        assert_eq!(decoded.card_grace_roots, snap.card_grace_roots);
+
+        let old_pub =
+            derive_recipient_calendar_xwing_keypair(&derive_calendar_root(&[3u8; 32])).public;
+        let sealed = crate::wrapped_blob::seal_record_to_recipient_xwing(
+            RecordKind::Calendar,
+            b"sealed two rotations ago",
+            &old_pub,
+        )
+        .unwrap();
+        let mda = StandingDavRing::from_msek_and_grace_roots(
+            DavKind::Calendar,
+            &mseks[0],
+            &decoded.dav_grace_roots(DavKind::Calendar),
+        );
+        let apps = StandingDavRing::from_mseks(DavKind::Calendar, &mseks[0], &mseks[1..]);
+        assert_eq!(mda.len(), 3);
+        for ring in [&mda, &apps] {
+            assert_eq!(ring.open(&sealed).unwrap(), b"sealed two rotations ago");
+        }
+        // The card grace list is the card ring's, not the calendar's.
+        let card_mda = StandingDavRing::from_msek_and_grace_roots(
+            DavKind::Card,
+            &mseks[0],
+            &decoded.dav_grace_roots(DavKind::Card),
+        );
+        assert!(card_mda.open(&sealed).is_err());
+    }
+
+    /// Both DAV grace lists are additive: omitted when empty, so a
+    /// single-generation snapshot keeps its pre-split bytes; a wrong-length
+    /// root is refused.
+    #[test]
+    fn dav_grace_root_fields_are_additive_and_length_checked() {
+        let single = build_mls_snapshot_plaintext(&[[1u8; 32]], &[]);
+        let bytes = single.to_canonical_bytes().unwrap();
+        for needle in [&b"calendar_grace_roots"[..], &b"card_grace_roots"[..]] {
+            assert!(!bytes.windows(needle.len()).any(|w| w == needle));
+        }
+        for card in [false, true] {
+            let mut snap = build_mls_snapshot_plaintext(&[[1u8; 32], [2u8; 32]], &[]);
+            let list = if card {
+                &mut snap.card_grace_roots
+            } else {
+                &mut snap.calendar_grace_roots
+            };
+            list[0] = ByteBuf::from(vec![0u8; 31]);
+            let bytes = snap.to_canonical_bytes().unwrap();
+            assert!(matches!(
+                MlsSnapshotPlaintext::from_canonical_bytes(&bytes),
+                Err(UnwrapError::InvalidFormat(_))
+            ));
+        }
     }
 }

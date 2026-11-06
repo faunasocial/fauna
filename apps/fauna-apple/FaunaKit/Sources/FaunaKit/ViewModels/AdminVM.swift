@@ -384,7 +384,13 @@ public class AdminVM {
     /// `nil`, the deliberate handle-less admission (public-mode.md § A
     /// handle-less account). The form is never cleared here on success or
     /// failure — the new row in the Users-section refetch is the feedback.
-    public func admitUser(actorHex: String, handle: String, tier: String) async {
+    /// `guardian` (from `admin-users-admit-guardian-select`) makes the admitted
+    /// account supervised in the same transaction; `ageBand` (from
+    /// `admin-users-admit-age-band-select`) rides only beside a guardian, like
+    /// the mint path. The nest refuses a guardian on a handle-less admit —
+    /// surfaced through `actionError`.
+    public func admitUser(actorHex: String, handle: String, tier: String,
+                          guardian: Data? = nil, ageBand: String? = nil) async {
         let trimmed = actorHex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count == 64, trimmed.allSatisfy({ $0.isHexDigit }) else {
             actionError = L.admin.usersPage.admitActorHint
@@ -396,7 +402,7 @@ public class AdminVM {
         do {
             try await admin().usersCreate(
                 actorId: actorId, tier: tier, handle: trimmedHandle.isEmpty ? nil : trimmedHandle,
-                guardianActor: nil, ageBand: nil)
+                guardianActor: guardian, ageBand: guardian == nil ? nil : ageBand)
             await loadUsers()
         } catch {
             actionError = error.localizedDescription

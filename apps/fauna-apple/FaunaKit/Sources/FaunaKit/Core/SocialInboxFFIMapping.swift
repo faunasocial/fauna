@@ -27,14 +27,17 @@ extension Contact {
         // (contacts.md § Contact roster filter) — `nil` for a federated peer.
         self.init(peerId: ffi.peerId, status: ffi.status,
                   updatedAt: ffi.acceptedAt.map(Int.init),
-                  handle: ffi.handle, domain: ffi.domain)
+                  handle: ffi.handle, domain: ffi.domain,
+                  homeNestUrl: ffi.homeNestUrl)
     }
 }
 
 extension NotificationItem {
-    init(ffi: FfiNotifItem) {
-        // `body` paints the shared `notification_text_for` decision
-        // (`notifications.md` § Localized body): the catalog sentence for a
+    init(ffi: FfiNotifItem, overlays: FfiContactOverlays) {
+        // `body` paints the shared `notification_text_naming_for` decision
+        // (`notifications.md` § Localized body, with a fauna-native row's
+        // `{sender}` named as the viewer calls that person — § *The sender arg*,
+        // through the held contact overlay projection): the catalog sentence for a
         // `.localized` key this build's `L` table carries, resolved through
         // `renderLocalizedText` — never `renderLocalizedTextNested`, a
         // notification's args are relayed data (a display name, a count),
@@ -53,7 +56,7 @@ extension NotificationItem {
         // an inert row, and dropping `subjectUri` until 2026-09-25 is why a
         // bridged row could not carry its off-app destination.
         let text: String
-        switch notificationTextFor(item: ffi) {
+        switch notificationTextNamingFor(item: ffi, overlays: overlays) {
         case let .localized(localizedText): text = renderLocalizedText(localizedText)
         case let .verbatim(verbatimText): text = verbatimText
         }
@@ -68,7 +71,7 @@ extension NotificationItem {
 
 /// `knockTextFor`'s decision (`notifications.md` § The knock toast), resolved
 /// through this app's i18n pipeline exactly like `NotificationItem.init(ffi:)`
-/// resolves `notificationTextFor` above: the knock row's own sentence for a
+/// resolves `notificationTextNamingFor` above: the knock row's own sentence for a
 /// body this build's catalog knows, else the toast's own sentence naming the
 /// sender. Pulled out of `NotificationManager.postKnockNotification` as its
 /// own function so the resolution is testable without a notification host

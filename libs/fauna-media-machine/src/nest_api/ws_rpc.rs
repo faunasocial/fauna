@@ -43,6 +43,8 @@ impl From<fauna_protocol::files::FileVersionInfo> for FileVersionSummary {
             pruned: v.pruned.unwrap_or(false),
             purge_after: v.purge_after,
             folder_id: v.folder_id,
+            thumbnail_hash: v.thumbnail_hash,
+            deposited_by: v.deposited_by,
         }
     }
 }
@@ -178,9 +180,13 @@ where
     }
 
     async fn do_media_snapshot(&self) -> Result<MediaSnapshot, MediaApiError> {
-        let (items, _) = self.judged_media().await?;
+        let (items, tally) = self.judged_media().await?;
+        // The held count rides the snapshot: a held row is absent from THIS
+        // listing only, and the page machine must not read its absence as
+        // "nothing here" (`ui/README.md` § List pages: loading is not empty).
         Ok(MediaSnapshot {
             items,
+            held: tally.held,
             ..Default::default()
         })
     }
@@ -457,10 +463,12 @@ where
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError> {
         // Restore = re-point (file-sync.md § Restore): an ordinary `modify`
-        // carrying the historical manifest + its sealed-set generation verbatim.
+        // carrying the historical manifest + its sealed-set generation verbatim,
+        // and the version's thumbnail manifest (verbatim or re-sealed with it).
         // The record shape is shared (`SyncClient::restore_version`) so Media and
         // the Windows shell-extension verb can never drift apart. Self-healing like
         // the other Media writes — restore works from a folder-less control-plane
@@ -478,6 +486,7 @@ where
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
                 folder_id.map(fauna_core::folder_keys::FolderRef::Local),
             )
@@ -538,6 +547,7 @@ where
                 // anchor — causality honestly unknown (readers treat the row
                 // as anchor-less; the merge licence never fires on media
                 // binaries anyway).
+                None,
                 None,
                 None,
                 row,
@@ -664,6 +674,7 @@ mod native {
             manifest_hash: String,
             size_bytes: i64,
             content_key_version: Option<u64>,
+            thumbnail_hash: Option<String>,
             path_sealed: Option<Vec<u8>>,
         ) -> Result<(), MediaApiError> {
             self.do_restore_member(
@@ -674,6 +685,7 @@ mod native {
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
             )
             .await
@@ -684,12 +696,11 @@ mod native {
     /// entry the linux app + `fauna-ffi` call.
     ///
     /// Injects the native [`NativeBlobUploader`](crate::blob_uploader::NativeBlobUploader)
-    /// (the `upload` POST leg) + the native
-    /// [`NativeBlobFetcher`](crate::blob_fetcher::NativeBlobFetcher) (the
-    /// `fetch_thumbnail` GET-by-hash leg) — both built from `nest`'s `AuthClient`
-    /// (pinned http + shared bearer) — so `upload` POSTs + `fetch_thumbnail`
-    /// downloads over the bulk-binary `/api/v1/blob` carve-out, and `delete` rides
-    /// WS-RPC. The whole content plane works on all four native apps.
+    /// (the `upload` chunk + manifest POST leg) + the native chunk fetcher (the
+    /// `download_file` / `fetch_thumbnail` manifest walk — a thumbnail rests as
+    /// its file rests) — both built from `nest`'s `AuthClient` (pinned http +
+    /// shared bearer) — and `delete` rides WS-RPC. The whole content plane works
+    /// on all four native apps.
     pub fn build_media_machine(
         nest: Arc<NestClient>,
         observer: Arc<dyn MediaObserver>,
@@ -714,8 +725,6 @@ mod native {
         // moved into the WS-RPC api.
         let uploader: Arc<dyn crate::blob_uploader::MediaBlobUploader> =
             Arc::new(crate::blob_uploader::NativeBlobUploader::new(&nest));
-        let fetcher: Arc<dyn crate::blob_fetcher::MediaBlobFetcher> =
-            Arc::new(crate::blob_fetcher::NativeBlobFetcher::new(&nest));
         // The full-file download leg: the neutral-home `fauna-client` binding
         // (priority #2 dedup — it used to be a media-local copy,
         // `NativeDownloadFetcher`, byte-for-byte identical to this).
@@ -744,14 +753,7 @@ mod native {
             seam = seam.with_row_nonces(fauna_client_sync::SetNonceSource::Resolver(resolver));
         }
         let api: Arc<dyn MediaNestApi> = Arc::new(seam);
-        let machine = MediaMachine::new(
-            observer,
-            api,
-            Some(uploader),
-            Some(fetcher),
-            Some(download),
-            folder_keys,
-        );
+        let machine = MediaMachine::new(observer, api, Some(uploader), Some(download), folder_keys);
         // Cross-nest downloads (a foreign shared set, a followed public folder
         // homed elsewhere): the bytes come straight off the home nest's public
         // routes, integrity by content address, the TLS verified against the
@@ -881,6 +883,7 @@ mod wasm {
             manifest_hash: String,
             size_bytes: i64,
             content_key_version: Option<u64>,
+            thumbnail_hash: Option<String>,
             path_sealed: Option<Vec<u8>>,
         ) -> Result<(), MediaApiError> {
             self.do_restore_member(
@@ -891,6 +894,7 @@ mod wasm {
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
             )
             .await
@@ -899,15 +903,12 @@ mod wasm {
 
     /// Build a [`MediaMachine`] over the SPA's browser `WsRpcClient`.
     ///
-    /// Injects both wasm blob seams — the [`WasmBlobUploader`](crate::blob_uploader::WasmBlobUploader)
-    /// (LEG B — the `upload` POST leg, a `gloo-net` fetch + `web-sys` FormData
-    /// multipart carrying the JS-provided bearer) and the
-    /// [`WasmBlobFetcher`](crate::blob_fetcher::WasmBlobFetcher) (LEG B's render
-    /// twin — the `fetch_thumbnail` GET-by-hash leg over the public by-hash route,
-    /// no bearer) — both built from the SPA's session, mirroring native. So
-    /// `upload` POSTs + `fetch_thumbnail` downloads over the bulk-binary
-    /// `/api/v1/blob` carve-out, and `delete` rides WS-RPC. The whole content plane
-    /// now works on web too.
+    /// Injects both wasm byte seams — the [`WasmBlobUploader`](crate::blob_uploader::WasmBlobUploader)
+    /// (the `upload` chunk + manifest POST leg, carrying the JS-provided bearer)
+    /// and the public chunk fetcher (the `download_file` / `fetch_thumbnail`
+    /// manifest walk — a thumbnail rests as its file rests) — both built from the
+    /// SPA's session, mirroring native; `delete` rides WS-RPC. The whole content
+    /// plane works on web too.
     ///
     /// Owner-only Media (no folder custody resolver) — the same default as the
     /// native `build_media_machine`, for a client whose Media page reads no
@@ -948,8 +949,6 @@ mod wasm {
         // moved into the WS-RPC api; `WsRpcClient` is a cheap `Rc` handle (clone).
         let uploader: Arc<dyn crate::blob_uploader::MediaBlobUploader> =
             Arc::new(crate::blob_uploader::WasmBlobUploader::new(nest.clone()));
-        let fetcher: Arc<dyn crate::blob_fetcher::MediaBlobFetcher> =
-            Arc::new(crate::blob_fetcher::WasmBlobFetcher::new(nest.clone()));
         // The full-file download leg: the neutral-home `fauna-core` binding
         // (priority #2 dedup — it used to be a media-local copy,
         // `WasmDownloadFetcher`, byte-for-byte identical to this).
@@ -980,14 +979,7 @@ mod wasm {
             seam = seam.with_row_nonces(fauna_client_sync::SetNonceSource::Resolver(resolver));
         }
         let api: Arc<dyn MediaNestApi> = Arc::new(seam);
-        let machine = MediaMachine::new(
-            observer,
-            api,
-            Some(uploader),
-            Some(fetcher),
-            Some(download),
-            folder_keys,
-        );
+        let machine = MediaMachine::new(observer, api, Some(uploader), Some(download), folder_keys);
         // Cross-nest shared-set downloads (Phase 2): browsers reach a foreign
         // nest's public byte routes directly — the S6 route-scoped permissive
         // CORS on exactly those two GETs is what makes this fetch legal; the
@@ -1907,6 +1899,7 @@ mod tests {
                 "abc123".into(),
                 42,
                 Some(5),
+                Some("feed01".into()),
                 Some(vec![9u8; 40]),
             )
             .await;
@@ -1922,7 +1915,9 @@ mod tests {
         assert_eq!(rec.manifest_hash.as_deref(), Some("abc123"));
         assert_eq!(rec.size_bytes, 42);
         assert_eq!(rec.content_key_version, Some(5));
-        assert_eq!(rec.thumbnail_hash, None);
+        // The version's thumbnail rides the record (media.md § Encryption at
+        // rest → *A thumbnail rests as its file rests*).
+        assert_eq!(rec.thumbnail_hash.as_deref(), Some("feed01"));
         assert_eq!(
             rec.path_sealed.as_ref().map(|b| &b[..]),
             Some(&[9u8; 40][..])

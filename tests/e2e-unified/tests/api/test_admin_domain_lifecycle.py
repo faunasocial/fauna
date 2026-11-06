@@ -336,3 +336,41 @@ def test_the_first_domain_added_to_a_domainless_nest_becomes_its_name_at_once(do
         assert after.get("web_serving_domain") == first, (
             f"the web address did not follow the first added domain: "
             f"{after.get('web_serving_domain')!r}")
+
+
+@pytest.mark.feature("admin-dns-and-certificates")
+def test_a_new_domains_mta_sts_policy_starts_in_testing_and_the_nest_enforces_it_itself(
+    domain_nest,
+):
+    """Outcome 38 (`mail-multidomain.md` § Wizard steps; § The advance): a
+    domain the admin adds starts ``testing`` — even when the add asks for
+    ``enforce``, since the wire carries no mode to set — and the nest's own
+    advance moves it to ``enforce`` once seven days have passed, never before.
+
+    The advance runs through the ``test-hooks`` clock seam, the production
+    statement at a shifted clock. It skips the trust half (a CA-issued mail
+    certificate), which a harness nest never serves; that half is the
+    ``mta_sts_advance`` unit tests'."""
+    from tests.api.test_primary_domain_rename_lifecycle import _advance_mta_sts
+
+    with _admin(domain_nest) as admin:
+        _set_host_address(admin)
+        _ensure_primary(admin)
+        added = f"added-{secrets.token_hex(3)}.example"
+        admin.call("fauna.bridges.add_local_domain", {
+            "domain": added,
+            "mta_sts_cert_mode": "expand_primary",
+            "mta_sts_mode": "enforce",
+        })
+
+        def mode() -> str:
+            listed = admin.call("fauna.bridges.list_local_domains", {})["active"]
+            return {d["domain_name"]: d["mta_sts_mode"] for d in listed}[added]
+
+        assert mode() == "testing", "a new domain starts in testing, whatever the add asked"
+
+        assert added not in _advance_mta_sts(domain_nest, 6), "moved before its seven days"
+        assert mode() == "testing"
+
+        assert added in _advance_mta_sts(domain_nest, 8), "the nest did not move it itself"
+        assert mode() == "enforce"

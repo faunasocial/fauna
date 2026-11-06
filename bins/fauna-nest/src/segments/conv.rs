@@ -1282,4 +1282,169 @@ mod tests {
         assert_eq!(rows[0].1, b"conv-body-2".to_vec());
         assert_eq!(rows[1].1, b"conv-body-3".to_vec());
     }
+
+    /// Both withhold flags survive compaction. A taken-down
+    /// record and an admin-blocked one are compacted into a new segment; on
+    /// the fresh live rows each stays withheld on both read primitives
+    /// (`channel.fetch` / `federation.channel.fetch` and the paired
+    /// `mls.pull`), the taken-down record's attachment stays in the blob
+    /// withhold's input under its ground, and a block of a record compacted
+    /// BEFORE it was reported still lands on its one live copy (the tombstoned
+    /// input row beside it is history, never a second copy).
+    #[tokio::test]
+    async fn compaction_carries_both_withhold_flags_and_a_compacted_record_can_be_blocked() {
+        use crate::db::admin_block::{AdminBlockTarget, AdminBlockWrite};
+        use crate::db::blob_withhold::WithholdGround;
+        use crate::db::moderation::{AbuseReportInsert, NewAbuseReport};
+
+        let (_tmp, mgr, cache_db) = setup();
+        // Distinct channel id — for-test segment dirs are PID-shared.
+        let channel = [0x2fu8; 32];
+        let attachment = [0x77u8; 32];
+        let dead = b"sealed-dead-payload".to_vec();
+        let taken_down = b"sealed-taken-down-payload".to_vec();
+        let blocked = b"sealed-blocked-payload".to_vec();
+        let later = b"sealed-reported-after-compaction".to_vec();
+        append(&mgr, &cache_db, &channel, &dead, 1_715_000_000_000)
+            .await
+            .expect("append dead");
+        append_with_refs(
+            &mgr,
+            &cache_db,
+            &channel,
+            &taken_down,
+            1_715_000_001_000,
+            &[attachment],
+            None,
+        )
+        .await
+        .expect("append taken down");
+        append(&mgr, &cache_db, &channel, &blocked, 1_715_000_002_000)
+            .await
+            .expect("append blocked");
+        append(&mgr, &cache_db, &channel, &later, 1_715_000_003_000)
+            .await
+            .expect("append later");
+
+        let report = |subject: &str, reason: &str| NewAbuseReport {
+            reporter_actor: [0x31; 32],
+            subject_kind: "message".into(),
+            subject_id: subject.repeat(32),
+            subject_channel: Some(hex::encode(channel)),
+            subject_actor: None,
+            reason: reason.into(),
+            note: None,
+            excerpt: None,
+            block_author: false,
+        };
+        let open_report = |row: AbuseReportInsert| match row {
+            AbuseReportInsert::Inserted(row) => row,
+            other => panic!("unexpected {other:?}"),
+        };
+        let first = open_report(
+            cache_db
+                .insert_abuse_report(report("ab", "harassment"), 10, 1)
+                .await
+                .expect("report"),
+        );
+        assert_eq!(
+            cache_db
+                .set_conv_legal_takedown(&record_cid_of(&taken_down), Some("court-order-7"))
+                .await
+                .expect("take down"),
+            1
+        );
+        assert_eq!(
+            cache_db
+                .set_conv_admin_block(&record_cid_of(&blocked), Some(&first.id))
+                .await
+                .expect("block"),
+            1
+        );
+
+        mgr.finalize_open(&channel).await.expect("finalize");
+        tombstone_up_to_seq(&cache_db, &[channel], 1)
+            .await
+            .expect("tombstone");
+        let plan = CompactionPlan {
+            inputs: vec![1],
+            bucket: "2024-05".to_string(),
+        };
+        let outcome = compact_bucket(&mgr, &cache_db, &channel, &plan)
+            .await
+            .expect("compact");
+        assert!(outcome.new_segment.is_some(), "three records survived");
+
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 0, 100, None)
+            .await
+            .expect("read");
+        assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2, 3, 4]);
+        assert!(rows[0].1.is_empty(), "the taken-down body stays withheld");
+        assert_eq!(rows[0].2.legal_takedown.as_deref(), Some("court-order-7"));
+        assert!(rows[1].1.is_empty(), "the blocked body stays withheld");
+        assert_eq!(rows[1].2.admin_block.as_deref(), Some("harassment"));
+        assert_eq!(rows[2], (4, later.clone(), ConvWithhold::default()));
+        let scoped = read_for_scopes_after_seq(&mgr, &cache_db, &[channel], 0, 100, None)
+            .await
+            .expect("scoped read");
+        assert!(scoped[0].2.is_empty() && scoped[0].3.legal_takedown.is_some());
+        assert!(scoped[1].2.is_empty() && scoped[1].3.admin_block.is_some());
+        assert_eq!(
+            cache_db
+                .conv_attachment_refs_by_withhold()
+                .await
+                .expect("withhold input"),
+            vec![(attachment, Some(WithholdGround::Legal))],
+            "the compacted record's attachment stays withheld under its ground"
+        );
+
+        // A record reported only after compaction: its (channel, cid) names a
+        // tombstoned input row and the live successor; the block lands on the
+        // one live copy.
+        let target = AdminBlockTarget::Conversation {
+            record_cid: record_cid_of(&later),
+            channel: Some(channel),
+        };
+        assert!(
+            cache_db
+                .conv_record_in_scope(&channel, &record_cid_of(&later))
+                .await
+                .expect("in scope")
+        );
+        let second = open_report(
+            cache_db
+                .insert_abuse_report(report("cd", "spam"), 10, 2)
+                .await
+                .expect("second report"),
+        );
+        let write = cache_db
+            .admin_block_txn(
+                &target,
+                &"cd".repeat(32),
+                &second.id,
+                "spam",
+                &[0x01; 32],
+                "test",
+                3,
+            )
+            .await
+            .expect("block a compacted record");
+        assert!(
+            matches!(write, AdminBlockWrite::Blocked { .. }),
+            "{write:?}"
+        );
+        let rows = read_after_seq(&mgr, &cache_db, &channel, 3, 100, None)
+            .await
+            .expect("read blocked");
+        assert!(rows[0].1.is_empty());
+        assert_eq!(rows[0].2.admin_block.as_deref(), Some("spam"));
+        let listed: Vec<String> = cache_db
+            .list_admin_blocks()
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|r| r.report.id)
+            .collect();
+        assert_eq!(listed.len(), 2, "each block listed once: {listed:?}");
+    }
 }

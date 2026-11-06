@@ -21,6 +21,7 @@ Stamped 2026-10-01 at 308c995169.
    - `tests/e2e-unified/tests/test_factory_reset_reonboard.py::test_factory_reset_navigate_prefills_claim_code`
    - `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds`
    - `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_from_the_page_reclaims_and_the_pinned_app_reconnects_unwarned`
+   - `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_right_after_a_wizard_claim_keeps_its_claim_code`
 2. [app] If the app is killed in the middle of claiming, resetting, adding or removing a domain, or turning mail on or off — or the nest is killed in the middle of adding a domain, turning mail off or revoking a helper's key — reopening the app finds the nest either finished or ready to do it again, with no command line involved — `docs/goal/architecture/nest/common.md` § Client-state recoverability (absolute invariant)
    - `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_claim_box_recovers`
    - `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds`
@@ -59,6 +60,7 @@ Stamped 2026-10-01 at 308c995169.
     - `tests/e2e-unified/tests/test_factory_reset_mail.py::test_mail_is_accepted_and_delivered_again_after_a_reset_and_reclaim`
 15. [app] Once a reset has wiped the app's own sign-in, the next launch starts from the beginning — choose or create an identity — and never tries to sign the old identity back in — `docs/goal/behavior/onboarding.md` § App-launch routing
     - `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch`
+    - `tests/e2e-unified/tests/test_sign_out_web.py::test_web_next_load_after_the_sign_in_is_wiped_starts_from_identity_choice`
 16. [nest] Straight after a reset the nest serves nothing — mail, calendar, contacts and files are all off — until it is claimed and they are switched on again — `docs/goal/architecture/nest/common.md` § Factory reset
     - `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_nothing_is_served_after_a_reset_until_mail_is_switched_on`
 
@@ -67,42 +69,44 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| linux | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+c9e7fe5d standalone |
+| macos | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| ios | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+c9e7fe5d standalone |
+| tui | ⚠ partial | 0.1.5-dev+c9e7fe5d standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_factory_reset_reonboard.py::test_factory_reset_navigate_prefills_claim_code` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_from_the_page_reclaims_and_the_pinned_app_reconnects_unwarned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_claim_box_recovers` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_failed_factory_reset_does_not_trap_the_client` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_domain_add_box_recovers` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_domain_remove_box_recovers` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` | web (linux): failed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_disable_box_recovers` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_domain_add_boot_reconciles` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_admin_mail_disable_reconciles` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_mta_revoke_leaves_dkim_key_untouched` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 3 | app | `tests/e2e-unified/tests/test_factory_reset_confirm.py::test_factory_reset_first_click_wipes_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_only_an_admin_can_factory_reset` | nest (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_from_the_page_reclaims_and_the_pinned_app_reconnects_unwarned` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/test_factory_reset_mail.py::test_a_reset_erases_every_account_handle_grant_domain_address_and_message` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_the_nest_keeps_its_certificate_through_a_reset` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_member_whose_nest_was_reset_is_told_and_offered_a_fresh_start` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_whose_claim_code_cannot_be_kept_is_refused` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_within_grace_failed_reset_honors_fresh_slot_with_visible_exit` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_reopening_while_the_reset_nest_is_down_keeps_the_reclaim` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_each_account_keeps_its_own_pending_reset` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_factory_reset_calendar_reclaim.py::test_calendar_works_after_factory_reset_reclaim` | web (linux): skipped, linux (linux): passed, windows (windows): skipped, macos (macos): failed, ios (macos): failed, tui (linux): skipped |
-| 13 | app | `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_docker.py::test_calendar_works_after_factory_reset_reclaim_docker` | linux (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/test_factory_reset_mail.py::test_mail_is_accepted_and_delivered_again_after_a_reset_and_reclaim` | nest (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_nothing_is_served_after_a_reset_until_mail_is_switched_on` | nest (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_from_the_page_reclaims_and_the_pinned_app_reconnects_unwarned` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_right_after_a_wizard_claim_keeps_its_claim_code` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_claim_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_factory_reset_floor_holds` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_failed_factory_reset_does_not_trap_the_client` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_domain_add_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_domain_remove_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_enable_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_client_mid_mail_disable_box_recovers` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_domain_add_boot_reconciles` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_admin_mail_disable_reconciles` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_kill_nest_mid_mta_revoke_leaves_dkim_key_untouched` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_factory_reset_confirm.py::test_factory_reset_first_click_wipes_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 4 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_only_an_admin_can_factory_reset` | nest (linux): passed, nest (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_from_the_page_reclaims_and_the_pinned_app_reconnects_unwarned` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_factory_reset_mail.py::test_a_reset_erases_every_account_handle_grant_domain_address_and_message` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_the_nest_keeps_its_certificate_through_a_reset` | nest (linux): passed, nest (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_member_whose_nest_was_reset_is_told_and_offered_a_fresh_start` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_a_reset_whose_claim_code_cannot_be_kept_is_refused` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_crash_recovery_journeys.py::test_within_grace_failed_reset_honors_fresh_slot_with_visible_exit` — requires `unclean-kill` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_reopening_while_the_reset_nest_is_down_keeps_the_reclaim` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_factory_reset_journeys.py::test_each_account_keeps_its_own_pending_reset` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_factory_reset_calendar_reclaim.py::test_calendar_works_after_factory_reset_reclaim` — requires `calendar-after-reclaim` (not built: windows, android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/platform/docker/test_factory_reset_calendar_reclaim_docker.py::test_calendar_works_after_factory_reset_reclaim_docker` — requires `calendar-after-reclaim-docker-drive` (test harness) (not built: windows, macos, ios, android) | web (linux): passed, linux (linux): passed |
+| 14 | nest | `tests/e2e-unified/tests/test_factory_reset_mail.py::test_mail_is_accepted_and_delivered_again_after_a_reset_and_reclaim` | nest (linux): passed, nest (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_onboarding_launch_routing_smoke.py::test_smoke_g_factory_reset_leaves_no_identity_for_the_next_launch` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_next_load_after_the_sign_in_is_wiped_starts_from_identity_choice` | web (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/api/test_factory_reset_wipe.py::test_nothing_is_served_after_a_reset_until_mail_is_switched_on` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

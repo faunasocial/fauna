@@ -691,9 +691,98 @@ impl CacheDb {
     /// `sealed_under` narrows the serve to rows whose form-v2 cleartext header
     /// names that generation (the reclamation pass's "is anything still
     /// sealed under G" question — `fleet-scope-reclamation.md`
-    /// § *Fleet-scope reclamation*, clause (3e)); the tip is still
-    /// taken over every live row, so the echo stays a claim about the whole
-    /// log.
+    /// § *Fleet-scope reclamation*, clause (3e)), and `item_key` to the rows
+    /// at one blinded item key (the HTTP record door's by-key read); the tip
+    /// is still taken over every live row, so the echo stays a claim about
+    /// the whole log.
+    ///
+    /// **A page read loads a page of rows**. The rows the
+    /// gates cannot serve are skipped in SQL wherever the request makes that
+    /// decidable ([`StateFeedFilter::scan_floor`]), the scan steps the scope
+    /// in chunks of [`STATE_FEED_SCAN_CHUNK`] rows, and it stops the moment
+    /// `page_full` answers `true` for a served row — that row included, so
+    /// the caller's frame cut sees that the log goes on. A stopped read says
+    /// so ([`StateFeedRead::more`]): it is complete only through its last
+    /// row, never through the tip. Without the stop, every page of a walk
+    /// loaded the whole scope, sealed bytes included, under `CacheDb`'s
+    /// single connection lock.
+    pub async fn get_account_state_page(
+        &self,
+        scope_folder_id: i64,
+        filter: &StateFeedFilter<'_>,
+        page_full: &mut (dyn FnMut(&super::SyncChangeRow) -> bool + Send),
+    ) -> anyhow::Result<StateFeedRead> {
+        let class = ItemClass::StateEntry.as_wire();
+        let conn = self.conn.lock().await;
+        let mut read = StateFeedRead {
+            // Every live row moves the tip, gated or not: the tip is what the
+            // scope's log holds, not what this caller is owed. Read under the
+            // same lock as the rows, so nothing lands between the two.
+            tip: conn
+                .query_row(
+                    "SELECT MAX(seq) FROM sync_changes
+                     WHERE folder_id = ?1 AND item_class = ?2 AND superseded_at IS NULL",
+                    rusqlite::params![scope_folder_id, class],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .context("read the state feed's tip")?,
+            ..StateFeedRead::default()
+        };
+        let by_key = if filter.item_key.is_some() {
+            " AND path_hash = ?4"
+        } else {
+            ""
+        };
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {}
+                 FROM sync_changes
+                 WHERE folder_id = ?1 AND item_class = ?2 AND superseded_at IS NULL
+                   AND seq > ?3{by_key}
+                 ORDER BY seq
+                 LIMIT {STATE_FEED_SCAN_CHUNK}",
+                super::sync_storage::SYNC_CHANGE_COLUMNS,
+            ))
+            .context("prepare get_account_state_page")?;
+        let mut scan_from = filter.scan_floor();
+        loop {
+            let rows = match filter.item_key {
+                Some(key) => stmt.query_map(
+                    rusqlite::params![scope_folder_id, class, scan_from, key.as_slice()],
+                    super::sync_storage::sync_change_row_from_sql,
+                ),
+                None => stmt.query_map(
+                    rusqlite::params![scope_folder_id, class, scan_from],
+                    super::sync_storage::sync_change_row_from_sql,
+                ),
+            }
+            .context("query state entries")?;
+            let mut scanned = 0usize;
+            for row in rows {
+                let row = row.context("read state entry row")?;
+                scanned += 1;
+                scan_from = row.seq;
+                #[cfg(test)]
+                STATE_FEED_ROWS_LOADED.with(|n| n.set(n.get() + 1));
+                if !filter.serves(&row) {
+                    continue;
+                }
+                let full = page_full(&row);
+                read.rows.push(row);
+                if full {
+                    read.more = true;
+                    return Ok(read);
+                }
+            }
+            if scanned < STATE_FEED_SCAN_CHUNK {
+                return Ok(read);
+            }
+        }
+    }
+
+    /// The scope's whole class-2 feed past the gates, unbounded — for tests
+    /// only: a reader-facing page reads [`Self::get_account_state_page`],
+    /// which bounds the load under the one DB lock.
     pub async fn get_account_state_changes(
         &self,
         scope_folder_id: i64,
@@ -702,59 +791,129 @@ impl CacheDb {
         held_through_seq: Option<i64>,
         sealed_under: Option<&[u8; 32]>,
     ) -> anyhow::Result<StateFeedRead> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {}
-                 FROM sync_changes
-                 WHERE folder_id = ?1 AND item_class = ?2 AND superseded_at IS NULL
-                 ORDER BY seq",
-                super::sync_storage::SYNC_CHANGE_COLUMNS,
-            ))
-            .context("prepare get_account_state_changes")?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![scope_folder_id, ItemClass::StateEntry.as_wire()],
-                super::sync_storage::sync_change_row_from_sql,
-            )
-            .context("query state entries")?;
-        let mut read = StateFeedRead::default();
-        for row in rows {
-            let row = row.context("read state entry row")?;
-            // Every live row moves the tip, gated or not: the tip is what the
-            // scope's log holds, not what this caller is owed.
-            read.tip = Some(row.seq);
-            let seen = match (&row.origin_writer, row.origin_seq) {
-                // A device writer's row: gated by that writer's own slot when
-                // the caller names it, and — the third gate — by the
-                // watermark when it does not.
-                (Some(w), Some(s)) => {
-                    let slot = frontier.get(&hex::encode(w)).copied();
-                    s <= slot.unwrap_or(0)
-                        || (slot.is_none() && held_through_seq.is_some_and(|held| row.seq <= held))
-                }
-                // The nest is the writer: its slot is `since`.
-                _ => row.seq <= since,
-            };
-            if seen {
-                continue;
+        let filter = StateFeedFilter {
+            since,
+            frontier,
+            held_through_seq,
+            sealed_under,
+            item_key: None,
+        };
+        self.get_account_state_page(scope_folder_id, &filter, &mut |_| false)
+            .await
+    }
+}
+
+/// How many rows one step of a state-feed scan loads at most
+/// ([`CacheDb::get_account_state_page`]): small enough that a page of entries
+/// at the plane's 64 KiB ceiling stops inside the first step, large enough
+/// that a page of small entries takes few steps.
+pub const STATE_FEED_SCAN_CHUNK: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    /// Rows a state-feed scan has loaded on this thread — the witness that a
+    /// page read loads a page of rows (`#[tokio::test]` runs on one thread).
+    pub(crate) static STATE_FEED_ROWS_LOADED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// What a class-2 feed read is gated by ([`CacheDb::get_account_state_page`]).
+#[derive(Clone, Copy)]
+pub struct StateFeedFilter<'a> {
+    /// The nest-writer slot.
+    pub since: i64,
+    /// The device writers' slots, hex `writer_id` → high-water `writer_seq`.
+    pub frontier: &'a std::collections::BTreeMap<String, i64>,
+    /// The serve-order watermark, the third gate.
+    pub held_through_seq: Option<i64>,
+    /// Serve only rows sealed under this generation.
+    pub sealed_under: Option<&'a [u8; 32]>,
+    /// Serve only rows at this blinded item key.
+    pub item_key: Option<&'a [u8; 32]>,
+}
+
+impl StateFeedFilter<'_> {
+    /// The `seq` at or below which no row can pass the gates, so the scan
+    /// starts above it: the nest's rows are served above `since` and, with
+    /// no device writer named, every device row above the watermark — or from
+    /// 0 when there is none. A named writer's rows are gated by its own slot
+    /// at any `seq`, so naming one scans from the start.
+    pub fn scan_floor(&self) -> i64 {
+        if !self.frontier.is_empty() {
+            return 0;
+        }
+        self.held_through_seq.map_or(0, |held| held.min(self.since))
+    }
+
+    /// Whether this filter serves `row`.
+    fn serves(&self, row: &super::SyncChangeRow) -> bool {
+        let seen = match (&row.origin_writer, row.origin_seq) {
+            // A device writer's row: gated by that writer's own slot when
+            // the caller names it, and — the third gate — by the
+            // watermark when it does not.
+            (Some(w), Some(s)) => {
+                let slot = self.frontier.get(&hex::encode(w)).copied();
+                s <= slot.unwrap_or(0)
+                    || (slot.is_none() && self.held_through_seq.is_some_and(|held| row.seq <= held))
             }
-            if let Some(generation) = sealed_under
-                && row
-                    .entry_sealed
+            // The nest is the writer: its slot is `since`.
+            _ => row.seq <= self.since,
+        };
+        if seen {
+            return false;
+        }
+        if let Some(key) = self.item_key
+            && row.path_hash.as_slice() != key.as_slice()
+        {
+            return false;
+        }
+        match self.sealed_under {
+            Some(generation) => {
+                row.entry_sealed
                     .as_deref()
                     .and_then(fauna_core::account_entry_crypto::peek_generation_id)
-                    != Some(*generation)
-            {
-                continue;
+                    == Some(*generation)
             }
-            read.rows.push(row);
+            None => true,
         }
-        Ok(read)
     }
 }
 
 impl CacheDb {
+    /// Test-only: retire, ungated and unbelted, every live row of `actor`'s
+    /// fleet scope at the blinded `item_key`, whoever wrote it — the plane
+    /// half of the holder that no longer has an account's escrow wrap
+    /// (`crate::generation_escrow_test_hook`). The same `superseded_at` write
+    /// the retire door makes, so nothing reads the rows afterwards. Returns
+    /// the rows retired; a scope never written answers 0.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_retire_fleet_rows_at(
+        &self,
+        actor_id: &[u8; 32],
+        item_key: &[u8; 32],
+    ) -> anyhow::Result<usize> {
+        let Some(folder) = self
+            .find_state_scope(actor_id, ACCOUNT_STATE_FLEET_SCOPE)
+            .await?
+        else {
+            return Ok(0);
+        };
+        let now = super::now_epoch_millis();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE sync_changes SET superseded_at = ?1
+             WHERE folder_id = ?2 AND path_hash = ?3 AND item_class = ?4
+               AND superseded_at IS NULL",
+            rusqlite::params![
+                now,
+                folder,
+                item_key.as_slice(),
+                ItemClass::StateEntry.as_wire()
+            ],
+        )
+        .context("retire the fleet rows at an item key")
+    }
+
     /// This nest's **replica id** (`account-sync-plane.md` § The bind leg,
     /// ruling 2): the 16 random bytes minted once with the database
     /// (`migrations::MIGRATIONS_NEST_REPLICA`), stable across every boot over
@@ -787,6 +946,10 @@ pub struct StateFeedRead {
     /// lets a reply claim completeness through it: `seq` is `AUTOINCREMENT`,
     /// so any row landing after the scan lands above it.
     pub tip: Option<i64>,
+    /// The read stopped because the page filled, not because the scope ran
+    /// out: the rows are complete only through the last of them, and the
+    /// tip is no completeness claim.
+    pub more: bool,
 }
 
 #[cfg(test)]

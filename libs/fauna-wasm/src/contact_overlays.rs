@@ -92,6 +92,25 @@ impl From<StagedSave> for SaveAnswerJs {
     }
 }
 
+/// What a notification row says, with a fauna-native row's sender named as the
+/// viewer calls them — [`crate::notification_text`] through
+/// `fauna_client_notifications::notification_text_naming` over `overlays`'
+/// projection (`docs/goal/behavior/notifications.md` § Localized body → *The
+/// sender arg*). `row` and the answer have `notificationText`'s shapes; the
+/// Notifications page paints this, never the unnamed twin.
+#[wasm_bindgen(js_name = notificationTextNaming)]
+pub fn notification_text_naming(
+    row: JsValue,
+    overlays: &WasmContactOverlays,
+) -> Result<JsValue, JsValue> {
+    let item: fauna_client_notifications::notifications::NotifItem =
+        serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
+    let text = fauna_client_notifications::notification_text_naming(&item, |id| {
+        overlays.cache.known_peer_label(id)
+    });
+    crate::notification_text_js(text)
+}
+
 /// The projection's reads for one tab (module docs).
 #[wasm_bindgen]
 pub struct WasmContactOverlays {

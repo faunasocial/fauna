@@ -35,7 +35,10 @@ Reaction/Delete is not a user-visible message — the manager consumes it and re
 
 **Capability.** `supports_reactions` (already modelled, FaunaMls-only) gates reactions;
 `supports_message_delete` (new, FaunaMls-only) gates delete. Other rails are `false` until their backends
-implement the rail-native semantics.
+implement the rail-native semantics — a bridged room's *declared* `supports_message_delete` is masked
+`false` until the family carries a far-side delete, and the nest-copy *remove* of a bridged row is a
+different affordance under its own derived flag, `supports_local_remove`
+([`bridged-adapter.md`](bridged-adapter.md) § Removing bridged rows).
 
 **Manager + snapshot (`libs/fauna-conversations`).** `MessageSnapshot` carries the derived
 `reactions: Vec<ReactionGroup>` (`{ emoji, count, reacted_by_me }`, ordered by first-added time),

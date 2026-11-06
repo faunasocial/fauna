@@ -637,21 +637,14 @@ def test_row_23_declared_ids_no_longer_flagged(mod):
         "web": ["admin-dns-empty", "admin-factory-reset-cancel-button", "nests-section", "sign-out-cancel-button"],
         "windows": ["card-detail-back", "nostr-signing-mode"],
         "android": ["family-guardian-section", "family-supervised-section"],
+        # The apple Settings-root `*-settings-link` ids left this list when the keyed
+        # `settings-nav-row[<key>]` ids replaced them (ui.yaml `sub_page_nav_rows`).
         "apple": [
-            "atproto-settings-link",
-            "devices-settings-link",
-            "folders-settings-link",
             "launch-error-title",
             "launch-status",
-            "linked-nests-link",
-            "mail-settings-link",
             "more-back-button",
             "more-tab",
             "more-view",
-            "nostr-settings-link",
-            "subscription-settings-link",
-            "task-delegation-link",
-            "web-settings-link",
         ],
     }.items():
         flagged = found["rendered-not-declared"][app]

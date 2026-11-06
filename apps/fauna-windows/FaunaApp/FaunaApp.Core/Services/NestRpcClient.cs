@@ -43,7 +43,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
 {
     /// The nest's https base URL. The UniFFI client swaps it to <c>wss</c> and
     /// appends <c>/api/v1/ws/{actor}</c> itself (libs/fauna-client
-    /// <c>ws_adapter::build_ws_url</c>), so no scheme conversion is done here.
+    /// <c>fauna_core::transport::actor_ws_url</c>), so no scheme conversion is done here.
     private readonly string _nestUrl;
     private readonly ICryptoService _crypto;
     private readonly SemaphoreSlim _connectGate = new(1, 1);
@@ -53,7 +53,9 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// <c>Connect()</c> await, because a dispose racing an in-flight connect
     /// sees <c>_nest</c> still null (it is written only once <c>Connect()</c>
     /// returns) and so skips disconnecting the client that is about to land
-    /// anyway.</summary>
+    /// anyway. Also what makes a disposed client silent and refuse to hand out
+    /// a client at all (<see cref="DeliverOnUi"/>, <see cref="ConnectedAsync"/>'s
+    /// entry).</summary>
     private volatile bool _disposed;
     /// <summary>Cached, per-session <c>FfiCaldavClient</c> for
     /// <see cref="CaldavQueryEventsSeededAsync"/>'s backstop poll (events.md
@@ -113,6 +115,30 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     private void CaptureUiContextFallback()
     {
         if (!_uiContextIsAuthoritative) _uiContext ??= SynchronizationContext.Current;
+    }
+
+    /// <summary>
+    /// The one marshal every <c>Raise…OnUi</c> goes through: <paramref name="invoke"/>
+    /// runs <paramref name="handler"/> on the captured UI context, or inline when none
+    /// was captured — and a DISPOSED client delivers nothing, neither a raise made after
+    /// <see cref="DisposeAsync"/> nor one posted before it and still queued when it
+    /// landed (the pumps post from their own threads, so the UI turn that would deliver
+    /// can come after the dispose).
+    /// <para>Why a dead client must be silent (<c>apps/windows.md</c> § Client lifetime):
+    /// its own <c>Disconnect()</c> makes the connection-state watch yield a last
+    /// <c>Disconnected</c>, and delivered, that reaches the outgoing shell VM — the one
+    /// writer of the process-wide <c>OfflineGate.Shared</c> — after the incoming
+    /// client may already have connected. Every other event a disposed client could
+    /// still raise belongs to a session that has ended, so the rule is the same for
+    /// all of them.</para>
+    /// </summary>
+    private void DeliverOnUi<T>(T? handler, Action<T> invoke) where T : Delegate
+    {
+        if (handler is null || _disposed) return;
+        if (_uiContext is not null)
+            _uiContext.Post(_ => { if (!_disposed) invoke(handler); }, null);
+        else
+            invoke(handler);
     }
 
     /// The local sync agent, for the remote-change nudge relay (see
@@ -176,7 +202,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             // client is torn down (watch sender dropped) → the loop ends.
             while (await sub.Next().ConfigureAwait(false) is not null)
             {
-                RaiseReconnectedOnUi();
+                OnReconnectObserved();
             }
         }
         catch (Exception ex)
@@ -187,15 +213,19 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
-    private void RaiseReconnectedOnUi()
+    /// <summary>One reconnect seen by the pump: the blanket <see cref="Reconnected"/>
+    /// re-pull, plus <see cref="DevicesStale"/> when the shared classifier says a
+    /// reconnect leaves the Devices &amp; Folders surface stale. Split out of the
+    /// socket loop so the keying is unit-testable.</summary>
+    internal void OnReconnectObserved()
     {
-        var handler = Reconnected;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(), null);
-        else
-            handler();
+        RaiseReconnectedOnUi();
+        var stale = FaunaFfiMethods.StaleSurfacesOnReconnect();
+        if (stale.devices) RaiseDevicesStaleOnUi();
+        if (stale.nestInfo) RaiseNestInfoStaleOnUi();
     }
+
+    private void RaiseReconnectedOnUi() => DeliverOnUi(Reconnected, h => h());
 
     // ── store-change notice ─────────────────────────────────────────────
     /// <inheritdoc />
@@ -227,15 +257,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// <summary>Raise <see cref="StoreChanged"/> on the UI thread — the surface
     /// VMs that subscribe mutate XAML-bound state. Internal so the unit tests
     /// drive it without the native runtime.</summary>
-    internal void RaiseStoreChangedOnUi()
-    {
-        var handler = StoreChanged;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(), null);
-        else
-            handler();
-    }
+    internal void RaiseStoreChangedOnUi() => DeliverOnUi(StoreChanged, h => h());
 
     // ── connection-state indicator ──────────────────────────────────────
     /// <inheritdoc />
@@ -270,6 +292,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             // when the client is torn down (watch sender dropped) → the loop ends.
             while (await sub.Next().ConfigureAwait(false) is { } state)
             {
+                // This client's own DisposeAsync sets _disposed BEFORE its Disconnect(),
+                // and that Disconnect is what yields the last Disconnected — so a
+                // disposed client ends here, quietly: the event is not news to anyone
+                // (DeliverOnUi would drop it anyway), and the session-ending read
+                // below would hit an FfiNestClient the dispose has destroyed.
+                if (_disposed) break;
                 RaiseConnectionStateOnUi(state);
                 // A `Disconnected` is also where a supervisor that stopped for good
                 // says why (the stop is recorded before the state is announced). A
@@ -279,6 +307,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                 // connection-state observer and tui's/linux's pumps are the model.
                 if (state == FfiConnectionState.Disconnected)
                 {
+                    if (_disposed) break;
                     var verdict = nest.SessionEndingVerdict();
                     ShellLog.Info("NestRpcClient",
                         $"[conn] disconnected; session-ending verdict: {verdict?.ToString() ?? "none"}");
@@ -289,6 +318,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                     }
                 }
             }
+        }
+        catch (ObjectDisposedException) when (_disposed)
+        {
+            // The dispose landed between a check above and the call after it: the
+            // session this pump served has ended, which is not a fault.
+            ShellLog.Debug("NestRpcClient", "connection-state pump ended with its client");
         }
         catch (Exception ex)
         {
@@ -308,25 +343,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// </summary>
     internal event Action<FfiSessionEndingVerdict>? SessionEnding;
 
-    private void RaiseSessionEndingOnUi(FfiSessionEndingVerdict verdict)
-    {
-        var handler = SessionEnding;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(verdict), null);
-        else
-            handler(verdict);
-    }
+    private void RaiseSessionEndingOnUi(FfiSessionEndingVerdict verdict) =>
+        DeliverOnUi(SessionEnding, h => h(verdict));
 
-    private void RaiseConnectionStateOnUi(FfiConnectionState state)
-    {
-        var handler = ConnectionStateChanged;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(state), null);
-        else
-            handler(state);
-    }
+    /// <summary>Raise <see cref="ConnectionStateChanged"/> on the UI thread. Internal so
+    /// the unit tests drive it without the native runtime.</summary>
+    internal void RaiseConnectionStateOnUi(FfiConnectionState state) =>
+        DeliverOnUi(ConnectionStateChanged, h => h(state));
 
     // ── knock push → OS toast + roster refresh ──────────────────────────
     /// <inheritdoc />
@@ -373,15 +396,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
-    private void RaiseKnockOnUi(FfiKnock knock)
-    {
-        var handler = KnockReceived;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(knock), null);
-        else
-            handler(knock);
-    }
+    private void RaiseKnockOnUi(FfiKnock knock) => DeliverOnUi(KnockReceived, h => h(knock));
 
     // ── generic push pump (fauna.notification / calendar.changed / resync_required) ──
     /// <inheritdoc />
@@ -391,7 +406,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// <inheritdoc />
     public event Action? MailSpamPushChanged;
     /// <inheritdoc />
-    public event Action<string>? FolderChangedPushed;
+    public event Action? MailImportPushChanged;
+    /// <inheritdoc />
+    public event Action? MailExportPushChanged;
+    /// <inheritdoc />
+    public event Action<string, byte[]?>? FolderChangedPushed;
+    /// <inheritdoc />
+    public event Action? DevicesStale;
+    /// <inheritdoc />
+    public event Action? NestInfoStale;
     private Task? _pushPump;
 
     /// <summary>
@@ -495,11 +518,18 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // and the sync-agent nudge stay a raw match on `ev`, since
         // `FfiStaleSurfaces`'s booleans carry no payload.
         var stale = FaunaFfiMethods.StaleSurfacesForPushEvent(ev);
+        // The nest's self-description (its signed rules) is a per-push flag of its
+        // own (`fauna.nest.info_changed`, transport.md § Which surfaces a push
+        // invalidates) whatever arm the push lands in below.
+        if (stale.nestInfo) RaiseNestInfoStaleOnUi();
         switch (ev)
         {
             case FfiPushEvent.Notification:
             case FfiPushEvent.ResyncRequired:
                 RaiseReconnectedOnUi();
+                // Only the classifier's `devices` flag (true for ResyncRequired, false
+                // for a Notification) re-reads the Devices & Folders machine.
+                if (stale.devices) RaiseDevicesStaleOnUi();
                 return Task.CompletedTask;
             case FfiPushEvent.CalendarChanged calendarChanged:
                 if (stale.events)
@@ -531,7 +561,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                 // effect, not a staleness reaction, so it is unconditional —
                 // only the UI raise is gated on the classifier.
                 if (stale.media)
-                    RaiseFolderChangedOnUi(syncChanged.folder);
+                    RaiseFolderChangedOnUi(syncChanged.folder, syncChanged.folderHash);
                 return NudgeSyncAgentAsync(syncChanged.folder, syncChanged.folderHash);
             case FfiPushEvent.Other:
                 // The spam model changed on another device (an undo or reset —
@@ -539,6 +569,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                 // classifier's flag decides; the open Spam panel re-hydrates.
                 if (stale.mailSpam)
                     RaiseMailSpamPushChangedOnUi();
+                // The three import events (mailbox-migration.md): the open Import
+                // wizard re-reads; a page not open does nothing.
+                if (stale.mailImport)
+                    RaiseMailImportPushChangedOnUi();
+                // The three export events (mail-export.md § A failed export is a
+                // record the wizard shows until the user moves on): the open Export
+                // wizard re-reads; a page not open does nothing.
+                if (stale.mailExport)
+                    RaiseMailExportPushChangedOnUi();
                 return Task.CompletedTask;
             case FfiPushEvent.AccountUpdated:
                 // Not modelled on windows yet — no surface acts on this.
@@ -573,84 +612,100 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
-    private void RaiseCalendarPushChangedOnUi(string actorId, string calendarId)
-    {
-        var handler = CalendarPushChanged;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(actorId, calendarId), null);
-        else
-            handler(actorId, calendarId);
-    }
+    private void RaiseCalendarPushChangedOnUi(string actorId, string calendarId) =>
+        DeliverOnUi(CalendarPushChanged, h => h(actorId, calendarId));
 
-    private void RaiseAddressBookPushChangedOnUi(string actorId, string addressbookId)
-    {
-        var handler = AddressBookPushChanged;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(actorId, addressbookId), null);
-        else
-            handler(actorId, addressbookId);
-    }
+    private void RaiseAddressBookPushChangedOnUi(string actorId, string addressbookId) =>
+        DeliverOnUi(AddressBookPushChanged, h => h(actorId, addressbookId));
 
-    private void RaiseMailSpamPushChangedOnUi()
-    {
-        var handler = MailSpamPushChanged;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(), null);
-        else
-            handler();
-    }
+    private void RaiseMailSpamPushChangedOnUi() => DeliverOnUi(MailSpamPushChanged, h => h());
 
-    private void RaiseFolderChangedOnUi(string folder)
-    {
-        var handler = FolderChangedPushed;
-        if (handler is null) return;
-        if (_uiContext is not null)
-            _uiContext.Post(_ => handler(folder), null);
-        else
-            handler(folder);
-    }
+    private void RaiseMailImportPushChangedOnUi() => DeliverOnUi(MailImportPushChanged, h => h());
+
+    private void RaiseMailExportPushChangedOnUi() => DeliverOnUi(MailExportPushChanged, h => h());
+
+    private void RaiseDevicesStaleOnUi() => DeliverOnUi(DevicesStale, h => h());
+
+    private void RaiseNestInfoStaleOnUi() => DeliverOnUi(NestInfoStale, h => h());
+
+    private void RaiseFolderChangedOnUi(string folder, byte[]? folderHash) =>
+        DeliverOnUi(FolderChangedPushed, h => h(folder, folderHash));
 
     /// <summary>
-    /// Ensure the WS-RPC connection is up, returning the connected client. The
-    /// secret is read here (not at construction) so the façade can be built
-    /// before the keypair is loaded; the WS handshake authenticates via a
-    /// silent challenge, independent of the HTTP bearer.
+    /// The session's one client, its reconnect supervisor started. The secret is
+    /// read here (not at construction) so the façade can be built before the
+    /// keypair is loaded; the WS handshake authenticates via a silent challenge,
+    /// independent of the HTTP bearer.
+    ///
+    /// <para><b>Returning does not mean the socket is up.</b> This is a long-lived
+    /// app session, so it takes the supervised form the tui and linux sessions
+    /// take (transport-connection.md § Connection lifecycle): a nest that did not
+    /// answer is the supervisor's to retry, and a request made meanwhile waits for
+    /// the connection within its own deadline, exactly as it does across any later
+    /// reconnect. Waiting for the socket here instead put a full connect timeout
+    /// in front of every caller in turn behind the gate, and the launch path awaits
+    /// three of them before it mounts the main app. It also threw with the
+    /// supervisor still running, so each caller left another one dialling.</para>
     /// </summary>
     private async Task<FfiNestClient> ConnectedAsync()
     {
-        if (_nest is not null) return _nest;
+        // A disposed wrapper hands out nothing — not even the client it cached: that
+        // client is destroyed (or about to be) by DisposeAsync, and a call on it fails
+        // with an "already destroyed" from the UniFFI layer instead of naming the real
+        // cause, a caller still holding a client from an ended session.
+        if (_disposed) throw new ObjectDisposedException(nameof(NestRpcClient));
+        if (Volatile.Read(ref _nest) is { } live) return live;
         Logs.E2eTrace.Write("[connect] cache miss, awaiting gate");
         await _connectGate.WaitAsync().ConfigureAwait(false);
         Logs.E2eTrace.Write("[connect] gate acquired");
         try
         {
-            if (_nest is null)
+            if (Volatile.Read(ref _nest) is { } cached) return cached;
+            Logs.E2eTrace.Write("[connect] constructing FfiNestClient");
+            var nest = new FfiNestClient(_nestUrl, _crypto.SecretBytes);
+            Logs.E2eTrace.Write("[connect] constructed; calling EnsureConnected()");
+            try
             {
-                Logs.E2eTrace.Write("[connect] constructing FfiNestClient");
-                var nest = new FfiNestClient(_nestUrl, _crypto.SecretBytes);
-                Logs.E2eTrace.Write("[connect] constructed; calling Connect()");
-                await nest.Connect().ConfigureAwait(false);
-                Logs.E2eTrace.Write("[connect] Connect() returned");
-                if (_disposed)
+                await nest.EnsureConnected().ConfigureAwait(false);
+            }
+            catch
+            {
+                // A refusal no retry clears. No supervisor stands behind it,
+                // so this client holds nothing worth keeping, and the next
+                // caller starts a fresh one, as it always has.
+                nest.Dispose();
+                throw;
+            }
+            Logs.E2eTrace.Write("[connect] EnsureConnected() returned");
+            // Publish FIRST, then check: a full fence (Interlocked, not a volatile
+            // write — a store then a load may otherwise reorder), mirroring
+            // DisposeAsync, which sets _disposed and then unpublishes with its own
+            // Interlocked.Exchange. With both sides fenced, a dispose racing this
+            // connect cannot miss the client: either it unpublishes and tears it
+            // down, or this side sees _disposed below. (Checking before publishing
+            // left a window between the two where a dispose saw null and a live
+            // client was then cached on a torn-down wrapper.)
+            Interlocked.Exchange(ref _nest, nest);
+            if (_disposed)
+            {
+                // DisposeAsync ran while EnsureConnected() was in flight, or is
+                // running now. Exactly one side tears this client down: if the
+                // field still holds it, DisposeAsync saw null and never
+                // disconnected anything — this freshly started client is the only
+                // handle on the reconnect supervisor it meant to stop, so take it
+                // back and tear it down here; if the field no longer holds it,
+                // DisposeAsync has it. Either way the wrapper is gone and hands out
+                // nothing.
+                if (Interlocked.CompareExchange(ref _nest, null, nest) == nest)
                 {
-                    // DisposeAsync ran while Connect() was in flight: it saw
-                    // _nest still null and so never disconnected anything —
-                    // this freshly connected client is the only handle on the
-                    // reconnect supervisor DisposeAsync meant to stop. Tear it
-                    // down here instead of caching it onto an already
-                    // torn-down wrapper.
                     Logs.E2eTrace.Write("[connect] disposed mid-connect; disconnecting the client it minted");
                     try { await nest.Disconnect().ConfigureAwait(false); }
                     catch { /* best-effort: the wrapper is being discarded regardless */ }
                     nest.Dispose();
-                    throw new ObjectDisposedException(nameof(NestRpcClient));
                 }
-                _nest = nest;
+                throw new ObjectDisposedException(nameof(NestRpcClient));
             }
-            return _nest;
+            return nest;
         }
         finally
         {
@@ -847,7 +902,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             deviceLabel,
             spawner,
             bearerSource,
-            reachabilityObserver);
+            reachabilityObserver,
+            // The registry OBJECT, not ids/keys: shared Rust resolves the paired
+            // predecessor keys off the provisioned identity's own actor and the
+            // agent is sent them on `SyncCapability.predecessor_keys_by_actor`
+            // (sync-agent-credentials.md § Credential model).
+            ResolveAccountRegistry());
     }
 
     /// <inheritdoc />
@@ -864,6 +924,15 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await agent.ReseedCustodianStore(nest, _crypto.SecretBytes, thisDeviceId)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiReseedResult> PullBackFromDestinationAsync(string deviceIdHex, string destinationId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.BackupPullBackFromDestination(
+            nest, _crypto.SecretBytes, Convert.FromHexString(deviceIdHex), destinationId)
             .ConfigureAwait(false);
     }
 
@@ -960,7 +1029,11 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                     $"[account-runtime] store-change listener not registered; open "
                     + $"store-backed pages repaint on the next visit: {ex.Message}");
             }
-            await nest.StartAccountRuntime(appDataDir, storeContainer: null, IndexLeaseDevice(deviceIdHex), accounts)
+            // SyncAgentSession.DeviceLabel: the app default the engine host
+            // registers under too — the ceremony names the machine's row with
+            // it, never the `fauna` placeholder (devices.md § Device names).
+            await nest.StartAccountRuntime(appDataDir, storeContainer: null, IndexLeaseDevice(deviceIdHex),
+                    SyncAgentSession.DeviceLabel, accounts)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1059,6 +1132,10 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
+    // Everything from here to the #endif is a TestAgent read or poke, so it
+    // compiles out of a Release build with the agent (convention 15).
+
     /// <summary>
     /// The <c>account_pump_cycles</c> e2e state value as raw JSON, or
     /// <c>null</c> when this app has no connected client yet (pre-auth) — the
@@ -1104,7 +1181,6 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         }
     }
 
-#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// The <c>device_set_state</c> e2e reader as raw JSON — whether
     /// <paramref name="deviceIdHex"/>'s <c>fauna.state.device-set</c> row reads
@@ -1147,6 +1223,58 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <summary>
+    /// The <c>escrow_wrap_coordinates</c> e2e reader as raw JSON — the recovery-kit
+    /// let-go journey's staging read (<c>fleet-scope-reclamation.md</c>
+    /// § <i>Fleet-scope reclamation</i>, clause (3)(j)): this device's own
+    /// <c>fauna.state.escrow-wrap</c> rows with the blinded item key the nest knows
+    /// each by, <c>{"found":true,"rows":[...]}</c> or <c>{"found":false}</c>, from
+    /// the shared <c>fauna_client_account_runtime::escrow_wrap_coordinates_json</c>.
+    /// Same contract and <b>Debug-only</b> gating as
+    /// <see cref="DeviceSetStateJsonAsync"/> (a <c>test-helpers</c> UniFFI seam);
+    /// <c>null</c> only when no client is connected yet. Its only caller is
+    /// <c>Testing.TestAgent</c>, via <c>App.EscrowWrapCoordinatesForTest</c>.
+    /// </summary>
+    public async Task<string?> EscrowWrapCoordinatesJsonAsync()
+    {
+        if (_nest is null) return null;
+        return await _nest.EscrowWrapCoordinatesJson().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The <c>custody_ceremony_ingest</c> e2e state value as raw JSON — what this
+    /// process's custody ceremony sink did with each received payload
+    /// (<c>fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY</c>; five atomic loads, no
+    /// I/O, shaped by the shared builder tui and linux publish through), or
+    /// <c>null</c> when no client is connected yet, which the serializer reports as
+    /// the key being absent. Same <b>Debug-only</b> gating as
+    /// <see cref="DeviceSetStateJsonAsync"/> (a <c>test-helpers</c> UniFFI seam).
+    /// </summary>
+    public string? CustodyCeremonyIngestJson() => _nest?.CustodyCeremonyIngestJson();
+
+    /// <summary>
+    /// The <c>custody_owner_resend_now</c> poke — this app, as a custody OWNER,
+    /// posts every ceremony it granted once more (a delivered one's deliver
+    /// re-signed, an unanswered offer verbatim; <c>account-replica-posture.md</c>
+    /// § The custody grant + ceremony). <c>false</c> when there is no connected
+    /// client, session or account store yet (pre-auth): a quiet no-op, with the
+    /// HOST's <c>custody_ceremony_ingest</c> as the consumer's barrier. Same
+    /// <b>Debug-only</b> gating as <see cref="DeviceSetStateJsonAsync"/>.
+    /// </summary>
+    public async Task<bool> CustodyOwnerResendNowAsync()
+    {
+        if (_nest is null) return false;
+        try
+        {
+            return await _nest.CustodyOwnerResendNow().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NestRpcClient", $"[custody] owner resend-now failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The <c>reconnect_backoff</c> e2e seam (<c>fauna_e2e_agent::RECONNECT_BACKOFF</c>
     /// owns the contract): pace this connection's reconnect retries —
     /// <c>{"initial_ms": N, "max_ms": M}</c> — or restore production pacing with
@@ -1165,6 +1293,33 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         _nest.SetReconnectBackoffForTest(payloadJson);
         return true;
     }
+
+    /// <summary>
+    /// The <c>launch_token</c> e2e state value as JSON text
+    /// (<c>fauna_e2e_agent::LAUNCH_TOKEN_KEY</c> owns the shape and names whose
+    /// bearer each app reports — on the UniFFI apps this client's
+    /// <c>WsChallengeBearer</c>): the held bearer's schedule on the app's own clock
+    /// and every own session id still live. A synchronous, non-minting read, so the
+    /// state builder may call it; <c>"null"</c> while a mint is in flight, and
+    /// <c>null</c> with no connected client. <b>Debug-only</b> for the same reason
+    /// as <see cref="DeviceSetStateJsonAsync"/>.
+    /// </summary>
+    public string? LaunchTokenJsonForTest() => _nest?.LaunchTokenJsonForTest();
+
+    /// <summary>
+    /// The <c>launch_refresh_token</c> e2e command's mechanism
+    /// (<c>fauna_e2e_agent::LAUNCH_REFRESH_TOKEN</c>): drop this client's held
+    /// bearer and re-mint over the silent challenge — the path its TTL and 401
+    /// refreshes take — keeping the predecessor id in the own set and live
+    /// nest-side. <c>false</c> with no connected client (never forces a connect);
+    /// a re-mint that fails throws the FFI error. <b>Debug-only</b>.
+    /// </summary>
+    public async Task<bool> RefreshHeldBearerForTestAsync()
+    {
+        if (_nest is null) return false;
+        await _nest.RefreshHeldBearerForTest().ConfigureAwait(false);
+        return true;
+    }
 #endif
 
     /// <inheritdoc />
@@ -1181,6 +1336,11 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         if (_nest is null) return null;
         return await _nest.AccountEnrollmentNotice().ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<NewerRelease?> LookForNewerReleaseAtSignInAsync() =>
+        await (await ConnectedAsync().ConfigureAwait(false))
+            .LookForNewerReleaseAtSignIn().ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>A free FFI function over the process's account runtime, so it
@@ -1228,14 +1388,17 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     // ── fauna.feed.* page (shared FeedManager) ──────────────────────────────
 
     /// <inheritdoc />
-    public async Task<FfiFeedManager> BuildFeedManagerAsync()
+    public async Task<FfiFeedManager> BuildFeedManagerAsync(string? deviceIdHex = null)
     {
         // Reuse the shared, auto-reconnecting WS-RPC client (the same pattern as
         // BuildConversationsSessionAsync / the page machines), then hand the
         // manager the 32-byte actor secret so its submit_post can build + sign
         // posts (libs/fauna-ffi FfiNestClient::feed_manager → fauna_feed::FeedManager).
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        return nest.FeedManager(_crypto.SecretBytes);
+        // The app's sync device id registers the archive machine's comment source
+        // (archive-import.md § Placement under the owner's own post); null keeps the
+        // fold off, exactly like the conversations leg's RecordingDevice screening.
+        return nest.FeedManager(_crypto.SecretBytes, recordingDevice: RecordingDevice(deviceIdHex));
     }
 
     // ── search page (shared SearchManager) ──────────────────────────────────
@@ -1248,6 +1411,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // (libs\fauna-ffi FfiNestClient::search_manager → fauna_client_search::SearchManager).
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return nest.SearchManager();
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiPostBlobHosts> BuildPostBlobHostsAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return nest.PostBlobHosts();
     }
 
     /// <inheritdoc />
@@ -1451,6 +1621,44 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             : await plane.Refresh(nest).ConfigureAwait(false);
     }
 
+    // ── Nest rules (nest-rules.md) ───────────────────────────────────────
+
+    public async Task<FfiNestRulesRefresh> RefreshNestRulesBookAsync(FfiNestRulesBook book)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await book.Refresh(nest).ConfigureAwait(false);
+    }
+
+    public async Task<FfiAdminContentPolicy> AdminContentPolicyAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Admin().ContentPolicy().ConfigureAwait(false);
+    }
+
+    public async Task<FfiAdminContentPolicy> AdminSetContentPolicyAsync(byte[] document)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Admin().SetContentPolicy(document).ConfigureAwait(false);
+    }
+
+    public async Task<FfiFamilyWardInfo?> FamilySaveContentRulesAsync(byte[] ward, byte[] document)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Family().SaveContentRules(ward, document).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<string>> RuleLabelersAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.BuildRuleLabelersClient(nest).RuleLabelers().ConfigureAwait(false);
+    }
+
+    public async Task<byte[]?> RuleModuleAsync(byte[] labelerId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.BuildRuleLabelersClient(nest).RuleModule(labelerId).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<FfiFeatureRow>> FeaturesRowsAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -1565,14 +1773,11 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                             .Select(f => new BridgeLinkField(f.key, f.label, f.fieldType, f.placeholder))
                             .ToList()))
                     .ToList(),
-                b.settings
-                    .Select(s => new BridgeSetting(
-                        s.key, s.label, s.settingType,
-                        s.value is FfiCborValue.Bool bo ? bo.@v : (bool?)null,
-                        s.value is FfiCborValue.Text tx ? tx.@v : null,
-                        s.value is FfiCborValue.Integer iv ? iv.@v : (long?)null))
-                    .ToList(),
-                b.error))
+                b.settings.Select(BridgeSetting.FromFfi).ToList(),
+                b.error,
+                SupportsFollowRequests: b.supportsFollowRequests,
+                IdentityLabel: b.identity?.label,
+                SupportsFollows: b.supportsFollows))
             .ToList();
     }
 
@@ -1599,13 +1804,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// deserializes.</summary>
     public async Task BridgesSetSettingsAsync(string bridgeId, IReadOnlyList<BridgeSettingValue> settings)
     {
-        var entries = settings
-            .Select(s => new FfiCborEntry(
-                s.Key,
-                s.BoolValue is bool b ? new FfiCborValue.Bool(b)
-                    : s.NumberValue is long n ? (FfiCborValue)new FfiCborValue.Integer(n)
-                    : new FfiCborValue.Text(s.TextValue ?? string.Empty)))
-            .ToArray();
+        var entries = settings.Select(s => new FfiCborEntry(s.Key, s.ToCbor())).ToArray();
         var nest = await ConnectedAsync().ConfigureAwait(false);
         await nest.Bridges().SetSettings(bridgeId, new FfiCborValue.Map(entries)).ConfigureAwait(false);
     }
@@ -1629,6 +1828,22 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await nest.Bridges().RemoveFollow(bridgeId, followId).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<BridgeFollowRequest>> BridgesListFollowRequestsAsync(string bridgeId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        var rows = await nest.Bridges().ListFollowRequests(bridgeId).ConfigureAwait(false);
+        return rows.Select(r => new BridgeFollowRequest(r.id, r.display)).ToList();
+    }
+
+    public async Task BridgesAnswerFollowRequestAsync(string bridgeId, string id, bool approve)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        if (approve)
+            await nest.Bridges().ApproveFollowRequest(bridgeId, id).ConfigureAwait(false);
+        else
+            await nest.Bridges().RefuseFollowRequest(bridgeId, id).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<BridgeFeedSubscription>> BridgesFeedsListAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -1646,6 +1861,52 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         await nest.Bridges().FeedsDelete(id).ConfigureAwait(false);
+    }
+
+    // ── fauna.plugins.{list,install,uninstall} — ADMIN ──────────────────
+    //
+    // Reached through `FfiBridgesClient`, the same UniFFI façade android consumes; the
+    // rows arrive paint-ready (shared `installed_plugin_text`), so these are pure
+    // pass-throughs.
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<FfiInstalledPlugin>> PluginsListAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Bridges().PluginsList().ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task PluginsInstallAsync(string documentUrl)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Bridges().PluginsInstall(documentUrl).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task PluginsUninstallAsync(string principalIdHex)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Bridges().PluginsUninstall(principalIdHex).ConfigureAwait(false);
+    }
+
+    // ── fauna.plugins.{available,set_settings} — every account ──
+    //
+    // The same FfiBridgesClient façade; each card arrives composed (shared
+    // `plugin_card_text`), so these are pass-throughs too.
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<FfiPluginCard>> PluginsAvailableAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Bridges().PluginsAvailable().ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task PluginsSetSettingAsync(string principalIdHex, BridgeSettingValue value)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Bridges().PluginsSetSetting(principalIdHex, value.Key, value.ToCbor()).ConfigureAwait(false);
     }
 
     // ── fauna.nostr.bunker.* ────────────────────────────────────────────
@@ -1717,11 +1978,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
 
     public async Task EmailFiltersCreateAsync(
         string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority)
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         await nest.Email()
-            .FiltersCreate(name, rules.ToArray(), combination, action, priority)
+            .FiltersCreate(name, rules.ToArray(), combination, action, priority, continueOnMatch)
             .ConfigureAwait(false);
     }
 
@@ -1744,11 +2006,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// row in place (the edit dialog's save).</summary>
     public async Task EmailFiltersUpdateAsync(
         long id, string name, IReadOnlyList<FfiEmailFilterRule> rules,
-        string combination, FfiEmailFilterAction action, int priority)
+        string combination, FfiEmailFilterAction action, int priority,
+        bool continueOnMatch = false)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         await nest.Email()
-            .FiltersUpdate(id, name, rules.ToArray(), combination, action, priority)
+            .FiltersUpdate(id, name, rules.ToArray(), combination, action, priority, continueOnMatch)
             .ConfigureAwait(false);
     }
 
@@ -1819,31 +2082,30 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <summary><c>fauna.contacts.list</c> → <see cref="ContactInfo"/> rows. The
-    /// FFI status string maps 1:1 to the app enum:
-    /// "pending"→Pending, "accepted"→Accepted, "confirmed"→Confirmed,
-    /// "blocked"→Blocked (any other value falls back to Accepted, the safe
-    /// good-standing default). <c>confirmed</c> is kept distinct — it was
-    /// previously collapsed into Accepted, which dropped the distinct "Confirmed"
-    /// status badge (contacts.md § Where logic lives → Status badge text). The
-    /// enriched <c>FfiContactItem</c> now carries <c>handle</c>/<c>domain</c>
-    /// (contacts.md § State &amp; data shape — <c>ContactSummary</c>), seeded onto the
-    /// row so the shared roster filter matches on handle + domain + actor-id.</summary>
+    /// FFI status string maps to the app enum through <see cref="ContactStatusWire.Parse"/>
+    /// — the four named statuses 1:1, any other to <see cref="ContactStatus.Other"/> —
+    /// and is kept verbatim (lowercased) on <see cref="ContactInfo.WireStatus"/>, so a
+    /// status this build does not name keeps its own label and roster section
+    /// (contacts.md § Where logic lives → Roster status grouping) instead of filing
+    /// under Accepted. The enriched <c>FfiContactItem</c> carries
+    /// <c>handle</c>/<c>domain</c> (contacts.md § State &amp; data shape —
+    /// <c>ContactSummary</c>), seeded onto the row so the shared roster filter matches
+    /// on handle + domain + actor-id.</summary>
     public async Task<IReadOnlyList<ContactInfo>> ContactsListAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         var contacts = await nest.Contacts().ContactsList().ConfigureAwait(false);
         return contacts
-            .Select(c => new ContactInfo(
-                c.peerId,
-                c.handle,
-                c.status.ToLowerInvariant() switch
+            .Select(c =>
+            {
+                var wire = c.status.ToLowerInvariant();
+                return new ContactInfo(c.peerId, c.handle, ContactStatusWire.Parse(wire), (ulong?)c.acceptedAt)
                 {
-                    "pending" => ContactStatus.Pending,
-                    "confirmed" => ContactStatus.Confirmed,
-                    "blocked" => ContactStatus.Blocked,
-                    _ => ContactStatus.Accepted,
-                },
-                (ulong?)c.acceptedAt) { Domain = c.domain })
+                    WireStatus = wire,
+                    Domain = c.domain,
+                    HomeNestUrl = c.homeNestUrl,
+                };
+            })
             .ToList();
     }
 
@@ -1935,6 +2197,18 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await nest.Notifications().MarkRead(upTo).ConfigureAwait(false);
     }
 
+    public async Task<bool> NotificationsDismissAsync(long id)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Notifications().Dismiss(id).ConfigureAwait(false);
+    }
+
+    public async Task<long> NotificationsClearAsync(long? upTo)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Notifications().Clear(upTo).ConfigureAwait(false);
+    }
+
     public async Task<long> NotificationsCountAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -2022,6 +2296,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    public async Task AdminTiersDeleteAsync(string name)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Admin().TiersDelete(name).ConfigureAwait(false);
+    }
+
     public async Task AdminTiersCreateAsync(
         string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds)
     {
@@ -2043,10 +2323,11 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await nest.Admin().SetAgeVerificationRequired(required).ConfigureAwait(false);
     }
 
-    public async Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle)
+    public async Task AdminUsersCreateAsync(byte[] actorId, string tier, string? handle,
+        byte[]? guardianActorId = null, string? ageBand = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
-        await nest.Admin().UsersCreate(actorId, tier, handle, null, null).ConfigureAwait(false);
+        await nest.Admin().UsersCreate(actorId, tier, handle, guardianActorId, ageBand).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -2199,10 +2480,33 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await FaunaFfiMethods.AdminSetWebAppOrigin(nest, mode).ConfigureAwait(false);
     }
 
+    /// <summary><c>fauna.admin.update_channel.get</c> via the shared
+    /// <c>admin_update_channel_view</c> fold — a free FFI function.</summary>
+    public async Task<FfiAdminUpdateChannelView> AdminUpdateChannelStatusAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.AdminUpdateChannelStatus(nest).ConfigureAwait(false);
+    }
+
+    /// <summary><c>fauna.admin.update_channel.set</c> — answers the fold of a
+    /// fresh read.</summary>
+    public async Task<FfiAdminUpdateChannelView> SetUpdateChannelAsync(
+        uniffi.fauna_provisioning.UpdateChannel channel)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.AdminSetUpdateChannel(nest, channel).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<LogEntry>> AdminLogsAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await nest.Admin().Logs().ConfigureAwait(false);
+    }
+
+    public async Task<IFfiAuditLog> AdminAuditLogAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return nest.Admin().AuditLog();
     }
 
     public async Task<FfiAdminHostingRow[]> AdminCustodyHostingListAsync()
@@ -2382,6 +2686,20 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         await nest.Admin().AbuseReportResolve(reportId, acted).ConfigureAwait(false);
     }
 
+    // ── fauna.moderation.admin_block[.list] (the admin block of a reported item) ──
+
+    public async Task<string> AdminBlockAsync(string reportId, bool restore)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Moderation().AdminBlock(reportId, restore).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<FfiBlockedRow>> AdminBlockListAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Moderation().AdminBlockList().ConfigureAwait(false);
+    }
+
     public Task<string[]> HideReportedAsync(string id) => FaunaFfiMethods.HideReported(id);
 
     public Task<string[]> LoadHiddenContentAsync() => FaunaFfiMethods.LoadHiddenContent();
@@ -2420,6 +2738,42 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return await FaunaFfiMethods.ForwardPerHourSet(nest, value).ConfigureAwait(false);
+    }
+
+    public async Task<MailSwitches> MailSwitchesGetAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.MailSwitchesGet(nest).ConfigureAwait(false);
+    }
+
+    public async Task<MailSwitches> MailSwitchesSetAsync(bool? receiveEnabled, bool? sendEnabled)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.MailSwitchesSet(nest, receiveEnabled, sendEnabled).ConfigureAwait(false);
+    }
+
+    public async Task<uniffi.fauna_client_mail_settings.MailQuotas> MailQuotasGetAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.MailQuotasGet(nest).ConfigureAwait(false);
+    }
+
+    public async Task<FfiAutoRespond> AutorespondGetAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Email().AutorespondGet().ConfigureAwait(false);
+    }
+
+    public async Task AutorespondSetAsync(string message)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Email().AutorespondSet(message).ConfigureAwait(false);
+    }
+
+    public async Task AutorespondClearAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await nest.Email().AutorespondClear().ConfigureAwait(false);
     }
 
     // ── fauna.family.* (Family page) ────────────────────────────────────
@@ -3042,6 +3396,17 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    public async Task<FfiRestoreSummary> RestoreSnapshotToDirAsync(
+        string deviceId, ulong snapshotId, string outputDir)
+    {
+        // The per-file download's twin for the whole tree: the same secret,
+        // device id and i64 narrowing at this adapter (see above).
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.RestoreSnapshotToDir(
+            nest, _crypto.SecretBytes, Convert.FromHexString(deviceId), (long)snapshotId, outputDir)
+            .ConfigureAwait(false);
+    }
+
     // ── Muted keywords (moderation.md § Muted keywords) ────────────────────
     // Thin pass-through to the shared FFI free-fns — input-free: the account
     // runtime holds the owner secret and the nest plane, so neither is passed.
@@ -3061,6 +3426,10 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     /// <inheritdoc />
     public async Task<MutedWordsSnapshot> MutedKeywordsRemoveAsync(string word) =>
         await FaunaFfiMethods.RemoveMutedWord(word).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<MutedWordsSnapshot> MutedKeywordsSetLevelAsync(string word, uniffi.fauna_core.MutedKeywordLevel level) =>
+        await FaunaFfiMethods.SetMutedWordLevel(word, level).ConfigureAwait(false);
 
     // ── Trained topics (topic-factors.md § Authoring surface & picker) ──
     // Thin pass-through to the shared FFI free-fns. The nest client still goes
@@ -3272,16 +3641,53 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FfiSubscribeReply> SubscriptionSubscribeAsync(byte[] authorId, string tier)
+    public async Task<FfiSubscribeReply> SubscriptionSubscribeAsync(
+        byte[] authorId, string tier, string? homeNestUrl = null)
     {
         // Publish the caller's identity-seed ML-KEM ek (surface B, S4b) unconditionally
         // (no capability token), so the author can wrap hybrid KeyBlobs to this
         // subscriber. Twin of the FFI free fn linux
         // calls (offers.rs::subscribe_to / mod.rs::follow).
         var nest = await ConnectedAsync().ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(homeNestUrl))
+            return await uniffi.fauna_ffi.FaunaFfiMethods
+                .SubscriptionsSubscribeAcrossNests(nest, _crypto.SecretBytes, authorId, tier, homeNestUrl)
+                .ConfigureAwait(false);
         return await uniffi.fauna_ffi.FaunaFfiMethods
             .SubscriptionsSubscribePublishingEk(nest, _crypto.SecretBytes, authorId, tier)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SubscriptionPublishEncapsKeyAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        await uniffi.fauna_ffi.FaunaFfiMethods
+            .SubscriptionsPublishEncapsKey(nest, _crypto.SecretBytes)
+            .ConfigureAwait(false);
+    }
+
+    // 0 = not started, 1 = started: the shared trigger is spawned ONCE per
+    // client (a repeat e2e `session` patch can reuse the same client).
+    private int _mailEpochRefreshStarted;
+
+    /// <inheritdoc />
+    public async Task StartMailEpochRefreshOnEveryConnectAsync()
+    {
+        if (Interlocked.Exchange(ref _mailEpochRefreshStarted, 1) != 0) return;
+        try
+        {
+            var nest = await ConnectedAsync().ConfigureAwait(false);
+            await uniffi.fauna_ffi.FaunaFfiMethods
+                .StartMailEpochRefreshOnEveryConnect(nest)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // Let a later call retry (the connect itself failed), then surface.
+            Interlocked.Exchange(ref _mailEpochRefreshStarted, 0);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -3292,9 +3698,14 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(byte[] authorId)
+    public async Task<FfiUnsubscribeReply> SubscriptionUnsubscribeAsync(
+        byte[] authorId, string? tier = null, string? homeNestUrl = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(homeNestUrl) && tier is not null)
+            return await uniffi.fauna_ffi.FaunaFfiMethods
+                .SubscriptionsUnsubscribeAcrossNests(nest, _crypto.SecretBytes, authorId, tier, homeNestUrl)
+                .ConfigureAwait(false);
         return await nest.Subscriptions().Unsubscribe(authorId).ConfigureAwait(false);
     }
 
@@ -3347,6 +3758,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await nest.Payments().ClaimsList().ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    public async Task<ulong> PaymentsClaimsVoidAsync(string code)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Payments().ClaimsVoid(code).ConfigureAwait(false);
+    }
+
 #endif   // PAYMENTS
 
     // ── Profile edit (display-name / bio / links read-modify-write) ──────
@@ -3366,7 +3784,8 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
                 .Select(l => new ProfileLinkRow(l.label, l.uri))
                 .ToList();
             var display = new ProfileDisplay(d.displayName, d.bio, links);
-            return new ProfileGetResult(display, body);
+            return new ProfileGetResult(display, body,
+                Pictures: new ProfilePictures(d.avatarHashHex, d.bannerHashHex));
         }
         catch (FfiException)
         {
@@ -3383,20 +3802,22 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         using var registry = RequireRegistry();
         try
         {
-            // The base's lastDirectBody (the owner's last identity-signed row)
-            // is not threaded on windows yet, so a save over an external app's
-            // edit degrades as before.
-            var body = (await nest.Profile()
+            var editBase = await nest.Profile()
                 .LoadEditBase(_crypto.SecretBytes, registry)
-                .ConfigureAwait(false))?.body;
-            if (body is null)
+                .ConfigureAwait(false);
+            if (editBase is null)
                 return null;
-            var d = FaunaFfiMethods.DecodeProfileDisplay(body);
+            var body = editBase.body;
+            // The own-form projection: the toggle's start value comes from the
+            // shared decode over the WHOLE base (body + the owner's last
+            // identity-signed word), never from a re-spelled audience read.
+            var d = FaunaFfiMethods.DecodeOwnProfileDisplay(
+                _crypto.ActorIdHex, body, editBase.lastDirectBody);
             var links = d.links
                 .Select(l => new ProfileLinkRow(l.label, l.uri))
                 .ToList();
             var display = new ProfileDisplay(d.displayName, d.bio, links);
-            return new ProfileGetResult(display, body);
+            return new ProfileGetResult(display, body, editBase.lastDirectBody, d.audienceEveryone);
         }
         catch (FfiException)
         {
@@ -3407,16 +3828,40 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<ProfileGetResult?> ProfileHeaderReadAsync(string actorId, string? home)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        try
+        {
+            var read = await nest.Profile().ProfileHeaderRead(actorId, home).ConfigureAwait(false);
+            var body = read.body;
+            var d = FaunaFfiMethods.DecodeProfileDisplay(body);
+            var links = d.links
+                .Select(l => new ProfileLinkRow(l.label, l.uri))
+                .ToList();
+            return new ProfileGetResult(new ProfileDisplay(d.displayName, d.bio, links), body,
+                Pictures: new ProfilePictures(
+                    d.avatarHashHex, d.bannerHashHex, read.relayedFrom, read.homeNestActorId));
+        }
+        catch (FfiException)
+        {
+            // Not opted in / unreachable home / decode failure — the id fallback.
+            return null;
+        }
+    }
+
+    /// <inheritdoc />
     public async Task ProfileSetAsync(
-        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner)
+        ProfileDisplay edited, byte[]? baseBody, FfiProfileImageEdit avatar, FfiProfileImageEdit banner,
+        byte[]? lastDirectBody = null, bool? audienceEveryone = null)
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         var links = edited.Links
             .Select(l => new FfiProfileLink(l.Label, l.Uri))
             .ToArray();
         var body = FaunaFfiMethods.BuildEditedProfileWithImages(
-            _crypto.SecretBytes, baseBody, null, ProfilePredecessors(), edited.DisplayName,
-            edited.Bio, links, avatar, banner, null);
+            _crypto.SecretBytes, baseBody, lastDirectBody, ProfilePredecessors(), edited.DisplayName,
+            edited.Bio, links, avatar, banner, audienceEveryone);
         await nest.Profile().ProfileSet(body).ConfigureAwait(false);
     }
 
@@ -3565,7 +4010,7 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer)
+    public async Task<MediaMachine> BuildMediaMachineAsync(MediaObserver observer, ConversationsSession? convSession)
     {
         // Bind the Media content-plane machine to the session's connected WS-RPC
         // requester; its cross-set fauna.media.list read rides this same
@@ -3636,6 +4081,21 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // gesture reports its error rather than minting.
         machine.SetShareAuthor(_crypto.SecretBytes, _nestUrl);
 
+        // The member-row join-filter (media.md § Encryption at rest → The filter
+        // and the upload target address the row, (c)), the Devices twin
+        // DevicesMachineHost wires: the machine reads the shared sets' rows (value
+        // `local:<id>`, owner-labelled, an upload target for a writer) through the
+        // client's one per-actor ConversationsSession, and judges each member
+        // row's declassification under the channel's MLS-recorded owner. Unwired,
+        // the machine drops every shared set's row (fail-safe), so a shared set
+        // reaches the page only as an item-only option by name — merged with an
+        // own namesake. Before the first refresh, which the page makes after this
+        // returns. A missing session leaves the shared rows out, never a page error.
+        if (convSession is not null)
+        {
+            FaunaFfiMethods.WireMediaMlsQuery(machine, convSession);
+        }
+
         return machine;
     }
 
@@ -3703,6 +4163,13 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
         return FaunaFfiMethods.BuildForwardersMachine(nest);
+    }
+
+    /// <inheritdoc />
+    public async Task<DmarcReportsMachine> BuildDmarcReportsMachineAsync()
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return FaunaFfiMethods.BuildDmarcReportsMachine(nest);
     }
 
     /// <inheritdoc />
@@ -3887,6 +4354,25 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<uniffi.fauna_archive_import_machine.ArchiveImportMachine> BuildArchiveImportMachineAsync(string deviceIdHex)
+    {
+        // Built over the session's shared WS-RPC connection; its period-key, folder-key
+        // and mail custody are this seat's account runtime, wired inside
+        // build_archive_import_machine (libs/fauna-ffi/src/archive_import.rs).
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return FaunaFfiMethods.BuildArchiveImportMachine(nest, deviceIdHex);
+    }
+
+    /// <inheritdoc />
+    public async Task<uniffi.fauna_archive_import_machine.ArchiveLinks?> ArchiveLinksAsync()
+    {
+        // Stashed on the FfiNestClient by the conversations factory
+        // (fauna-ffi's archive_import::wire_archive_seams), so this is a read, not a build.
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return nest.ArchiveLinks();
+    }
+
+    /// <inheritdoc />
     public async Task<MailAliasesMachine> BuildMailAliasesMachineAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -4051,6 +4537,51 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    // ── Settings → Sessions (ui/sessions.md) ──
+    // The CONNECTED client: the pass reads this client's own bearer holder for
+    // the own-session ids and the keep-id, so a throwaway client would fold
+    // this app's own sign-in as a stranger's.
+
+    /// <inheritdoc />
+    public async Task<FfiSessionsPage> SessionsLoadAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.SessionsLoad(nest, devices, ownDeviceId, previous)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiSessionsPage> SessionsRevokeAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string tokenId)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.SessionsRevoke(nest, devices, ownDeviceId, previous, tokenId)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiSessionsPage> SessionsRevokeOthersAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.SessionsRevokeOthers(nest, devices, ownDeviceId, previous)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<FfiSessionsPage> SessionsLockoutAsync(
+        uniffi.fauna_devices_machine.DevicesMachine? devices, string? ownDeviceId,
+        FfiSessionsSnapshot? previous, string confirmWord)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await FaunaFfiMethods.SessionsLockout(nest, devices, ownDeviceId, previous, confirmWord)
+            .ConfigureAwait(false);
+    }
+
     /// <inheritdoc />
     public async Task<FfiSweepRetryAnswer> SuccessionRetryGroupSweepAsync()
     {
@@ -4117,6 +4648,27 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await FaunaFfiMethods
             .CustodyRevoke(nest, _crypto.SecretBytes, grantId, holder)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Runs on the connected client's account runtime, so — like
+    /// <see cref="AccountPumpNowAsync"/> and android's
+    /// <c>custodyRestoreFromCustodian</c> — it never forces a connect: with no
+    /// connected client there is no runtime to run the gesture, and the answer
+    /// says so. The restore dials the custodian, never this session's own nest.</remarks>
+    public async Task<FfiCustodianRestoreOutcome> AccountRestoreFromCustodianAsync(string url)
+    {
+        if (Volatile.Read(ref _nest) is not { } nest)
+            return new FfiCustodianRestoreOutcome.Failed("not connected");
+        try
+        {
+            return await nest.AccountRestoreFromCustodian(url).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NestRpcClient", $"[account-runtime] restore from custodian failed: {ex.GetType().Name}");
+            return new FfiCustodianRestoreOutcome.Failed(ex.Message);
+        }
     }
 
     /// <inheritdoc />
@@ -4204,12 +4756,14 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         // Stop the author reconciliation poll loop — it has no watch stream to
         // end it when the session is torn down (sign-out / nest re-point).
         _authorPumpCts.Cancel();
-        if (_nest is not null)
+        // Unpublish the client BEFORE tearing it down, so nothing reading the field
+        // meanwhile (ConnectedAsync's fast path, the pumps) can pick up a client that
+        // is about to be destroyed.
+        if (Interlocked.Exchange(ref _nest, null) is { } nest)
         {
-            try { await _nest.Disconnect().ConfigureAwait(false); }
+            try { await nest.Disconnect().ConfigureAwait(false); }
             catch { /* best-effort: tearing down the session regardless */ }
-            _nest.Dispose();
-            _nest = null;
+            nest.Dispose();
         }
         _connectGate.Dispose();
     }

@@ -78,6 +78,12 @@ pub(crate) async fn start_rotation(
             ..MailStateRow::recreatable_of(&mail)
         })
         .await?;
+    // The page reads the sentinel from here on: a publish refused below —
+    // the nest offline, or the awaited publish refused not-ready behind a
+    // long pass (`account-client-lifecycle.md` § The client-side lifecycle,
+    // the awaited publish's bound) — ends the dispatch with the banner and
+    // its Resume showing at once, not at the next hydrate.
+    machine.set_snapshot_from(&machine.mail_store().load_rows().await?);
     // ...and to the nest's state plane, acknowledged, before the first nest
     // write below: a replica that hydrates from the nest — a sibling, or this
     // device relaunched over a fresh store — must meet the sentinel, never the
@@ -156,15 +162,12 @@ pub(crate) async fn first_enable(
             ..MailStateRow::recreatable_of(mail)
         })
         .await?;
-    // Published before the nest moves, as a rotation's sentinel is: a replica
-    // hydrating from the nest must meet the pending enable, never an email-off
-    // mailbox beside blobs this enable provisioned.
-    machine.mail_store().publish().await?;
-
-    // The row, with its secret, BEFORE any blob is wrapped under it: the
-    // secret is what every later step seals under, so a stop after this
-    // leaves it in custody for the resume. Its generation marker is unset —
-    // the row is owed its wrap, and the loop below records it once wrapped.
+    // The row, with its secret, BEFORE the publish and any blob wrapped
+    // under it: the secret is what every later step seals under, so a stop
+    // anywhere after this — the publish refused included — leaves it in
+    // custody for the resume, which never mints a second credential. Its
+    // generation marker is unset — the row is owed its wrap, and the loop
+    // below records it once wrapped.
     let rows = machine.mail_store().load_rows().await?;
     let credential_id = derive_credential_id(&display_name, &rows.spent_credential_ids());
     machine
@@ -182,6 +185,21 @@ pub(crate) async fn first_enable(
             burned: None,
         })
         .await?;
+    // The page reads the pending enable from here on (as `start_rotation`'s
+    // snapshot does): a publish refused below ends the dispatch with the
+    // banner and its Resume showing at once — the retry of a stopped first
+    // enable is Resume, never a second Enable (`mail-credentials.md`
+    // § Partial-state-during-minting).
+    machine.set_snapshot_from(&machine.mail_store().load_rows().await?);
+    // Published before the nest moves, as a rotation's sentinel is: a replica
+    // hydrating from the nest must meet the pending enable — its credential
+    // row included — never an email-off mailbox beside blobs this enable
+    // provisioned. Refused — the nest offline, or the awaited publish not
+    // served within its bound behind a long pass
+    // (`account-client-lifecycle.md` § The client-side lifecycle, the awaited
+    // publish's bound) — nothing on the nest has moved; the pending enable
+    // stands, resumable.
+    machine.mail_store().publish().await?;
 
     drive_rotation_loop(machine, msek).await
 }
@@ -246,6 +264,7 @@ async fn drive_rotation_loop(
             machine.actor_id(),
             recipient_pubkey,
             mlkem_ek,
+            crate::machine::DavSealPubkeys::derive(&new_msek),
             Some(epoch_keys),
         )
         .await?;

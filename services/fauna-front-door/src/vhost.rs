@@ -115,9 +115,10 @@ enum NotFound {
 enum Resolved {
     /// A canonical regular file inside the canonical docroot.
     File(PathBuf),
-    /// A directory named without a trailing slash: ask again with one, so the
-    /// page's relative links resolve against the directory.
-    TrailingSlash,
+    /// Something servable named WITH a trailing slash (the root aside): ask
+    /// again without one, the canonical form of every URL on the site
+    /// (front-door.md § Public-vhost topology).
+    Slashed,
     /// Nothing servable — absent, outside the docroot, or not a regular file.
     Miss,
 }
@@ -193,35 +194,41 @@ async fn resolve(root: &Path, url_path: &str) -> Resolved {
     let Ok(meta) = tokio::fs::metadata(&real).await else {
         return Resolved::Miss;
     };
-    if meta.is_file() {
-        return Resolved::File(real);
-    }
-    if !meta.is_dir() {
+    let file = if meta.is_file() {
+        real
+    } else if meta.is_dir() {
+        // A directory is servable only through its `index.html` — the site is
+        // built with directory pages (`who/index.html`), so this is the
+        // ordinary path for every page.
+        match contained_file(&root, &real.join("index.html")).await {
+            Some(file) => file,
+            None => return Resolved::Miss,
+        }
+    } else {
         // A FIFO, socket or device: a miss, never an open.
         return Resolved::Miss;
+    };
+    // Judged only once the path resolved, so a slashed miss stays a miss.
+    if url_path != "/" && url_path.ends_with('/') {
+        return Resolved::Slashed;
     }
-    if !url_path.ends_with('/') {
-        return Resolved::TrailingSlash;
-    }
-    // A directory is servable only through its `index.html` — the site is
-    // built with directory pages (`who/index.html`), so this is the ordinary
-    // path for every page but the root.
-    match contained_file(&root, &real.join("index.html")).await {
-        Some(file) => Resolved::File(file),
-        None => Resolved::Miss,
-    }
+    Resolved::File(file)
 }
 
 async fn serve_static(root: &Path, req: Request, miss: NotFound) -> Response {
     let path = req.uri().path().to_owned();
     let file = match resolve(root, &path).await {
         Resolved::File(file) => file,
-        Resolved::TrailingSlash => {
-            // 307 + the query, which is what this vhost has always answered
-            // here; deliberately not a permanent redirect, so a page that
-            // later becomes a file is not cached into a loop.
+        Resolved::Slashed => {
+            // Permanent (308) + the query. The 307 this replaced was temporary
+            // because it pointed at the slashed form, which a page turning into
+            // a file would have made a loop; the slash-less form names a page
+            // and a file alike, so caching it for good is safe. The leading
+            // slashes collapse to one: `//who/` must not become the
+            // scheme-relative `//who`, a redirect to another host.
             let query = req.uri().query().map_or(String::new(), |q| format!("?{q}"));
-            return Redirect::temporary(&format!("{path}/{query}")).into_response();
+            let to = format!("/{}{query}", path.trim_matches('/'));
+            return Redirect::permanent(&to).into_response();
         }
         Resolved::Miss => return static_miss(root, &path, miss).await,
     };
@@ -385,8 +392,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(site.path().join("index.html"), "<h1>burrow home</h1>").unwrap();
-        // The site is built with directory pages (`who/index.html`), so a
-        // directory request is the ordinary case, not an edge one.
+        // The site is built with directory pages (`who/index.html`) and named
+        // without a trailing slash (`/who`), so a directory request is the
+        // ordinary case, not an edge one.
         std::fs::create_dir_all(site.path().join("who")).unwrap();
         std::fs::write(site.path().join("who/index.html"), "<h1>who we are</h1>").unwrap();
         std::fs::create_dir_all(site.path().join("_astro")).unwrap();
@@ -535,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn apex_serves_a_directory_page_through_its_index() {
         let mut fx = fixture();
-        let resp = fx.app.call(get("door.test", "/who/")).await.unwrap();
+        let resp = fx.app.call(get("door.test", "/who?tab=a")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(
             resp.headers()[header::CONTENT_TYPE.as_str()]
@@ -548,15 +556,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apex_sends_a_directory_named_without_a_slash_to_one() {
+    async fn apex_sends_a_slashed_page_permanently_to_its_slashless_form() {
         let mut fx = fixture();
-        let resp = fx.app.call(get("door.test", "/who?tab=a")).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let resp = fx.app.call(get("door.test", "/who/?tab=a")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
         assert_eq!(
             resp.headers()[header::LOCATION.as_str()],
-            "/who/?tab=a",
-            "relative links on the page resolve against the directory"
+            "/who?tab=a",
+            "a page URL's canonical form has no trailing slash"
         );
+    }
+
+    #[tokio::test]
+    async fn apex_sends_a_slashed_file_to_its_slashless_form_too() {
+        let mut fx = fixture();
+        let resp = fx
+            .app
+            .call(get("door.test", "/_astro/site.css/"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            resp.headers()[header::LOCATION.as_str()],
+            "/_astro/site.css"
+        );
+    }
+
+    #[tokio::test]
+    async fn apex_serves_the_root_as_slash_without_a_redirect() {
+        let mut fx = fixture();
+        let resp = fx.app.call(get("door.test", "/")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("burrow home"));
+    }
+
+    /// The redirect names a path on this host, never another one: a request
+    /// path opening with `//` would otherwise become a scheme-relative
+    /// `Location` pointing off-site.
+    #[tokio::test]
+    async fn a_slashed_redirect_never_leaves_the_host() {
+        let mut fx = fixture();
+        let resp = fx.app.call(get("door.test", "//who/")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(resp.headers()[header::LOCATION.as_str()], "/who");
+    }
+
+    #[tokio::test]
+    async fn a_slashed_miss_is_a_miss_not_a_redirect() {
+        let mut fx = fixture();
+        let resp = fx.app.call(get("door.test", "/nowhere/")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(body_string(resp).await.contains("lost in the burrow"));
     }
 
     #[tokio::test]
@@ -628,7 +678,7 @@ mod tests {
         async fn a_pushed_directory_link_out_of_the_docroot_serves_nothing() {
             let mut fx = fixture();
             symlink(fx.outside.path(), fx.site().join("state")).unwrap();
-            for path in ["/state/privkey.pem", "/state/"] {
+            for path in ["/state/privkey.pem", "/state", "/state/"] {
                 let resp = fx.app.call(get("door.test", path)).await.unwrap();
                 let status = resp.status();
                 let body = body_string(resp).await;
@@ -750,7 +800,7 @@ mod tests {
         async fn a_link_that_stays_inside_the_docroot_is_still_served() {
             let mut fx = fixture();
             symlink(fx.site().join("who"), fx.site().join("mirror")).unwrap();
-            let resp = fx.app.call(get("door.test", "/mirror/")).await.unwrap();
+            let resp = fx.app.call(get("door.test", "/mirror")).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
             assert!(body_string(resp).await.contains("who we are"));
         }

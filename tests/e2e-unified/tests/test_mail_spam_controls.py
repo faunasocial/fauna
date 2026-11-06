@@ -27,7 +27,7 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
 from helpers.mail_aliases import add_exact_alias
@@ -211,6 +211,9 @@ def _spam_model_grant_rows(nest) -> list[bytes]:
         conn.close()
 
 
+# android paints the contribute toggle and the Nests trust rows this walk reads;
+# its leg is marked so the android run owes it (2026-10-26).
+@pytest.mark.android
 @pytest.mark.feature("spam")
 def test_contributing_is_off_until_turned_on_and_is_a_revocable_grant(app, contribute_nest):
     """Outcome 13: contributing training to the nest's shared starting point is
@@ -221,7 +224,6 @@ def test_contributing_is_off_until_turned_on_and_is_a_revocable_grant(app, contr
     from actions.mail_spam import MailSpamActions
     from tests.test_nest_trust_grants import _login_as_admin, _seed_mda_holder
 
-    app.nest_trust.require_mint_test_setup_supported()
     nest = contribute_nest
     _login_as_admin(app, nest)
     app.mail_settings.navigate()
@@ -347,6 +349,10 @@ def _deliver(mta, recipient: str, subject: str, body: str, deadline: float) -> N
 
 
 @pytest.mark.feature("spam")
+# android builds the threshold input on the spam page (`MailSpamScreen.kt`,
+# Compose-content-proven in `MailSpamContentTest.kt`); marked so its leg is
+# applicable — not yet run on a device, so no cell moves.
+@pytest.mark.android
 @pytest.mark.real_conversations
 def test_your_own_spam_threshold_sorts_your_mail(
     logged_in_app, mail_bridge_mta, nest_instance, test_user, _threshold_cleanup,
@@ -442,13 +448,6 @@ def test_your_own_spam_threshold_sorts_your_mail(
 
 # ── outcome 11 ─────────────────────────────────────────────────────────────
 
-# The apps whose second seat of one identity the harness can launch
-# (`conftest.py::_alice_extra_seat`, and web's twin page
-# `conftest.py::_alice_web_twin_seat`) — and so the apps this journey can run on.
-_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "ios", "windows", "web"})
-# The apps whose open spam page re-reads on `StaleSurfaces::mail_spam`.
-_PUSH_REREAD_APPS = frozenset({"tui", "linux", "macos", "ios", "web", "android", "windows"})
-
 
 @pytest.mark.feature("spam")
 @pytest.mark.linux
@@ -456,9 +455,14 @@ _PUSH_REREAD_APPS = frozenset({"tui", "linux", "macos", "ios", "web", "android",
 @pytest.mark.ios
 @pytest.mark.web
 @pytest.mark.windows
+# android is the WATCHING device: a tui seat of the same identity drives the
+# undo and the reset, and android's open list must follow by the push.
+@pytest.mark.android
+@pytest.mark.requires_surface("second-seat-same-identity")
 @pytest.mark.real_conversations
 def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
-    dedicated_actor_app, nest_instance, request, seal_helper_binary
+    dedicated_actor_app, nest_instance, request, seal_helper_binary,
+    android_other_device_seat,
 ):
     """Outcome 11: an undo or a reset on one device updates the training history
     already open on the person's other device, with no visit to reload it
@@ -473,20 +477,7 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
 
     app, actor = dedicated_actor_app
     name = app_name(app.driver)
-    if name not in _SECOND_SEAT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="a second seat of one identity in the e2e harness",
-            detail="conftest.py::_alice_extra_seat launches tui, linux, macos, ios and windows seats, and web opens a twin page; android has no second-seat harness",
-            tracked="",
-        )
-    if name not in _PUSH_REREAD_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="StaleSurfaces::mail_spam",
-            detail="the spam page re-reading on the training-history push is built on tui first",
-            tracked="",
-        )
+    require_surface(app.driver, "second-seat-same-identity")
 
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
@@ -504,25 +495,48 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
              "subject": f"Third {stamp}", "label": "spam", "source": "imap_junk_move"},
         ],
     )
-    spam_a = MailSpamActions(app.driver)
-    spam_a.navigate()
-    assert spam_a.wait_for_history_count(3), (
-        f"device A: seeded 3 lessons; list shows {spam_a.history_count()} "
-        f"(error: {spam_a.error_text()!r})"
+    spam_app = MailSpamActions(app.driver)
+    spam_app.navigate()
+    assert spam_app.wait_for_history_count(3), (
+        f"device A: seeded 3 lessons; list shows {spam_app.history_count()} "
+        f"(error: {spam_app.error_text()!r})"
     )
 
-    if name == "web":
-        seat = _alice_web_twin_seat(
-            app.driver, request, actor, screenshot_tag="spam-second-device",
+    # Roles: on every app but android the app under test drives the undo and the
+    # reset (device A) and a second seat of it watches (device B). On android the
+    # roles swap: a tui seat of the same identity (the declared
+    # `android_other_device_seat`, built outside this test's budget) drives, and
+    # android — opened once and never navigated again — watches.
+    seat = None
+    if name == "android":
+        _device_b, driver_b = android_other_device_seat(
+            "spam-second-device", identity=actor,
         )
     else:
-        seat = _alice_extra_seat(
-            name, request, actor, nest_instance, screenshot_tag="spam-second-device",
-        )
-    _device_b, driver_b = next(seat)
+        if name == "web":
+            seat = _alice_web_twin_seat(
+                app.driver, request, actor, screenshot_tag="spam-second-device",
+            )
+        else:
+            seat = _alice_extra_seat(
+                name, request, actor, nest_instance, screenshot_tag="spam-second-device",
+            )
+        _device_b, driver_b = next(seat)
     try:
-        spam_b = MailSpamActions(driver_b)
-        spam_b.navigate()
+        if name == "android":
+            spam_a = MailSpamActions(driver_b)
+            spam_a.navigate()
+            assert spam_a.wait_for_history_count(3), (
+                f"device A (tui seat): the lessons show {spam_a.history_count()} of 3 "
+                f"(error: {spam_a.error_text()!r})"
+            )
+            spam_b = spam_app
+            diag_driver = driver_b
+        else:
+            spam_a = spam_app
+            spam_b = MailSpamActions(driver_b)
+            spam_b.navigate()
+            diag_driver = app.driver
         assert spam_b.wait_for_history_count(3, timeout=_UI_S), (
             f"device B: the open list shows {spam_b.history_count()} of 3 "
             f"(error: {spam_b.error_text()!r})"
@@ -542,14 +556,15 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
         assert spam_a.wait_for_history_count(0), (
             f"device A: the reset clears the history; list shows "
             f"{spam_a.history_count()} (error: {spam_a.error_text()!r}; "
-            f"{app.driver.diagnose('mail-spam-reset-model-button')})"
+            f"{diag_driver.diagnose('mail-spam-reset-model-button')})"
         )
         assert spam_b.wait_for_history_count(0, timeout=_UI_S), (
             f"device B: the reset on device A must clear the list open here; it "
             f"shows {spam_b.history_count()} (error: {spam_b.error_text()!r})"
         )
     finally:
-        seat.close()
+        if seat is not None:
+            seat.close()
 
 
 # ── outcome 12 ─────────────────────────────────────────────────────────────
@@ -603,6 +618,9 @@ def _junk_over_imap(handle, address: str, password: str, subject: str) -> None:
 
 
 @pytest.mark.feature("spam")
+# android paints the history on the spam page and reloads it on open
+# (`MailSpamVM.kt`); marked so its leg is applicable — not yet run on a device.
+@pytest.mark.android
 def test_a_lesson_given_in_a_mail_app_is_in_the_history_next_time(
     app, dedicated_mail_nest, request
 ):

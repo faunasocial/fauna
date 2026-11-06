@@ -9,6 +9,7 @@ using FaunaApp.Core.Logs;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using FaunaApp.Feed;
 using uniffi.fauna_conversations;
 using S = FaunaApp.Core.Services.Strings;
 using FaunaApp.UiIds;
@@ -29,13 +30,16 @@ namespace FaunaApp.Views;
 /// apps/fauna-linux/src/views/profile/{mod,tiers}.rs + apple FaunaKit
 /// ProfileView/SubscriptionsVM.
 /// </summary>
-public sealed partial class ProfilePage : Page
+public sealed partial class ProfilePage : Page, IPostCardPage
 {
     /// <summary>The live instance, set on load / cleared on unload — the TestAgent's
     /// <c>compose.file</c> route for <c>profile-edit-avatar</c>/<c>profile-edit-banner</c>
     /// (native bridges can't drive the real OS file picker; mirrors
-    /// <c>ConversationsPage.Current</c>/<c>StageAttachment</c>).</summary>
+    /// <c>ConversationsPage.Current</c>/<c>StageAttachment</c>). The agent is its only
+    /// reader, so it compiles out of Release with it (convention 15).</summary>
+#if DEBUG || FAUNA_E2E_AGENT
     internal static ProfilePage? Current { get; private set; }
+#endif
 
     private ProfileViewModel? _vm;
 
@@ -51,7 +55,7 @@ public sealed partial class ProfilePage : Page
     /// <c>TierMoneyFieldsHost</c> — same removable-item reasoning as
     /// <see cref="_payments"/> (dynamic-features.md § Platform-family surface excision
     /// → The price-and-route class). Null until the first <c>Page_Loaded</c>.</summary>
-    private Views.Payments.SubscriptionTierMoneyFields? _tierMoneyFields;
+    private Views.Payments.TierMoneyFields? _tierMoneyFields;
 #endif
 
     // The nav-parameter clients (held so the OTHER-profile start-DM resolves the
@@ -67,6 +71,7 @@ public sealed partial class ProfilePage : Page
     public ProfilePage()
     {
         this.InitializeComponent();
+        _cards = new PostCardHost(this, ProfilePostsList, "profile", TipListDialogHost);
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -83,11 +88,14 @@ public sealed partial class ProfilePage : Page
             // (SELF). Read-and-clear so the next SELF nav (sidebar profile-tab) is SELF.
             var target = App.PendingProfileTarget;
             App.PendingProfileTarget = null;
+            var targetHome = App.PendingProfileHome;
+            App.PendingProfileHome = null;
             var isSelf = string.IsNullOrEmpty(target);
             var actorId = isSelf
                 ? (clients.Crypto.HasKey ? clients.Crypto.ActorIdHex : "")
                 : target!;
-            _vm = new ProfileViewModel(clients.Rpc, actorId, isSelf);
+            _vm = new ProfileViewModel(clients.Rpc, actorId, isSelf, targetHome);
+            PublishProfileState();
             _vm.PropertyChanged += ViewModel_PropertyChanged;
 
             // Rich identity is publish-path-gated, so until the profile read lands the
@@ -276,22 +284,41 @@ public sealed partial class ProfilePage : Page
         PaymentsSectionsHost.Content = _payments;
         _payments.Attach(_vm, _clients?.Account.Handle);
 
-        _tierMoneyFields = new Views.Payments.SubscriptionTierMoneyFields();
+        _tierMoneyFields = new Views.Payments.TierMoneyFields();
         TierMoneyFieldsHost.Content = _tierMoneyFields;
 #endif
 
+#if DEBUG || FAUNA_E2E_AGENT
         Current = this;
+#endif
         ContactOverlayNames.Moved += OnOverlayMoved;
         // The ward's durable asks moved (a status read landed): repaint the ask pair.
         WardAsksCache.Changed += OnWardAsksChanged;
         PaintKnock();
 
+        // The Posts tab is the default tab: the page's open is an open of the tab, so it
+        // reads the author's posts now, beside the header and Tiers reads below.
+        _ = OpenPostsWindowAsync();
+
         // Render the header's two names on load: the shared resolver's answer over the
         // published display_name (the HeaderName / HeaderPublicName changes push through
         // ViewModel_PropertyChanged).
         await _vm.RefreshHeaderAsync();
+        PublishProfileState();
         HandleText.Text = _vm.HeaderName;
         ApplyPublicName();
+
+        // The OTHER header holds no handle: re-read the contact roster now, so a
+        // contact accepted a moment ago is named by the roster's handle rather than
+        // the short id until the receive loop's next tick (value-formatting.md § Peer
+        // display label → the roster handle; apple's ProfileView open task is the
+        // twin). The projection's move also raises ContactOverlayNames.Moved; the
+        // repaint here does not wait for that wake.
+        if (!_vm.IsSelf)
+        {
+            await ContactOverlayNames.RefreshRosterAsync();
+            _vm.RepaintHeader();
+        }
 
         await _vm.HydrateAsync();
         UpdateDerivedUi();
@@ -310,12 +337,69 @@ public sealed partial class ProfilePage : Page
 
     private void Page_Unloaded(object sender, RoutedEventArgs e)
     {
+#if DEBUG || FAUNA_E2E_AGENT
         if (ReferenceEquals(Current, this)) Current = null;
+#endif
+        App.ProfileStateNow = null;
         ContactOverlayNames.Moved -= OnOverlayMoved;
         WardAsksCache.Changed -= OnWardAsksChanged;
+        // An open still in flight lands nowhere; the window stops observing.
+        _postsEpoch++;
+        DetachPostsWindow();
     }
 
     private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(PaintKnock);
+
+    /// <summary>Resolved per call (never captured) — the nest client is replaced on re-auth;
+    /// <see cref="Helpers.BlobImageLoader"/> documents the staleness it prevents.</summary>
+    private Helpers.BlobImageLoader? _pictureLoader;
+
+    /// <summary>Bumped per paint; a plane build that finishes after a newer paint began
+    /// does not bind (the VM's own epoch drops stale reads, this drops stale binds).</summary>
+    private int _pictureEpoch;
+
+    /// <summary>Paint <c>profile-avatar</c> / <c>profile-banner</c> from the VM: an element
+    /// is rendered only while the profile names its picture, and
+    /// <see cref="Helpers.ImageHashBind"/> answers <c>get_attr(state)</c> —
+    /// <c>placeholder</c> until the bytes are on screen, <c>painted</c> after; a failed
+    /// fetch leaves it a placeholder, never <c>error-message</c>. The post-blob plane is
+    /// built before the first bind so a relayed profile's bytes never fall back to this
+    /// nest's by-hash GET.</summary>
+    private async void PaintPictures()
+    {
+        if (_vm is null) return;
+        var epoch = ++_pictureEpoch;
+        var avatar = _vm.AvatarHash;
+        var banner = _vm.BannerHash;
+        var home = _vm.PictureHome;
+        if (avatar is not null || banner is not null)
+        {
+            try
+            {
+                if (_clients?.Rpc is { } rpc) await Core.PostBlobHostsHost.GetOrBuildAsync(rpc);
+            }
+            catch (Exception ex)
+            {
+                // No plane: this nest's pictures still load through the by-hash GET, a
+                // relayed one stays a placeholder (the loader treats it as a miss).
+                ShellLog.Warn("ProfilePage", $"post-blob plane unavailable for header pictures: {ex.Message}");
+            }
+            if (epoch != _pictureEpoch) return;
+        }
+        _pictureLoader ??= new Helpers.BlobImageLoader(() => App.CurrentNest);
+        BindPicture(AvatarImage, avatar, home);
+        BindPicture(BannerImage, banner, home);
+        AvatarGlyph.Visibility = avatar is null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BindPicture(Image image, string? hash, object? home)
+    {
+        Helpers.ImageHashBind.SetManageVisibility(image, false);
+        Helpers.ImageHashBind.SetLoader(image, _pictureLoader);
+        Helpers.ImageHashBind.SetHome(image, home);
+        Helpers.ImageHashBind.SetHash(image, hash);
+        image.Visibility = hash is null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     /// <summary>Paint <c>profile-request-contact-button</c> and the guardian-ask pair
     /// from the VM (OTHER profile only; the row is collapsed on SELF). The knock reads
@@ -398,6 +482,11 @@ public sealed partial class ProfilePage : Page
             case nameof(ProfileViewModel.HeaderPublicName):
                 ApplyPublicName();
                 break;
+            case nameof(ProfileViewModel.AvatarHash):
+            case nameof(ProfileViewModel.BannerHash):
+            case nameof(ProfileViewModel.PictureHome):
+                PaintPictures();
+                break;
             case nameof(ProfileViewModel.KnockAsk):
                 PaintKnock();
                 break;
@@ -429,6 +518,9 @@ public sealed partial class ProfilePage : Page
         PostsPanel.Visibility = Visibility.Visible;
         TiersPanel.Visibility = Visibility.Collapsed;
         PageHeading.Text = S.Get("profile/posts");
+        // Every activation reads the author's posts afresh (profile.md § Persistence —
+        // no client cache), as the Tiers tab's own re-read door does.
+        _ = OpenPostsWindowAsync();
     }
 
     private async void TiersTab_Click(object sender, RoutedEventArgs e)
@@ -436,6 +528,8 @@ public sealed partial class ProfilePage : Page
         PostsPanel.Visibility = Visibility.Collapsed;
         TiersPanel.Visibility = Visibility.Visible;
         PageHeading.Text = S.Get("profile/tiers");
+        // The window's read error belongs to the Posts tab alone.
+        ShowPostsError(null);
         // Re-read on every activation, not just page load — the ruled uniform
         // door (monetization.md § Pillar 1 → The Tiers-tab re-read door):
         // there is no push kind for a subscribe grant, so a re-click is the
@@ -488,7 +582,10 @@ public sealed partial class ProfilePage : Page
     private void StartDm_Click(object sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
-        var manager = _clients?.ConvSession?.Manager() ?? ConversationsManagerHost.Instance;
+        // A retired session (a click landing after an actor change, before the frame
+        // takes this page away) starts nothing.
+        if (ConversationsManagerHost.ManagerFor(_clients?.ConvSession, "start a DM") is not { } manager)
+            return;
         manager.StartNewConversation();
         try
         {
@@ -556,13 +653,13 @@ public sealed partial class ProfilePage : Page
     // once per realized row, and both lists are rebuilt with Clear + Add, so every row
     // arrives in a fresh container.
 
-    /// <summary>Fill one tier row's price column (<see cref="Views.Payments.SubscriptionTierPriceText"/>).</summary>
+    /// <summary>Fill one tier row's price column (<see cref="Views.Payments.TierPrice"/>).</summary>
     private void TierPriceHost_Loaded(object sender, RoutedEventArgs e)
     {
 #if PAYMENTS
         if (sender is not ContentControl { DataContext: SubscriptionTierRow row } host) return;
-        if (host.Content is not Views.Payments.SubscriptionTierPriceText price)
-            host.Content = price = new Views.Payments.SubscriptionTierPriceText();
+        if (host.Content is not Views.Payments.TierPrice price)
+            host.Content = price = new Views.Payments.TierPrice();
         price.Bind(row);
 #endif   // PAYMENTS
     }
@@ -578,14 +675,14 @@ public sealed partial class ProfilePage : Page
 #endif   // PAYMENTS
     }
 
-    /// <summary>Fill one offer row's checkout link (<see cref="Views.Payments.SubscriptionOfferPaymentLink"/>).</summary>
+    /// <summary>Fill one offer row's checkout link (<see cref="Views.Payments.OfferPaymentLink"/>).</summary>
     private void OfferPaymentLinkHost_Loaded(object sender, RoutedEventArgs e)
     {
 #if PAYMENTS
         if (sender is not ContentControl { DataContext: SubscriptionOfferRow row } host) return;
-        if (host.Content is not Views.Payments.SubscriptionOfferPaymentLink link)
+        if (host.Content is not Views.Payments.OfferPaymentLink link)
         {
-            link = new Views.Payments.SubscriptionOfferPaymentLink();
+            link = new Views.Payments.OfferPaymentLink();
             link.OpenRequested += (_, r) => OpenOfferPaymentLink(r);
             host.Content = link;
         }
@@ -639,6 +736,24 @@ public sealed partial class ProfilePage : Page
 
     private void CancelEdit_Click(object sender, RoutedEventArgs e) => _vm?.CancelEdit();
 
+    /// <summary>True while <see cref="SyncEditFormFromVm"/> paints the toggle, so the
+    /// paint is not read back as a user press.</summary>
+    private bool _syncingAudience;
+
+    private void EditAudienceToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || _syncingAudience) return;
+        _vm.SetAudience(EditAudienceToggle.IsOn);
+    }
+
+    /// <summary>Publish the viewed actor + actor-home slot to the <c>data.profile</c>
+    /// state read (<c>profile.actor_id</c> / <c>profile.home_nest_url</c>).</summary>
+    private void PublishProfileState()
+    {
+        if (_vm is null) return;
+        App.ProfileStateNow = (_vm.ActorId, _vm.ActorHomeUrl);
+    }
+
     /// <summary>Push the VM's edit-form display-name + bio into the TextBoxes (the
     /// links bind via ItemsSource), and reset the avatar/banner buttons to their
     /// localized placeholders (the VM's staged bytes/clear flags were reset by
@@ -648,6 +763,9 @@ public sealed partial class ProfilePage : Page
         if (_vm is null) return;
         EditDisplayNameBox.Text = _vm.EditDisplayName;
         EditBioBox.Text = _vm.EditBio;
+        _syncingAudience = true;
+        EditAudienceToggle.IsOn = _vm.EditAudienceEveryone;
+        _syncingAudience = false;
         AvatarButton.Content = S.Get("profile/edit_avatar");
         BannerButton.Content = S.Get("profile/edit_banner");
     }
@@ -722,6 +840,7 @@ public sealed partial class ProfilePage : Page
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>The TestAgent's <c>compose.file</c> route for
     /// <c>profile-edit-avatar</c>/<c>profile-edit-banner</c> (native bridges can't
     /// drive the real OS file picker — mirrors <see cref="ConversationsPage.StageAttachment"/>).
@@ -746,6 +865,7 @@ public sealed partial class ProfilePage : Page
                 return false;
         }
     }
+#endif
 
     /// <summary>Pull the display-name + bio TextBoxes into the VM before
     /// <c>SaveEditAsync</c> (the links are already two-way-bound).</summary>
@@ -819,6 +939,184 @@ public sealed partial class ProfilePage : Page
         if (_vm is null || sender is not FrameworkElement { Tag: SubscriptionSubscriberRow row }) return;
         await _vm.RemoveSubscriberAsync(row.SubscriberId, _vm.SelectedTier);
         UpdateDerivedUi();
+    }
+
+    // ── Posts tab (profile.md § Layout & flow → The Posts tab) ──────────────────
+    //
+    // The tab is a feed read narrowed to one author, adding no post logic of its own:
+    // an AUTHOR WINDOW of the session's feed manager (FfiFeedManager.AuthorWindow —
+    // feed.md § State & data shape → The author window) behind a window-bound
+    // FeedViewModel, its rows the feed's own post-card template, and the cards' verbs
+    // the feed's own card behaviour (PostCardHost) acting on the window. A card's
+    // activation is the door a search result uses: the feed page's post_detail over
+    // the timeline's resolve_post. Mirrors tui's profile::posts, linux's
+    // views/profile/posts.rs and apple's ProfilePostsSection.
+
+    /// <summary>The Posts tab's cards — the feed page's own card behaviour, acting on
+    /// <see cref="_postsVm"/> through <see cref="IPostCardPage"/>.</summary>
+    private readonly PostCardHost _cards;
+
+    /// <summary>The window behind the tab, minted afresh on every open; null before the
+    /// first open lands and after the page unloads.</summary>
+    private FeedViewModel? _postsVm;
+
+    /// <summary>Bumped per open and at unload: an open that finishes after a newer one
+    /// began (or after the page left) mints nothing and paints nothing.</summary>
+    private int _postsEpoch;
+
+    /// <summary>The window's read error while it is the one on <c>error-message</c> —
+    /// so a later tick clears only what this tab painted, never the page's other errors.</summary>
+    private string? _postsErrorShown;
+
+    /// <summary>A card verb's failure while it is the one on <c>error-message</c> — the
+    /// feed page's sticky page error, which the next verb that lands clears.</summary>
+    private string? _cardErrorShown;
+
+    /// <summary>Open the tab: mint a fresh author window off the session's feed manager
+    /// for the actor on screen (the viewer's own on SELF) and read its first page. Called
+    /// on the page's open and on every <c>profile-posts-tab</c> activation, so each open
+    /// reads afresh. The feed manager is built here when the Feed page has not been
+    /// opened this session (FeedManagerHost is the one per-session manager), and the
+    /// post-blob plane and the room-post key seam are in place before the window is
+    /// minted, so its cards' pictures and room labels resolve as on the feed.</summary>
+    private async Task OpenPostsWindowAsync()
+    {
+        if (_vm is null || _clients?.Rpc is not { } rpc || string.IsNullOrEmpty(_vm.ActorId)) return;
+        var clients = _clients;
+        var actorId = _vm.ActorId;
+        var epoch = ++_postsEpoch;
+        try
+        {
+            var timeline = await Core.FeedManagerHost.GetOrBuildAsync(
+                rpc, () => rpc.BuildFeedManagerAsync(clients.Account?.ResolveDeviceId()));
+            await Core.PostBlobHostsHost.GetOrBuildAsync(rpc);
+            // The window shares the seams installed on the timeline it is minted from;
+            // install the room-post seam first (idempotent — FeedPage.Page_Loaded's own).
+            if (clients.ConvSession is not null) timeline.SetRoomPostKeys(clients.ConvSession);
+            if (epoch != _postsEpoch) return;
+
+            DetachPostsWindow();
+            var window = FeedViewModel.ForAuthorWindow(
+                timeline.AuthorWindow(actorId), new FeedNotifyObserver(), rpc);
+            window.PropertyChanged += PostsWindow_PropertyChanged;
+            _postsVm = window;
+            // The previous open's rows go at once: nothing renders while the first read
+            // is in flight (profile.md § The Posts tab → Empty, loading, error).
+            RefreshPosts();
+            await window.ReloadCommand.ExecuteAsync(null);
+            if (ReferenceEquals(_postsVm, window)) RefreshPosts();
+        }
+        catch (Exception ex)
+        {
+            if (epoch != _postsEpoch) return;
+            ShellLog.Warn(nameof(ProfilePage), $"posts window open failed: {ex.GetType().Name}: {ex.Message}");
+            ShowPostsError(S.Error(ex));
+        }
+    }
+
+    private void PostsWindow_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (ReferenceEquals(sender, _postsVm)) RefreshPosts();
+    }
+
+    /// <summary>Stop observing the current window (a newer open replaces it, or the page
+    /// left). Its manager is the window's own, so its observer list is the VM's to clear.</summary>
+    private void DetachPostsWindow()
+    {
+        if (_postsVm is not { } old) return;
+        _postsVm = null;
+        old.PropertyChanged -= PostsWindow_PropertyChanged;
+        old.DetachFromManager();
+        old.CleanupReconnect();
+        old.CleanupStoreChange();
+    }
+
+    /// <summary>Repaint the tab from the window's snapshot: the rows (the feed's own
+    /// reconcile and lazy resolves), <c>profile-posts-empty</c> off the shared
+    /// <c>FeedSnapshot::empty_state</c>, the load-more footer while the window holds
+    /// more, and the window's read error on <c>error-message</c>.</summary>
+    private void RefreshPosts()
+    {
+        var window = _postsVm;
+        _cards.Sync(window?.Posts ?? Array.Empty<uniffi.fauna_feed.PostSummary>());
+        NoPostsText.Visibility = window?.EmptyState == uniffi.fauna_feed.FeedEmptyState.NoPosts
+            ? Visibility.Visible : Visibility.Collapsed;
+        LoadMorePostsButton.Visibility = window is { HasMore: true, Posts.Count: > 0 }
+            ? Visibility.Visible : Visibility.Collapsed;
+        ShowPostsError(window?.ErrorText);
+    }
+
+    /// <summary>The window's read error on the page's <c>error-message</c>, while the
+    /// Posts tab is showing (tui's <c>posts::page_error</c>); its clearing clears only
+    /// what this tab painted.</summary>
+    private void ShowPostsError(string? error)
+    {
+        if (!string.IsNullOrEmpty(error) && PostsPanel.Visibility == Visibility.Visible)
+        {
+            if (error == _postsErrorShown) return;
+            _postsErrorShown = error;
+            RenderError(error);
+            return;
+        }
+        if (_postsErrorShown is null) return;
+        if (App.CurrentErrorMessage == _postsErrorShown) RenderError(null);
+        _postsErrorShown = null;
+    }
+
+    /// <summary>The tab's next page — the feed page's own load-more button.</summary>
+    private async void LoadMorePosts_Click(object sender, RoutedEventArgs e)
+    {
+        if (_postsVm is not { } window) return;
+        await _cards.RunVerbAsync("load more", window.LoadMoreAsync);
+    }
+
+    // ── IPostCardPage — what the Posts tab's cards act on and paint on ──────────
+
+    FeedViewModel? IPostCardPage.CardViewModel => _postsVm;
+    INestRpcClient? IPostCardPage.Rpc => _clients?.Rpc;
+    ICryptoService? IPostCardPage.Crypto => _clients?.Crypto;
+    ISessionAccount? IPostCardPage.Account => _clients?.Account;
+
+    void IPostCardPage.ReportPageError(string message)
+    {
+        _cardErrorShown = message;
+        RenderError(message);
+    }
+
+    void IPostCardPage.ClearPageError()
+    {
+        if (_cardErrorShown is null) return;
+        if (App.CurrentErrorMessage == _cardErrorShown) RenderError(null);
+        _cardErrorShown = null;
+    }
+
+    void IPostCardPage.ShowError(string message) => RenderError(message);
+
+    void IPostCardPage.ShowReportStatus(string? acknowledgement)
+    {
+        ReportStatusText.Text = acknowledgement ?? "";
+        ReportStatusText.Visibility = acknowledgement is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void IPostCardPage.RefreshCards() => RefreshPosts();
+
+    /// <summary>Open the page's lightbox overlay (<c>image-lightbox</c>) on a card's
+    /// already-loaded picture.</summary>
+    public void ShowImageLightbox(Microsoft.UI.Xaml.Media.Imaging.BitmapImage image) => Lightbox.Show(image);
+
+    /// <summary>A card's activation: the feed page's <c>post_detail</c> through the door a
+    /// search result uses (search.md § User actions → SearchNav.Post; profile.md § The
+    /// Posts tab → What a row is) — the feed page opens the post from what its timeline
+    /// holds, else through the timeline manager's <c>resolve_post</c>. A REPOST ROW opens
+    /// its original, as on the feed.</summary>
+    Task IPostCardPage.OpenPostDetailAsync(FeedPostItem item)
+    {
+        if (_clients is null) return Task.CompletedTask;
+        var postId = item.IsRepostRow && item.RepostedPostId is { Length: > 0 } original
+            ? original
+            : item.PostId;
+        Frame.Navigate(typeof(FeedPage), _clients with { DeepLinkPostId = postId });
+        return Task.CompletedTask;
     }
 
     // ── render helpers ──────────────────────────────────────────────────

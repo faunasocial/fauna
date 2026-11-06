@@ -31,9 +31,9 @@ import (
 //     client's chosen filename is ignored — we rewrite Location.
 //  4. Tokenize the FN/EMAIL/TEL values into a CanonicalTokenSet (encrypted-mode
 //     SEARCH-axis index hint).
-//  5. SEAL-ALWAYS: HPKE-seal raw body to actor's MLS pubkey; HPKE-seal hint
-//     bytes to actor's index pubkey (falling back to MLS pubkey when the actor
-//     has no index key yet). Wire bytes never see plaintext, in BOTH storage
+//  5. SEAL-ALWAYS: HPKE-seal raw body as a `card-record` to the session's
+//     card key; HPKE-seal hint bytes to actor's index pubkey (falling back to
+//     the card key when the actor has no index key yet). Wire bytes never see plaintext, in BOTH storage
 //     modes — contacts have no plaintext-at-rest carve-out.
 //  6. wsrpc.PutCardCiphertext → outcome dispatch:
 //     - Created/Updated → 201 + ETag + Location (emersion hard-codes 201).
@@ -79,29 +79,22 @@ func (b *Backend) PutAddressObject(
 
 	tokens := mailfauna.Tokenize(indexableText(card))
 
-	mlsPubkey := sess.MLSPubkey()
-	if mlsPubkey == nil {
+	cardPubkey, cardEk := sess.CardPubkey(), sess.CardMlkemEk()
+	if cardPubkey == nil {
 		return nil, webdav.NewHTTPError(http.StatusInternalServerError,
-			errors.New("session missing MLS pubkey"))
-	}
-	indexKey := sess.IndexKey()
-	if indexKey == nil {
-		// Actor has no index key provisioned yet — fall back to the MLS pubkey
-		// so the recipient's MDA opens both shapes with the same key on REPORT
-		// (mirrors the IMAP/CalDAV write path).
-		indexKey = mlsPubkey
+			errors.New("session missing card seal key"))
 	}
 
-	// SEAL-ALWAYS. The body seals X-Wing to the actor's two key halves; the
-	// index hint does too while its key is the MLS-pubkey fallback
-	// (IndexHintMlkemEk), and classically to a dedicated index key. Unlike the CalDAV terminator there
-	// is NO plaintext-mode arm — the nest stores ciphertext in both modes.
-	encryptedBody, err := mailfauna.EncryptToRecipientHybrid(rawBytes, mlsPubkey, sess.MlkemEk())
+	// SEAL-ALWAYS. The body is a `card-record` sealed X-Wing to the session's
+	// card key (`owner-key-material.md` § Path B-sibling-6); the index hint
+	// seals to the actor's index key when one is registered, else to the card
+	// key as a `card-record` (mailfauna.SealRecordIndexHint).
+	encryptedBody, err := mailfauna.SealRecordHybrid(mailfauna.RecordKindCard, rawBytes, cardPubkey, cardEk)
 	if err != nil {
 		return nil, fmt.Errorf("seal card body: %w", err)
 	}
-	encryptedHint, err := mailfauna.EncryptToRecipientHybrid(
-		tokens.CanonicalBytes, indexKey, mailfauna.IndexHintMlkemEk(indexKey, mlsPubkey, sess.MlkemEk()))
+	encryptedHint, err := mailfauna.SealRecordIndexHint(
+		mailfauna.RecordKindCard, tokens.CanonicalBytes, sess.IndexKey(), cardPubkey, cardEk)
 	if err != nil {
 		return nil, fmt.Errorf("seal card index hint: %w", err)
 	}

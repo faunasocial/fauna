@@ -62,6 +62,11 @@
      *  `true`, the field falls back to the all-dimmed live-preview. Ignored in `notes` mode (Notes
      *  always hides). Enter still sends either way — no structural gestures in compose. */
     markersShown?: boolean;
+    /** Read-only and announced disabled (`aria-disabled`, which the e2e bridge's
+     *  `get_attr(.., "disabled")` reads as `is_disabled()`): the room cannot take a
+     *  send (`capabilities.can_send` false), so the field stays in view, readable,
+     *  never writable. */
+    disabled?: boolean;
     /** The e2e id, set on CodeMirror's contenteditable content element. */
     testid?: string;
     /** Bound OUT: the toolbar splice hook (set once the view mounts, null after
@@ -78,6 +83,7 @@
     markdownEnabled = true,
     notes = false,
     markersShown = false,
+    disabled = false,
     testid = 'dm-text-field',
     wrapSelection = $bindable(null),
   }: Props = $props();
@@ -99,6 +105,11 @@
   // update listener doesn't echo our own write back out as an `oninput`.
   let syncing = false;
   const decoCompartment = new Compartment();
+  const disabledCompartment = new Compartment();
+  const disabledExtension = () => [
+    EditorView.editable.of(!disabled),
+    EditorView.contentAttributes.of(disabled ? { 'aria-disabled': 'true' } : {}),
+  ];
 
   // Reusable marks, keyed by class — `Decoration.mark` instances are immutable +
   // shareable across the document and across recomputes.
@@ -230,6 +241,7 @@
           cmPlaceholder(placeholder),
           EditorView.contentAttributes.of({ 'data-testid': testid, spellcheck: 'true' }),
           decoCompartment.of(decoExtension()),
+          disabledCompartment.of(disabledExtension()),
           theme,
           EditorView.updateListener.of((u) => {
             if (u.docChanged && !syncing) oninput(u.state.doc.toString());
@@ -302,6 +314,12 @@
     view.dispatch({
       effects: decoCompartment.reconfigure(decoExtension()),
     });
+  });
+
+  $effect(() => {
+    void disabled;
+    if (!view) return;
+    view.dispatch({ effects: disabledCompartment.reconfigure(disabledExtension()) });
   });
 
   /** Toolbar splice: wrap the current selection in `prefix`/`suffix` via the

@@ -31,16 +31,16 @@
 // Two clocks by contract: `performance.now()` feeds dwell credit, `Date.now()`
 // only stamps the observation.
 //
-// - **Playback:** an inline `VideoThumbnail` player notes its progress
-//   (`notePlayback`, on `timeupdate` and `ended`) into a per-post unread peak;
-//   each sample takes it for the post's row (`takePlayedPm`) — the contract on
-//   the shared `CueRow::media_played_pm` — so a video played to the end derives
-//   the media `watch-complete`.
+// - **Playback:** an inline `VideoThumbnail` player relays its progress
+//   (`notePlayback`, on `timeupdate` and `ended`) and its engagement
+//   (`notePlaying`, on every transition that drives its published state) to the
+//   shared tracker, which keeps the played peak and treats an engaged media row
+//   as attended — so a video played to the end derives the media
+//   `watch-complete`, and a play under the skip gate is no skip.
 
 import type { WasmFeedManager } from '../../static/fauna_wasm.js';
 import { feedManagerIfReady } from './feed';
 import {
-  cuePlayedPerMille,
   cueSampleIntervalMs,
   logMessage,
   newCueTracker,
@@ -49,23 +49,20 @@ import {
   type CueTrackerHandle,
 } from './wasm';
 
-/** Each post's highest played per-mille since the probe last took it. */
-const unreadPlayedPm = new Map<string, number>();
-
 /** An inline player's progress report: `position` and `duration` in its own
- *  unit (a `<video>`'s seconds). Folded by max into the post's unread peak. */
+ *  unit (a `<video>`'s seconds), noted on the shared tracker, which folds it by
+ *  max into the post's unread peak. */
 export function notePlayback(postId: string, position: number, duration: number): void {
-  const pm = cuePlayedPerMille(position, duration);
-  if (pm === null) return;
-  unreadPlayedPm.set(postId, Math.max(pm, unreadPlayedPm.get(postId) ?? 0));
+  const manager = feedManagerIfReady();
+  if (manager) cueTrackerFor(manager).notePlayed(postId, position, duration);
 }
 
-/** The probe's read: the peak played on `postId` since the last take, cleared
- *  by the take; `null` when nothing played since. */
-export function takePlayedPm(postId: string): number | null {
-  const pm = unreadPlayedPm.get(postId);
-  unreadPlayedPm.delete(postId);
-  return pm ?? null;
+/** Whether the post's inline player is engaged — `true` at the tap (loading
+ *  counts) and on play, `false` on pause, end, error and teardown. The player's
+ *  own transitions, relayed; the tracker decides what attention means. */
+export function notePlaying(postId: string, playing: boolean): void {
+  const manager = feedManagerIfReady();
+  if (manager) cueTrackerFor(manager).notePlaying(postId, playing);
 }
 
 /** What the page tells the probe each sample: whether the post list is what
@@ -177,7 +174,7 @@ export class CueCapture {
         top: rect.top,
         height: rect.height,
         is_media: isMedia,
-        media_played_pm: isMedia ? takePlayedPm(postId) : null,
+        media_played_pm: null,
       });
     }
     return this.emit(

@@ -76,10 +76,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use fauna_account_store::{
     backend::StoreBackend,
-    locks::{
-        AgentPresence, EngineLock, EngineLockOutcome, MigrationLock, MigrationLockOutcome,
-        SeedLegLock, SeedLegLockOutcome,
-    },
+    locks::{EngineLock, MigrationLock, MigrationLockOutcome, SeedLegLock},
     sqlite::{ReplicaPosture, ReplicaSealKey, SqliteBackend},
     store::AccountStore,
     types::WriterId,
@@ -109,9 +106,10 @@ pub use fauna_account_plane::account_driver::{
     FleetBootstrapRows, GroupCeremonyAuthority, HolderWalk, HolderWalkSeat, HostLegs, LegsCtx,
     LegsOutput, LinkedNestConnector, MembershipSource, NoLegs, OwedDeliveries, OwedNestDeliverer,
     PassTimings, Presence, PrincipalCustody, PumpCycles, PumpCyclesView, PumpReport,
-    RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd,
-    TrustedHolderSource, elect_at_start, fixed_holders, fleet_bootstrap, fleet_bootstrap_rows,
-    nudge_scope_for_push, push_step_error, r14_trust,
+    RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, SecondConnection,
+    SecondConnectionClose, ServeEnd, ServeStoreFacts, ServeStoreSeat, TrustedHolderSource,
+    elect_at_start, fixed_holders, fleet_bootstrap, fleet_bootstrap_rows, nudge_scope_for_push,
+    push_step_error, r14_trust,
 };
 /// The refused-change door's write, for a host that drives the door itself
 /// (the conformance suites' background-write proof).
@@ -469,6 +467,17 @@ pub struct AccountRuntimeParams<R> {
     /// as its `sync_device_id` is the one the app pushed, so the two halves of
     /// `this_device_row`'s *enrolled wins* rule always agree.
     pub enrollment_target_device_id: String,
+    /// **What that row is named when the ceremony has to create it** — the
+    /// host app's **app default** (`devices.md` § Device names, class (2)):
+    /// the same frozen constant the app hands its engine host (`fauna-tui`,
+    /// `fauna-linux`, `fauna-windows`, `fauna-macos`, `fauna-ios`,
+    /// `fauna-android`), so a phone with no folder bound is born `fauna-ios`
+    /// rather than the `fauna` placeholder. Machine-authored, so it rests
+    /// plaintext and never displaces a name the user chose (the nest's rule
+    /// (b)). `None` — a host with no app to name: the seedless agent, the e2e
+    /// harness's app-less seat — keeps the placeholder
+    /// ([`fauna_client_sync::SELF_REGISTER_LABEL`]).
+    pub enrollment_device_label: Option<String>,
     /// The secondary leg's connector (`account-sync-plane.md` § The bind leg,
     /// ruling 4): how this seed-holding runtime opens an owner-authenticated
     /// connection to each linked nest whose pairing carries the
@@ -503,6 +512,7 @@ struct HostParams<R> {
     credentials: CredentialStore,
     peer_transport: Option<PeerTransportFactory>,
     enrollment_target_device_id: String,
+    enrollment_device_label: Option<String>,
     linked_nests: Option<LinkedNestConnector<R>>,
     owed_nests: Option<OwedNestDeliverer<R>>,
     /// The attested predecessors — the driver's trust half, and the host's
@@ -546,6 +556,21 @@ impl AccountStoreRuntime {
         R: KeyedRpcRequester + Clone + Send + Sync + 'static,
         R::Error: RpcErrorClass,
     {
+        Self::start_with_tip_wait(params, fauna_account_plane::account_driver::FIRST_PASS_WAIT)
+            .await
+    }
+
+    /// [`Self::start`] with the parked tip-sealed put's bound shrunk
+    /// (`DriverConfig::tip_wait`) — the store thread runs its own clock, so a
+    /// test cannot pause it to reach the production bound.
+    async fn start_with_tip_wait<R>(
+        params: AccountRuntimeParams<R>,
+        tip_wait: Duration,
+    ) -> Result<AccountStoreHandle>
+    where
+        R: KeyedRpcRequester + Clone + Send + Sync + 'static,
+        R::Error: RpcErrorClass,
+    {
         let AccountRuntimeParams {
             store_root,
             store_backup_exclusion,
@@ -562,6 +587,7 @@ impl AccountStoreRuntime {
             attested_predecessors,
             peer_transport,
             enrollment_target_device_id,
+            enrollment_device_label,
             linked_nests,
             owed_nests,
         } = params;
@@ -573,10 +599,12 @@ impl AccountStoreRuntime {
             DriverConfig {
                 actor_id_hex: actor_id_hex.clone(),
                 backstop_interval,
+                tip_wait,
                 memberships,
                 trusted_escrow_holders,
                 attested_predecessors: attested_predecessors.clone(),
                 enrollment_target_device_id: enrollment_target_device_id.clone(),
+                enrollment_device_label: enrollment_device_label.clone(),
             },
             reconnects,
             pushes,
@@ -591,6 +619,7 @@ impl AccountStoreRuntime {
             credentials,
             peer_transport,
             enrollment_target_device_id,
+            enrollment_device_label,
             linked_nests,
             owed_nests,
             attested_predecessors: attested_predecessors.actor_ids().to_vec(),
@@ -684,6 +713,18 @@ fn writer_key_from_slot(
 struct NativeLegs {
     peer: PeerLegState,
     custody: crate::custody_leg::CustodyLegState,
+}
+
+impl NativeLegs {
+    /// The legs half of a yield and of a shutdown: the peer node shut down and
+    /// awaited (its listener gone), then its serve side, transport, sibling
+    /// channels and file-sync hooks; then the custodied stores this holder
+    /// opened — every serving connection among them waited closed. Both
+    /// rebuild from scratch at this runtime's next pass as a holder.
+    async fn stand_down_all(&mut self) {
+        crate::peer_leg::stand_down(&mut self.peer).await;
+        self.custody.stand_down().await;
+    }
 }
 
 impl<B, R> HostLegs<B, R> for NativeLegs
@@ -911,13 +952,9 @@ where
         }
     }
 
-    /// The yield's legs half: the peer node shut down and awaited (its
-    /// listener gone), then its serve side, transport, sibling channels and
-    /// file-sync hooks; then the custodied stores this holder opened. Both
-    /// rebuild from scratch at this runtime's next pass as a holder.
+    /// The yield's legs half ([`NativeLegs::stand_down_all`]).
     async fn stand_down(&mut self) {
-        crate::peer_leg::stand_down(&mut self.peer).await;
-        self.custody.stand_down();
+        self.stand_down_all().await;
     }
 
     /// The restore gesture: the custody-revocation snapshot refreshed first
@@ -965,29 +1002,17 @@ impl EngineElection for FileElection {
     type Held = EngineLock;
 
     async fn try_acquire(&self) -> ElectionOutcome<EngineLock> {
-        match EngineLock::try_acquire(&self.store_dir) {
-            EngineLockOutcome::Held(lock) => ElectionOutcome::Held(lock),
-            EngineLockOutcome::Refused => ElectionOutcome::Refused,
-            EngineLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
-        }
+        EngineLock::try_acquire(&self.store_dir).into()
     }
 
     type SeedLegs = SeedLegLock;
 
     async fn try_acquire_seed_legs(&self) -> ElectionOutcome<SeedLegLock> {
-        match SeedLegLock::try_acquire(&self.store_dir) {
-            SeedLegLockOutcome::Held(lock) => ElectionOutcome::Held(lock),
-            SeedLegLockOutcome::Refused => ElectionOutcome::Refused,
-            SeedLegLockOutcome::Degraded(e) => ElectionOutcome::Degraded(e.to_string()),
-        }
+        SeedLegLock::try_acquire(&self.store_dir).into()
     }
 
     async fn agent_present(&self) -> Presence {
-        match AgentPresenceLock::is_present(&self.store_dir) {
-            AgentPresence::Present => Presence::Present,
-            AgentPresence::Absent => Presence::Absent,
-            AgentPresence::Degraded(e) => Presence::Degraded(e.to_string()),
-        }
+        AgentPresenceLock::is_present(&self.store_dir).into()
     }
 }
 
@@ -1011,6 +1036,7 @@ async fn worker<R>(
         credentials,
         peer_transport,
         enrollment_target_device_id,
+        enrollment_device_label,
         linked_nests,
         owed_nests,
         attested_predecessors,
@@ -1250,6 +1276,7 @@ async fn worker<R>(
                     &writer_key,
                     &principal_slot,
                     &enrollment_target_device_id,
+                    enrollment_device_label.as_deref(),
                     !driver.rotated_since_serve,
                     // Decision 1's third trigger: the pump's finding that
                     // this machine's own device-set row reads `Removed`,
@@ -1372,6 +1399,16 @@ async fn worker<R>(
             actor_id_hex.clone(),
         )
         .with_seal_key(ReplicaSealKey::derive(&backup_key));
+        // What a second connection to this store opens from — the share
+        // plane's group feed (`group-set.md` § decision 6) — seated afresh
+        // at every assembly, so a reader finds the writer this assembly
+        // resolved, never one a rotation retired.
+        driver.serve_store_seat().seat(ServeStoreFacts {
+            store_dir: store_dir.clone(),
+            seal_key: Some(ReplicaSealKey::derive(&backup_key)),
+            actor_id_hex: actor_id_hex.clone(),
+            writer: WriterId(writer_key.verifying_key().to_bytes()),
+        });
         // The custodian leg (W8.5): worker-owned like the peer leg; rebuilt
         // on reassembly for the same reason (the writer identity may have
         // rotated). The revocation snapshot reads the grant log off this
@@ -1413,6 +1450,14 @@ async fn worker<R>(
             ServeEnd::Reassemble => continue 'assembly,
             ServeEnd::Closed => break 'assembly,
             ServeEnd::Shutdown(reply) => {
+                // The receipt says the store is closed, so it must cover
+                // every connection this runtime holds to it: the legs' serving
+                // threads hold second ones, and a dropped leg closes them only
+                // after the receipt — a sign-out's erase then meets them open,
+                // which windows refuses (`account-scoping.md` § Erasure
+                // follows scope, the open-store note). So the legs are stood
+                // down, their closes awaited, before the reply below.
+                legs.stand_down_all().await;
                 shutdown_reply = Some(reply);
                 break 'assembly;
             }
@@ -1436,14 +1481,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use fauna_account_store::types::WriterId;
-    use fauna_core::data::ModerationConfig;
+    use fauna_core::data::DelegationConfig;
     use fauna_core::encoding::{canonical_decode, canonical_encode};
     use fauna_core::seen_set::SeenScopeSet;
     use fauna_protocol::account_state::{
         AccountStatePutReply, AccountStatePutRequest, ItemClass, KIND_STATE_PUT,
     };
     use fauna_protocol::merge_policy::{
-        KIND_MODERATION, KIND_SEEN_SET, KIND_SYNC_PREFS, PREFERENCE_KEY,
+        KIND_DELEGATION, KIND_SEEN_SET, KIND_SYNC_PREFS, PREFERENCE_KEY,
     };
     use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
     use fauna_protocol::{decode_strict, encode_canonical as wire_encode};
@@ -1452,6 +1497,7 @@ mod tests {
     use crate::scope_set::OWN_ACTOR_KINDS;
     use fauna_account_plane::account_driver::NotReadyReason;
     use fauna_account_store::db::actor_state_dir;
+    use fauna_account_store::locks::EngineLockOutcome;
     use std::path::PathBuf;
 
     /// The `prior` half of the R14 writer-door trust must reach the writer door
@@ -2572,6 +2618,7 @@ mod tests {
                 // The machine's named row: every device of the account is its
                 // own machine, so its own row (`named_row`).
                 enrollment_target_device_id: named_row(device),
+                enrollment_device_label: None,
             }
         }
 
@@ -2751,15 +2798,28 @@ mod tests {
             .await
             .expect("a's second word");
 
+        let term = |snap: &fauna_client_config::MutedWordsSnapshot, word: &str| {
+            snap.keywords
+                .iter()
+                .find(|k| k.keyword == word)
+                .cloned()
+                .unwrap_or_else(|| panic!("{word} is listed"))
+        };
         let softened = set_muted_word_level(&a, "Politics", MutedKeywordLevel::ShowLess)
             .await
             .expect("the level is set");
         assert!(softened.loaded);
-        assert_eq!(softened.keywords[0].keyword, "Politics");
-        assert_eq!(softened.keywords[0].weight, MUTED_KEYWORD_SHOW_LESS_WEIGHT);
-        assert_eq!(softened.keywords[0].level(), MutedKeywordLevel::ShowLess);
+        assert_eq!(softened.keywords.len(), 2);
         assert_eq!(
-            softened.keywords[1].level(),
+            term(&softened, "Politics").weight,
+            MUTED_KEYWORD_SHOW_LESS_WEIGHT
+        );
+        assert_eq!(
+            term(&softened, "Politics").level(),
+            MutedKeywordLevel::ShowLess
+        );
+        assert_eq!(
+            term(&softened, "spoiler").level(),
             MutedKeywordLevel::Hide,
             "the other term keeps the default weight"
         );
@@ -2777,8 +2837,8 @@ mod tests {
         let hidden = set_muted_word_level(&a, "Politics", MutedKeywordLevel::Hide)
             .await
             .expect("the level is set back");
-        assert_eq!(hidden.keywords[0].weight, MUTED_KEYWORDS_PENALTY);
-        assert_eq!(hidden.keywords[0].level(), MutedKeywordLevel::Hide);
+        assert_eq!(term(&hidden, "Politics").weight, MUTED_KEYWORDS_PENALTY);
+        assert_eq!(term(&hidden, "Politics").level(), MutedKeywordLevel::Hide);
     }
 
     /// Red-verified: with the gate out of `load_record` the read is served
@@ -2790,13 +2850,14 @@ mod tests {
         use fauna_account_plane::account_state_plane::{AccountStatePlane, ItemId};
         use fauna_account_store::sqlite::SqliteBackend;
         use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-        use fauna_core::data::ModerationConfig;
-        use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp, PREFERENCE_KEY};
+        use fauna_core::data::MutedKeyword;
+        use fauna_protocol::merge_policy::{KIND_MODERATION, LwwStamp};
 
         let fx = fixture();
         let predecessor = ActorKeypair::generate();
         let predecessor_key = BackupKey::derive(predecessor.secret_bytes());
-        // The predecessor's device publishes its muted words, long ago.
+        // The predecessor's device publishes its muted words, one row per
+        // term, long ago.
         {
             let device = ed25519_dalek::SigningKey::from_bytes(&[0x3D; 32]);
             let writer = WriterId(device.verifying_key().to_bytes());
@@ -2813,7 +2874,7 @@ mod tests {
                 prior: Vec::new(),
                 trusted_holders: Default::default(),
             };
-            AccountStatePlane::new(
+            let plane = AccountStatePlane::new(
                 &store,
                 &fx.fake,
                 &schedule,
@@ -2821,28 +2882,28 @@ mod tests {
                 &trust,
                 ACCOUNT_STATE_SCOPE,
             )
-            .expect("the predecessor's plane")
-            .put(
-                &ItemId {
-                    kind: KIND_MODERATION.into(),
-                    key: PREFERENCE_KEY.into(),
-                },
-                fauna_core::encoding::canonical_encode(&ModerationConfig {
-                    muted_keywords: vec!["first".into(), "second".into()],
-                    ..Default::default()
-                })
-                .expect("encode"),
-                Some(
-                    LwwStamp {
-                        at_ms: 1,
-                        writer: writer.0,
-                    }
-                    .encode()
-                    .expect("stamp"),
-                ),
-            )
-            .await
-            .expect("the predecessor's row reaches the nest");
+            .expect("the predecessor's plane");
+            for (at_ms, word) in [(1, "first"), (2, "second")] {
+                let keyword = MutedKeyword::from(word);
+                plane
+                    .put(
+                        &ItemId {
+                            kind: KIND_MODERATION.into(),
+                            key: keyword.plane_key(),
+                        },
+                        fauna_core::encoding::canonical_encode(&keyword).expect("encode"),
+                        Some(
+                            LwwStamp {
+                                at_ms,
+                                writer: writer.0,
+                            }
+                            .encode()
+                            .expect("stamp"),
+                        ),
+                    )
+                    .await
+                    .expect("the predecessor's row reaches the nest");
+            }
         }
 
         let mut params = fx.params("a");
@@ -4045,6 +4106,39 @@ mod tests {
         );
     }
 
+    /// **The sync agent's teardown does not wait out a pass that will not
+    /// end, and retires nothing.** The agent's mount comes down on an
+    /// un-provision while an app waits on it (a bounded receipt) to erase or
+    /// re-mount the store, and a pass against an unreachable nest runs for
+    /// most of a minute — measured 2026-11-04 on windows: 55 s, every
+    /// nest-backed step paying its own deadline, and the erase behind it left
+    /// the signed-out account's store on disk. So the stop cuts the pass as a
+    /// sign-out does, but the machine stays enrolled: the enrollment is the
+    /// app's to retire, and on a switch it must survive.
+    #[tokio::test]
+    async fn a_teardown_cutting_the_pass_returns_from_a_pass_that_will_not_end() {
+        let fx = fixture();
+        fx.fake.stall_next_list.store(true, Ordering::SeqCst);
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("runtime");
+        fx.fake.list_stalled.notified().await;
+
+        tokio::time::timeout(EVENTUALLY_BUDGET, handle.shutdown_cutting_the_pass())
+            .await
+            .expect(
+                "the teardown waited on a pass that will not end — in the agent that is \
+                 an un-provision whose receipt never comes, and an erase under a held store",
+            );
+        handle.closed().await;
+        let s = fx.fake.state.lock().unwrap();
+        assert!(
+            s.grant_revokes.is_empty(),
+            "a teardown that is not a sign-out retires no enrollment"
+        );
+        assert!(s.grant_on.is_some(), "the machine stays enrolled");
+    }
+
     /// **A sign-out that cuts a pass mid-put still lands this device's own
     /// `Removed` row** (`fleet-scope-reclamation.md`
     /// § *Fleet-scope reclamation*, clause (4)). The cut drops the pass where
@@ -4178,7 +4272,7 @@ mod tests {
         let in_flight = handle.pump_cycles();
         assert!(in_flight.0 > in_flight.1, "the prologue is in flight");
 
-        let read = tokio::time::timeout(EVENTUALLY_BUDGET, handle.get_preference(KIND_MODERATION))
+        let read = tokio::time::timeout(EVENTUALLY_BUDGET, handle.get_preference(KIND_DELEGATION))
             .await
             .expect("a local read waited on a pass that will not end")
             .expect("read");
@@ -4216,17 +4310,17 @@ mod tests {
         });
         fx.fake.list_stalled.notified().await;
         let puts_before = fx.fake.put_calls();
-        let value = moderation_value(&["w"]);
+        let value = delegation_value(&["w"]);
 
         let stamp = tokio::time::timeout(
             EVENTUALLY_BUDGET,
-            handle.put_preference(KIND_MODERATION, value.clone()),
+            handle.put_preference(KIND_DELEGATION, value.clone()),
         )
         .await
         .expect("a local write waited on a pass that will not end")
         .expect("put");
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the row is durable inside the pass");
@@ -4282,7 +4376,7 @@ mod tests {
         // Served inside the held prologue, at the stalled walk's await point;
         // the barrier sent before it is still parked.
         handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("a read inside the pass");
         assert!(
@@ -4554,6 +4648,238 @@ mod tests {
         handle.shutdown().await;
     }
 
+    /// **A departed member's cached share endpoint stops being dialed at the
+    /// roster, and is tombstoned on a positive reading only** (`p2p.md`
+    /// § Cross-user shared-set transfer → *A departed member's cached
+    /// endpoint*, rulings 1 and 2, and *Re-admission*). The pass's per-set
+    /// targeting (`share_pump::set_dial_targets`, whose targets are the only
+    /// peers `pull_pass` dials and mints outcomes for) over a real account
+    /// runtime: alice and bob cached; bob leaves the roster → he is no
+    /// target; an UNREADABLE roster tombstones nothing and the row survives;
+    /// a NOT-LISTED reading tombstones it, so even a consult vouching for him
+    /// again finds no row — until his next advertisement puts a fresh one.
+    #[cfg(feature = "p2p-share")]
+    #[tokio::test]
+    async fn a_departed_members_share_endpoint_is_dropped_then_tombstoned_on_a_positive_reading() {
+        use crate::share_pump::{SharedSetSpec, set_dial_targets};
+        use fauna_core::identity::ActorId;
+        use fauna_peer_share::admission::{RosterReading, SetMembership};
+        use std::sync::Mutex;
+
+        const SET: [u8; 32] = [0x5E; 32];
+        const ALICE: [u8; 32] = [0xA1; 32];
+        const BOB: [u8; 32] = [0xB0; 32];
+
+        /// The set's roster as this replica holds it: a listed set and a
+        /// switchable "could I read it" — the tri-state the sweep needs.
+        struct Roster {
+            listed: Mutex<Vec<[u8; 32]>>,
+            readable: Mutex<bool>,
+        }
+        impl SetMembership for Roster {
+            fn is_member(&self, channel_id: &[u8; 32], actor: &ActorId) -> bool {
+                // Fail closed, as the production consult: unreadable → false.
+                *channel_id == SET
+                    && *self.readable.lock().unwrap()
+                    && self.listed.lock().unwrap().contains(&actor.0)
+            }
+            fn roster_reading(&self, channel_id: &[u8; 32], actor: &ActorId) -> RosterReading {
+                if *channel_id != SET || !*self.readable.lock().unwrap() {
+                    RosterReading::Unreadable
+                } else if self.listed.lock().unwrap().contains(&actor.0) {
+                    RosterReading::Listed
+                } else {
+                    RosterReading::NotListed
+                }
+            }
+        }
+        fn row(member: [u8; 32]) -> fauna_core::share_endpoints::ShareEndpoints {
+            fauna_core::share_endpoints::ShareEndpoints {
+                channel_id: SET.to_vec(),
+                member_actor: member.to_vec(),
+                endpoints: fauna_core::device_endpoints::DeviceEndpoints {
+                    node_id: member,
+                    ..Default::default()
+                },
+            }
+        }
+        let spec = SharedSetSpec {
+            folder: "holiday".to_string(),
+            folder_id: "ref-holiday".to_string(),
+            set_id: SET,
+            db_path: PathBuf::from("/d"),
+            body: crate::share_body::TreeBodySource::shared("/w"),
+            landing: crate::share_landing::Landing::Resident,
+            content_keys: fauna_core::folder_keys::FolderContentKeys::genesis([9u8; 32], 1).into(),
+        };
+        let dialed = |targets: Option<Vec<fauna_peer_sync::discovery::PeerDialTarget>>| {
+            let mut ids: Vec<[u8; 32]> = targets
+                .expect("the cache read answers")
+                .iter()
+                .map(|t| t.node_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params_trusting_the_holder("a"))
+            .await
+            .expect("runtime");
+        handle.reconcile_now().await.expect("enrolls");
+        handle
+            .put_share_endpoints(row(ALICE))
+            .await
+            .expect("alice's advertisement caches (first need mints the tip)");
+        handle
+            .put_share_endpoints(row(BOB))
+            .await
+            .expect("bob's advertisement caches");
+        let roster = Roster {
+            listed: Mutex::new(vec![ALICE, BOB]),
+            readable: Mutex::new(true),
+        };
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            vec![ALICE, BOB],
+            "both members are dialed while the roster lists them"
+        );
+
+        // The roster can't be read: the fail-closed consult dials nobody, and
+        // NO tombstone is written (ruling 1(c), ruling 2's last word).
+        *roster.readable.lock().unwrap() = false;
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            Vec::<[u8; 32]>::new()
+        );
+        *roster.readable.lock().unwrap() = true;
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            vec![ALICE, BOB],
+            "an unreadable pass erased nothing: both rows still dial"
+        );
+
+        // Bob leaves the roster: not dialed this pass, and the positive
+        // reading tombstones his row.
+        roster.listed.lock().unwrap().retain(|m| *m != BOB);
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            vec![ALICE]
+        );
+        let live_keys = |rows: Vec<fauna_account_store::types::StateEntry>| -> Vec<String> {
+            rows.into_iter().map(|e| e.key).collect()
+        };
+        let bob_key = fauna_core::share_endpoints::share_entry_key(&SET, &BOB);
+        assert!(
+            !live_keys(
+                handle
+                    .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
+                    .await
+                    .expect("read")
+            )
+            .contains(&bob_key),
+            "bob's departed endpoint is tombstoned on this store"
+        );
+        assert!(
+            !handle
+                .tombstone_share_endpoints(SET, BOB)
+                .await
+                .expect("a second sweep answers"),
+            "a second sweep of the gone row writes nothing"
+        );
+
+        // Re-admitted: the roster lists him again, but there is nothing to
+        // dial until he says where he is …
+        roster.listed.lock().unwrap().push(BOB);
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            vec![ALICE],
+            "absent, not unreachable: no row to dial"
+        );
+        // … and his next advertisement, stamped after the tombstone, is.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        handle
+            .put_share_endpoints(row(BOB))
+            .await
+            .expect("bob re-advertises");
+        assert_eq!(
+            dialed(set_dial_targets(&handle, &roster, &spec, &[], None).await),
+            vec![ALICE, BOB]
+        );
+        handle.shutdown().await;
+    }
+
+    /// **A set this replica LEFT has its cached share-endpoints rows
+    /// tombstoned whole, and no other set's** (`p2p.md` § Cross-user
+    /// shared-set transfer → *A departed member's cached endpoint*, ruling 2's
+    /// last sentence): the set-scoped door the leave sequence issues. Rows of
+    /// sets A and B cached; the door on A tombstones both of A's rows and
+    /// leaves B's live; a second call writes nothing.
+    #[tokio::test]
+    async fn a_left_sets_share_endpoints_are_tombstoned_and_no_other_sets() {
+        const SET_A: [u8; 32] = [0x5A; 32];
+        const SET_B: [u8; 32] = [0x5B; 32];
+        const ALICE: [u8; 32] = [0xA1; 32];
+        const BOB: [u8; 32] = [0xB0; 32];
+        fn row(set: [u8; 32], member: [u8; 32]) -> fauna_core::share_endpoints::ShareEndpoints {
+            fauna_core::share_endpoints::ShareEndpoints {
+                channel_id: set.to_vec(),
+                member_actor: member.to_vec(),
+                endpoints: fauna_core::device_endpoints::DeviceEndpoints {
+                    node_id: member,
+                    ..Default::default()
+                },
+            }
+        }
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params_trusting_the_holder("a"))
+            .await
+            .expect("runtime");
+        handle.reconcile_now().await.expect("enrolls");
+        for (set, member) in [(SET_A, ALICE), (SET_A, BOB), (SET_B, ALICE)] {
+            handle
+                .put_share_endpoints(row(set, member))
+                .await
+                .expect("the advertisement caches");
+        }
+        let live = || async {
+            let mut keys: Vec<String> = handle
+                .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter(|e| !e.tombstone)
+                .map(|e| e.key)
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(live().await.len(), 3);
+
+        assert_eq!(
+            handle
+                .tombstone_share_endpoints_of_set(SET_A)
+                .await
+                .expect("the door answers"),
+            2,
+            "both of the left set's rows are tombstoned"
+        );
+        assert_eq!(
+            live().await,
+            vec![fauna_core::share_endpoints::share_entry_key(&SET_B, &ALICE)],
+            "the other set's row is untouched"
+        );
+        assert_eq!(
+            handle
+                .tombstone_share_endpoints_of_set(SET_A)
+                .await
+                .expect("a repeat answers"),
+            0,
+            "a second drop of the same set writes nothing"
+        );
+        handle.shutdown().await;
+    }
+
     /// **A tip-sealed door put that would mint waits for the pass instead of
     /// minting inside it** (`Cmd::is_local`, the door-put verdict): the local
     /// half of a tip-sealed put is store work only while an admissible tip
@@ -4618,7 +4944,7 @@ mod tests {
         }
         // Served in arrival order on the store thread: when this read has
         // answered, every put ahead of it was answered or parked.
-        inside_the_pass("the read", handle.get_preference(KIND_MODERATION))
+        inside_the_pass("the read", handle.get_preference(KIND_DELEGATION))
             .await
             .expect("read");
         for (i, put) in puts.iter_mut().enumerate() {
@@ -4634,6 +4960,206 @@ mod tests {
             put.await
                 .expect_err(&format!("put {i}: no tip resolves and none can mint here"));
         }
+        handle.shutdown().await;
+    }
+
+    /// **A tip-sealed put parked behind a pass waits for a tip, not for the
+    /// pass** (`account-client-lifecycle.md` § The client-side lifecycle, the
+    /// pump bullet → *Commands and passes*, the tip wait): the park's one
+    /// reason is the mint, so the parked put is re-asked at every breath of
+    /// the pass and served at the first one where a tip resolves. A second
+    /// device signs in to an account whose first device minted its
+    /// generation; its prologue is held at its first walk, before escrow
+    /// recovery has keyed that generation, and a DNS write sent then parks.
+    /// The walk is released and the pass held again at its next walk, past
+    /// the recovery: the put answers there, sealed under the first device's
+    /// generation, while the pass is still held. Red-verified with the parked
+    /// put served only when the pass ends: it waited on the second hold.
+    #[tokio::test]
+    async fn a_tip_sealed_put_parked_behind_a_held_pass_lands_once_the_pass_keys_a_tip() {
+        use fauna_core::data::DnsConfig;
+        use fauna_protocol::merge_policy::KIND_GENERATION_MINT;
+        use futures_util::FutureExt as _;
+
+        let fx = fixture();
+        let a = AccountStoreRuntime::start(fx.params_trusting_the_holder("a"))
+            .await
+            .expect("start a");
+        a.reconcile_now().await.expect("a enrolls");
+        a.write_dns(DnsConfig {
+            managed_domains: domains(&["first.example"]),
+            ..Default::default()
+        })
+        .await
+        .expect("a's write mints the account's generation");
+        a.reconcile_now().await.expect("a publishes its rows");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        fx.fake.stall_next_list.store(true, Ordering::SeqCst);
+        let b = AccountStoreRuntime::start(fx.params_trusting_the_holder("b"))
+            .await
+            .expect("start b");
+        fx.fake.list_stalled.notified().await;
+        let mut put = std::pin::pin!(b.write_dns(DnsConfig {
+            managed_domains: domains(&["second.example"]),
+            ..Default::default()
+        }));
+        assert!(
+            put.as_mut().now_or_never().is_none(),
+            "sent, not yet answered"
+        );
+        inside_the_pass("the read", b.get_preference(KIND_DELEGATION))
+            .await
+            .expect("read");
+        assert!(
+            put.as_mut().now_or_never().is_none(),
+            "parked: b has keyed no generation yet, so its door would mint"
+        );
+
+        // Walk call by walk call, each one held: the put answers at a hold
+        // past the escrow recovery, the pass still in flight. A pass that
+        // ends with the put still parked holds nothing more, and the wait
+        // for the next hold fails.
+        let mut holds = 0;
+        let landed = loop {
+            fx.fake.stall_next_list.store(true, Ordering::SeqCst);
+            fx.fake.release_list.notify_one();
+            inside_the_pass(
+                "the next walk call, with the put still parked",
+                fx.fake.list_stalled.notified(),
+            )
+            .await;
+            holds += 1;
+            inside_the_pass("the read", b.get_preference(KIND_DELEGATION))
+                .await
+                .expect("read");
+            if let Some(landed) = put.as_mut().now_or_never() {
+                break landed;
+            }
+            assert!(
+                holds < 32,
+                "the put stayed parked through {holds} held walk calls"
+            );
+        };
+        assert!(
+            landed.expect("the put lands under the generation b recovered"),
+            "b's record was written"
+        );
+
+        fx.fake.release_list.notify_one();
+        b.settled().await;
+        assert_eq!(
+            b.states_of_kind(KIND_GENERATION_MINT)
+                .await
+                .expect("b's mint rows")
+                .len(),
+            1,
+            "b sealed under a's generation and minted none of its own"
+        );
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
+    /// **A tip-sealed put parked past the bound is refused not-ready**
+    /// (the tip wait's bound, `FIRST_PASS_WAIT` — shrunk here, as the store
+    /// thread keeps its own clock): no tip resolves while the pass is held,
+    /// so at the bound the put answers the transient not-ready refusal every
+    /// surface already renders — never minted inside the pass, never written
+    /// without a tip, and not served again once the pass ends (the untrusted
+    /// fixture of the park test above: no tip ever resolves). Red-verified
+    /// with no bound: the put waited on the held pass.
+    #[tokio::test]
+    async fn a_tip_sealed_put_parked_past_the_bound_is_refused_not_ready() {
+        use fauna_account_plane::account_driver::ScopeNotReady;
+        use fauna_protocol::merge_policy::KIND_GENERATION_MINT;
+
+        let fx = fixture();
+        let handle =
+            AccountStoreRuntime::start_with_tip_wait(fx.params("a"), Duration::from_millis(300))
+                .await
+                .expect("runtime");
+        let held = hold_a_pass(&fx, &handle).await;
+
+        let refused = inside_the_pass(
+            "the parked put",
+            handle.put_custodian_endpoints(Default::default()),
+        )
+        .await
+        .expect_err("no tip resolves within the bound");
+        assert_eq!(
+            refused.downcast_ref::<ScopeNotReady>().map(|e| e.reason),
+            Some(NotReadyReason::TipPending),
+            "refused as waiting on a tip, got {refused:#}"
+        );
+        let seam = fauna_client_config::StoreError::Save(format!("{refused:#}"));
+        assert!(
+            seam.is_not_ready(),
+            "the store seam's not-ready class: {seam:?}"
+        );
+        assert_eq!(
+            format!("{refused:#}"),
+            fauna_client_config::LEDGER_NOT_READY
+        );
+        assert!(!held.is_finished(), "refused while the pass is still held");
+
+        release_the_pass(&fx, &handle, held).await;
+        assert!(
+            handle
+                .states_of_kind(KIND_GENERATION_MINT)
+                .await
+                .expect("mint rows")
+                .is_empty(),
+            "the refused put was never served after the pass: nothing minted"
+        );
+        handle.shutdown().await;
+    }
+
+    /// **An awaited publish parked behind a held pass is refused not-ready
+    /// at the bound** (`account-client-lifecycle.md` § The client-side
+    /// lifecycle, the pump bullet → *Commands and passes*, the awaited
+    /// publish's bound): the publish step is the pass's own, so an awaited
+    /// publish (`Cmd::PublishOwn` — the mail rotation's barrier, through
+    /// `publish_mail`) sent while a pass is held is parked, never served at
+    /// a breath; at the bound it answers the transient not-ready refusal
+    /// every surface already renders, nothing sent; and once the pass has
+    /// ended a fresh awaited publish is served between passes as before.
+    /// Red-verified with the park unbounded: the publish waited on the held
+    /// pass.
+    #[tokio::test]
+    async fn an_awaited_publish_parked_past_the_bound_is_refused_not_ready() {
+        let fx = fixture();
+        let handle =
+            AccountStoreRuntime::start_with_tip_wait(fx.params("a"), Duration::from_millis(300))
+                .await
+                .expect("runtime");
+        let held = hold_a_pass(&fx, &handle).await;
+        let fleet_puts_before = fx.fake.put_calls_for(ACCOUNT_STATE_FLEET_SCOPE);
+
+        let refused = inside_the_pass("the awaited publish", handle.publish_mail())
+            .await
+            .expect_err("the pass does not end within the bound");
+        assert_eq!(
+            format!("{refused:#}"),
+            fauna_client_config::LEDGER_NOT_READY,
+            "the transient not-ready refusal"
+        );
+        let seam = fauna_client_config::StoreError::Save(format!("{refused:#}"));
+        assert!(
+            seam.is_not_ready(),
+            "the store seam's not-ready class: {seam:?}"
+        );
+        assert!(!held.is_finished(), "refused while the pass is still held");
+        assert_eq!(
+            fx.fake.put_calls_for(ACCOUNT_STATE_FLEET_SCOPE),
+            fleet_puts_before,
+            "nothing was sent for the refused publish"
+        );
+
+        release_the_pass(&fx, &handle, held).await;
+        handle
+            .publish_mail()
+            .await
+            .expect("between passes the awaited publish is served");
         handle.shutdown().await;
     }
 
@@ -5404,7 +5930,7 @@ mod tests {
             .expect("runtime");
         // A real write, so the WAL exists and the close has something to do.
         handle
-            .put_preference(KIND_MODERATION, moderation_value(&["x"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["x"]))
             .await
             .expect("write");
         let store_dir = StoreRoot::at(fx.base.join("a"))
@@ -5827,6 +6353,7 @@ mod tests {
         let agent = AccountStoreRuntime::start(AccountRuntimeParams {
             principal: RuntimePrincipal::Seedless,
             enrollment_target_device_id: NAMED_ROW.to_string(),
+            enrollment_device_label: None,
             ..fx.params("b")
         })
         .await
@@ -5916,6 +6443,40 @@ mod tests {
 
         a.shutdown().await;
         b.shutdown().await;
+    }
+
+    /// A host stops a superseded runtime twice — its `finish` arm and the
+    /// teardown holding the published clone — and both ask the sign-out way
+    /// (`HostState::superseded_stop_reason`). The retirement is one act: the
+    /// first stop's revoke ends the session the second would ride, so a second
+    /// run read as a severance that never landed while the first had landed
+    /// (the 2026-10-31 linux sweep's `fauna.auth.not_registered` line).
+    #[tokio::test]
+    async fn a_runtime_stopped_twice_for_a_sign_out_retires_its_enrollment_once() {
+        let fx = fixture();
+        let handle = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("runtime");
+        handle.reconcile_now().await.expect("pass");
+        let writer = enrolled_writer_hex(&handle).await;
+
+        let host_arm = handle.clone();
+        let (first, second) = tokio::join!(
+            host_arm.shutdown_for_sign_out(),
+            handle.shutdown_for_sign_out()
+        );
+
+        let retired = EnrollmentRetirement::Retired {
+            cleared: true,
+            sessions_revoked: 0,
+        };
+        assert_eq!(first, retired, "the first stop retires the grant");
+        assert_eq!(second, retired, "the second reads that same outcome");
+        assert_eq!(
+            fx.fake.state.lock().unwrap().grant_revokes,
+            vec![writer],
+            "exactly one retirement reached the nest"
+        );
     }
 
     /// **A sign-out is not a removal — its own `Removed` row never mints a
@@ -6165,15 +6726,20 @@ mod tests {
         handle.shutdown().await;
     }
 
-    fn moderation_value(words: &[&str]) -> Vec<u8> {
-        canonical_encode(&ModerationConfig {
-            muted_keywords: words
+    /// A `fauna.state.delegation` value naming `words` — the delegable
+    /// singleton these tests write through the preference door (the
+    /// moderation kind left that door for per-row writes of its own).
+    fn delegation_value(words: &[&str]) -> Vec<u8> {
+        canonical_encode(&DelegationConfig {
+            assignments: words
                 .iter()
-                .map(|w| fauna_core::data::MutedKeyword::from(*w))
+                .map(|w| fauna_core::data::TaskAssignment {
+                    task_kind: (*w).into(),
+                    pinned_to: None,
+                })
                 .collect(),
-            ..Default::default()
         })
-        .expect("encode moderation")
+        .expect("encode delegation")
     }
 
     /// A preference put lands locally, reads back, and publishes on the plane
@@ -6185,15 +6751,15 @@ mod tests {
             .await
             .expect("start");
 
-        let value = moderation_value(&["spoilers"]);
+        let value = delegation_value(&["spoilers"]);
         handle
-            .put_preference(KIND_MODERATION, value.clone())
+            .put_preference(KIND_DELEGATION, value.clone())
             .await
             .expect("put");
 
         // Local read serves the entry.
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("entry present");
@@ -6232,7 +6798,7 @@ mod tests {
         let a = AccountStoreRuntime::start(fx.params("a"))
             .await
             .expect("runtime");
-        a.put_preference(KIND_MODERATION, moderation_value(&["one"]))
+        a.put_preference(KIND_DELEGATION, delegation_value(&["one"]))
             .await
             .expect("put");
         assert!(a.raise_read_marker(&channel(1), 1).await.expect("raise"));
@@ -6252,7 +6818,7 @@ mod tests {
         fresh.reconcile_now().await.expect("pass");
         let markers = fresh.read_markers().await.expect("markers");
         let moderation = fresh
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .map(|e| e.value)
@@ -6272,7 +6838,7 @@ mod tests {
         let a = device_at_a_full_scope(&fx).await;
 
         assert!(a.raise_read_marker(&channel(2), 1).await.expect("raise"));
-        a.put_preference(KIND_MODERATION, moderation_value(&["two"]))
+        a.put_preference(KIND_DELEGATION, delegation_value(&["two"]))
             .await
             .expect("the rewrite is durable locally");
         a.settled().await;
@@ -6283,7 +6849,7 @@ mod tests {
         let (markers, moderation) = fresh_device_reads(&fx, "fresh").await;
         assert_eq!(
             moderation,
-            moderation_value(&["two"]),
+            delegation_value(&["two"]),
             "the rewrite reached the nest past the parked row"
         );
         assert_eq!(
@@ -6343,7 +6909,7 @@ mod tests {
 
         assert!(a.raise_read_marker(&channel(2), 1).await.expect("raise"));
         assert!(a.raise_read_marker(&channel(3), 1).await.expect("raise"));
-        a.put_preference(KIND_MODERATION, moderation_value(&["first"]))
+        a.put_preference(KIND_DELEGATION, delegation_value(&["first"]))
             .await
             .expect("put");
         a.settled().await;
@@ -6354,7 +6920,7 @@ mod tests {
         let (markers, moderation) = fresh_device_reads(&fx, "fresh").await;
         assert_eq!(
             moderation,
-            moderation_value(&["first"]),
+            delegation_value(&["first"]),
             "the preference took the room"
         );
         assert_eq!(markers, vec![(channel(1), 1)], "the markers wait");
@@ -6612,7 +7178,7 @@ mod tests {
             .await
             .expect("runtime");
         rounds(&[&a, &r], 2).await;
-        r.put_preference(KIND_MODERATION, moderation_value(&["kept"]))
+        r.put_preference(KIND_DELEGATION, delegation_value(&["kept"]))
             .await
             .expect("put");
         assert!(r.raise_read_marker(&channel(ch), 2).await.expect("raise"));
@@ -6631,7 +7197,7 @@ mod tests {
              handed over"
         );
         let (markers, moderation) = fresh_device_reads(&fx, "fresh").await;
-        assert_eq!(moderation, moderation_value(&["kept"]));
+        assert_eq!(moderation, delegation_value(&["kept"]));
         assert_eq!(markers, vec![(channel(ch), 2)]);
         a.shutdown().await;
     }
@@ -6742,7 +7308,7 @@ mod tests {
             .await
             .expect("runtime");
         handle
-            .put_preference(KIND_MODERATION, moderation_value(&["pre"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["pre"]))
             .await
             .expect("pre-rotation write");
         // The prologue and the publish step the write armed are behind the
@@ -6778,7 +7344,7 @@ mod tests {
 
         // Refused typed…
         let err = handle
-            .put_preference(KIND_MODERATION, moderation_value(&["stale"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["stale"]))
             .await
             .expect_err("the stale writer must be refused");
         assert!(
@@ -6788,13 +7354,13 @@ mod tests {
 
         // …and healed: the same handle's retry lands under the successor
         // (the worker reassembled from the slot before serving it).
-        let healed = moderation_value(&["healed"]);
+        let healed = delegation_value(&["healed"]);
         handle
-            .put_preference(KIND_MODERATION, healed.clone())
+            .put_preference(KIND_DELEGATION, healed.clone())
             .await
             .expect("the reassembled runtime serves the retry");
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("entry present");
@@ -6816,7 +7382,7 @@ mod tests {
     #[tokio::test]
     async fn a_deleted_machine_revives_as_a_successor_with_its_unpushed_tail() {
         let fx = fixture();
-        let value = moderation_value(&["survives-the-delete"]);
+        let value = delegation_value(&["survives-the-delete"]);
         let old_device_id;
         {
             let handle = AccountStoreRuntime::start(fx.params("a"))
@@ -6828,9 +7394,9 @@ mod tests {
             // The un-pushed write: the publish leg fails once, the local row
             // is durable-before-error by contract.
             fx.fake.fail_next_put.store(true, Ordering::SeqCst);
-            let _ = handle.put_preference(KIND_MODERATION, value.clone()).await;
+            let _ = handle.put_preference(KIND_DELEGATION, value.clone()).await;
             let entry = handle
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .expect("the local row is durable despite the failed publish");
@@ -6910,7 +7476,7 @@ mod tests {
         }
         // The un-pushed value survived the succession locally…
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the tail survived");
@@ -7374,9 +7940,9 @@ mod tests {
         // The un-pushed write: the publish leg fails once, the local row is
         // durable-before-error by contract.
         fx.fake.fail_next_put.store(true, Ordering::SeqCst);
-        let _ = handle.put_preference(KIND_MODERATION, value.to_vec()).await;
+        let _ = handle.put_preference(KIND_DELEGATION, value.to_vec()).await;
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the local row is durable despite the failed publish");
@@ -7416,7 +7982,7 @@ mod tests {
         let report = handle.reconcile_now().await.expect("pass");
         assert_eq!(report.enrollment, Some(EnrollmentPass::Current));
         handle
-            .put_preference(KIND_MODERATION, value.to_vec())
+            .put_preference(KIND_DELEGATION, value.to_vec())
             .await
             .expect("the local write lands");
         // Its publish step runs before the shutdown is served (a reused
@@ -7455,7 +8021,7 @@ mod tests {
     async fn a_surviving_slot_over_a_fresh_store_retires_the_key_and_a_second_replica_walks_both_lives()
      {
         let fx = fixture();
-        let first_value = moderation_value(&["life-one"]);
+        let first_value = delegation_value(&["life-one"]);
         let first_writer = a_life_that_puts(&fx, &first_value).await;
         let first_life_coordinates: Vec<(String, i64)> = {
             let s = fx.fake.state.lock().unwrap();
@@ -7473,7 +8039,7 @@ mod tests {
         // The journal is gone; the slot is not.
         std::fs::remove_dir_all(store_dir_of(&fx, "a")).expect("delete the store dir");
 
-        let second_value = moderation_value(&["life-two"]);
+        let second_value = delegation_value(&["life-two"]);
         let second_writer = a_life_that_puts(&fx, &second_value).await;
         assert_ne!(
             second_writer, first_writer,
@@ -7518,7 +8084,7 @@ mod tests {
             "another replica's history is never 'burnt' here"
         );
         let entry = other
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the second replica converged on the preference");
@@ -7589,10 +8155,10 @@ mod tests {
         let dir = store_dir_of(&fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let older_value = moderation_value(&["before-the-backup"]);
+        let older_value = delegation_value(&["before-the-backup"]);
         let first_writer = a_life_that_puts(&fx, &older_value).await;
         copy_dir_recursive(&dir, &backup);
-        let newer_value = moderation_value(&["after-the-backup"]);
+        let newer_value = delegation_value(&["after-the-backup"]);
         assert_eq!(
             a_life_that_puts(&fx, &newer_value).await,
             first_writer,
@@ -7621,7 +8187,7 @@ mod tests {
         // The pre-backup life's later row is this machine's RETIRED history
         // above what the restored journal held — new history, it lands.
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the preference is present");
@@ -7632,9 +8198,9 @@ mod tests {
         );
         // A new put publishes under the successor, at a coordinate no life
         // has used — the fake refuses a reused one, which would fail this put.
-        let latest_value = moderation_value(&["after-the-heal"]);
+        let latest_value = delegation_value(&["after-the-heal"]);
         handle
-            .put_preference(KIND_MODERATION, latest_value.clone())
+            .put_preference(KIND_DELEGATION, latest_value.clone())
             .await
             .expect("a put under the successor lands");
         handle.settled().await;
@@ -7715,7 +8281,7 @@ mod tests {
     async fn a_forged_unopenable_own_row_above_the_journal_is_unopened_not_burnt() {
         let fx = fixture();
         let dir = store_dir_of(&fx, "a");
-        let first_writer = a_life_that_puts(&fx, &moderation_value(&["the-only-life"])).await;
+        let first_writer = a_life_that_puts(&fx, &delegation_value(&["the-only-life"])).await;
 
         let forged_seq = state_coordinates_of(&fx, &first_writer)
             .iter()
@@ -7797,7 +8363,7 @@ mod tests {
     async fn a_forged_unopenable_own_row_at_an_unheld_coordinate_is_unopened_not_burnt() {
         let fx = fixture();
         let dir = store_dir_of(&fx, "a");
-        let first_writer = a_life_that_puts(&fx, &moderation_value(&["the-only-life"])).await;
+        let first_writer = a_life_that_puts(&fx, &delegation_value(&["the-only-life"])).await;
         let writer = writer_id_of(&first_writer);
 
         let held: Vec<u64> = journal_rows_of(&dir, &writer)
@@ -7881,7 +8447,7 @@ mod tests {
         let dir = store_dir_of(&fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let first_writer = a_life_that_puts(&fx, &moderation_value(&["before-the-backup"])).await;
+        let first_writer = a_life_that_puts(&fx, &delegation_value(&["before-the-backup"])).await;
         copy_dir_recursive(&dir, &backup);
         let before = state_coordinates_of(&fx, &first_writer);
 
@@ -7893,7 +8459,7 @@ mod tests {
             let report = handle.reconcile_now().await.expect("pass");
             assert_eq!(report.enrollment, Some(EnrollmentPass::Current));
             let stamp = handle
-                .put_preference(KIND_MODERATION, moderation_value(&["the-old-life"]))
+                .put_preference(KIND_DELEGATION, delegation_value(&["the-old-life"]))
                 .await
                 .expect("the moderation put publishes");
             assert_eq!(enrolled_writer_hex(&handle).await, first_writer);
@@ -7940,7 +8506,7 @@ mod tests {
         // with a later stamp so its value wins once it is carried.
         std::fs::remove_dir_all(&dir).expect("drop the current journal");
         copy_dir_recursive(&backup, &dir);
-        let burnt_value = moderation_value(&["the-burnt-life"]);
+        let burnt_value = delegation_value(&["the-burnt-life"]);
         {
             let backend = SqliteBackend::open(&dir).expect("open the restored backend");
             let writer = fauna_account_store::store::stamped_writer(&backend)
@@ -7962,7 +8528,7 @@ mod tests {
             while i64::try_from(seq).unwrap() < coordinate {
                 seq = store
                     .put_state(StateEntry {
-                        kind: KIND_MODERATION.into(),
+                        kind: KIND_DELEGATION.into(),
                         key: PREFERENCE_KEY.into(),
                         scope: ACCOUNT_STATE_SCOPE.into(),
                         value: burnt_value.clone(),
@@ -8019,7 +8585,7 @@ mod tests {
              {passes:#?}"
         );
         let healed = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("moderation is present");
@@ -8065,7 +8631,7 @@ mod tests {
             report.errors
         );
         let converged = other
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the second replica holds moderation");
@@ -8116,7 +8682,7 @@ mod tests {
             &["one", "two", "three"][..],
         ] {
             handle
-                .put_preference(KIND_MODERATION, moderation_value(words))
+                .put_preference(KIND_DELEGATION, delegation_value(words))
                 .await
                 .expect("the put publishes");
         }
@@ -8251,7 +8817,7 @@ mod tests {
         let writer = enrolled_writer_hex(&handle).await;
         let before = state_coordinates_of(fx, &writer);
         let stamp = handle
-            .put_preference(KIND_MODERATION, value.to_vec())
+            .put_preference(KIND_DELEGATION, value.to_vec())
             .await
             .expect("the local write lands");
         // The publish step runs after the write answers; the nest is read
@@ -8320,7 +8886,7 @@ mod tests {
         first_writer: &str,
         old_stamp: &LwwStamp,
         value: &[u8],
-        moderation_key: &[u8],
+        delegation_key: &[u8],
         through: i64,
     ) -> WriterId {
         let backend = SqliteBackend::open(dir).expect("open the restored backend");
@@ -8342,7 +8908,7 @@ mod tests {
         while i64::try_from(seq).unwrap() < through {
             seq = store
                 .put_state(StateEntry {
-                    kind: KIND_MODERATION.into(),
+                    kind: KIND_DELEGATION.into(),
                     key: PREFERENCE_KEY.into(),
                     scope: ACCOUNT_STATE_SCOPE.into(),
                     value: value.to_vec(),
@@ -8359,7 +8925,7 @@ mod tests {
                     item_class: ItemClass::StateEntry.as_wire().to_string(),
                     writer,
                     writer_seq: seq,
-                    item_key: moderation_key.to_vec(),
+                    item_key: delegation_key.to_vec(),
                     op: "state-put".into(),
                     entry: Some(b"sealed by the burnt life".to_vec()),
                     feed_seq: None,
@@ -8430,7 +8996,7 @@ mod tests {
         );
         assert_eq!(
             handle
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .expect("moderation is present")
@@ -8500,23 +9066,23 @@ mod tests {
         let dir = store_dir_of(&fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let (first_writer, old_stamp, moderation_key) =
-            a_life_that_puts_stamped(&fx, &moderation_value(&["before-the-backup"])).await;
+        let (first_writer, old_stamp, delegation_key) =
+            a_life_that_puts_stamped(&fx, &delegation_value(&["before-the-backup"])).await;
         copy_dir_recursive(&dir, &backup);
         let (sync_prefs_coordinate, sync_prefs_key, old_sync) =
             the_old_life_saves_sync_prefs(&fx, &first_writer).await;
-        assert_ne!(moderation_key, sync_prefs_key);
+        assert_ne!(delegation_key, sync_prefs_key);
 
         std::fs::remove_dir_all(&dir).expect("drop the current journal");
         copy_dir_recursive(&backup, &dir);
-        let burnt_value = moderation_value(&["the-burnt-life"]);
+        let burnt_value = delegation_value(&["the-burnt-life"]);
         let burnt_writer = a_burnt_life_journals_moderation_through(
             &dir,
             &fx,
             &first_writer,
             &old_stamp,
             &burnt_value,
-            &moderation_key,
+            &delegation_key,
             sync_prefs_coordinate,
         )
         .await;
@@ -8548,7 +9114,7 @@ mod tests {
             vec![sync_prefs_key.clone()],
             "the burnt life's relay row at the coordinate is retired for the fleet's \
              (moderation key {:?}, sync-prefs key {:?}, feed {:?}, journal {:?})",
-            &moderation_key[..2],
+            &delegation_key[..2],
             &sync_prefs_key[..2],
             feed_dump(&fx, &first_writer),
             journal_rows_of(&dir, &burnt_writer)
@@ -8565,7 +9131,7 @@ mod tests {
             .find(|r| r.seq == coordinate)
             .expect("the retired coordinate is still held");
         assert!(
-            matches!(&held.item, fauna_account_store::types::ItemRef::StateKey { kind, .. } if kind == KIND_MODERATION),
+            matches!(&held.item, fauna_account_store::types::ItemRef::StateKey { kind, .. } if kind == KIND_DELEGATION),
             "the burnt row is not rewritten: {held:?}"
         );
         check_carry_is_stable(&fx, &dir, &successor, rows_after_carry, 1).await;
@@ -8590,30 +9156,30 @@ mod tests {
         let dir = store_dir_of(&fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let (first_writer, old_stamp, moderation_key) =
-            a_life_that_puts_stamped(&fx, &moderation_value(&["before-the-backup"])).await;
+        let (first_writer, old_stamp, delegation_key) =
+            a_life_that_puts_stamped(&fx, &delegation_value(&["before-the-backup"])).await;
         copy_dir_recursive(&dir, &backup);
         let (sync_prefs_coordinate, sync_prefs_key, old_sync) =
             the_old_life_saves_sync_prefs(&fx, &first_writer).await;
-        assert_ne!(moderation_key, sync_prefs_key);
+        assert_ne!(delegation_key, sync_prefs_key);
 
         std::fs::remove_dir_all(&dir).expect("drop the current journal");
         copy_dir_recursive(&backup, &dir);
-        let burnt_value = moderation_value(&["the-burnt-life"]);
+        let burnt_value = delegation_value(&["the-burnt-life"]);
         let burnt_writer = a_burnt_life_journals_moderation_through(
             &dir,
             &fx,
             &first_writer,
             &old_stamp,
             &burnt_value,
-            &moderation_key,
+            &delegation_key,
             sync_prefs_coordinate,
         )
         .await;
         let coordinate = u64::try_from(sync_prefs_coordinate).unwrap();
         assert_eq!(
             relay_item_keys_at(&dir, &burnt_writer, coordinate).await,
-            vec![moderation_key.clone()],
+            vec![delegation_key.clone()],
             "fixture: the relay row the plane records before a send is in place"
         );
 
@@ -8651,7 +9217,7 @@ mod tests {
             relay_rows_under(&dir, &successor)
                 .await
                 .iter()
-                .any(|(_, item)| *item == moderation_key),
+                .any(|(_, item)| *item == delegation_key),
             "the burnt value re-authored under the successor is on the relay plane as the \
              successor's word"
         );
@@ -8674,7 +9240,7 @@ mod tests {
         old_sync: fauna_account_store::types::StateEntry,
         /// The burnt life's moderation value — the other row there.
         burnt_value: Vec<u8>,
-        moderation_key: Vec<u8>,
+        delegation_key: Vec<u8>,
         sync_prefs_key: Vec<u8>,
         /// The healed replica's successor writer and its journal length
         /// after the carry — `check_carry_is_stable`'s baseline.
@@ -8692,19 +9258,19 @@ mod tests {
         let dir = store_dir_of(fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let (first_writer, old_stamp, moderation_key) =
-            a_life_that_puts_stamped(fx, &moderation_value(&["before-the-backup"])).await;
+        let (first_writer, old_stamp, delegation_key) =
+            a_life_that_puts_stamped(fx, &delegation_value(&["before-the-backup"])).await;
         copy_dir_recursive(&dir, &backup);
         // The old life's ONE save after the backup: its moderation head stays
         // below the sync-prefs coordinate, which is what lets the lenient fake
         // accept the burnt life's moderation row there.
         let (sync_prefs_coordinate, sync_prefs_key, old_sync) =
             the_old_life_saves_sync_prefs(fx, &first_writer).await;
-        assert_ne!(moderation_key, sync_prefs_key);
+        assert_ne!(delegation_key, sync_prefs_key);
 
         std::fs::remove_dir_all(&dir).expect("drop the current journal");
         copy_dir_recursive(&backup, &dir);
-        let burnt_value = moderation_value(&["the-burnt-life"]);
+        let burnt_value = delegation_value(&["the-burnt-life"]);
         // Unsent: the slot stays at the backup's high-water, so the prologue's
         // publish_pending sends the burnt row — and the lenient fake accepts
         // it at the old life's coordinate, under the other item.
@@ -8714,7 +9280,7 @@ mod tests {
             &first_writer,
             &old_stamp,
             &burnt_value,
-            &moderation_key,
+            &delegation_key,
             sync_prefs_coordinate,
         )
         .await;
@@ -8726,7 +9292,7 @@ mod tests {
             heal_and_check_carried(fx, &dir, &first_writer, &old_sync, &burnt_value, 2).await;
         let mut keys = feed_item_keys_at(fx, &first_writer, sync_prefs_coordinate);
         keys.sort();
-        let mut both = vec![moderation_key.clone(), sync_prefs_key.clone()];
+        let mut both = vec![delegation_key.clone(), sync_prefs_key.clone()];
         both.sort();
         assert_eq!(
             keys,
@@ -8749,7 +9315,7 @@ mod tests {
             coordinate: sync_prefs_coordinate,
             old_sync,
             burnt_value,
-            moderation_key,
+            delegation_key,
             sync_prefs_key,
             successor,
             rows_after_carry,
@@ -8847,7 +9413,7 @@ mod tests {
         );
         assert_eq!(
             other
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .expect("moderation reached the second replica")
@@ -8873,7 +9439,7 @@ mod tests {
         // nest serves, and meets the same shape with the same arm.
         let mut relayed = relay_item_keys_at(&dir_b, &first_writer, coordinate).await;
         relayed.sort();
-        let mut both = vec![d.moderation_key.clone(), d.sync_prefs_key.clone()];
+        let mut both = vec![d.delegation_key.clone(), d.sync_prefs_key.clone()];
         both.sort();
         assert_eq!(relayed, both, "both duplicates stay relayable onward");
         // The walk paged past the coordinate: the healed replica's successor
@@ -8902,7 +9468,7 @@ mod tests {
         let dir = store_dir_of(&fx, "a");
         let backup = fx.base.join("a-backup");
 
-        let first_writer = a_life_that_puts(&fx, &moderation_value(&["before-the-backup"])).await;
+        let first_writer = a_life_that_puts(&fx, &delegation_value(&["before-the-backup"])).await;
         copy_dir_recursive(&dir, &backup);
 
         // The pre-backup life goes on: a sync-prefs save, then a moderation put.
@@ -8927,7 +9493,7 @@ mod tests {
                 "fixture: the save published one row: {fresh:?}"
             );
             let stamp = handle
-                .put_preference(KIND_MODERATION, moderation_value(&["the-old-life"]))
+                .put_preference(KIND_DELEGATION, delegation_value(&["the-old-life"]))
                 .await
                 .expect("the moderation put lands");
             // Its publish step runs before the shutdown is served.
@@ -8943,7 +9509,7 @@ mod tests {
         // moderation stamp, so its value wins everywhere once it is carried.
         std::fs::remove_dir_all(&dir).expect("drop the current journal");
         copy_dir_recursive(&backup, &dir);
-        let burnt_value = moderation_value(&["the-burnt-life"]);
+        let burnt_value = delegation_value(&["the-burnt-life"]);
         let burnt_writer = {
             let backend = SqliteBackend::open(&dir).expect("open the restored backend");
             let writer = fauna_account_store::store::stamped_writer(&backend)
@@ -8964,7 +9530,7 @@ mod tests {
             while i64::try_from(seq).unwrap() < sync_prefs_coordinate {
                 seq = store
                     .put_state(StateEntry {
-                        kind: KIND_MODERATION.into(),
+                        kind: KIND_DELEGATION.into(),
                         key: PREFERENCE_KEY.into(),
                         scope: ACCOUNT_STATE_SCOPE.into(),
                         value: burnt_value.clone(),
@@ -9013,7 +9579,7 @@ mod tests {
             .expect("get")
             .expect("sync prefs are present at the healed replica");
         let healed_moderation = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("moderation is present");
@@ -9038,7 +9604,7 @@ mod tests {
             .expect("get")
             .expect("the second replica holds sync prefs");
         let other_moderation = other
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the second replica holds moderation");
@@ -9100,7 +9666,7 @@ mod tests {
     #[tokio::test]
     async fn a_lost_slot_over_a_stamped_store_self_heals_into_a_successor_with_its_unpushed_tail() {
         let fx = fixture();
-        let value = moderation_value(&["survives-the-lost-slot"]);
+        let value = delegation_value(&["survives-the-lost-slot"]);
         let (old_writer, _) = enroll_with_an_unpushed_row(&fx, &value).await;
         lose_the_slot(&fx);
         let state_puts_before = fx.fake.put_calls_for("state");
@@ -9118,7 +9684,7 @@ mod tests {
         );
         // The un-pushed row survived locally…
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the tail survived");
@@ -9154,7 +9720,7 @@ mod tests {
     #[tokio::test]
     async fn an_install_already_stranded_by_a_doomed_fresh_writer_heals_at_the_next_assembly() {
         let fx = fixture();
-        let value = moderation_value(&["survives-the-strand"]);
+        let value = delegation_value(&["survives-the-strand"]);
         let (old_writer, _) = enroll_with_an_unpushed_row(&fx, &value).await;
         lose_the_slot(&fx);
         // The pre-heal launch: a fresh writer minted into the empty slot (the
@@ -9185,7 +9751,7 @@ mod tests {
             "the slot's key IS the successor — no third identity is minted"
         );
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the tail survived the strand");
@@ -9213,7 +9779,7 @@ mod tests {
     async fn a_slot_restored_to_a_retired_writer_is_never_reused_the_heal_mints_a_fresh_successor()
     {
         let fx = fixture();
-        let value = moderation_value(&["outlives-two-rotations"]);
+        let value = delegation_value(&["outlives-two-rotations"]);
         let (old_writer, old_secret_hex) = enroll_with_an_unpushed_row(&fx, &value).await;
         lose_the_slot(&fx);
         // The first heal: the old writer is retired, the slot holds successor X.
@@ -9243,7 +9809,7 @@ mod tests {
         );
         assert_ne!(fresh, successor, "the store moved on to a fresh successor");
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the row is still here");
@@ -9261,15 +9827,15 @@ mod tests {
             .await
             .expect("start b");
 
-        let value = moderation_value(&["spoilers", "endgame"]);
-        a.put_preference(KIND_MODERATION, value.clone())
+        let value = delegation_value(&["spoilers", "endgame"]);
+        a.put_preference(KIND_DELEGATION, value.clone())
             .await
             .expect("put");
 
         let report = b.reconcile_now().await.expect("reconcile");
         assert!(report.errors.is_empty(), "clean pass: {:?}", report.errors);
         let entry = b
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("b sees a's value");
@@ -9294,7 +9860,7 @@ mod tests {
         // follows it meets the injected failure (a network failure is never
         // the write's answer — the pump bullet's wake source (4)).
         handle
-            .put_preference(KIND_MODERATION, moderation_value(&["w"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["w"]))
             .await
             .expect("the local write lands");
         handle.settled().await;
@@ -9306,7 +9872,7 @@ mod tests {
         // The local write landed first (the plane's law) …
         assert!(
             handle
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .is_some(),
@@ -9403,11 +9969,11 @@ mod tests {
         handle.settled().await;
 
         fx.fake.lose_next_put_reply.store(true, Ordering::SeqCst);
-        let moderation = moderation_value(&["held-by-the-nest"]);
+        let moderation = delegation_value(&["held-by-the-nest"]);
         // The write is the local row; its publish step meets the lost reply
         // (a transport fault is never the write's answer).
         handle
-            .put_preference(KIND_MODERATION, moderation.clone())
+            .put_preference(KIND_DELEGATION, moderation.clone())
             .await
             .expect("the local write lands");
         handle.settled().await;
@@ -9417,7 +9983,7 @@ mod tests {
             1,
             "fixture: the nest recorded the row: {feed:?}"
         );
-        let (coordinate, moderation_key) = feed[0].clone();
+        let (coordinate, delegation_key) = feed[0].clone();
 
         // A second item's write lands locally, and its publish step re-sends
         // the moderation row ahead of it (journal order) and meets the replay
@@ -9450,7 +10016,7 @@ mod tests {
         );
         assert_eq!(
             handle
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .expect("present")
@@ -9467,7 +10033,7 @@ mod tests {
              and the sync-prefs row the unblocked pass published"
         );
         assert!(
-            relay.contains(&(coordinate, moderation_key)),
+            relay.contains(&(coordinate, delegation_key)),
             "the echo re-recorded the moderation row at its coordinate: {relay:?}"
         );
     }
@@ -9499,7 +10065,7 @@ mod tests {
         // leg fails.
         fx.fake.fail_next_put.store(true, Ordering::SeqCst);
         handle
-            .put_preference(KIND_MODERATION, moderation_value(&["unsent"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["unsent"]))
             .await
             .expect("the local write lands");
         handle.settled().await;
@@ -9762,7 +10328,7 @@ mod tests {
             .await
             .expect("first start");
         handle
-            .put_preference(KIND_MODERATION, moderation_value(&["w"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["w"]))
             .await
             .expect("put");
         handle.shutdown().await;
@@ -9774,7 +10340,7 @@ mod tests {
             .expect("second start");
         assert!(
             handle
-                .get_preference(KIND_MODERATION)
+                .get_preference(KIND_DELEGATION)
                 .await
                 .expect("get")
                 .is_some()
@@ -10568,7 +11134,7 @@ mod tests {
         handle.shutdown().await;
         handle.shutdown().await; // second call: no hang, no panic
         let err = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect_err("gone");
         assert!(err.to_string().contains(RUNTIME_GONE));
@@ -11126,13 +11692,13 @@ mod tests {
             params
         };
         let marker = "sealed-replica-marker-0123456789";
-        let value = moderation_value(&[marker]);
+        let value = delegation_value(&[marker]);
 
         let handle = AccountStoreRuntime::start(params())
             .await
             .expect("assemble");
         handle
-            .put_preference(KIND_MODERATION, value.clone())
+            .put_preference(KIND_DELEGATION, value.clone())
             .await
             .expect("the local write lands");
         handle.settled().await;
@@ -11157,7 +11723,7 @@ mod tests {
             .await
             .expect("relaunch");
         let entry = handle
-            .get_preference(KIND_MODERATION)
+            .get_preference(KIND_DELEGATION)
             .await
             .expect("get")
             .expect("the row survives the relaunch");
@@ -11581,7 +12147,7 @@ mod tests {
             .expect("the engine holder");
         holder.reconcile_now().await.expect("pass");
         holder
-            .put_preference(KIND_MODERATION, moderation_value(&["probe"]))
+            .put_preference(KIND_DELEGATION, delegation_value(&["probe"]))
             .await
             .expect("a preference write");
         holder.reconcile_now().await.expect("pass");

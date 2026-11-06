@@ -16,9 +16,22 @@ var pinnedCipherSuites = []uint16{
 	crypto_tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 }
 
-// pinnedCurves drops P-521: slow, and no security upside on a
-// public-internet listener.
+// pinnedCurves is the key-exchange group list, in server-preference order:
+// the post-quantum hybrids first, then the classical curves, P-521 dropped
+// (slow, and no security upside on a public-internet listener).
+//
+// crypto/tls offers its default groups — the hybrids included — only while
+// CurvePreferences is nil; once a list is set, only the listed groups are
+// offered. So this explicit list MUST name every hybrid the toolchain's
+// default carries, or post-quantum key exchange silently disappears from
+// every listener (TestHardenedServerConfigKeepsEveryDefaultHybrid reddens
+// when a Go bump adds one). Owners: docs/goal/behavior/smtp-server.md
+// § TLS posture per port (the list), docs/goal/architecture/security/
+// post-quantum.md (the PQ posture).
 var pinnedCurves = []crypto_tls.CurveID{
+	crypto_tls.X25519MLKEM768,
+	crypto_tls.SecP256r1MLKEM768,
+	crypto_tls.SecP384r1MLKEM1024,
 	crypto_tls.X25519,
 	crypto_tls.CurveP256,
 	crypto_tls.CurveP384,

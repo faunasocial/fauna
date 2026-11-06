@@ -31,6 +31,14 @@ fn provider_set_request_roundtrip() {
         kind: "fake".into(),
         webhook_secret: "whsec_abc123".into(),
         tier: "gold".into(),
+        product_ref: None,
+        extra: Default::default(),
+    });
+    roundtrip(ProviderSetRequest {
+        kind: "stripe".into(),
+        webhook_secret: "whsec_abc123".into(),
+        tier: "gold".into(),
+        product_ref: Some("plink_1".into()),
         extra: Default::default(),
     });
 }
@@ -60,6 +68,7 @@ fn providers_list_reply_roundtrip() {
                 created_at: Timestamp(1_750_000_000_000_000),
                 last_verified_at: None,
                 last_rejected_at: None,
+                product_ref: None,
                 extra: Default::default(),
             },
             ProviderItem {
@@ -68,6 +77,7 @@ fn providers_list_reply_roundtrip() {
                 created_at: Timestamp(1_750_000_001_000_000),
                 last_verified_at: Some(1_750_000_050),
                 last_rejected_at: Some(1_750_000_040),
+                product_ref: Some("plink_1".into()),
                 extra: Default::default(),
             },
         ],

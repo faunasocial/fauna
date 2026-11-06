@@ -157,12 +157,8 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_onboarding_machine::{OnboardingMachine, OnboardingObserver};
-
-    struct NopObs;
-    impl OnboardingObserver for NopObs {
-        fn on_changed(&self) {}
-    }
+    use fauna_onboarding_machine::OnboardingMachine;
+    use fauna_onboarding_machine::observer::NullObserver;
 
     use crate::testid::widget_names;
 
@@ -171,7 +167,7 @@ mod tests {
     #[test]
     fn page_exposes_all_ui_yaml_ids() {
         crate::testid::run_on_gtk_thread(|| {
-            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let m = OnboardingMachine::new(Arc::new(NullObserver));
             let (root, refresh) = build(m);
             refresh();
             let names = widget_names(&root);
@@ -194,7 +190,7 @@ mod tests {
     /// glue (`onboarding.md` § 3b-ter).
     #[test]
     fn grant_latches_the_answer_and_skip_does_not() {
-        let granted = OnboardingMachine::new(Arc::new(NopObs));
+        let granted = OnboardingMachine::new(Arc::new(NullObserver));
         granted.grant_default_trust();
         assert!(
             granted.take_trust_prompt_granted(),
@@ -205,7 +201,7 @@ mod tests {
             "the latch is consume-once, so a handoff that runs twice mints once"
         );
 
-        let skipped = OnboardingMachine::new(Arc::new(NopObs));
+        let skipped = OnboardingMachine::new(Arc::new(NullObserver));
         skipped.skip_trust_prompt();
         assert!(
             !skipped.take_trust_prompt_granted(),

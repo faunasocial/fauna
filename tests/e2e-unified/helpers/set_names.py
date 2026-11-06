@@ -48,6 +48,19 @@ def find_set(rows: list[dict], name: str) -> dict | None:
     return None
 
 
+def item_in_set(item: dict, name: str) -> bool:
+    """Whether a ``fauna.media.list`` item belongs to the set called ``name``.
+
+    By hash first: once a seat's engine stamps the sealed set name the set rests
+    no plaintext name (schema 114), so the item's ``folder`` is blank beside its
+    ``folder_hash`` — a plaintext-only match finds nothing although the record
+    landed. A set no engine has stamped still carries its plaintext."""
+    raw = item.get("folder_hash")
+    if raw is not None and bytes(raw) == set_name_hash(name):
+        return True
+    return item.get("folder") == name
+
+
 def addressed(name: str, **fields) -> dict:
     """A request payload addressed to the set called ``name`` by its hash — the
     harness twin of ``fauna_protocol::folders::addressed``. A sealed set rests

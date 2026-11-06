@@ -14,9 +14,7 @@ use fauna_core::localized::LocalizedText;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::admin::{AdminStatsReply, AdminStatusReply};
 use fauna_protocol::bridge_routing::{MailHealthReply, MailHealthRequest};
-use fauna_protocol::discovery::{
-    NestInfoReply, NestInfoRequest, SetupStatusReply, SetupStatusRequest,
-};
+use fauna_protocol::discovery::{NestInfoReply, SetupStatusReply, SetupStatusRequest};
 use fauna_protocol::node_policy::RegistrationMode;
 
 use crate::AdminClient;
@@ -201,9 +199,13 @@ where
             .await
             .map_err(|e| keep("fauna.setup.status", e))
             .ok();
-        let nest_info = self
-            .nest
-            .request::<_, NestInfoReply>("fauna.nest.info", NestInfoRequest::default())
+        // The domain card is the only fold of this reply, and a connection's
+        // domain is fixed for its life: read through the transport's
+        // per-connection memo (`transport-trust.md` § *The nest's
+        // self-description is read once per connection*). Read per entry, an
+        // admin moving between pages drew one of the actor's 60-a-minute
+        // discovery budget on every arrival and tripped it.
+        let nest_info = fauna_protocol::read_nest_info(&self.nest)
             .await
             .map_err(|e| keep("fauna.nest.info", e))
             .ok();
@@ -445,6 +447,77 @@ mod tests {
                 "fauna.bridges.mail_health",
             ]
         );
+    }
+
+    /// The domain card is fixed for a connection's life, so a re-entry to the
+    /// dashboard on one connection takes it from the transport's per-connection
+    /// `fauna.nest.info` memo: every entry re-reads stats, status, setup and
+    /// mail health (they change between visits), never the self-description.
+    #[test]
+    fn re_entries_on_one_connection_read_nest_info_once() {
+        struct OneConnection {
+            inner: fauna_client_testkit::ScriptedRequester,
+            memo: fauna_protocol::NestInfoMemo,
+        }
+        impl fauna_protocol::RpcRequester for OneConnection {
+            type Error =
+                <fauna_client_testkit::ScriptedRequester as fauna_protocol::RpcRequester>::Error;
+            async fn request<Req, Reply>(
+                &self,
+                kind: &'static str,
+                payload: Req,
+            ) -> Result<Reply, Self::Error>
+            where
+                Req: serde::Serialize,
+                Reply: serde::de::DeserializeOwned,
+            {
+                self.inner.request(kind, payload).await
+            }
+            fn live_connection_id(&self) -> Option<u64> {
+                Some(1)
+            }
+            fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+                Some(&self.memo)
+            }
+        }
+        fn enc<T: serde::Serialize>(reply: &Option<T>) -> Vec<u8> {
+            fauna_protocol::encode_canonical(reply.as_ref().unwrap())
+                .unwrap()
+                .to_vec()
+        }
+        let all = all_reads();
+        let first = [
+            enc(&all.stats),
+            enc(&all.status),
+            enc(&all.setup),
+            enc(&all.nest_info),
+            enc(&all.mail_health),
+        ];
+        let again = [
+            enc(&all.stats),
+            enc(&all.status),
+            enc(&all.setup),
+            enc(&all.mail_health),
+        ];
+        let nest = std::sync::Arc::new(OneConnection {
+            inner: fauna_client_testkit::ScriptedRequester::new(
+                first.into_iter().chain(again.clone()).chain(again),
+            ),
+            memo: fauna_protocol::NestInfoMemo::new(),
+        });
+        let client = AdminClient::new(nest.clone());
+        for _ in 0..3 {
+            let snap = block_on(client.dashboard_snapshot());
+            assert_eq!(snap.error, None);
+            assert_eq!(snap.stats, admin_dashboard_cards(&all));
+        }
+        let reads = nest
+            .inner
+            .kinds()
+            .into_iter()
+            .filter(|k| *k == "fauna.nest.info")
+            .count();
+        assert_eq!(reads, 1, "kinds: {:?}", nest.inner.kinds());
     }
 
     /// Every read failing yields no cards and the first read's error.

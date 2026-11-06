@@ -31,8 +31,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use fauna_client_bridges::BridgesClient;
 use fauna_client_core::post::{
-    ReferenceKind, ReferencedAudience, build_post, build_post_with_media, build_referencing_post,
-    decode_post, decode_post_fetched_as, wire_post_id,
+    PostAuthoring, ReferenceKind, ReferencedAudience, build_post, build_post_with_media,
+    build_reaction_post_at, build_referencing_post, decode_post, decode_post_fetched_as,
+    wire_post_id,
 };
 use fauna_client_feed::FeedClient;
 use fauna_client_feed::encode_filter_rule;
@@ -188,6 +189,11 @@ enum Selection {
     /// the selection of an [`author_window`](FeedManager::author_window),
     /// always chronological, never composed.
     Author(String),
+    /// The imported-posts selection (`feed.md` § State & data shape → *The
+    /// imported-posts selection*), keyed by a `fauna_core::source` platform
+    /// token: the OWN actor's posts through `fauna.feed.author.posts` with
+    /// `sources: [token]` — chronological, never composed, search a re-query.
+    Imported(String),
 }
 
 /// The shared feed manager. Construct over an authed transport + the local
@@ -334,6 +340,14 @@ pub struct FeedManager<R> {
     /// surface is `PostSummary.document`, never a parallel sibling field.
     /// **In-memory only** (the no-persistence posture is unchanged).
     resolved_previews: RwLock<HashMap<String, PreviewState>>,
+    /// The folded archive comments' source (`archive-import.md` § What each
+    /// category becomes). `None` until [`set_archive_comment_source`](Self::set_archive_comment_source)
+    /// wires it; a manager without it folds nothing.
+    archive_comment_source: RwLock<Option<Arc<dyn crate::ArchiveCommentSource>>>,
+    /// The last good read of it, keyed by the post (hex id) each comment sits
+    /// under — projected onto `PostSummary::archive_comments` at every
+    /// [`snapshot`](Self::snapshot). Identity-stable, never cleared on reload.
+    archive_comments: RwLock<HashMap<String, Vec<crate::ArchiveCommentView>>>,
     /// A remote author's signed face, keyed `(author, home)` — the memo behind
     /// [`resolve_author_face`](Self::resolve_author_face) (`feed.md` § The read
     /// model → *The remote author's byline*). The in-flight slot folds the N
@@ -596,7 +610,7 @@ pub fn feed_reloads_json(counts: Option<(u64, u64, u64)>) -> serde_json::Value {
 /// hand-spelled reimplementation (the `feed_reloads_json` idiom).
 ///
 /// Field-for-field, this is linux's/windows' own dump
-/// (`apps/fauna-linux/src/main.rs::sync_state_json`,
+/// (`apps/fauna-linux/src/lib.rs::sync_state_json`,
 /// `AppDataSnapshot.cs`) plus `is_muted` — apple's richer pattern
 /// (`FaunaMacApp.swift`'s `manager.isMuted` read): the e2e harness's
 /// `_feed_posts_from_state` (`actions/feed.py`) filters muted posts out of
@@ -791,6 +805,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             revealed_remote: RwLock::new(HashSet::new()),
             unlock_purchase_requested: RwLock::new(HashSet::new()),
             resolved_previews: RwLock::new(HashMap::new()),
+            archive_comment_source: RwLock::new(None),
+            archive_comments: RwLock::new(HashMap::new()),
             resolved_faces: RwLock::new(HashMap::new()),
             base_scores: RwLock::new(HashMap::new()),
             sealed: RwLock::new(SealedScorers::default()),
@@ -980,9 +996,14 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             }
         }
         label_room_posts(&mut snap);
+        let folded = self.archive_comments.read().unwrap();
         for p in rendered_posts_mut(&mut snap) {
             p.plays_media = p.derive_plays_media();
+            if let Some(comments) = folded.get(&p.post_id) {
+                p.archive_comments = comments.clone();
+            }
         }
+        drop(folded);
         let me_hex = hex::encode(ActorKeypair::from_secret(self.actor_secret).actor_id().0);
         state_reply_audiences(&mut snap, &me_hex);
         snap
@@ -1003,6 +1024,54 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         for o in self.observers.read().unwrap().iter() {
             o.on_changed();
         }
+    }
+
+    // ── Folded archive comments (archive-import.md § What each category becomes) ──
+
+    /// Wire the folded archive comments' source — the archive import machine's
+    /// read over this account's archive folders.
+    pub fn set_archive_comment_source(&self, source: Arc<dyn crate::ArchiveCommentSource>) {
+        *self.archive_comment_source.write().unwrap() = Some(source);
+    }
+
+    /// Re-read the folded archive comments into the projection
+    /// [`snapshot`](Self::snapshot) folds under each imported post, and notify.
+    /// Run at login, when an import finishes, and on opening the feed or a
+    /// post. A failed read keeps what the last read left and reports the
+    /// reason; no source is a no-op.
+    pub async fn refresh_archive_comments(&self) -> Result<(), String> {
+        let Some(source) = self.archive_comment_source.read().unwrap().clone() else {
+            return Ok(());
+        };
+        let records = source.archive_comments().await?;
+        let mut by_post: HashMap<String, Vec<crate::ArchiveCommentView>> = HashMap::new();
+        for r in records {
+            by_post
+                .entry(r.post_id)
+                .or_default()
+                .push(crate::ArchiveCommentView {
+                    external_id: r.external_id,
+                    author_name: r.author_name,
+                    created_at_ms: r.created_at_ms,
+                    text: r.text,
+                    media_count: r.media_count,
+                });
+        }
+        for comments in by_post.values_mut() {
+            comments.sort_by(|a, b| {
+                (a.created_at_ms, &a.external_id).cmp(&(b.created_at_ms, &b.external_id))
+            });
+        }
+        let changed = {
+            let mut held = self.archive_comments.write().unwrap();
+            let changed = *held != by_post;
+            *held = by_post;
+            changed
+        };
+        if changed {
+            self.notify();
+        }
+        Ok(())
     }
 
     // ── Draft persistence (v2, posts rail) ───────────────────────
@@ -1026,11 +1095,14 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// and unsealed with the owner's `BackupKey` — the load-on-launch /
     /// cross-device catch-up path.
     ///
-    /// A corrupt or unreadable blob is logged and ignored (keep the empty
-    /// composer) rather than failing the surface: an unopenable draft must never
-    /// cost the user the ability to post. An all-empty draft is also a no-op —
-    /// the composer's default already *is* that state, so notifying would only
-    /// churn observers (and, via the autosave observer, cost an upload tick).
+    /// The restore FILLS ([`crate::drafts::PostDrafts::fill`]): it may land
+    /// minutes late, after the user has started typing, and a composer holding
+    /// user input keeps it. A corrupt or unreadable blob is logged and ignored
+    /// rather than failing the surface: an unopenable draft must never cost the
+    /// user the ability to post. A restore the composer does not take — an
+    /// all-empty draft, or a live compose that wins — is a no-op without a
+    /// notify, which would only churn observers (and, via the autosave
+    /// observer, cost an upload tick).
     pub fn restore_drafts(&self, bytes: Vec<u8>) {
         let drafts = match crate::drafts::PostDrafts::restore_from_bytes(&bytes) {
             Ok(d) => d,
@@ -1039,11 +1111,10 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 return;
             }
         };
-        if drafts.is_empty() {
-            return;
+        let took = drafts.fill(&mut self.state.write().unwrap().compose);
+        if took {
+            self.notify();
         }
-        drafts.apply_to(&mut self.state.write().unwrap().compose);
-        self.notify();
     }
 
     // ── e2e test-helper surface ──────────────────────────────────
@@ -1373,6 +1444,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             s.selected_feed = feed_id;
             s.trending_selected = false;
             s.author_selected = None;
+            s.imported_selected = None;
         }
         self.reload().await;
     }
@@ -1389,8 +1461,33 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             s.trending_selected = true;
             s.selected_feed = None;
             s.author_selected = None;
+            s.imported_selected = None;
         }
         self.reload().await;
+    }
+
+    /// Select the **imported-posts selection** for one archive platform
+    /// (`feed.md` § State & data shape → *The imported-posts selection*; the
+    /// archive import's Done step, "View imported") and load its first page:
+    /// the own actor's posts whose origin platform is `token` (a
+    /// `fauna_core::source` token), read through `fauna.feed.author.posts`
+    /// with `sources: [token]`. Clears `selected_feed` and
+    /// `trending_selected` in the same write, so no two selection fields
+    /// ever both point somewhere; the search term rides the read.
+    pub async fn select_imported(&self, token: String) {
+        {
+            let mut s = self.state.write().unwrap();
+            s.imported_selected = Some(token);
+            s.selected_feed = None;
+            s.trending_selected = false;
+        }
+        self.reload().await;
+    }
+
+    /// Leave the imported-posts selection for the local feed
+    /// (`feed-imported-clear`) and re-query.
+    pub async fn clear_imported(&self) {
+        self.select_feed(None).await;
     }
 
     /// Re-run the current query — same selection (Local / Trending / a custom
@@ -1426,6 +1523,8 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         let s = self.state.read().unwrap();
         if let Some(author) = &s.author_selected {
             Selection::Author(author.clone())
+        } else if let Some(token) = &s.imported_selected {
+            Selection::Imported(token.clone())
         } else if s.trending_selected {
             Selection::Trending
         } else if let Some(fid) = &s.selected_feed {
@@ -1579,7 +1678,7 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         let selection = self.current_selection();
         let composition = match &selection {
             // The author read is always chronological and never composes.
-            Selection::Local | Selection::Author(_) => Vec::new(),
+            Selection::Local | Selection::Author(_) | Selection::Imported(_) => Vec::new(),
             // Trending has no feed row, but the caller's GLOBAL factor set still
             // composes with it (`trending.md` § The Trending feed — "composes
             // with every tier-1 factor they own"): the nest folds the
@@ -2070,7 +2169,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 // One author's posts — chronological on the `created_at`
                 // keyset cursor; the author read takes no search.
                 let r = feed
-                    .feed_author_posts(author, cursor, Some(PAGE_LIMIT))
+                    .feed_author_posts(author, cursor, Some(PAGE_LIMIT), None, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (r.posts, r.cursor, None)
+            }
+            Selection::Imported(token) => {
+                // The own actor's posts from that platform — the author read
+                // narrowed by `sources`, the search bar a re-query on it.
+                let me = hex::encode(ActorKeypair::from_secret(self.actor_secret).actor_id().0);
+                let r = feed
+                    .feed_author_posts(me, cursor, Some(PAGE_LIMIT), search, Some(vec![token]))
                     .await
                     .map_err(|e| e.to_string())?;
                 (r.posts, r.cursor, None)
@@ -2340,6 +2449,9 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
                 p.reply_count = counts.reply_count;
                 p.repost_count = counts.repost_count;
                 p.quote_count = counts.quote_count;
+                // The per-emoji tally rides beside the four, the nest's own
+                // post-act projection for the caller (ruling 5).
+                p.reactions = counts.reactions.iter().cloned().map(Into::into).collect();
                 changed = true;
             }
         }
@@ -2574,6 +2686,107 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
             let mut s = self.state.write().unwrap();
             for p in rendered_posts_mut(&mut s).filter(|p| p.post_id == post_id) {
                 p.viewer_repost_id = repost_id.clone();
+                changed = true;
+            }
+        }
+        if changed {
+            self.notify();
+        }
+    }
+
+    /// Toggle the viewer's own reaction of `emoji` on a post
+    /// (`post-reaction-pill`) — **one verb, the repost toggle's semantics**
+    /// (`feed.md` § Layout & flow → *Reaction posts count and paint*, ruling 4;
+    /// no confirmation, no picker).
+    ///
+    /// Off → on (the target row's group for `emoji` carries no
+    /// [`viewer_react_id`](crate::PostReactionGroup::viewer_react_id)):
+    /// composes the caller's wordless, public `Reference::React { emoji }`
+    /// post through the shared reaction builder (`build_reaction_post_at`, the
+    /// one the archive merge signs a claimed reaction through) and folds the
+    /// created id — the create reply returns it — into that group. On → off:
+    /// deletes that post through the ordinary deletion path
+    /// ([`delete_post`](Self::delete_post), a signed tombstone; the nest's
+    /// projection purge takes it out of the tally) and clears the field.
+    ///
+    /// Then the tally is read back from the nest, never guessed: a reaction
+    /// moves no counter of its own, and the nest projects the tally per
+    /// distinct actor, so a local `±1` would be wrong exactly when two devices
+    /// race. The interact door has **no** `react` action; the read-back rides
+    /// its native pure-read arm (`repost` on a `fauna` target only returns the
+    /// post's counts, which carry `reactions`), as [`repost`](Self::repost)'s
+    /// does — and, as there, ruling 3 (`archive-import.md` § Compatibility →
+    /// *Slice-3 rulings*) skips it on an archive-imported target, whose token
+    /// the door refuses: the reaction stands, and the count catches up on the
+    /// next natural reload. Best-effort either way — the reaction exists, so a
+    /// failed read must not read back as a failed reaction.
+    ///
+    /// A group this window does not hold yet (an emoji nobody had put on the
+    /// post) gets no local carrier — the read-back brings the nest's group,
+    /// viewer id included. A **bridged** target, or a post the window cannot
+    /// answer for, is refused with [`REACT_REFUSED_NOT_NATIVE`] and nothing is
+    /// composed: no `React` composes toward a foreign origin in this slice.
+    pub async fn react(&self, post_id: String, emoji: String) -> Result<(), String> {
+        let (source, viewer_react_id) = {
+            let s = self.state.read().unwrap();
+            match s.find_post(&post_id) {
+                Some(p) => (
+                    Some(crate::SourceKind::classify(&p.source)),
+                    p.reactions
+                        .iter()
+                        .find(|g| g.emoji == emoji)
+                        .and_then(|g| g.viewer_react_id.clone()),
+                ),
+                None => (None, None),
+            }
+        };
+        if !source.as_ref().is_some_and(crate::SourceKind::is_native) {
+            return Err(REACT_REFUSED_NOT_NATIVE.to_string());
+        }
+        let is_fauna_native = matches!(source, Some(crate::SourceKind::Fauna));
+        match viewer_react_id {
+            None => {
+                let digest = fauna_core::hex32::decode(&post_id).map_err(|e| e.to_string())?;
+                let target = *PostId::from_digest_dag_cbor(digest).as_bytes();
+                let kp = ActorKeypair::from_secret(self.actor_secret);
+                // Wordless, so it builds public for a restricted target too —
+                // the builder's rule, as for a repost.
+                let bytes =
+                    build_reaction_post_at(&kp, target, Some(&emoji), &PostAuthoring::now())
+                        .map_err(|e| e.to_string())?;
+                let posts = PostsClient::new(self.nest.clone());
+                let reply = posts
+                    .posts_create(bytes.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.observe_own_post_created(&reply.post_id, &bytes);
+                self.set_viewer_react(&post_id, &emoji, Some(reply.post_id));
+            }
+            Some(react_id) => {
+                self.delete_post(react_id).await?;
+                self.set_viewer_react(&post_id, &emoji, None);
+            }
+        }
+        if is_fauna_native {
+            let _ = self.interact(post_id, "repost".to_string(), None).await;
+        }
+        Ok(())
+    }
+
+    /// Fold a new viewer-reaction state into the `emoji` group of every
+    /// rendered row for `post_id` and re-emit — [`react`](Self::react)'s local
+    /// half, the [`set_viewer_repost`](Self::set_viewer_repost) twin. A row
+    /// with no group for `emoji` is left alone (never a guessed count).
+    fn set_viewer_react(&self, post_id: &str, emoji: &str, react_id: Option<String>) {
+        let mut changed = false;
+        {
+            let mut s = self.state.write().unwrap();
+            for g in rendered_posts_mut(&mut s)
+                .filter(|p| p.post_id == post_id)
+                .flat_map(|p| p.reactions.iter_mut())
+                .filter(|g| g.emoji == emoji)
+            {
+                g.viewer_react_id = react_id.clone();
                 changed = true;
             }
         }
@@ -4960,6 +5173,17 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         // The home's identity as the relaying nest dial-proved it — the root
         // the foreign byte plane graduates its pin against.
         summary.home_nest_actor_id = reply.home_nest_actor_id;
+        // The nest's counters, which the raw body cannot carry either — the same
+        // four the post-act fold writes (`interact_folding_counts`). A reply
+        // without them (a bridged row, a relayed read) leaves the decoded zeros.
+        // The per-emoji tally rides beside them and folds the same way.
+        if let Some(counts) = reply.counts {
+            summary.like_count = counts.like_count;
+            summary.reply_count = counts.reply_count;
+            summary.repost_count = counts.repost_count;
+            summary.quote_count = counts.quote_count;
+            summary.reactions = counts.reactions.into_iter().map(Into::into).collect();
+        }
         // The envelope just decoded IS the gated record `gated_blob_hash`
         // would fetch: cache it here, because a relayed post is not on this
         // nest and that fetch would miss — the unseal and the room's verdict
@@ -5235,11 +5459,31 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
         let Ok(Some(offer)) = subs.post_unlock_get(author_id, post_id.clone()).await else {
             return;
         };
-        let view = UnlockOfferView {
-            tier_name: offer.tier_name,
-            price_hint: offer.price_hint,
-            payment_url: offer.payment_url,
-        };
+        self.land_unlock_offer(
+            &post_id,
+            UnlockOfferView {
+                tier_name: offer.tier_name,
+                price_hint: offer.price_hint,
+                payment_url: offer.payment_url,
+            },
+        );
+    }
+
+    /// Fold a resolved offer into its post, unless this actor bought the post
+    /// while the read was on the wire. The guard at the top of
+    /// [`resolve_post_unlock_offer`](Self::resolve_post_unlock_offer) only covers
+    /// a read that STARTS after the buy; one already in flight answers afterwards
+    /// and would put the buy affordance back on a bought post, so the guard is
+    /// re-read here, after the `await`.
+    fn land_unlock_offer(&self, post_id: &str, view: UnlockOfferView) {
+        if self
+            .unlock_purchase_requested
+            .read()
+            .unwrap()
+            .contains(post_id)
+        {
+            return;
+        }
         let changed = {
             let mut s = self.state.write().unwrap();
             match rendered_posts_mut(&mut s).find(|p| p.post_id == post_id) {
@@ -5747,7 +5991,50 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// Idempotent by construction: re-tapping the *same* verb is a
     /// [`TrainOutcome::DuplicateSignal`] — the model is not mutated, so no put is
     /// issued (the guard is in the model, not in the UI).
+    ///
+    /// A refusal is also the page's error ([`Self::report_train`]), so no
+    /// shell has to bridge the returned `Err` onto `error-message` itself.
     pub async fn train_post(
+        &self,
+        post_id: String,
+        factor: String,
+        verb: TrainVerb,
+    ) -> Result<TrainResult, String> {
+        let result = self.train_post_inner(post_id, factor, verb).await;
+        self.report_train(result.as_ref().err());
+        result
+    }
+
+    /// The training gesture's report on the page error
+    /// (`FeedSnapshot::error` → `error-message`): a refusal stamps
+    /// `feed.error_train` over whatever the page said — the gesture just
+    /// happened, so its outcome leads, as it does on every app's error line — and
+    /// a landed one clears that refusal and nothing else.
+    fn report_train(&self, refused: Option<&String>) {
+        {
+            let mut s = self.state.write().unwrap();
+            match refused {
+                Some(e) => {
+                    s.error = Some(LocalizedText::key_arg(
+                        "feed.error_train",
+                        "message",
+                        e.clone(),
+                    ));
+                }
+                None if s
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.key == "feed.error_train") =>
+                {
+                    s.error = None;
+                }
+                None => return,
+            }
+        }
+        self.notify();
+    }
+
+    async fn train_post_inner(
         &self,
         post_id: String,
         factor: String,
@@ -5781,7 +6068,15 @@ impl<R: RpcRequester + Clone> FeedManager<R> {
     /// statistical model, and strictly better than refusing to un-mark. That
     /// fallback is [`TopicModel::remove_marker`], which is explicitly counts-
     /// preserving; it is not an error path.
+    ///
+    /// Reported on the page error as [`Self::train_post`] is.
     pub async fn untrain_post(&self, post_id: String, factor: String) -> Result<(), String> {
+        let result = self.untrain_post_inner(post_id, factor).await;
+        self.report_train(result.as_ref().err());
+        result
+    }
+
+    async fn untrain_post_inner(&self, post_id: String, factor: String) -> Result<(), String> {
         let mut model = self.fetch_model(&factor).await?;
 
         let changed = match self.full_text_for_training(&post_id).await {
@@ -6407,6 +6702,9 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         reply_count: p.reply_count,
         repost_count: p.repost_count,
         quote_count: p.quote_count,
+        // The per-emoji reaction tally, carried 1:1 beside the counts
+        // (`feed.md` § Layout & flow → *Reaction posts count and paint*).
+        reactions: p.reactions.into_iter().map(Into::into).collect(),
         // Gated-to-tier marker → `gated-post-badge`; the list body of a gated
         // post is its plaintext teaser until `unlock_gated_post` decrypts.
         gated_tier: p.gated_tier,
@@ -6452,6 +6750,8 @@ fn map_post(p: FeedPostItem) -> PostSummary {
         // graduates its pin against the home before the first byte
         // (`transport-trust.md` § The post arm).
         home_nest_actor_id: p.home_nest_actor_id,
+        // Folded in at every snapshot read (`FeedManager::snapshot`).
+        archive_comments: Vec::new(),
     }
 }
 
@@ -6525,6 +6825,8 @@ fn map_fetched_post(
         reply_count: 0,
         repost_count: 0,
         quote_count: 0,
+        // Filled beside the counts by `resolve_post` from the reply's `counts`.
+        reactions: Vec::new(),
         gated_tier: post.gated.as_ref().map(|g| g.tier.clone()),
         // The same accessor the nest's indexer projects `gated_room` through
         // (`fauna_core::room_post::room_post_of`), so the two doors name the
@@ -6560,6 +6862,7 @@ fn map_fetched_post(
         unlock_purchase_pending: false,
         home_nest_url: None,
         home_nest_actor_id: None,
+        archive_comments: Vec::new(),
     }
 }
 
@@ -6809,6 +7112,14 @@ fn rendered_posts_mut(s: &mut FeedSnapshot) -> impl Iterator<Item = &mut PostSum
 /// [`REFERENCE_REFUSED_RESTRICTED`](fauna_client_core::post::REFERENCE_REFUSED_RESTRICTED).
 pub const REPLY_SEALS_INSTEAD: &str =
     "this reply can be sealed to the post's own audience — send it without confirming";
+
+/// What [`FeedManager::react`] answers for a target it does not compose a
+/// reaction toward: a bridged (`bluesky` / `nostr` / `activitypub`) post — no
+/// `React` composes toward a foreign origin yet — or a post the loaded window
+/// cannot answer for. Nothing is created. A stable string, like
+/// [`REPLY_SEALS_INSTEAD`].
+pub const REACT_REFUSED_NOT_NATIVE: &str =
+    "a reaction can only be added to a post from this network — nothing was sent";
 
 pub fn refusal_i18n_key(err: &str) -> Option<&'static str> {
     (err == fauna_client_core::post::REFERENCE_REFUSED_RESTRICTED)
@@ -7190,6 +7501,9 @@ mod tests {
         /// When set, `fauna.posts.get` carries this bridged-author face on its
         /// reply (`PostGetReply.author_display`).
         posts_get_author_display: Option<fauna_protocol::feed::AuthorDisplay>,
+        /// When set, `fauna.posts.get` carries these counters on its reply
+        /// (`PostGetReply.counts`).
+        posts_get_counts: Option<fauna_protocol::posts::PostEngagementCounts>,
         /// Bytes answered to `fauna.posts.get_remote` — the post's home nest,
         /// relayed by this one.
         posts_get_remote_body: Vec<u8>,
@@ -7319,7 +7633,7 @@ mod tests {
                     reply_count: reply,
                     repost_count: repost,
                     quote_count: quote,
-                    extra: Default::default(),
+                    ..Default::default()
                 });
         }
         fn set_interact_counts_after_create(&self, reply: i64, quote: i64) {
@@ -7329,7 +7643,7 @@ mod tests {
                     reply_count: reply,
                     repost_count: 0,
                     quote_count: quote,
-                    extra: Default::default(),
+                    ..Default::default()
                 });
         }
         fn set_linkpreview_reply(&self, reply: LinkPreviewResolveReply) {
@@ -7783,6 +8097,7 @@ mod tests {
                             legal_takedown,
                             admin_block,
                             author_display: g.posts_get_author_display.clone(),
+                            counts: g.posts_get_counts.clone(),
                             ..Default::default()
                         })
                     }
@@ -8580,6 +8895,73 @@ mod tests {
         let (_, last) = g.calls.last().unwrap();
         let req: FeedLocalPostsRequest = fauna_protocol::decode_strict(last).unwrap();
         assert_eq!(req.search.as_deref(), Some("rust"));
+    }
+
+    /// Flow (`docs/goal/ui/feed.md` § State & data shape → *The imported-posts
+    /// selection*): `select_imported("instagram")` → `imported_selected` is the
+    /// token and every other selection field clears → the read is
+    /// `fauna.feed.author.posts` for the OWN actor with `sources: [token]` →
+    /// the search bar re-queries the same read with `search` → `clear_imported`
+    /// returns to Local; `select_feed` and Trending leave it too.
+    #[test]
+    fn select_imported_reads_the_own_authors_posts_from_that_platform() {
+        let nest = MockNest::arc();
+        let m = mgr(nest.clone());
+        let me = hex::encode(ActorKeypair::from_secret(TEST_SECRET).actor_id().0);
+        nest.push_page(vec![post("aa", 1)], None); // trending first
+        block_on(m.select_trending_feed());
+        nest.push_page(vec![post("im", 2)], None); // the imported read
+        block_on(m.select_imported("instagram".into()));
+        let snap = m.snapshot();
+        assert_eq!(snap.imported_selected.as_deref(), Some("instagram"));
+        assert!(!snap.trending_selected && snap.selected_feed.is_none());
+        assert_eq!(post_ids(&m), vec!["im"]);
+
+        nest.push_page(vec![post("im", 2)], None); // the search re-query
+        block_on(m.set_search_query(Some("beach".into())));
+        let reads: Vec<FeedAuthorPostsRequest> = nest
+            .calls()
+            .iter()
+            .filter(|(k, _)| k == "fauna.feed.author.posts")
+            .map(|(_, b)| fauna_protocol::decode_strict(b).unwrap())
+            .collect();
+        assert_eq!(reads.len(), 2, "the selection and its search re-query");
+        assert!(reads.iter().all(|r| r.author == me), "the own actor");
+        assert!(
+            reads
+                .iter()
+                .all(|r| r.sources == Some(vec!["instagram".to_string()]))
+        );
+        assert_eq!(reads[0].search, None);
+        assert_eq!(reads[1].search.as_deref(), Some("beach"));
+        assert_eq!(
+            m.snapshot().imported_selected.as_deref(),
+            Some("instagram"),
+            "search keeps the selection"
+        );
+
+        nest.push_page(vec![post("aa", 1)], None);
+        block_on(m.clear_imported());
+        let snap = m.snapshot();
+        assert_eq!(snap.imported_selected, None, "cleared back to Local");
+        assert!(!snap.trending_selected && snap.selected_feed.is_none());
+        let (kind, _) = nest.calls().last().unwrap().clone();
+        assert_eq!(kind, "fauna.feed.local.posts");
+
+        nest.push_page(vec![post("im", 2)], None);
+        block_on(m.select_imported("facebook".into()));
+        nest.push_page(vec![post("aa", 1)], None);
+        block_on(m.select_trending_feed());
+        assert_eq!(m.snapshot().imported_selected, None, "Trending leaves it");
+        nest.push_page(vec![post("im", 2)], None);
+        block_on(m.select_imported("facebook".into()));
+        nest.push_page(vec![post("aa", 1)], None);
+        block_on(m.select_feed(None));
+        assert_eq!(
+            m.snapshot().imported_selected,
+            None,
+            "select_feed leaves it"
+        );
     }
 
     /// One manual poll of a future that is allowed to park (unlike `block_on`,
@@ -9674,6 +10056,242 @@ mod tests {
         );
         let target_row = snap.posts.iter().find(|p| p.post_id == target).unwrap();
         assert_eq!(target_row.viewer_repost_id, None, "the toggle state clears");
+    }
+
+    fn reaction_group(
+        emoji: &str,
+        count: i64,
+        viewer_react_id: Option<&str>,
+    ) -> fauna_protocol::feed::PostReactionGroup {
+        fauna_protocol::feed::PostReactionGroup {
+            emoji: emoji.into(),
+            count,
+            viewer_react_id: viewer_react_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn set_interact_reactions(
+        nest: &MockNest,
+        reactions: Vec<fauna_protocol::feed::PostReactionGroup>,
+    ) {
+        nest.inner.lock().unwrap().interact_counts =
+            Some(fauna_protocol::posts::PostEngagementCounts {
+                reactions,
+                ..Default::default()
+            });
+    }
+
+    /// The wire tally rides onto the card 1:1, in the nest's order
+    /// (`feed.md` § Layout & flow → *Reaction posts count and paint*, ruling 2).
+    #[test]
+    fn map_post_carries_the_reaction_tally() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut item = post(&target, 2);
+        item.reactions = vec![
+            reaction_group("❤️", 3, Some("dd")),
+            reaction_group("🔥", 1, None),
+        ];
+        nest.push_page(vec![item], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        let got: Vec<(String, i64, Option<String>)> = m.snapshot().posts[0]
+            .reactions
+            .iter()
+            .map(|g| (g.emoji.clone(), g.count, g.viewer_react_id.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("❤️".into(), 3, Some("dd".into())), ("🔥".into(), 1, None)]
+        );
+    }
+
+    /// The post-act fold carries the tally beside the four counts (ruling 5).
+    #[test]
+    fn interact_folds_the_reaction_tally_beside_the_counts() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        nest.push_page(vec![post(&target, 2)], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        set_interact_reactions(&nest, vec![reaction_group("🔥", 4, None)]);
+
+        block_on(m.interact(target, "like".into(), None)).expect("like ok");
+
+        let snap = m.snapshot();
+        assert_eq!(snap.posts[0].reactions.len(), 1);
+        assert_eq!(snap.posts[0].reactions[0].count, 4);
+    }
+
+    /// The reaction toggle's ON direction (ruling 4): a wordless
+    /// `Reference::React { emoji }` post is composed, its id folds into the
+    /// group's `viewer_react_id` without touching the count, and — on a
+    /// `fauna` target — the tally is read back through the door's pure-read
+    /// `repost` arm (the door has no `react` action) and replaces the row's.
+    #[test]
+    fn a_react_composes_a_react_post_and_folds_the_id_then_the_read_back_tally() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut item = post(&target, 2);
+        item.reactions = vec![reaction_group("🔥", 1, None)];
+        nest.push_page(vec![item], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        // No counts from the door: the local fold alone — the id, never a
+        // guessed count.
+        block_on(m.react(target.clone(), "🔥".into())).expect("react ok");
+        let req: fauna_protocol::posts::PostCreateRequest = nest.req("fauna.posts.create");
+        let (decoded, _) = decode_post(req.body.as_ref()).expect("decodes + verifies");
+        match decoded.body {
+            fauna_core::data::PostBody::Text { ref content, .. } => assert_eq!(content, ""),
+            ref other => panic!("expected Text body, got {other:?}"),
+        }
+        let digest = fauna_core::hex32::decode(&target).unwrap();
+        match &decoded.references[..] {
+            [fauna_core::data::Reference::React { post_id, emoji }] => {
+                assert_eq!(*post_id, PostId::from_digest_dag_cbor(digest));
+                assert_eq!(emoji, "🔥");
+            }
+            other => panic!("expected exactly one React reference, got {other:?}"),
+        }
+        assert!(
+            decoded.gated.is_none(),
+            "a reaction is public, as a repost is"
+        );
+        let g = m.snapshot().posts[0].reactions[0].clone();
+        assert_eq!(
+            (g.count, g.viewer_react_id),
+            (1, Some("ab".repeat(32))),
+            "the created id folds in; the count waits on the nest"
+        );
+        let reqs: Vec<fauna_protocol::posts::PostInteractRequest> =
+            nest.reqs("fauna.posts.interact");
+        let calls: Vec<(&str, &str)> = reqs
+            .iter()
+            .map(|r| (r.post_id.as_str(), r.action.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(target.as_str(), "repost")],
+            "the read-back rides the native pure-read arm — never a `react` action"
+        );
+
+        // With the door's post-act tally, that tally is what the card shows.
+        let m2 = {
+            let nest = MockNest::arc();
+            let mut item = post(&target, 2);
+            item.reactions = vec![reaction_group("🔥", 1, None)];
+            nest.push_page(vec![item], None);
+            set_interact_reactions(&nest, vec![reaction_group("🔥", 2, Some(&"ab".repeat(32)))]);
+            let m = mgr(nest);
+            block_on(m.select_feed(None));
+            m
+        };
+        block_on(m2.react(target, "🔥".into())).expect("react ok");
+        let g = m2.snapshot().posts[0].reactions[0].clone();
+        assert_eq!((g.count, g.viewer_react_id), (2, Some("ab".repeat(32))));
+    }
+
+    /// The OFF direction: a second tap deletes the viewer's own `React` post
+    /// through the ordinary deletion path (a signed tombstone), composes
+    /// nothing, clears the id, and folds the nest's read-back tally.
+    #[test]
+    fn a_second_react_tap_deletes_the_viewers_own_react_post() {
+        let target = "cc".repeat(32);
+        let react_id = "dd".repeat(32);
+        let nest = MockNest::arc();
+        let mut item = post(&target, 2);
+        item.reactions = vec![reaction_group("🔥", 2, Some(&react_id))];
+        nest.push_page(vec![item], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        set_interact_reactions(&nest, vec![reaction_group("🔥", 1, None)]);
+
+        block_on(m.react(target.clone(), "🔥".into())).expect("un-react ok");
+
+        assert!(
+            !nest.kinds().contains(&"fauna.posts.create".to_string()),
+            "the OFF direction must not compose"
+        );
+        let req: fauna_protocol::posts::PostDeleteRequest = nest.req("fauna.posts.delete");
+        let tombstone =
+            fauna_core::encoding::decode_tombstone(req.body.as_ref()).expect("decodes + verifies");
+        let digest = fauna_core::hex32::decode(&react_id).unwrap();
+        assert_eq!(
+            tombstone.post_id,
+            PostId::from_digest_dag_cbor(digest),
+            "the delete names the viewer's own React post, never the target"
+        );
+        let snap = m.snapshot();
+        let row = snap.posts.iter().find(|p| p.post_id == target).unwrap();
+        assert_eq!(
+            row.reactions,
+            vec![crate::PostReactionGroup {
+                emoji: "🔥".into(),
+                count: 1,
+                viewer_react_id: None,
+            }]
+        );
+    }
+
+    /// Ruling 3 (`archive-import.md` § Compatibility → *Slice-3 rulings*): the
+    /// door refuses its pure-read arm on an archive-imported token, so on such
+    /// a target the reaction is composed (or deleted) and the read-back is
+    /// skipped — outcome 54's targets are exactly these posts, and the toggle
+    /// must succeed on them.
+    #[test]
+    fn a_react_on_an_archive_imported_post_composes_and_skips_the_read_back() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut item = post(&target, 2);
+        item.source = fauna_core::source::FACEBOOK.into();
+        item.reactions = vec![reaction_group("❤️", 1, None)];
+        nest.push_page(vec![item], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        block_on(m.react(target.clone(), "❤️".into())).expect("react ok");
+        assert!(nest.kinds().contains(&"fauna.posts.create".to_string()));
+        assert_eq!(
+            m.snapshot().posts[0].reactions[0].viewer_react_id,
+            Some("ab".repeat(32))
+        );
+        block_on(m.react(target, "❤️".into())).expect("un-react ok");
+        assert!(nest.kinds().contains(&"fauna.posts.delete".to_string()));
+        assert!(
+            !nest.kinds().contains(&"fauna.posts.interact".to_string()),
+            "no read-back the door would refuse"
+        );
+        assert_eq!(m.snapshot().posts[0].reactions[0].viewer_react_id, None);
+    }
+
+    /// A bridged target, or one the window cannot answer for, is refused with
+    /// the stable text and nothing is composed — no `React` composes toward a
+    /// foreign origin in this slice.
+    #[test]
+    fn a_react_on_a_bridged_or_unloaded_post_is_refused_and_composes_nothing() {
+        let target = "cc".repeat(32);
+        let nest = MockNest::arc();
+        let mut bridged = post(&target, 2);
+        bridged.source = "nostr".into();
+        nest.push_page(vec![bridged], None);
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+
+        assert_eq!(
+            block_on(m.react(target, "🔥".into())),
+            Err(REACT_REFUSED_NOT_NATIVE.to_string())
+        );
+        assert_eq!(
+            block_on(m.react("ee".repeat(32), "🔥".into())),
+            Err(REACT_REFUSED_NOT_NATIVE.to_string())
+        );
+        let kinds = nest.kinds();
+        assert!(!kinds.contains(&"fauna.posts.create".to_string()));
+        assert!(!kinds.contains(&"fauna.posts.interact".to_string()));
     }
 
     /// A bridged row never composes — the nest's bridged arms drive the
@@ -11407,6 +12025,94 @@ mod tests {
         assert_eq!(m.snapshot().posts[0].media_hash, Some("ab".repeat(32)));
     }
 
+    // ── Folded archive comments (archive-import.md § What each category becomes) ──
+
+    struct FoldSource(std::sync::Mutex<Result<Vec<crate::ArchiveCommentRecord>, String>>);
+
+    impl crate::ArchiveCommentSource for FoldSource {
+        fn archive_comments(&self) -> crate::ArchiveCommentsFuture<'_> {
+            let read = self.0.lock().unwrap().clone();
+            Box::pin(async move { read })
+        }
+    }
+
+    fn folded(post_id: &str, id: &str, at: i64) -> crate::ArchiveCommentRecord {
+        crate::ArchiveCommentRecord {
+            post_id: post_id.into(),
+            external_id: id.into(),
+            author_name: "Friend Two".into(),
+            created_at_ms: at,
+            text: format!("words {id}"),
+            media_count: 0,
+        }
+    }
+
+    #[test]
+    fn archive_comments_fold_under_their_post_oldest_first_and_a_failed_read_keeps_them() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 2), post("bb", 1)], None);
+        let m = mgr(nest);
+        block_on(m.select_feed(None));
+        let ids: Vec<String> = m
+            .snapshot()
+            .posts
+            .iter()
+            .map(|p| p.post_id.clone())
+            .collect();
+        let (a, b) = (ids[0].clone(), ids[1].clone());
+        // No source: a no-op, nothing folded.
+        block_on(m.refresh_archive_comments()).unwrap();
+        assert!(
+            m.snapshot()
+                .posts
+                .iter()
+                .all(|p| p.archive_comments.is_empty())
+        );
+
+        let source = Arc::new(FoldSource(std::sync::Mutex::new(Ok(vec![
+            folded(&a, "facebook:c2", 20),
+            folded(&a, "facebook:c1", 10),
+        ]))));
+        m.set_archive_comment_source(source.clone());
+        block_on(m.refresh_archive_comments()).unwrap();
+        let snap = m.snapshot();
+        let under_a = &snap
+            .posts
+            .iter()
+            .find(|p| p.post_id == a)
+            .unwrap()
+            .archive_comments;
+        let keys: Vec<&str> = under_a.iter().map(|c| c.external_id.as_str()).collect();
+        assert_eq!(keys, ["facebook:c1", "facebook:c2"]);
+        assert_eq!(under_a[0].author_name, "Friend Two");
+        assert!(
+            snap.posts
+                .iter()
+                .find(|p| p.post_id == b)
+                .unwrap()
+                .archive_comments
+                .is_empty(),
+            "another post folds nothing"
+        );
+
+        *source.0.lock().unwrap() = Err("folder unreadable".into());
+        assert_eq!(
+            block_on(m.refresh_archive_comments()),
+            Err("folder unreadable".into())
+        );
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.posts
+                .iter()
+                .find(|p| p.post_id == a)
+                .unwrap()
+                .archive_comments
+                .len(),
+            2,
+            "the last good read is kept"
+        );
+    }
+
     // ── Cue subject: playable media (engagement-cues.md § Cue vocabulary) ──
 
     /// A loaded `has_media` post whose signed body `posts.get` serves with ONE
@@ -11714,6 +12420,48 @@ mod tests {
             .expect("the bridged face rides the deep-link door");
         assert_eq!(face.display_name.as_deref(), Some("Alice"));
         assert_eq!(face.handle.as_deref(), Some("alice.bsky.social"));
+    }
+
+    /// A post opened through the deep-link door shows the nest's counters, as
+    /// its timeline card does: the reply's `counts` land on the summary, and a
+    /// reply without them leaves the decoded zeros.
+    #[test]
+    fn resolve_post_folds_the_nest_counts_onto_the_summary() {
+        let nest = MockNest::arc();
+        nest.push_page(vec![post("aa", 1)], None);
+        let kp = ActorKeypair::from_secret([9u8; 32]);
+        nest.inner.lock().unwrap().posts_get_body = build_post(&kp, "body", &[], None).unwrap();
+
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(None));
+        block_on(m.resolve_post("zz".into()));
+        assert_eq!(m.snapshot().find_post("zz").unwrap().like_count, 0);
+
+        nest.inner.lock().unwrap().posts_get_counts =
+            Some(fauna_protocol::posts::PostEngagementCounts {
+                like_count: 3,
+                reply_count: 2,
+                repost_count: 1,
+                quote_count: 4,
+                reactions: vec![reaction_group("🔥", 2, Some("ee"))],
+                ..Default::default()
+            });
+        block_on(m.resolve_post("yy".into()));
+        let snap = m.snapshot();
+        let p = snap.find_post("yy").unwrap();
+        assert_eq!(
+            (p.like_count, p.reply_count, p.repost_count, p.quote_count),
+            (3, 2, 1, 4)
+        );
+        assert_eq!(
+            p.reactions,
+            vec![crate::PostReactionGroup {
+                emoji: "🔥".into(),
+                count: 2,
+                viewer_react_id: Some("ee".into()),
+            }],
+            "the per-emoji tally folds beside the four counts"
+        );
     }
 
     /// Re-opening the same deep-linked post is free — the slot already holds it.
@@ -14123,6 +14871,52 @@ mod tests {
         );
     }
 
+    /// A refused train (here: the model will not open) is the page's error in
+    /// the snapshot, under the train's own `feed.error_train` key — replacing
+    /// the feed's load notice — so every app paints the same line from the one
+    /// slot it already reads, rather than each shell bridging it (or not). A
+    /// later train that lands clears it; an unrelated notice is never cleared.
+    #[test]
+    fn a_refused_train_is_the_page_error_and_a_landed_train_clears_it() {
+        let nest = MockNest::arc();
+        nest.set_feed_composition(vec![entry(CATS, 1000)]);
+        nest.seed_unopenable_model(CATS);
+        nest.push_page(vec![scored_post("kit", 2, 1_000_000, "a kitten")], None);
+        seed_posts_get_body(&nest, "a tiny kitten purring");
+        let m = mgr(nest.clone());
+        block_on(m.select_feed(Some("feed-1".into())));
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some("feed.error_trained_factor".to_string()),
+        );
+
+        let refused = block_on(m.train_post("kit".into(), CATS.into(), TrainVerb::MoreLikeThis))
+            .expect_err("training over an unopenable model is refused");
+        let error = m.snapshot().error.expect("the refusal is surfaced");
+        assert_eq!(error.key, "feed.error_train");
+        assert_eq!(error.args.get("message"), Some(&refused));
+        block_on(m.untrain_post("kit".into(), CATS.into())).expect_err("so is an untrain over it");
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some("feed.error_train".into())
+        );
+
+        nest.seed_model(CATS, &cats_model());
+        block_on(m.train_post("kit".into(), CATS.into(), TrainVerb::MoreLikeThis)).unwrap();
+        assert!(
+            m.snapshot().error.is_none(),
+            "a landed train clears its own refusal"
+        );
+
+        m.inject_error_for_test(LocalizedText::key("feed.error_load"));
+        block_on(m.train_post("kit".into(), CATS.into(), TrainVerb::LessLikeThis)).unwrap();
+        assert_eq!(
+            m.snapshot().error.map(|e| e.key),
+            Some("feed.error_load".into()),
+            "a landed train leaves another surface's notice alone",
+        );
+    }
+
     /// A trained factor with no stored blob yet (created, never taught) is not
     /// an error — it is simply inert until its first example.
     #[test]
@@ -15651,6 +16445,22 @@ mod tests {
             "a second resolve after a successful buy must not re-offer the \
              post — the teaser would reappear and the buy's completion signal \
              (a cleared unlock_offer) would never durably hold"
+        );
+
+        // A read already on the wire when the buy landed answers after it, past
+        // the guard at the top of the resolve: same outcome required.
+        m.land_unlock_offer(
+            "aa",
+            UnlockOfferView {
+                tier_name: "post-unlock-abc123".into(),
+                price_hint: Some("$3".into()),
+                payment_url: None,
+            },
+        );
+        assert_eq!(
+            m.snapshot().posts[0].unlock_offer,
+            None,
+            "a resolve in flight across the buy must not re-offer the post"
         );
     }
 
@@ -17868,6 +18678,67 @@ mod tests {
         b.restore_drafts(bytes);
 
         assert_eq!(spy.count(), 1, "the restored draft must reach the shell");
+    }
+
+    /// A restore FILLS (`ui/feed.md` § Persistence): the launch load retries a
+    /// read lost to the transport for minutes, so its restore routinely lands
+    /// after the user has started typing — and the composer they are typing
+    /// into wins, every field of it. A restore that overwrote here would be a
+    /// way to lose typing, which is why the retry waited on this rule.
+    #[test]
+    fn a_late_restore_never_overwrites_a_typed_compose() {
+        let a = mgr(Arc::new(MockNest::default()));
+        a.update_compose("the older draft".into(), "old, tags".into(), None);
+        a.update_compose_gate(Some("supporters".into()), "old teaser".into());
+        let bytes = a.drafts_snapshot_bytes();
+
+        let b = mgr(Arc::new(MockNest::default()));
+        b.update_compose("typed meanwhile".into(), String::new(), None);
+        let spy = Arc::new(CountingObserver::default());
+        b.add_observer(Arc::clone(&spy) as Arc<dyn FeedSnapshotObserver>);
+        b.restore_drafts(bytes);
+
+        let compose = b.snapshot().compose;
+        assert_eq!(compose.text, "typed meanwhile");
+        assert_eq!(compose.tags, "", "no field of the resting draft leaks in");
+        assert_eq!(compose.gate_tier, None);
+        assert_eq!(compose.gate_preview, "");
+        assert_eq!(spy.count(), 0, "nothing changed, so nothing to notify");
+    }
+
+    /// Authorship is any user input, not only text: an audience chosen with
+    /// nothing typed yet is still the user's compose, and the restore leaves it.
+    #[test]
+    fn a_late_restore_never_overwrites_a_chosen_audience() {
+        let a = mgr(Arc::new(MockNest::default()));
+        a.update_compose("the older draft".into(), String::new(), None);
+        let bytes = a.drafts_snapshot_bytes();
+
+        let b = mgr(Arc::new(MockNest::default()));
+        b.update_compose_gate(Some("supporters".into()), String::new());
+        b.restore_drafts(bytes);
+
+        let compose = b.snapshot().compose;
+        assert_eq!(compose.text, "");
+        assert_eq!(compose.gate_tier.as_deref(), Some("supporters"));
+    }
+
+    /// The other half of FILL: a composer the user has not authored into — a
+    /// whitespace-only body included — still takes the resting draft, which is
+    /// what carries a post begun on another device onto this one.
+    #[test]
+    fn a_late_restore_still_fills_an_untouched_compose() {
+        let a = mgr(Arc::new(MockNest::default()));
+        a.update_compose("from the other device".into(), "walrus".into(), None);
+        let bytes = a.drafts_snapshot_bytes();
+
+        let b = mgr(Arc::new(MockNest::default()));
+        b.update_compose("   ".into(), String::new(), None);
+        b.restore_drafts(bytes);
+
+        let compose = b.snapshot().compose;
+        assert_eq!(compose.text, "from the other device");
+        assert_eq!(compose.tags, "walrus");
     }
 
     /// An unreadable blob must cost the user nothing but their draft. The

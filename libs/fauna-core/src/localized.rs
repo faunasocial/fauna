@@ -145,6 +145,83 @@ impl LocalizedText {
     }
 }
 
+/// A [`LocalizedText`] whose template arguments may themselves be
+/// translatable: `nested` maps an argument name to the text that fills it (a
+/// byte size, a duration, a category word, a described scope), and wins over
+/// `text.args` of the same name. One level deep — a nested text's own args are
+/// data — so it crosses UniFFI as a plain record; a line that would need two
+/// levels gets a template of its own instead.
+///
+/// Lives here beside [`LocalizedText`] for the same reason: every shared crate
+/// that composes a page's lines (connected apps, archive import, …) hands the
+/// apps the *same* type — one `uniffi::Record` registration, one resolver per
+/// app (`resolveComposedText` in FaunaKit, `resolveComposed` on android and
+/// web, [`ComposedText::resolve`] for the Rust apps).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ComposedText {
+    pub text: LocalizedText,
+    pub nested: HashMap<String, LocalizedText>,
+}
+
+impl ComposedText {
+    /// A static key with no arguments.
+    pub fn key(key: &str) -> Self {
+        Self {
+            text: LocalizedText::key(key),
+            nested: HashMap::new(),
+        }
+    }
+
+    /// A key plus data arguments, none of them translatable.
+    pub fn args<const N: usize>(key: &str, pairs: [(&str, &str); N]) -> Self {
+        Self {
+            text: LocalizedText::key_args(key, pairs),
+            nested: HashMap::new(),
+        }
+    }
+
+    /// A key plus data arguments and the translatable texts that fill the
+    /// rest.
+    pub fn with_nested<const N: usize>(
+        key: &str,
+        pairs: [(&str, &str); N],
+        nested: impl IntoIterator<Item = (&'static str, LocalizedText)>,
+    ) -> Self {
+        Self {
+            text: LocalizedText::key_args(key, pairs),
+            nested: nested
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), t))
+                .collect(),
+        }
+    }
+
+    /// Resolve through `lookup` (the app's key → template function): each
+    /// nested text first, then this template with them substituted.
+    pub fn resolve<F, S>(&self, lookup: F) -> String
+    where
+        F: Fn(&str) -> Option<S>,
+        S: AsRef<str>,
+    {
+        let mut text = self.text.clone();
+        for (name, nested) in &self.nested {
+            text.args
+                .insert(name.clone(), nested.resolve(|k| lookup(k)));
+        }
+        text.resolve(lookup)
+    }
+}
+
+impl From<LocalizedText> for ComposedText {
+    fn from(text: LocalizedText) -> Self {
+        Self {
+            text,
+            nested: HashMap::new(),
+        }
+    }
+}
+
 /// Fill `{name}` placeholders of an already-resolved `template` with `args`
 /// verbatim, in one pass (see [`substitute`]). The public face the apps' own
 /// renderers call (over UniFFI) once they have looked the template up, so every

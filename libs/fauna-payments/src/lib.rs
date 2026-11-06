@@ -30,6 +30,14 @@
 //! caller), wasm32-clean like the other shared client crates.
 
 pub mod asking_price;
+// The fake provider verifies with a secret its author chose and grants that
+// author's own tiers, so it is test machinery, never a production surface: it
+// is compiled into test and debug builds and into a release build only through
+// the `test-helpers` feature an e2e flavor forwards
+// (`e2e-automation-surface-gating.md` rule (a)) — a production build's
+// registry has no `fake`. No `test` arm, on purpose: `cargo test --release`
+// is then the production registry, which is how its pin runs.
+#[cfg(any(debug_assertions, feature = "test-helpers"))]
 pub mod fake;
 pub mod stripe;
 pub mod tips;
@@ -66,9 +74,11 @@ pub struct VerifiedPaymentEvent {
     /// (`client_reference_id = actor_id` hex — monetization.md § Pillar 3
     /// Q4). `None` → unbound: the engine mints a claim code instead.
     pub buyer_reference: Option<String>,
-    /// Provider product/plan reference, input to [`TierMapping`]. Unused by
-    /// the first-cut single mapping but carried so multi-tier mappings need
-    /// no adapter change.
+    /// The product the payment is for, as the adapter names it (Stripe: a
+    /// Checkout Session's Payment Link id) — matched by
+    /// [`TierMapping::covers`] when the creator narrowed the mapping to one
+    /// product. `None` on an event that names none (a renewal invoice, a
+    /// refund, a hand-built Checkout with no Payment Link).
     pub product_reference: Option<String>,
     /// End of the paid validity window, seconds since epoch (provider-native
     /// unit). `None` → the event carries no window (e.g. a one-off payment):
@@ -84,6 +94,15 @@ pub struct VerifiedPaymentEvent {
     /// (monetization.md § Pillar 2 → *Visitor entitlement doors* ruling (2)).
     /// `None` on every event that is not a checkout completion.
     pub return_ref: Option<String>,
+    /// The stable references of the PURCHASE this event belongs to (Stripe:
+    /// the subscription id, the payment intent id, the Checkout Session id) —
+    /// distinct from [`Self::external_ref`], which names one delivery and
+    /// differs on every event. A payment records its claim or buyer binding
+    /// against each of them; a later renewal extends, and a refund or dispute
+    /// voids, whatever any one of them names (monetization.md § Expiry &
+    /// revocation). Empty when the event names no purchase — the engine then
+    /// falls back to the `external_ref` lookup.
+    pub purchase_refs: Vec<String>,
 }
 
 /// Why an inbound webhook was rejected. Every variant MUST surface as a
@@ -181,6 +200,7 @@ pub trait PaymentProvider: Send + Sync {
 /// non-2xx (an unknown provider must not read as delivered).
 pub fn provider_for_kind(kind: &str) -> Option<&'static dyn PaymentProvider> {
     match kind {
+        #[cfg(any(debug_assertions, feature = "test-helpers"))]
         fake::KIND => Some(&fake::FakeProvider),
         stripe::KIND => Some(&stripe::StripeProvider),
         _ => None,
@@ -188,9 +208,17 @@ pub fn provider_for_kind(kind: &str) -> Option<&'static dyn PaymentProvider> {
 }
 
 /// Every registered provider kind (the client provider-form `kind` select
-/// enumerates these).
+/// enumerates these). `fake` is listed only where it is compiled (see the
+/// module gate above).
 pub fn known_kinds() -> &'static [&'static str] {
-    &[fake::KIND, stripe::KIND]
+    #[cfg(any(debug_assertions, feature = "test-helpers"))]
+    {
+        &[fake::KIND, stripe::KIND]
+    }
+    #[cfg(not(any(debug_assertions, feature = "test-helpers")))]
+    {
+        &[stripe::KIND]
+    }
 }
 
 // ── Webhook ingress URL ────────────────────────────────────────
@@ -275,22 +303,47 @@ pub fn return_url(site_url: &str, kind: &str) -> String {
 // ── Tier mapping ───────────────────────────────────────────────
 
 /// The creator-configured payment→tier mapping ("map" capability of the
-/// adapter seam). First cut: one mapping per provider — every verified
-/// payment lands on the one configured tier (the provider form's tier-map is
-/// single-select). `product_reference` is accepted so growing to per-product
-/// mappings changes only this type, not the adapters or the engine.
+/// adapter seam): one tier per provider, optionally narrowed to the one
+/// product the tier is sold as (monetization.md § Pillar 3 →
+/// *Configuration*). With no product every verified payment on the
+/// provider account lands on the tier; with one, a payment for anything
+/// else the creator sells there (a tip link, another product) is not
+/// covered ([`Self::covers`]) and mints nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TierMapping {
     pub tier: String,
+    /// The adapter's product reference the tier is sold as (Stripe: the
+    /// Payment Link id, `plink_…` — a Checkout Session's webhook carries no
+    /// line items, but names its Payment Link). `None` = every payment.
+    pub product: Option<String>,
 }
 
 impl TierMapping {
-    /// Resolve the tier a verified payment entitles. `None` would mean "no
-    /// mapping covers this product" (unreachable with the first-cut single
-    /// mapping, but the engine already handles it so per-product maps slot
-    /// in additively).
+    /// Resolve the tier a verified payment entitles. Total: whether the
+    /// payment is for this tier at all is [`Self::covers`]'s question, asked
+    /// first by the ingress.
     pub fn tier_for(&self, _product_reference: Option<&str>) -> Option<&str> {
         Some(&self.tier)
+    }
+
+    /// Whether this mapping covers `event`. Only a [`PaymentEventKind::Payment`]
+    /// is ever withheld: a refund or dispute names a purchase, never a product,
+    /// and voids only what that purchase recorded, so it needs no product
+    /// check. A payment is covered when no product is configured, when it
+    /// names the configured product, or when `recorded_product` — the product
+    /// an earlier payment of the same purchase was recorded under — is the
+    /// configured one (a subscription's renewal invoice names its
+    /// subscription, not the Payment Link that sold it). A purchase recorded
+    /// under another product, or under none, is not this tier's: re-pointing
+    /// the mapping never moves an existing subscription onto the new product's
+    /// tier. `None` = no purchase recorded, or one that named no product.
+    pub fn covers(&self, event: &VerifiedPaymentEvent, recorded_product: Option<&str>) -> bool {
+        let Some(product) = self.product.as_deref() else {
+            return true;
+        };
+        event.kind != PaymentEventKind::Payment
+            || event.product_reference.as_deref() == Some(product)
+            || recorded_product == Some(product)
     }
 }
 
@@ -343,6 +396,17 @@ pub struct PaymentEntitlement {
     /// [`VerifiedPaymentEvent::return_ref`] onto a minted claim (the visitor
     /// return door's lookup key). `None` for every non-checkout mechanism.
     pub return_ref: Option<String>,
+    /// Carried from [`VerifiedPaymentEvent::purchase_refs`]: the stable
+    /// per-purchase references a renewal extends by and a refund voids by.
+    /// Empty for every mechanism that names no purchase (claim redemption, a
+    /// zap receipt) — the engine then keys on `external_ref` alone.
+    pub purchase_refs: Vec<String>,
+    /// Carried from [`VerifiedPaymentEvent::product_reference`]: the product
+    /// the payment named, recorded on its purchase so a later renewal (which
+    /// names none) is covered only while the mapping still names this product
+    /// ([`TierMapping::covers`]). `None` for every event and mechanism that
+    /// names no product.
+    pub product_reference: Option<String>,
 }
 
 impl PaymentEntitlement {
@@ -383,6 +447,8 @@ impl PaymentEntitlement {
             valid_until_secs: event.valid_until_secs,
             external_ref: event.external_ref.clone(),
             return_ref: event.return_ref.clone(),
+            purchase_refs: event.purchase_refs.clone(),
+            product_reference: event.product_reference.clone(),
         })
     }
 }
@@ -463,10 +529,31 @@ mod tests {
         assert!(provider_for_kind("").is_none());
     }
 
+    /// A production build carries no `fake` provider: run under
+    /// `cargo test --release -p fauna-payments` (no `debug_assertions`, no
+    /// `test-helpers`), this is the registry a production nest and app
+    /// actually link.
+    #[cfg(not(any(debug_assertions, feature = "test-helpers")))]
+    #[test]
+    fn a_production_build_registers_no_fake_provider() {
+        assert_eq!(known_kinds(), &["stripe"]);
+        assert!(provider_for_kind("fake").is_none());
+    }
+
+    /// The other half: a debug or e2e build keeps the fake provider every
+    /// tier_3 suite drives.
+    #[cfg(any(debug_assertions, feature = "test-helpers"))]
+    #[test]
+    fn a_debug_or_e2e_build_registers_the_fake_provider() {
+        assert!(known_kinds().contains(&"fake"));
+        assert!(provider_for_kind("fake").is_some());
+    }
+
     #[test]
     fn single_tier_mapping_maps_everything() {
         let m = TierMapping {
             tier: "gold".into(),
+            product: None,
         };
         assert_eq!(m.tier_for(None), Some("gold"));
         assert_eq!(m.tier_for(Some("prod_123")), Some("gold"));
@@ -481,6 +568,55 @@ mod tests {
     fn gold() -> TierMapping {
         TierMapping {
             tier: "gold".into(),
+            product: None,
+        }
+    }
+
+    #[test]
+    fn a_mapping_with_no_product_covers_every_payment() {
+        let ev = payment_event(None);
+        assert!(gold().covers(&ev, None));
+        let mut bare = ev.clone();
+        bare.product_reference = None;
+        assert!(gold().covers(&bare, None));
+    }
+
+    #[test]
+    fn a_product_mapping_covers_only_its_product_or_a_recorded_purchase() {
+        let m = TierMapping {
+            tier: "gold".into(),
+            product: Some("plink_gold".into()),
+        };
+        let mut ev = payment_event(None);
+        ev.product_reference = Some("plink_gold".into());
+        assert!(m.covers(&ev, None), "the mapped product");
+        ev.product_reference = Some("plink_tips".into());
+        assert!(!m.covers(&ev, None), "another product on the account");
+        ev.product_reference = None;
+        assert!(!m.covers(&ev, None), "a payment naming no product");
+        // A renewal names no product, only its purchase — covered once the
+        // purchase was recorded under the mapped product, and only then.
+        assert!(
+            m.covers(&ev, Some("plink_gold")),
+            "a renewal of a purchase of the mapped product"
+        );
+        assert!(
+            !m.covers(&ev, Some("plink_old")),
+            "a renewal of a purchase sold as another product"
+        );
+    }
+
+    #[test]
+    fn a_product_mapping_never_withholds_a_refund_or_an_ignored_event() {
+        let m = TierMapping {
+            tier: "gold".into(),
+            product: Some("plink_gold".into()),
+        };
+        let mut ev = payment_event(None);
+        ev.product_reference = None;
+        for kind in [PaymentEventKind::Refund, PaymentEventKind::Ignored] {
+            ev.kind = kind;
+            assert!(m.covers(&ev, None), "{kind:?}");
         }
     }
 
@@ -492,6 +628,7 @@ mod tests {
             valid_until_secs: Some(1_800_000_000),
             external_ref: "evt_1".into(),
             return_ref: Some("cs_test_1".into()),
+            purchase_refs: vec!["sub_1".into()],
         }
     }
 
@@ -516,6 +653,8 @@ mod tests {
         assert_eq!(e.valid_until_secs, Some(1_800_000_000));
         assert_eq!(e.external_ref, "evt_1");
         assert_eq!(e.return_ref.as_deref(), Some("cs_test_1"));
+        assert_eq!(e.purchase_refs, vec!["sub_1".to_string()]);
+        assert_eq!(e.product_reference.as_deref(), Some("prod_123"));
     }
 
     #[test]
@@ -560,6 +699,7 @@ mod tests {
         // behind that call, and the `?` keeps the None arm wired for it.
         let m = TierMapping {
             tier: "platinum".into(),
+            product: None,
         };
         let ev = payment_event(None);
         let e = PaymentEntitlement::from_verified_event("fake", payee(), &ev, &m)

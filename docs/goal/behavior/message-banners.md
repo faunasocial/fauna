@@ -35,11 +35,12 @@ Authority: the running app's banner for a newly arrived conversation message —
   messages; suppress the selected/focused thread). Pure +
   deterministic, so it lives once here instead of being re-derived per app
   (priority #2/#4) — only the native toast *firing* is app glue (see below).
-  **The floor in rule 2 (ratified 2026-09-22) is the unread rule's** — the same
-  `launch_floor_ms` the store stamps and every snapshot now publishes (§ State &
+  **The floor in rule 2 (ratified 2026-09-22) is the store's run-start stamp** —
+  `launch_floor_ms`, which the store stamps and every snapshot publishes (§ State &
   data shape → *When a thread is read*), passed to `diff` straight off the
-  snapshot so the banner and `dm-unread-indicator` can never disagree about
-  where news starts. It exists because the rails load asynchronously and the
+  snapshot. Since 2026-10-27 it is the banner's alone: the unread indicator no
+  longer reads a clock (`conversation-read-state.md` § How the carriers meet the
+  in-memory set). It exists because the rails load asynchronously and the
   mail rail re-drains the whole mailbox from UID 0 at every launch, record by
   record ([`../behavior/mail-app-surface.md`](../behavior/mail-app-surface.md)
   § Inbound client receive): seeding on the first non-empty snapshot seeds on
@@ -54,7 +55,7 @@ Authority: the running app's banner for a newly arrived conversation message —
   stamp comparison inherits that section's under-reports (a device clock
   running ahead; a sender-backdated stamp on a rail that carries the sender's
   own time — and on the banner that under-report lasts the whole run on every
-  app, since only the unread read retires: the floor is compared with the
+  app, since only the unread read retired: the floor is compared with the
   thread's newest stamp, and the store's newest is its last-appended message).
   **The key is the unread count, not the stamp (user-ratified 2026-09-27):** the count
   follows carriers the sender does not choose (the nest-assigned `seq`, mail's

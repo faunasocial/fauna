@@ -40,6 +40,7 @@ public sealed partial class AdminSettingsPage : Page
     public static string CapBlobSizeLabel => S.Get("admin/settings_page/cap_blob_size");
     public static string CapFeedsLabel => S.Get("admin/settings_page/cap_feeds");
     public static string SaveTierLabel => S.Get("admin/settings_page/save_tier");
+    public static string DeleteTierLabel => S.Get("admin/settings_page/delete_tier");
 
     // Membership designation row labels (monetization.md § Pillar 4), surfaced the
     // same way and for the same reason as the cap labels above.
@@ -120,6 +121,21 @@ public sealed partial class AdminSettingsPage : Page
         if (sender is FrameworkElement { DataContext: AdminTierRow row })
         {
             await _vm.SaveTierAsync(row);
+        }
+    }
+
+    /// <summary>
+    /// A per-row <c>admin-settings-tier-delete-button</c> → remove that tier via
+    /// <c>fauna.admin.tiers.delete</c> then refetch (admin.md § 3 → Removing a tier).
+    /// The button's DataContext is the row; no confirm dialog. Errors surface via the
+    /// VM's ErrorMessage.
+    /// </summary>
+    private async void DeleteTier_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        if (sender is FrameworkElement { DataContext: AdminTierRow row })
+        {
+            await _vm.DeleteTierAsync(row);
         }
     }
 

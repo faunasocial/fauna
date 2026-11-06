@@ -48,6 +48,17 @@ pub struct RecipientSealKey {
     pub mlkem_ek: Vec<u8>,
 }
 
+/// An actor's three standing seal keys — mail, calendar and card — as the one
+/// `actor_mls_pubkeys` row holds them and the one provision request writes
+/// them (`owner-key-material.md` § Path B-sibling-5 → *Registration*): every
+/// pair is required, so a half-registered actor is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientSealKeys {
+    pub mail: RecipientSealKey,
+    pub calendar: RecipientSealKey,
+    pub card: RecipientSealKey,
+}
+
 /// Result of `insert_inbound_mail` / `insert_appended_mail`. Plan 5 T6
 /// added `finalized` so the calling handler can emit a
 /// `fauna.segments.changed { Finalized }` push when this append closed
@@ -181,33 +192,45 @@ fn scan_result_row(r: &rusqlite::Row<'_>, message_id: [u8; 32]) -> rusqlite::Res
 }
 
 impl CacheDb {
-    /// Upsert both halves of an actor's standing recipient seal key in one
-    /// write: the 32-byte X25519 `mls_pubkey` and the ML-KEM-768
-    /// encapsulation key (`mlkem_ek`, S3c) the MTA pairs with it to build the
-    /// recipient's X-Wing public key. The provision door's writer — the only
-    /// writer of `actor_mls_pubkeys` — and the column is `NOT NULL`, so a
-    /// recipient row never rests without its post-quantum half.
-    pub async fn put_actor_recipient_seal_key(
+    /// Upsert an actor's three standing seal keys in one write — each the
+    /// 32-byte X25519 pubkey and the ML-KEM-768 encapsulation key (S3c) the
+    /// sealer pairs with it into the recipient's X-Wing public key: mail
+    /// (`mls_pubkey` / `mlkem_ek`), calendar and card. The provision door's
+    /// writer — the only writer of `actor_mls_pubkeys` — and every column is
+    /// `NOT NULL`, so a recipient row never rests without all three pairs.
+    pub async fn put_actor_recipient_seal_keys(
         &self,
         actor_id: &[u8; 32],
-        pubkey: &[u8; 32],
-        mlkem_ek: &[u8],
+        keys: &RecipientSealKeys,
     ) -> Result<()> {
         let actor = *actor_id;
-        let pubkey = *pubkey;
-        let mlkem_ek = mlkem_ek.to_vec();
+        let keys = keys.clone();
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO actor_mls_pubkeys (actor_id, mls_pubkey, mlkem_ek, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO actor_mls_pubkeys (actor_id, mls_pubkey, mlkem_ek,
+                 calendar_pubkey, calendar_mlkem_ek, card_pubkey, card_mlkem_ek, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(actor_id) DO UPDATE SET
                 mls_pubkey = excluded.mls_pubkey,
                 mlkem_ek = excluded.mlkem_ek,
+                calendar_pubkey = excluded.calendar_pubkey,
+                calendar_mlkem_ek = excluded.calendar_mlkem_ek,
+                card_pubkey = excluded.card_pubkey,
+                card_mlkem_ek = excluded.card_mlkem_ek,
                 updated_at = excluded.updated_at",
-            rusqlite::params![&actor[..], &pubkey[..], &mlkem_ek[..], now],
+            rusqlite::params![
+                &actor[..],
+                &keys.mail.mls_pubkey[..],
+                &keys.mail.mlkem_ek[..],
+                &keys.calendar.mls_pubkey[..],
+                &keys.calendar.mlkem_ek[..],
+                &keys.card.mls_pubkey[..],
+                &keys.card.mlkem_ek[..],
+                now
+            ],
         )
-        .context("put actor recipient seal key")?;
+        .context("put actor recipient seal keys")?;
         Ok(())
     }
 
@@ -267,6 +290,80 @@ impl CacheDb {
                 }))
             }
         }
+    }
+
+    /// All three of `actor_id`'s standing seal keys in one row read — the
+    /// `fetch_recipient_mls_pubkey` reply's shape (the MDA caches the calendar
+    /// and card pairs for its DAV seals). `None` when no row is on file.
+    pub async fn get_recipient_seal_keys(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Result<Option<RecipientSealKeys>> {
+        let actor = *actor_id;
+        let conn = self.conn.lock().await;
+        let row = conn
+            .query_row(
+                "SELECT mls_pubkey, mlkem_ek, calendar_pubkey, calendar_mlkem_ek,
+                        card_pubkey, card_mlkem_ek
+                 FROM actor_mls_pubkeys WHERE actor_id = ?1",
+                rusqlite::params![&actor[..]],
+                |row| {
+                    Ok([
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ])
+                },
+            )
+            .optional()
+            .context("get recipient seal keys")?;
+        let Some([mail_pk, mail_ek, cal_pk, cal_ek, card_pk, card_ek]) = row else {
+            return Ok(None);
+        };
+        Ok(Some(RecipientSealKeys {
+            mail: RecipientSealKey {
+                mls_pubkey: blob_to_array(mail_pk.as_slice(), "mls_pubkey")?,
+                mlkem_ek: mail_ek,
+            },
+            calendar: RecipientSealKey {
+                mls_pubkey: blob_to_array(cal_pk.as_slice(), "calendar_pubkey")?,
+                mlkem_ek: cal_ek,
+            },
+            card: RecipientSealKey {
+                mls_pubkey: blob_to_array(card_pk.as_slice(), "card_pubkey")?,
+                mlkem_ek: card_ek,
+            },
+        }))
+    }
+
+    /// Resolve the recipient's standing **calendar** seal key — what every
+    /// nest-side calendar seal (the personal-calendar metadata, a placed local
+    /// invitation) keys on (`owner-key-material.md` § Path B-sibling-5). The
+    /// calendar kind has no epochs, so this is the whole resolution.
+    pub async fn get_recipient_calendar_seal_key(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Result<Option<RecipientSealKey>> {
+        Ok(self
+            .get_recipient_seal_keys(actor_id)
+            .await?
+            .map(|k| k.calendar))
+    }
+
+    /// Resolve the recipient's standing **card** seal key
+    /// (`owner-key-material.md` § Path B-sibling-6) — the twin of
+    /// [`Self::get_recipient_calendar_seal_key`].
+    pub async fn get_recipient_card_seal_key(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Result<Option<RecipientSealKey>> {
+        Ok(self
+            .get_recipient_seal_keys(actor_id)
+            .await?
+            .map(|k| k.card))
     }
 
     /// Upsert a batch of per-epoch mail sealing public keys for `actor_id`
@@ -431,7 +528,7 @@ impl CacheDb {
     }
 
     /// Upsert the per-actor index public encryption key. Sibling of
-    /// `put_actor_recipient_seal_key` — the MTA bridge encrypts the
+    /// `put_actor_recipient_seal_keys` — the MTA bridge encrypts the
     /// canonical-token-set index hint to this key, while the body
     /// encrypts to the MLS pubkey, so a future deployment can grant the
     /// index-builder access to one without the other. Provisioning by
@@ -1630,45 +1727,88 @@ mod tests {
         assert!(db.get_content_scores(&[9u8; 32]).await.unwrap().is_empty());
     }
 
+    /// Three distinct pairs around a mail pair — the calendar and card halves
+    /// differ from the mail ones so a column mix-up reads as a wrong key.
+    fn seal_keys(mail_pk: [u8; 32], mail_ek: Vec<u8>) -> RecipientSealKeys {
+        RecipientSealKeys {
+            mail: RecipientSealKey {
+                mls_pubkey: mail_pk,
+                mlkem_ek: mail_ek,
+            },
+            calendar: RecipientSealKey {
+                mls_pubkey: [0xCA; 32],
+                mlkem_ek: vec![0xC1; 1184],
+            },
+            card: RecipientSealKey {
+                mls_pubkey: [0xCD; 32],
+                mlkem_ek: vec![0xD1; 1184],
+            },
+        }
+    }
+
     #[tokio::test]
-    async fn put_and_get_actor_recipient_seal_key() {
-        // Both halves ride one `actor_mls_pubkeys` row, written together.
+    async fn put_and_get_actor_recipient_seal_keys() {
+        // All three pairs ride one `actor_mls_pubkeys` row, written together,
+        // and each resolver reads its own pair.
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [4u8; 32];
-        let pubkey = [9u8; 32];
-        let ek = vec![7u8; 1184];
+        let keys = seal_keys([9u8; 32], vec![7u8; 1184]);
         assert!(db.get_actor_mls_pubkey(&actor).await.unwrap().is_none());
         assert!(db.get_recipient_seal_key(&actor).await.unwrap().is_none());
-        db.put_actor_recipient_seal_key(&actor, &pubkey, &ek)
+        assert!(
+            db.get_recipient_calendar_seal_key(&actor)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.get_recipient_card_seal_key(&actor)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.put_actor_recipient_seal_keys(&actor, &keys)
             .await
             .unwrap();
-        assert_eq!(db.get_actor_mls_pubkey(&actor).await.unwrap(), Some(pubkey));
+        assert_eq!(
+            db.get_actor_mls_pubkey(&actor).await.unwrap(),
+            Some([9u8; 32])
+        );
         assert_eq!(
             db.get_recipient_seal_key(&actor).await.unwrap(),
-            Some(RecipientSealKey {
-                mls_pubkey: pubkey,
-                mlkem_ek: ek,
-            })
+            Some(keys.mail.clone())
+        );
+        assert_eq!(
+            db.get_recipient_calendar_seal_key(&actor).await.unwrap(),
+            Some(keys.calendar.clone())
+        );
+        assert_eq!(
+            db.get_recipient_card_seal_key(&actor).await.unwrap(),
+            Some(keys.card.clone())
+        );
+        assert_eq!(
+            db.get_recipient_seal_keys(&actor).await.unwrap(),
+            Some(keys)
         );
     }
 
     #[tokio::test]
-    async fn put_actor_recipient_seal_key_is_upsert() {
+    async fn put_actor_recipient_seal_keys_is_upsert() {
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [1u8; 32];
-        db.put_actor_recipient_seal_key(&actor, &[2u8; 32], &[5u8; 1184])
+        db.put_actor_recipient_seal_keys(&actor, &seal_keys([2u8; 32], vec![5u8; 1184]))
             .await
             .unwrap();
-        db.put_actor_recipient_seal_key(&actor, &[3u8; 32], &[6u8; 1184])
+        let mut second = seal_keys([3u8; 32], vec![6u8; 1184]);
+        second.calendar.mls_pubkey = [0xCB; 32];
+        second.card.mlkem_ek = vec![0xD2; 1184];
+        db.put_actor_recipient_seal_keys(&actor, &second)
             .await
             .unwrap();
         assert_eq!(
-            db.get_recipient_seal_key(&actor).await.unwrap(),
-            Some(RecipientSealKey {
-                mls_pubkey: [3u8; 32],
-                mlkem_ek: vec![6u8; 1184],
-            }),
-            "the upsert replaces both halves"
+            db.get_recipient_seal_keys(&actor).await.unwrap(),
+            Some(second),
+            "the upsert replaces every pair"
         );
     }
 
@@ -1819,7 +1959,7 @@ mod tests {
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [8u8; 32];
         let standing_pubkey = [0xAAu8; 32];
-        db.put_actor_recipient_seal_key(&actor, &standing_pubkey, &[7u8; 1184])
+        db.put_actor_recipient_seal_keys(&actor, &seal_keys(standing_pubkey, vec![7u8; 1184]))
             .await
             .unwrap();
 
@@ -1858,7 +1998,7 @@ mod tests {
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [9u8; 32];
         let standing_pubkey = [0xCCu8; 32];
-        db.put_actor_recipient_seal_key(&actor, &standing_pubkey, &[7u8; 1184])
+        db.put_actor_recipient_seal_keys(&actor, &seal_keys(standing_pubkey, vec![7u8; 1184]))
             .await
             .unwrap();
 
@@ -1877,7 +2017,7 @@ mod tests {
         // epoch it DID publish, not the standing key.
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [10u8; 32];
-        db.put_actor_recipient_seal_key(&actor, &[0xDDu8; 32], &[7u8; 1184])
+        db.put_actor_recipient_seal_keys(&actor, &seal_keys([0xDDu8; 32], vec![7u8; 1184]))
             .await
             .unwrap();
 

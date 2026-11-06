@@ -74,7 +74,7 @@ pub async fn mutate_backup<T>(
     source_nest: [u8; 32],
     gesture: impl FnOnce(&mut BackupState) -> T,
 ) -> Result<(BackupState, T), BackupWriteError> {
-    let before = store.backup_state(source_nest).await?;
+    let before = store.backup_state_for_write(source_nest).await?;
     let mut after = before.clone();
     let out = gesture(&mut after);
     let list_moved = after.backup != before.backup;

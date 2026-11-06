@@ -375,10 +375,15 @@ pub mod native {
             let keypair = ActorKeypair::from_secret(*self.identity.secret_bytes());
             bounded(target, async {
                 let client = NestClient::new(target.nest_url.clone(), keypair);
-                client
-                    .connect()
-                    .await
-                    .map_err(|e| format!("linked nest {}: connect: {e}", target.nest_url))?;
+                // The mint first: an unreachable nest is the dial's `Err`, as
+                // the trait says (`connect()` alone is `Ok` over it, its
+                // supervisor retrying, and the pin would then bind it).
+                async {
+                    client.authenticate().await?;
+                    client.connect().await
+                }
+                .await
+                .map_err(|e| format!("linked nest {}: connect: {e}", target.nest_url))?;
                 let bound_identity =
                     fauna_client::trust::connection_bound_identity(&client, &target.nest_url)
                         .await
@@ -413,6 +418,30 @@ pub mod native {
                 })
             })
             .await
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::LinkedNestDial as _;
+        use super::*;
+
+        /// An unreachable linked nest is the owner dial's `Err` at the connect
+        /// — not a session that never came up, read one step later.
+        #[tokio::test]
+        async fn an_unreachable_nest_fails_the_owner_dial_at_the_connect() {
+            let dial = NativeLinkedNestDial::new(&ActorKeypair::from_secret([0x24; 32]));
+            let target = LinkedNestTarget {
+                nest_id: [0x33; 32],
+                // Nothing listens on port 1 of the loopback.
+                nest_url: "http://127.0.0.1:1".to_string(),
+                replica: true,
+            };
+            let err = match dial.owner(&target).await {
+                Ok(_) => panic!("an unreachable linked nest connected"),
+                Err(e) => e,
+            };
+            assert!(err.contains(": connect:"), "{err}");
         }
     }
 }

@@ -39,6 +39,40 @@ public class FeedPostItemTests
         Assert.Equal("\U0001F98B", item.SourceBadges[1].Glyph); // bluesky → butterfly 🦋
     }
 
+    /// <summary><c>ui/feed.md</c> § Layout &amp; flow → Reaction posts count and paint (ruling
+    /// 4): one pill per shared tally group in order, text "emoji count", the viewer's own
+    /// (<c>viewer_react_id</c> present) flagged; none on a repost row; a changed tally is a
+    /// changed card (<c>ContentEquals</c>), so the list repaints it.</summary>
+    [Fact]
+    public void ReactionPills_PaintTheSharedTallyInOrder_OwnFlagged_NoneOnRepostRow()
+    {
+        var groups = new[]
+        {
+            new PostReactionGroup(emoji: "\U0001F44D", count: 3, viewerReactId: "r1"),
+            new PostReactionGroup(emoji: "❤️", count: 1, viewerReactId: null),
+        };
+        var item = new FeedPostItem(PostSummaryFixture.Make(postId: "p1", reactions: groups));
+
+        Assert.Equal(2, item.ReactionPills.Count);
+        Assert.Equal("\U0001F44D 3", item.ReactionPills[0].Label);
+        Assert.True(item.ReactionPills[0].Own);
+        Assert.Equal("on", item.ReactionPills[0].State);
+        Assert.Equal("❤️ 1", item.ReactionPills[1].Label);
+        Assert.False(item.ReactionPills[1].Own);
+        Assert.Equal("off", item.ReactionPills[1].State);
+        Assert.All(item.ReactionPills, p => Assert.Equal("p1", p.PostId));
+
+        var repost = new FeedPostItem(
+            PostSummaryFixture.Make(postId: "p2", repostedPostId: "orig", reactions: groups));
+        Assert.Empty(repost.ReactionPills);
+        Assert.False(repost.HasReactionPills);
+
+        var bumped = new FeedPostItem(PostSummaryFixture.Make(
+            postId: "p1",
+            reactions: new[] { new PostReactionGroup("\U0001F44D", 4, "r1"), groups[1] }));
+        Assert.False(item.ContentEquals(bumped));
+    }
+
     [Fact]
     public void ActivityPub_UsesCanonicalFediverseLabel()
     {
@@ -228,6 +262,25 @@ public class FeedPostItemTests
         var liked = new FeedPostItem(PostSummaryFixture.Make(postId: "p", author: "a", likeCount: 3));
         Assert.Equal($"{Strings.Get("feed/like_tooltip")} 3", liked.LikeButtonName);
         Assert.DoesNotContain(liked.ReplyButtonName, char.IsDigit);
+    }
+
+    // feed.md § The read model → A post homed on another nest: the nest a post's own bytes
+    // rest on is the SHARED `post_blob_home` read off the post — never re-derived here. A
+    // post carrying a foreign home hands it on, identity included, for the post-blob plane;
+    // a post with none reads this nest (null).
+    [Fact]
+    public void BlobHome_IsTheSharedPostBlobHome_NullForThisNest()
+    {
+        var here = new FeedPostItem(PostSummaryFixture.Make(postId: "p", author: "a"));
+        Assert.Null(here.BlobHome);
+
+        var id = new string('a', 64);
+        var there = new FeedPostItem(PostSummaryFixture.Make(
+            postId: "p", author: "a",
+            homeNestUrl: "https://home.example", homeNestActorId: id));
+        var home = Assert.IsType<uniffi.fauna_ffi.FfiPostBlobHome>(there.BlobHome);
+        Assert.Equal("https://home.example", home.url);
+        Assert.Equal(id, home.nestActorId);
     }
 
     [Fact]
@@ -789,7 +842,7 @@ public class FeedPostItemTests
     /// <summary>The icon+count interaction bar binds the REAL snapshot counts
     /// (PostSummary.{like,reply,repost,quote}_count) — not the pre-lift hardcoded 0 —
     /// so the like/reply/repost/quote buttons show the post's real activity. The count
-    /// is hidden at 0 in XAML (FeedPage.CountToVisibility); this locks the value flow.</summary>
+    /// is hidden at 0 in XAML (PostCardBind.CountToVisibility); this locks the value flow.</summary>
     [Fact]
     public void InteractionCounts_BindRealSnapshotValues()
     {
@@ -806,7 +859,7 @@ public class FeedPostItemTests
     }
 
     /// <summary>The like button's lit state binds PostSummary.viewer_liked — what
-    /// FeedPage.LikedToButtonStyle paints and what routes the next tap to like vs.
+    /// PostCardBind.LikedToButtonStyle paints and what routes the next tap to like vs.
     /// unlike (feed.md § Interaction bar → Repost, ratified 2026-08-10).</summary>
     [Fact]
     public void ViewerLiked_BindsRealSnapshotValue()
@@ -1042,6 +1095,35 @@ public class FeedPostItemTests
         Assert.Equal("Room members only: Book club", item.GatedBadgeTooltip);
     }
 
+    // restricted-posts.md ruling 3: a public repost row wears its TARGET's badge, while the
+    // row's own GatedTier / RoomLabel stay null (the reply audience and unseal read them).
+    [Fact]
+    public void RepostOfRoomPost_BadgeNamesTargetsRoom_RowGateStaysPublic()
+    {
+        Strings.Initialize(new GatedBadgeLocalizer());
+        var item = new FeedPostItem(PostSummaryFixture.Make(
+            document: EmptyDoc(), repostedPostId: "orig-1",
+            repostedGatedTier: "room", repostedGatedRoom: "aa", repostedRoomLabel: "Book club"));
+
+        Assert.True(item.HasGatedBadge);
+        Assert.Equal("Room: Book club", item.GatedBadgeText);
+        Assert.Equal("Room members only: Book club", item.GatedBadgeTooltip);
+        Assert.Null(item.GatedTier);
+        Assert.Null(item.RoomLabel);
+    }
+
+    [Fact]
+    public void RepostOfRoomPost_OutsiderSeesReservedTierBadge()
+    {
+        Strings.Initialize(new GatedBadgeLocalizer());
+        var item = new FeedPostItem(PostSummaryFixture.Make(
+            document: EmptyDoc(), repostedPostId: "orig-1",
+            repostedGatedTier: "room", repostedGatedRoom: "aa"));
+
+        Assert.True(item.HasGatedBadge);
+        Assert.Equal("room", item.GatedBadgeText);
+    }
+
     [Fact]
     public void RoomLabel_Absent_BadgeFallsBackToReservedTier()
     {
@@ -1103,6 +1185,36 @@ public class FeedPostItemTests
 
         Assert.True(item.HasUnlockOffer);
         Assert.False(item.HasUnlockPaymentLink);
+    }
+
+    // ── Purchase-pending line (paid-posts outcome 14): a completed buy awaiting the author's
+    // approve paints gated-post-purchase-pending iff no offer shows and the post is locked.
+
+    [Theory]
+    [InlineData(true, false, false, true)]   // pending, no offer, locked → painted
+    [InlineData(false, false, false, false)] // not pending
+    [InlineData(true, true, false, false)]   // an offer is shown → the buy affordance wins
+    [InlineData(true, false, true, false)]   // already unlocked
+    public void ShowPurchasePending_FollowsTheTuiCondition(
+        bool pending, bool offer, bool unlocked, bool expected)
+    {
+        var item = new FeedPostItem(PostSummaryFixture.Make(
+            body: "teaser", document: EmptyDoc(), gatedTier: "post-unlock-abc",
+            gatedUnlocked: unlocked, unlockPurchasePending: pending,
+            unlockOffer: offer ? new UnlockOfferView("post-unlock-abc", "$3", null) : null));
+
+        Assert.Equal(expected, item.ShowPurchasePending);
+    }
+
+    [Fact]
+    public void ContentEquals_PurchasePendingFlips_False()
+    {
+        var before = new FeedPostItem(MakeGatedPost("post-unlock-abc", unlocked: false));
+        var after = new FeedPostItem(PostSummaryFixture.Make(
+            body: "teaser", document: EmptyDoc(), gatedTier: "post-unlock-abc",
+            unlockPurchasePending: true));
+
+        Assert.False(before.ContentEquals(after));
     }
 
     [Fact]

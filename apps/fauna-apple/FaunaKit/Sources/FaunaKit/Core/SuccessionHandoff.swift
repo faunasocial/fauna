@@ -98,6 +98,25 @@ public enum SuccessionHandoff {
     /// own binding.
     public private(set) static var sweepOwedTo: String?
 
+    /// The user pressed *Review The Rest Later* on the ephemeral member-review
+    /// pass this app run (`settings.md` § Recovery kit → *The ephemeral
+    /// member-review pass*). It hides the pass and decides nothing: no verdict
+    /// is written, so the open items are exactly what the permanent view
+    /// inherits.
+    ///
+    /// Lifetime mirrors ``sweep`` deliberately, because it is a decision *about*
+    /// that sweep: it survives the account switch (the pass renders in the
+    /// successor's session, and a defer taken there must stick) and only a
+    /// factory reset clears it. Session-scoped by design — a relaunch is a new
+    /// chance to work the backlog. tui's `App::succession_review_deferred` is
+    /// the twin.
+    public private(set) static var memberReviewDeferred = false
+
+    /// Record the defer — see ``memberReviewDeferred``.
+    public static func deferMemberReview() {
+        memberReviewDeferred = true
+    }
+
     /// Record a **relaunch adoption** — a launch refused as superseded whose
     /// chain-verified successor this device held, adopted by
     /// ``SupersededLaunchRoute`` — **before** the account switch that follows.
@@ -257,6 +276,9 @@ public enum SuccessionHandoff {
         sweep = nil
         sweepOwedTo = nil
         strandedKit = nil
+        // The defer is a decision about that sweep, so it clears with it — a
+        // fresh identity on a reset box must not start with the pass dismissed.
+        memberReviewDeferred = false
     }
 
     /// The sweep report as the state serializer publishes it: the decoded

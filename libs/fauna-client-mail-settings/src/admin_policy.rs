@@ -467,6 +467,10 @@ pub struct DmarcPolicyView {
     /// Days an inbound forensic report is kept (default 30, at most 90 — the
     /// payload is third-party PII).
     pub forensic_retention_days: u32,
+    /// Whether the nest mails its daily aggregate reports to peers
+    /// (`mail.dmarc.outbound_aggregate_enabled`, default on). No control on
+    /// the page yet; carried so a Save never turns it back on.
+    pub outbound_aggregate_enabled: bool,
 }
 
 impl From<DmarcReportingPolicy> for DmarcPolicyView {
@@ -484,6 +488,7 @@ impl From<DmarcReportingPolicy> for DmarcPolicyView {
             ri_seconds: p.ri_seconds,
             aggregate_retention_days: p.aggregate_retention_days,
             forensic_retention_days: p.forensic_retention_days,
+            outbound_aggregate_enabled: p.outbound_aggregate_enabled,
         }
     }
 }
@@ -507,6 +512,7 @@ impl DmarcPolicyView {
             ri_seconds: Some(self.ri_seconds),
             aggregate_retention_days: Some(self.aggregate_retention_days),
             forensic_retention_days: Some(self.forensic_retention_days),
+            outbound_aggregate_enabled: Some(self.outbound_aggregate_enabled),
             // Forward-compat catch-all (transport.md rule 4); nothing to
             // carry forward on a locally-built request.
             extra: Default::default(),
@@ -977,16 +983,6 @@ pub enum MailPolicyAction {
     /// retention past its ceiling or a destination that is not a `mailto:` URI
     /// (`fauna.protocol.malformed`), surfaced via [`MailPolicySnapshot::error`].
     SaveDmarc { policy: DmarcPolicyView },
-    /// Publish the current aggregate of opt-in users' models as the deployment
-    /// baseline (`fauna.bridges.publish_spam_baseline`). Admin-only, no payload
-    /// (caller-scoped). Aggregate-only reply; the k-anonymity floor withholds
-    /// below `BASELINE_MIN_CONTRIBUTORS` (`published = false`). The outcome
-    /// lands in [`MailPolicySnapshot::baseline_publish_result`], not a re-read.
-    /// `mail-spam.md` § Cold start Path 2 — with NO confirm: the button
-    /// dispatches [`Self::Press`] with [`MailPolicyConfirm::PublishSpamBaseline`]
-    /// instead; this direct form stays only for the apps that still publish on
-    /// one click, and goes when they move to `Press`.
-    PublishSpamBaseline,
     /// Flip standing baseline publish (`admin-mail-spam-baseline-standing-toggle`)
     /// on its own, outside the Spam group's Save: full-PUTs the PERSISTED spam
     /// sub-struct with only this field changed, then re-reads. Off withdraws
@@ -1367,7 +1363,6 @@ impl MailPolicyMachine {
                 MailPolicyAction::SaveOutbound { policy } => self.save_outbound(policy).await,
                 MailPolicyAction::SaveAlias { policy } => self.save_alias(policy).await,
                 MailPolicyAction::SaveDmarc { policy } => self.save_dmarc(policy).await,
-                MailPolicyAction::PublishSpamBaseline => self.publish_spam_baseline().await,
                 MailPolicyAction::SetBaselineStandingPublish { enabled } => {
                     self.set_baseline_standing_publish(enabled).await
                 }
@@ -2085,6 +2080,9 @@ mod tests {
             p.forensic_retention_days = req
                 .forensic_retention_days
                 .unwrap_or(d.forensic_retention_days);
+            p.outbound_aggregate_enabled = req
+                .outbound_aggregate_enabled
+                .unwrap_or(d.outbound_aggregate_enabled);
             Ok(())
         }
 
@@ -2213,6 +2211,19 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.health.expect("re-read").state, "delivering");
         assert_eq!(snap.status, MailPolicyStatus::Idle);
+    }
+
+    /// Publish the deployment baseline the way every renderer does: two presses
+    /// of the same button (the first arms, the second runs `publish_spam_baseline`;
+    /// `mail-spam.md` § Cold start Path 2).
+    async fn publish_baseline(m: &MailPolicyMachine) {
+        for _ in 0..2 {
+            m.dispatch(MailPolicyAction::Press {
+                button: MailPolicyConfirm::PublishSpamBaseline,
+            })
+            .await
+            .unwrap();
+        }
     }
 
     /// The same-button two-click confirm lives in the machine: the first press
@@ -2957,9 +2968,7 @@ mod tests {
             Arc::new(nest)
         });
         m.hydrate().await.unwrap();
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         let r = m.snapshot().baseline_publish_result.unwrap();
         assert!(r.published);
         assert_eq!(r.contributors, 3);
@@ -2979,9 +2988,7 @@ mod tests {
             Arc::new(nest)
         });
         m.hydrate().await.unwrap();
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         let r = m.snapshot().baseline_publish_result.unwrap();
         assert!(!r.published);
         assert_eq!(r.contributors, 2);
@@ -3002,9 +3009,7 @@ mod tests {
             Arc::new(nest)
         });
         m.hydrate().await.unwrap();
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         let r = m.snapshot().baseline_publish_result.unwrap();
         assert!(r.published);
         assert_eq!(r.contributors, 3);
@@ -3142,9 +3147,7 @@ mod tests {
         m.dispatch(MailPolicyAction::SetBaselineStandingPublish { enabled: true })
             .await
             .unwrap();
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         assert!(m.snapshot().baseline_state.unwrap().published);
         m.dispatch(MailPolicyAction::SetBaselineStandingPublish { enabled: false })
             .await
@@ -3166,9 +3169,7 @@ mod tests {
         });
         m.hydrate().await.unwrap();
         assert!(!m.snapshot().baseline_state.unwrap().published);
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         let snap = m.snapshot();
         assert!(snap.baseline_publish_result.unwrap().published);
         let state = snap.baseline_state.unwrap();
@@ -3188,9 +3189,7 @@ mod tests {
             Arc::new(nest)
         });
         m.hydrate().await.unwrap();
-        m.dispatch(MailPolicyAction::PublishSpamBaseline)
-            .await
-            .unwrap();
+        publish_baseline(&m).await;
         let snap = m.snapshot();
         let r = snap.baseline_publish_result.unwrap();
         assert!(!r.published);

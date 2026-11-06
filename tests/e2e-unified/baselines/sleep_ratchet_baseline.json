@@ -41,7 +41,7 @@
   "tests/platform/docker/test_mta_sts_serving.py": 1,
   "tests/platform/docker/test_uid_isolation.py": 1,
   "tests/platform/fediverse/conftest.py": 2,
-  "tests/platform/linux/test_desktop_join.py": 3,
+  "tests/test_desktop_join.py": 3,
   "tests/platform/linux/test_installer.py": 1,
   "tests/platform/macos/test_file_provider_read_path.py": 1,
   "tests/platform/macos/test_installer.py": 3,

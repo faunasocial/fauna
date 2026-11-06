@@ -1547,6 +1547,31 @@ impl StoreBackend for IndexedDbBackend {
         .await
     }
 
+    async fn group_state_cache_put(&self, entry: &StateEntry) -> Result<InsertOutcome> {
+        let entry = entry.clone();
+        self.write(&[GROUP], move |t| async move {
+            let entry = &entry;
+            let value = state_record(entry)?;
+            let stored = get(
+                &t.store(GROUP)?,
+                &self::key(&[
+                    JsValue::from_str(&entry.scope),
+                    JsValue::from_str(&entry.kind),
+                    JsValue::from_str(&entry.key),
+                ]),
+            )
+            .await?
+            .map(|o| state_entry(&o))
+            .transpose()?;
+            if entry_moved(stored.map(|e| e.entry_version), entry.entry_version) {
+                return Ok(InsertOutcome::EntryMoved);
+            }
+            put(&t.store(GROUP)?, &value).await?;
+            Ok(InsertOutcome::Inserted)
+        })
+        .await
+    }
+
     async fn group_state_get(
         &self,
         scope: &str,

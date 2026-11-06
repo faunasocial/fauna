@@ -185,6 +185,12 @@ window.__faunaTestAgent = {
       typeof window.__fauna_mlsFoldedCommits === "function"
         ? window.__fauna_mlsFoldedCommits()
         : null;
+    // Every chat channel bound to a thread, the same absent-hook ⇒ null refusal
+    // (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`).
+    const mlsBoundChannels =
+      typeof window.__fauna_mlsBoundChannels === "function"
+        ? window.__fauna_mlsBoundChannels()
+        : null;
     // --- Receive-loop cycles begun/finished (the delivery-path barrier) ---
     // `{started, completed, exit}` off the SPA's own receive pump, the web twin
     // of native's `ReceiveCycles`. Absent hook ⇒ null, the same loud refusal as
@@ -501,6 +507,7 @@ window.__faunaTestAgent = {
       session_generation: sessionGeneration,
       alert_sweep_passes: alertSweepPasses,
       mls_folded_commits: mlsFoldedCommits,
+      mls_bound_channels: mlsBoundChannels,
       conv_receive_cycles: convReceiveCycles,
       feed_reloads: feedReloads,
       devices_refreshes: devicesRefreshes,
@@ -566,6 +573,12 @@ window.__faunaTestAgent = {
         contacts: contactsOut,
         knocks: knocksOut,
         feed: { posts: feedPosts },
+        // The Profile page's viewed actor and actor-home slot
+        // (`#lib/profile-viewed`); null while no Profile page is mounted.
+        profile:
+          typeof window.__fauna_viewedProfile === "function"
+            ? window.__fauna_viewedProfile()
+            : null,
         events: null,
         notifications: null,
         sync: null,
@@ -843,7 +856,15 @@ window.__faunaTestAgent = {
           const id0 = stores.identity ? readStore(stores.identity) : null;
           const me = (id0 && id0.actorId ? id0.actorId : "").trim().toLowerCase();
           const isSelf = !target || (me && target.toLowerCase() === me);
-          const path = isSelf ? "/app/profile" : "/app/profile/" + target;
+          // The entry's optional `home_nest_url` is the open target's routing
+          // hint (profile.md § Layout & flow → *Reaching another actor's
+          // profile*): it rides the route as `?home=`, which the page seeds its
+          // actor-home slot from. Meaningless on SELF.
+          const hint =
+            typeof stack[0].home_nest_url === "string" ? stack[0].home_nest_url.trim() : "";
+          const path = isSelf
+            ? "/app/profile"
+            : "/app/profile/" + target + (hint ? "?home=" + encodeURIComponent(hint) : "");
           if (stores.goto) { stores.goto(path); } else { location.href = path; }
           return;
         }

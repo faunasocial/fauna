@@ -10,24 +10,23 @@ struct SettingsView: View {
     // stays `nil` and the Sync section is never painted (`ui/status.md`).
     @Environment(ConversationsVM.self) private var conversationsVM
     @State private var showDeleteConfirm = false
+    /// Presents the Backups list for the in-process driver (the Backups row is a
+    /// closure-based `NavigationLink`, which it cannot activate).
+    @State private var showBackups = false
     @State private var watchManager = IOSWatchConnectivityManager()
 
-    /// The `NavigationStack` path derived from `selectedSettingsPage`: empty on
-    /// the settings root (the page list), `[page]` on a sub-page. A computed
-    /// binding (not `@State`) keeps `selectedSettingsPage` the single source of
-    /// truth — a human tapping a `NavigationLink(value:)` appends to the path
-    /// (→ `selectedSettingsPage` set); the system back pops it (→ `nil`); the e2e
-    /// state protocol setting `selectedSettingsPage` makes the getter return
-    /// `[page]` so the stack pushes it. Mirrors `AdminShellView.path`.
-    private var path: Binding<[SettingsPage]> {
-        Binding(
-            get: { appState.selectedSettingsPage.map { [$0] } ?? [] },
-            set: { appState.selectedSettingsPage = $0.last }
-        )
-    }
+    /// Told once this Settings root is on screen as More's content; `MoreView`
+    /// releases the Settings path only then (`MoreView.settingsPath`).
+    var rootMounted: () -> Void = {}
+    /// Told each time a pushed sub-page appears (`MoreView.settingsPath`).
+    var pageAppeared: (SettingsPage) -> Void = { _ in }
 
+    /// The Settings ROOT — the page list. It has no `NavigationStack` of its
+    /// own: it is `MoreView`'s stack's root content, and that stack's path is
+    /// the Settings path (`MoreView.settingsPath`), pushed through the
+    /// `navigationDestination(for: SettingsPage.self)` declared here.
     var body: some View {
-        NavigationStack(path: path) {
+        Group {
             // Eager `ScrollView { VStack }`, NOT `List` (`apple-e2e-
             // automation.md` rule 6: an iOS `List` realizes rows lazily, so a row
             // far enough down the page never `.onAppear`-registers. `admin-tab` sat
@@ -75,20 +74,17 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.account) {
                                 Label(L.common.account, systemImage: "person.circle")
                             }
-                            .accessibilityIdentifier(Ids.accountSettingsLink)
-                            // Drives the same NavigationStack push the tap performs (.accessibilityIdentifier alone is invisible to the in-process
-                            // AutomationRegistry, which registers presence off automation*).
-                            .automationActivate(Ids.accountSettingsLink) { appState.selectedSettingsPage = .account }
+                            .settingsNavRow(.account, appState)
                         }
                         // The permanent unattested-member review backlog (row
                         // 308) — reachable at all times, directly after Account
-                        // per tui's ratified rail placement. No ui.yaml id: the
-                        // page itself is reached by the e2e nav-id protocol, not
-                        // a labeled row (mirrors the untagged Bridges row below).
+                        // per tui's ratified rail placement. Keyed
+                        // `settings-nav-row[member_review]` like every rail row.
                         navRow {
                             NavigationLink(value: SettingsPage.memberReview) {
                                 Label(L.settings.memberReviewPage.title, systemImage: "person.crop.circle.badge.questionmark")
                             }
+                            .settingsNavRow(.memberReview, appState)
                         }
                         #if !FAUNA_KIDS
                         navRow {
@@ -104,8 +100,7 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.nostr) {
                                 Label(L.nostr.title, systemImage: "antenna.radiowaves.left.and.right")
                             }
-                            .accessibilityIdentifier(Ids.nostrSettingsLink)
-                            .automationActivate(Ids.nostrSettingsLink) { appState.selectedSettingsPage = .nostr }
+                            .settingsNavRow(.nostr, appState)
                         }
                         // Bluesky is likewise its own dedicated page (the integration-
                         // depth selector), not a bridge under Bridges (ui/atproto.md).
@@ -113,52 +108,61 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.atproto) {
                                 Label(L.atprotoSettings.title, systemImage: "at")
                             }
-                            .accessibilityIdentifier(Ids.atprotoSettingsLink)
-                            .automationActivate(Ids.atprotoSettingsLink) { appState.selectedSettingsPage = .atproto }
+                            .settingsNavRow(.atproto, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mail) {
                                 Label(L.mailSettings.title, systemImage: "envelope")
                             }
-                            .accessibilityIdentifier(Ids.mailSettingsLink)
-                            .automationActivate(Ids.mailSettingsLink) { appState.selectedSettingsPage = .mail }
+                            .settingsNavRow(.mail, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailAliases) {
                                 Label(L.mailAliases.title, systemImage: "at")
                             }
+                            .settingsNavRow(.mailAliases, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailLists) {
                                 Label(L.mailLists.title, systemImage: "list.bullet.rectangle")
                             }
+                            .settingsNavRow(.mailLists, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailListMembers) {
                                 Label(L.mailLists.membersTitle, systemImage: "person.2")
                             }
+                            .settingsNavRow(.mailListMembers, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailExport) {
                                 Label(L.mailExport.title, systemImage: "square.and.arrow.up")
                             }
+                            .settingsNavRow(.mailExport, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailImport) {
                                 Label(L.mailImport.title, systemImage: "square.and.arrow.down")
                             }
+                            .settingsNavRow(.mailImport, appState)
+                        }
+                        navRow {
+                            NavigationLink(value: SettingsPage.archiveImport) {
+                                Label(L.archiveImport.title, systemImage: "tray.and.arrow.down")
+                            }
+                            .settingsNavRow(.archiveImport, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.mailSpam) {
                                 Label(L.mailSpam.title, systemImage: "xmark.bin")
                             }
+                            .settingsNavRow(.mailSpam, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.web) {
                                 Label(L.webSettings.title, systemImage: "globe")
                             }
-                            .accessibilityIdentifier(Ids.webSettingsLink)
-                            .automationActivate(Ids.webSettingsLink) { appState.selectedSettingsPage = .web }
+                            .settingsNavRow(.web, appState)
                         }
                         #endif
                         // Consumer-side subscriptions ("my subscriptions across all
@@ -168,15 +172,13 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.subscriptions) {
                                 Label(L.subscriptions.title, systemImage: "star")
                             }
-                            .accessibilityIdentifier(Ids.subscriptionSettingsLink)
-                            .automationActivate(Ids.subscriptionSettingsLink) { appState.selectedSettingsPage = .subscriptions }
+                            .settingsNavRow(.subscriptions, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.linkedNests) {
                                 Label(L.linkedNests.title, systemImage: "link")
                             }
-                            .accessibilityIdentifier(Ids.linkedNestsLink)
-                            .automationActivate(Ids.linkedNestsLink) { appState.selectedSettingsPage = .linkedNests }
+                            .settingsNavRow(.linkedNests, appState)
                         }
                         // The cross-participant runner + assignment surface
                         // (participants.md § Task delegation), rail-placed right
@@ -185,24 +187,24 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.taskDelegation) {
                                 Label(L.taskDelegation.title, systemImage: "gearshape.2")
                             }
-                            .accessibilityIdentifier(Ids.taskDelegationLink)
-                            .automationActivate(Ids.taskDelegationLink) { appState.selectedSettingsPage = .taskDelegation }
+                            .settingsNavRow(.taskDelegation, appState)
                         }
                         // The one roster over every third-party principal
                         // (connected-apps.md), rail-placed right after Task
-                        // delegation per settings.md § Navigation model. ui.yaml
-                        // mints no link id for it (the e2e navigates by nav id).
+                        // delegation per settings.md § Navigation model.
                         #if !FAUNA_KIDS
                         navRow {
                             NavigationLink(value: SettingsPage.connectedApps) {
                                 Label(L.connectedApps.title, systemImage: SettingsPage.connectedApps.systemImage)
                             }
+                            .settingsNavRow(.connectedApps, appState)
                         }
                         #endif
                         navRow {
                             NavigationLink(value: SettingsPage.privacy) {
                                 Label(L.settings.privacy, systemImage: "lock.shield")
                             }
+                            .settingsNavRow(.privacy, appState)
                         }
                         // Per-keyword conversation-collapse filter (shared
                         // FaunaKit; content-moderation-and-ranking.md § Q3),
@@ -211,6 +213,7 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.mutedWords) {
                                 Label(L.mutedWords.title, systemImage: "speaker.slash")
                             }
+                            .settingsNavRow(.mutedWords, appState)
                         }
                         // Feeds / Muted-words / Community-labelers hub (shared
                         // FaunaKit; content-moderation-and-ranking.md § Tier-3
@@ -221,17 +224,20 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.personalization) {
                                 Label(L.personalization.title, systemImage: "sparkles")
                             }
+                            .settingsNavRow(.personalization, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.labelerCatalog) {
                                 Label(L.labelerCatalog.title, systemImage: "shield.checkerboard")
                             }
+                            .settingsNavRow(.labelerCatalog, appState)
                         }
                         #endif
                         navRow {
                             NavigationLink(value: SettingsPage.encryption) {
                                 Label(L.settings.encryptionPage.title, systemImage: "key")
                             }
+                            .settingsNavRow(.encryption, appState)
                         }
                         // Devices (roster) + Folders (control plane) replaced the
                         // former single "Sync" sub-page (2026-06-28 unification). Reached
@@ -241,15 +247,21 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.devices) {
                                 Label(L.devices.title, systemImage: "desktopcomputer")
                             }
-                            .accessibilityIdentifier(Ids.devicesSettingsLink)
-                            .automationActivate(Ids.devicesSettingsLink) { appState.selectedSettingsPage = .devices }
+                            .settingsNavRow(.devices, appState)
+                        }
+                        // Sessions — the sign-ins live now, directly after Devices
+                        // (ui/sessions.md § The ruling, item 1).
+                        navRow {
+                            NavigationLink(value: SettingsPage.sessions) {
+                                Label(L.sessions.title, systemImage: "person.badge.key")
+                            }
+                            .settingsNavRow(.sessions, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.folders) {
                                 Label(L.folders.title, systemImage: "folder")
                             }
-                            .accessibilityIdentifier(Ids.foldersSettingsLink)
-                            .automationActivate(Ids.foldersSettingsLink) { appState.selectedSettingsPage = .folders }
+                            .settingsNavRow(.folders, appState)
                         }
                         navRow {
                             NavigationLink(value: SettingsPage.general) {
@@ -259,6 +271,7 @@ struct SettingsView: View {
                                 // iOS's old "Notifications" was the lone divergence (#4).
                                 Label(L.settings.general, systemImage: "bell.badge")
                             }
+                            .settingsNavRow(.general, appState)
                         }
                         // The client's durable log record — pushed by value (like the
                         // other sub-pages) so the cross-app {"view":"settings",
@@ -267,6 +280,7 @@ struct SettingsView: View {
                             NavigationLink(value: SettingsPage.logs) {
                                 Label(L.logs.title, systemImage: "doc.text.magnifyingglass")
                             }
+                            .settingsNavRow(.logs, appState)
                         }
                     }
 
@@ -279,11 +293,16 @@ struct SettingsView: View {
                             } label: {
                                 Label(L.backups.title, systemImage: "clock.arrow.circlepath")
                             }
+                            // Closure-based push (no `SettingsPage`), so keyed by hand;
+                            // the driver drives the same destination through `showBackups`.
+                            .accessibilityIdentifier("\(Ids.settingsNavRow)[backups]")
+                            .automationActivate("\(Ids.settingsNavRow)[backups]") { showBackups = true }
                         }
                         navRow(last: true) {
                             NavigationLink(value: SettingsPage.status) {
                                 Label(L.common.status, systemImage: "info.circle")
                             }
+                            .settingsNavRow(.status, appState)
                         }
                     }
 
@@ -355,8 +374,10 @@ struct SettingsView: View {
                 }
                 .padding()
             }
+            .navigationDestination(isPresented: $showBackups) { SnapshotListView() }
             .navigationDestination(for: SettingsPage.self) { page in
                 settingsDestination(page)
+                    .onAppear { pageAppeared(page) }
             }
             .pageTitle(L.common.settings)
             // Watch connectivity is install-scoped, not account-scoped: it stays on
@@ -399,6 +420,10 @@ struct SettingsView: View {
                 await loadStatusLegs()
             }
         }
+        // Releases More's Settings path once this root is on screen
+        // (`MoreView.settingsPath`); leaving Settings holds it again
+        // (`AppState.moreSelectedView`).
+        .task { rootMounted() }
     }
 
     /// The Status snapshot's node and MLS legs — one nest read each per visit /
@@ -480,6 +505,7 @@ struct SettingsView: View {
         case .account:
             AccountSettingsView(
                 session: appState.session,
+                flushDraftRails: { await appState.flushDraftRails() },
                 onAccountReset: {
                     appState.onSignOut?()
                     watchManager.sendSignOut()
@@ -505,6 +531,9 @@ struct SettingsView: View {
         case .general: NotificationSettingsView()
         case .encryption: EncryptionSettingsView()
         case .devices: DevicesView(reloadToken: appState.navGeneration)  // roster (DevicesContent)
+        case .sessions:
+            SessionsView(reloadToken: appState.navGeneration,
+                         onLocked: { appState.onAccountLocked?() })
         case .folders: FoldersView(reloadToken: appState.navGeneration)  // control plane (FoldersContent)
         #if !FAUNA_KIDS
         case .mail: MailSettingsView()
@@ -520,6 +549,18 @@ struct SettingsView: View {
                 appState.selectedSettingsPage = nil
                 appState.selectedTab = "conversations"
             })
+        case .archiveImport:
+            // Import from other services (shared FaunaKit; archive-import.md
+            // § The wizard and its machine). View imported opens the feed; the
+            // folder link opens Folders.
+            ArchiveImportView(
+                session: appState.session,
+                onNavigateToFeed: {
+                    appState.selectedSettingsPage = nil
+                    appState.selectedTab = "feed"
+                },
+                onNavigateToFolders: { appState.selectedSettingsPage = .folders }
+            )
         case .mailLists:
             MailListsView(onNavigateToMembers: { listIdHex, friendlyName in
                 appState.selectedMailListId = listIdHex
@@ -538,7 +579,7 @@ struct SettingsView: View {
         case .linkedNests: LinkedNestsView(reloadToken: appState.navGeneration)
         case .taskDelegation: TaskDelegationView(reloadToken: appState.navGeneration)
         #if !FAUNA_KIDS
-        case .connectedApps: ConnectedAppsView(reloadToken: appState.navGeneration)  // shared FaunaKit roster (connected-apps.md)
+        case .connectedApps: ConnectedAppsRoute(reloadToken: appState.navGeneration)  // shared FaunaKit roster (connected-apps.md)
         #endif
         case .logs: LogsView(source: .clientRing, headingId: Ids.pageHeading)
         #if !FAUNA_KIDS
@@ -616,11 +657,11 @@ struct StatusDetailView: View {
                                 // in-process driver's /element/text reflects current usage.
                                 // Mirrors MacStatusView's per-row automationValue reads.
                                 .automationValue(Ids.quotaStorage,
-                                                 text: { "\(quota.storage.usedBytes) / \(quota.storage.maxBytes)" })
+                                                 text: { QuotaBar.usageText(used: quota.storage.usedBytes, max: quota.storage.maxBytes) })
                             QuotaBar(label: L.common.inbox, used: quota.inbox.usedBytes, max: quota.inbox.maxBytes)
                                 .accessibilityIdentifier(Ids.quotaInbox)
                                 .automationValue(Ids.quotaInbox,
-                                                 text: { "\(quota.inbox.usedBytes) / \(quota.inbox.maxBytes)" })
+                                                 text: { QuotaBar.usageText(used: quota.inbox.usedBytes, max: quota.inbox.maxBytes) })
                             HStack {
                                 Text(L.common.devices)
                                 Spacer()
@@ -665,6 +706,12 @@ struct StatusDetailView: View {
                 .accessibilityIdentifier(Ids.settingsRegionSection)
                 .accessibilityElement(children: .contain)
                 .automationValue(Ids.settingsRegionSection, text: { L.region.sectionTitle })
+
+                // Nest rules — the rules in force for this session's nest
+                // (nest-rules.md § Acceptance at joining, and a change of
+                // rules → *The rules surface*), beside the region section.
+                // Absent while the nest has published none.
+                NestRulesSettingsSection(nestRules: appState.region.nestRules)
 
                 // Node, Encryption and Build — the shared snapshot's legs
                 // (`ui/status.md` § Layout & flow sections 5–8), the same shared
@@ -716,5 +763,34 @@ struct StatusDetailView: View {
         }
         .navigationTitle(L.common.status)
         .task { watchManager.activate() }
+        // One quota read per visit, as macOS' `MacStatusView` makes on each
+        // remount: the Settings root that configured the VM stays mounted
+        // under this push, so without it the page kept the usage it read at
+        // the session's start (a 3 MiB import never moved it).
+        .task { await vm.refreshQuotaAndLimits() }
     }
 }
+
+private extension View {
+    /// Tag a Settings root row with its rail-row id (`settings-nav-row[<key>]`, ui.yaml
+    /// `navigation.sub_page_nav_rows`; `SettingsPage.navRowId`) and register it with the
+    /// in-process driver, which drives the same push the tap performs. A SwiftUI element
+    /// carries one identifier, so this replaces the row's older `*-settings-link` id.
+    func settingsNavRow(_ page: SettingsPage, _ appState: AppState) -> some View {
+        settingsNavRow(page) { appState.selectedSettingsPage = page }
+    }
+}
+
+#if !FAUNA_KIDS
+/// The Connected apps page with its plugin rows' settings link: the link pushes
+/// the Bridges page, where the plugin's settings card sits.
+private struct ConnectedAppsRoute: View {
+    let reloadToken: Int
+    @State private var showBridges = false
+
+    var body: some View {
+        ConnectedAppsView(reloadToken: reloadToken, onOpenBridges: { showBridges = true })
+            .navigationDestination(isPresented: $showBridges) { BridgesView() }
+    }
+}
+#endif

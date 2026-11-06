@@ -68,3 +68,25 @@ final class ScopeTestParking: @unchecked Sendable {
         await Task.detached { for await _ in released { return } }.value
     }
 }
+
+/// Arms a stand-in body as the loop `key` of `loops` — one that parks until it is
+/// cancelled — and returns a stream that yields once that body has SEEN the cancel.
+/// What lets a test witness that a door retires a page-owned VM's drive loops with no
+/// machine running (`DriveLoops`; the mail export and import wizards).
+@MainActor
+func armCancelWitness<K>(_ loops: DriveLoops<K>, _ key: K) -> AsyncStream<Void> {
+    let (stream, seen) = AsyncStream<Void>.makeStream()
+    loops.spawn(key) {
+        while !Task.isCancelled { try? await Task.sleep(for: .seconds(60)) }
+        seen.yield()
+        seen.finish()
+    }
+    return stream
+}
+
+/// Waits for `armCancelWitness`'s stream to report the cancel. A door that never
+/// cancels leaves this parked, so a test using it carries a `.timeLimit`.
+func sawCancel(_ witness: AsyncStream<Void>) async -> Bool {
+    for await _ in witness { return true }
+    return false
+}

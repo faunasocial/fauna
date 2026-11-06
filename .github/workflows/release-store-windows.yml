@@ -29,6 +29,22 @@ on:
         description: "The public commit the version records (full 40-hex SHA)"
         required: true
         type: string
+      # The Store ships a store flavour (installers/windows.md § Store
+      # distribution, the flavour paragraph): `store-no-payments` from the
+      # first version whose recorded commit carries the Windows leg of that
+      # flavour, `store-safe` for an older commit. This text reaches the public
+      # repository only in a tree that carries the leg, so the default meets an
+      # older commit only when one is dispatched on purpose -- and the resolve
+      # step below refuses that, naming `store-safe`. (A commit that old also
+      # predates the hosted-runner recipes, which the step before it refuses.)
+      flavour:
+        description: "The store flavour to build: store-no-payments (payments and zaps excised, sharing kept) or store-safe (all three excised; a recorded commit older than the store-no-payments leg)"
+        required: true
+        type: choice
+        options:
+          - store-no-payments
+          - store-safe
+        default: store-no-payments
 
 permissions:
   contents: read
@@ -51,21 +67,19 @@ env:
   CARGO_RESOLVER_FEATURE_UNIFICATION: selected
 
 jobs:
-  # `just windows-store-package <arch> store-safe <identity> <publisher>`,
-  # inlined: the runner has no `just`, so each step runs what the recipe runs.
-  # The flavour is `store-safe`, for now (installers/windows.md § Store
-  # distribution, the flavour paragraph, owner ruling 2026-10-14): Microsoft
-  # Store Policies 10.8 ask a non-game app taking payment to name the commerce
-  # provider at each transaction, so the Store build carries no payments plane,
-  # and zaps and peer-to-peer sharing go with it. The direct-download MSI
-  # (release.yml) keeps the full build. The two
-  # deviations are the runner's: cargo is called directly (the recipe's
-  # `scripts\cargo-win.cmd` wrapper only locates a dev box's MSVC install,
-  # which the runner image already provides), and MSBuild.exe is found with
-  # vswhere rather than the recipe's dev-box path. The app is published with
-  # MSBuild as in the recipe -- under `dotnet publish` the XAML compiler fails
-  # on x64 too (the 0.1.5 dry run). The generated i18n and provider files are
-  # tracked, so the recipe's two generator dependencies have nothing to do.
+  # `just windows-store-package <arch> <flavour> <identity> <publisher>` -- the
+  # recipe the machines build the package with (release-integrity.md § What a
+  # release ships -> *Every release build runs the `just` recipe*), from the
+  # recorded commit's own tree: its production FFI and C# bindings, the sync
+  # agent and the shell extension, the self-contained app published with
+  # MSBuild, the staged payload and the pack, each arch named by its triple from
+  # this x64 runner. The flavour is the dispatch's `flavour` input
+  # (installers/windows.md § Store distribution, the flavour paragraph):
+  # Microsoft Store Policies 10.8 ask a non-game app taking payment to name the
+  # commerce provider at each transaction, so the Store build carries no
+  # payments plane, and zaps go with it; `store-safe` drops peer-to-peer sharing
+  # too. The recipe's flavour table is the one place a flavour's settings live.
+  # The direct-download MSI (release.yml) keeps the full build.
   build-store:
     strategy:
       # Each architecture reports on its own: a red on one leg says nothing
@@ -75,10 +89,8 @@ jobs:
         include:
           - arch: x64
             rust_target: x86_64-pc-windows-msvc
-            dotnet_rid: win-x64
           - arch: arm64
             rust_target: aarch64-pc-windows-msvc
-            dotnet_rid: win-arm64
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -92,6 +104,7 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           ref: ${{ inputs.commit }}
 
       - name: Assert the checkout is the recorded commit
@@ -103,6 +116,41 @@ jobs:
           [ "$head" = "$COMMIT" ] || {
             echo "::error::checked out $head, the version records $COMMIT"; exit 1; }
 
+      # The recorded commit's recipes are what build the package, so they must
+      # build both arches from this x64 runner: a tree older than that has a
+      # scripts/cargo-win.cmd that assumes an arm64 host and a
+      # windows-store-package that builds arm64 as the implicit host -- on this
+      # runner, an x64 package under the arm64 name. Such a commit (0.1.5's
+      # included) is refused here, naming where it can still be built.
+      - name: Refuse a recorded commit whose recipes predate the hosted runner
+        shell: bash
+        run: |
+          grep -qF 'host: x86_64-' scripts/cargo-win.cmd \
+            && grep -qF 'arm64) TARGET=aarch64-pc-windows-msvc;' justfile || {
+            echo "::error::this recorded commit's Windows recipes predate the x64 hosted runner (its scripts/cargo-win.cmd assumes an arm64 host, and its windows-store-package builds arm64 as the host); build its packages on an arm64 Windows machine from a public clone at that commit: just windows-store-package <arch> <flavour> <identity> <publisher>"
+            exit 1; }
+
+      # The flavour, resolved once and read by the build and the grade. A
+      # flavour's settings live in `just windows-store-package`'s table; this
+      # step only refuses a flavour the recorded commit cannot build.
+      - name: Resolve the flavour
+        shell: bash
+        env:
+          FLAVOUR: ${{ inputs.flavour }}
+        run: |
+          case "$FLAVOUR" in
+            store-no-payments)
+              grep -q FaunaExcisePayments apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj || {
+                echo "::error::this recorded commit predates the store-no-payments leg (FaunaApp.csproj has no FaunaExcisePayments); dispatch it with flavour=store-safe"
+                exit 1; }
+              ;;
+            store-safe) ;;
+            *)
+              echo "::error::unknown flavour '$FLAVOUR'"
+              exit 1 ;;
+          esac
+          echo "STORE_FLAVOUR=$FLAVOUR" >> "$GITHUB_ENV"
+
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           target: ${{ matrix.rust_target }}
@@ -113,93 +161,41 @@ jobs:
         with:
           dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
 
-      # 1. The PRODUCTION FFI (no `test-helpers`: the automation surface is
-      #    compiled out of a shipped package, convention 15) in the store-safe
-      #    flavour -- `just windows-ffi-store-safe`'s complement build, NOT a
-      #    feature added to the defaults -- its C# bindings, generated from that
-      #    very dll so the app compiles against the excised face, and the dll
-      #    staged where FaunaApp.csproj packs it.
-      - name: Build FFI + generate C# bindings + stage native dll
+      - name: Install uv
         shell: bash
-        run: |
-          cargo rustc --locked -p fauna-ffi --lib --crate-type cdylib --profile dist --no-default-features --features store-safe --target ${{ matrix.rust_target }}
-          cargo run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- \
-            --library target/${{ matrix.rust_target }}/dist/fauna_ffi.dll \
-            --out-dir apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/
-          mkdir -p apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native
-          cp target/${{ matrix.rust_target }}/dist/fauna_ffi.dll \
-             apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native/fauna_ffi.dll
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
-      # 2. The two Rust binaries the package carries, each in its OWN
-      #    invocation: one naming several packages unifies their features. The
-      #    sync agent builds without `p2p-share`, its only default feature.
-      - name: Build the sync agent and the shell extension
-        run: |
-          cargo build --locked --profile dist -p fauna-sync-agent --no-default-features --target ${{ matrix.rust_target }}
-          cargo build --locked --profile dist -p fauna-shell-ext  --target ${{ matrix.rust_target }}
-
-      # 3. The app, self-contained Release (the works-out-of-the-box invariant),
-      #    with the store-safe define: the csproj drops the payments and
-      #    peer-to-peer sharing pages and their glue.
-      #    MSBuild.exe, not `dotnet publish`: only under MSBuild does the XAML
-      #    compiler run in-process; `dotnet publish` shells out to the net472
-      #    XamlCompiler.exe, which exited 1 with no diagnostic on both legs of
-      #    the 0.1.5 dry run. The same command `just windows-store-package` runs.
-      - name: Publish the app
-        shell: pwsh
-        run: |
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
-          if (-not $msbuild) { throw "no MSBuild.exe on this runner" }
-          & $msbuild apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj -restore -t:Publish `
-            -p:Configuration=Release -p:RuntimeIdentifier=${{ matrix.dotnet_rid }} `
-            -p:SelfContained=true -p:WindowsAppSDKSelfContained=true `
-            -p:FaunaStoreSafe=true `
-            -bl:publish.binlog
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Build and pack. The recipe builds the PRODUCTION FFI (no `test-helpers`:
+      # the automation surface is compiled out of a shipped package, convention
+      # 15) in the store flavour and the app against its excised face, and its
+      # packer refuses a payload missing its native core or carrying the
+      # automation surface. The package lands in build/installer/.
+      - name: Build and pack the Store package
+        shell: bash
+        run: just windows-store-package ${{ matrix.arch }} "$STORE_FLAVOUR" "$STORE_IDENTITY_NAME" "$STORE_PUBLISHER"
 
       # The XAML compiler can fail with no message on the console; the binary
-      # log carries its diagnostics. Nothing secret is in scope in this workflow.
+      # log the recipe's publish writes carries its diagnostics. Nothing secret
+      # is in scope in this workflow.
       - name: Keep the publish log
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: publish-binlog-${{ matrix.arch }}
-          path: publish.binlog
+          path: build/installer/app-publish-${{ matrix.arch }}.binlog
           if-no-files-found: warn
 
-      # 4. Stage exactly the payload the manifest references.
-      - name: Stage the payload
-        shell: bash
-        run: |
-          publish=(apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/${{ matrix.dotnet_rid }}/publish)
-          [ -f "${publish[0]}/FaunaApp.exe" ] || {
-            echo "::error::no FaunaApp.exe under ${publish[0]} after the publish"; exit 1; }
-          stage=build/installer/store-payload/${{ matrix.arch }}
-          mkdir -p "$stage/App"
-          cp -r "${publish[0]}/." "$stage/App/"
-          cp target/${{ matrix.rust_target }}/dist/fauna-sync-agent.exe "$stage/"
-          cp target/${{ matrix.rust_target }}/dist/fauna_shell.dll "$stage/"
-
-      # 5. Pack, then grade the PACKAGE. The packer refuses a payload missing its
-      #    native core or carrying the automation surface; the grade reads the
-      #    finished .msix back: identity (the reservation above, the version in
-      #    Package.wxs, this arch), runFullTrust as the only capability, every
-      #    PE built for this arch, no .pdb, no automation surface, and the
-      #    store-safe excision: the packaged fauna_ffi.dll carries no
-      #    `fauna.payments.*` / `fauna.tips.*` / zap-signer kind string and no
-      #    peer-to-peer sharing face (`just windows-store-safe-check`'s native
-      #    column). Both are
-      #    standard-library Python, run on the runner image's own interpreter
-      #    so nothing is installed for them.
-      - name: Pack
-        run: >
-          python scripts/build-store-package.py
-          --arch ${{ matrix.arch }}
-          --payload-root build/installer/store-payload/${{ matrix.arch }}
-          --out-dir store-out
-          --identity-name "$env:STORE_IDENTITY_NAME"
-          --publisher "$env:STORE_PUBLISHER"
-
+      # Grade the PACKAGE: the grade reads the finished .msix back -- identity
+      # (the reservation above, the version in Package.wxs, this arch),
+      # runFullTrust as the only capability, every PE built for this arch, no
+      # .pdb, no automation surface, and the flavour's excision: the packaged
+      # fauna_ffi.dll carries no `fauna.payments.*` / `fauna.tips.*` /
+      # zap-signer kind string, and the peer-to-peer sharing faces exactly when
+      # the flavour keeps them (`just windows-store-safe-check`'s native
+      # column). Standard-library Python, run on the runner image's own
+      # interpreter.
+      #
       # The grade comes from THIS workflow's commit, not the recorded one: an
       # older recorded commit may predate a grade, and the grade is a check on
       # the package, not part of what the version builds. Sparse: the packer,
@@ -207,6 +203,7 @@ jobs:
       - name: Check out the grade (this workflow's commit)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
           path: grader
           sparse-checkout: |
@@ -216,8 +213,8 @@ jobs:
       - name: Grade
         run: >
           python grader/scripts/build-store-package.py
-          --grade store-out/Fauna-Store-${{ matrix.arch }}.msix
-          --flavour store-safe
+          --grade build/installer/Fauna-Store-${{ matrix.arch }}.msix
+          --flavour "$env:STORE_FLAVOUR"
           --package-wxs apps/fauna-windows/installer/Package.wxs
           --arch ${{ matrix.arch }}
           --identity-name "$env:STORE_IDENTITY_NAME"
@@ -225,7 +222,7 @@ jobs:
 
       - name: SHA-256
         shell: bash
-        working-directory: store-out
+        working-directory: build/installer
         run: |
           sha256sum Fauna-Store-${{ matrix.arch }}.msix > Fauna-Store-${{ matrix.arch }}.msix.sha256
           cat Fauna-Store-${{ matrix.arch }}.msix.sha256
@@ -236,6 +233,6 @@ jobs:
         with:
           name: store-windows-${{ matrix.arch }}
           path: |
-            store-out/Fauna-Store-${{ matrix.arch }}.msix
-            store-out/Fauna-Store-${{ matrix.arch }}.msix.sha256
+            build/installer/Fauna-Store-${{ matrix.arch }}.msix
+            build/installer/Fauna-Store-${{ matrix.arch }}.msix.sha256
           if-no-files-found: error

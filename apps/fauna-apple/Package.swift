@@ -1,5 +1,6 @@
 // swift-tools-version: 6.0
 
+import Foundation
 import PackageDescription
 
 var targets: [Target] = [
@@ -8,7 +9,15 @@ var targets: [Target] = [
         name: "FaunaKit",
         dependencies: ["FaunaFFISwift", "FaunaDeepLink", "FaunaExtensionKit"],
         path: "FaunaKit/Sources/FaunaKit",
-        swiftSettings: [.swiftLanguageMode(.v5)]
+        swiftSettings: [.swiftLanguageMode(.v5)],
+        // `VideoThumbnailView`'s SwiftUI `VideoPlayer` lives in `_AVKit_SwiftUI`,
+        // which does NOT link AVKit itself: its `VideoPlayerView` subclasses AVKit's
+        // `AVPlayerView`, so AVKit must already be loaded. `import AVKit` alone only
+        // leaves an autolink hint the linker drops when no AVKit symbol is used
+        // directly — the app then dies at the first tap ("failed to demangle
+        // superclass of VideoPlayerView … 'So12AVPlayerViewC'"). Linked explicitly,
+        // like SystemConfiguration below, so every final link carries it.
+        linkerSettings: [.linkedFramework("AVKit")]
     ),
     // The FFI-free slice of FaunaKit an app extension may link: the
     // platform-registered identifiers (`AppleIdentifiers`), the generated i18n
@@ -153,6 +162,31 @@ var targets: [Target] = [
     ),
 ]
 
+var products: [Product] = [
+    .library(name: "FaunaKit", targets: ["FaunaKit"]),
+    // Linked by the `.xcodeproj` `Fauna` app target (the appex-carrying macOS
+    // app bundle) — the same code the SPM `FaunaMacOS` executable wraps.
+    .library(name: "FaunaMacOSLib", targets: ["FaunaMacOSLib"]),
+    // Linked by the `.xcodeproj` `Fauna-iOS` app target (the appex-carrying
+    // iOS app bundle) — the same code the SPM `FaunaiOS` executable wraps.
+    .library(name: "FaunaiOSLib", targets: ["FaunaiOSLib"]),
+    // Linked by the `.xcodeproj` FP UI action appex targets (macOS + iOS) —
+    // deliberately the ONLY product they link (FFI-free).
+    .library(name: "FaunaDeepLink", targets: ["FaunaDeepLink"]),
+    // Linked by the `.xcodeproj` widget appex targets (macOS + iOS) —
+    // deliberately the ONLY product they link (FFI-free).
+    .library(name: "FaunaExtensionKit", targets: ["FaunaExtensionKit"]),
+]
+
+// `swift test` builds every product, and the library products only exist for
+// the `.xcodeproj`: nothing in a `swift` build links them. Three of them carry
+// the whole Rust FFI, 2.4 G each, so `just swift-test` sets this and skips them.
+// Set by that recipe alone, never by a person (mac-disk-budget.md § Where the
+// disk goes and what frees it (mac), what `swift test` writes).
+if ProcessInfo.processInfo.environment["FAUNA_SWIFTPM_SKIP_LIBRARY_PRODUCTS"] == "1" {
+    products = []
+}
+
 let package = Package(
     name: "FaunaApple",
     platforms: [
@@ -160,20 +194,6 @@ let package = Package(
         .iOS(.v17),
         .watchOS(.v10),
     ],
-    products: [
-        .library(name: "FaunaKit", targets: ["FaunaKit"]),
-        // Linked by the `.xcodeproj` `Fauna` app target (the appex-carrying macOS
-        // app bundle) — the same code the SPM `FaunaMacOS` executable wraps.
-        .library(name: "FaunaMacOSLib", targets: ["FaunaMacOSLib"]),
-        // Linked by the `.xcodeproj` `Fauna-iOS` app target (the appex-carrying
-        // iOS app bundle) — the same code the SPM `FaunaiOS` executable wraps.
-        .library(name: "FaunaiOSLib", targets: ["FaunaiOSLib"]),
-        // Linked by the `.xcodeproj` FP UI action appex targets (macOS + iOS) —
-        // deliberately the ONLY product they link (FFI-free).
-        .library(name: "FaunaDeepLink", targets: ["FaunaDeepLink"]),
-        // Linked by the `.xcodeproj` widget appex targets (macOS + iOS) —
-        // deliberately the ONLY product they link (FFI-free).
-        .library(name: "FaunaExtensionKit", targets: ["FaunaExtensionKit"]),
-    ],
+    products: products,
     targets: targets
 )

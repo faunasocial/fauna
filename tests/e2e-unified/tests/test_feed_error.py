@@ -40,6 +40,7 @@ ERROR_SURFACE_BUDGET_S = 60.0
 
 
 @pytest.mark.tier_3
+@pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.linux
@@ -64,17 +65,26 @@ def test_feed_error_surfaces_on_error_text(logged_in_app):
     )
 
     message = "nest rejected fauna.feed.local.posts (feed error test)"
-    app.feed.inject_error_for_test(message=message)
-
     # The injection stamps `FeedSnapshot.error` and notifies observers; the
     # page's error element renders on the deferred UI-thread refresh the
     # command return races, so poll for it (condition-based waiting, per the
     # action layer) rather than assuming the very next read sees it.
+    #
+    # A feed page that has just launched still has its own loads settling (the
+    # launch pull, a WS-RPC reconnect re-pull), and any of them that commits
+    # after the injection replaces the snapshot and clears the error it
+    # stamped — on iOS the banner painted for ~100 ms and was gone before the
+    # next poll. That is the load doing its job, not the surface failing, so
+    # the injection is repeated (a state poll, bounded) until one lands after
+    # the loads have settled and the banner stands.
     deadline = time.time() + ERROR_SURFACE_BUDGET_S
-    while time.time() < deadline:
-        if app.driver.is_visible("error-message"):
-            break
-        time.sleep(0.1)
+    while time.time() < deadline and not app.driver.is_visible("error-message"):
+        app.feed.inject_error_for_test(message=message)
+        window = time.time() + 5.0
+        while time.time() < window:
+            if app.driver.is_visible("error-message"):
+                break
+            time.sleep(0.1)
 
     assert app.driver.is_visible("error-message"), (
         "an injected feed error must surface on the page error-message "

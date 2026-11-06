@@ -18,7 +18,6 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from conftest import _provision_baseline_contributor, _withdraw_baseline_contributors
-from helpers.app_surface import app_name, skip_unbuilt
 from tests.api import ws_api
 
 # Module-level: linux is the lead app and renders ALL FIVE projected policy
@@ -403,12 +402,6 @@ def test_publish_spam_baseline_withheld(admin_app):
     )
 
 
-#: Apps whose publish button asks first (the same-button two-press,
-#: `MailPolicyConfirm::PublishSpamBaseline`): tui is the lead app; windows and apple
-#: follow in their batched trickle-down.
-_PUBLISH_CONFIRM_BUILT_APPS = {"tui", "linux", "web", "android"}
-
-
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
@@ -423,13 +416,6 @@ def test_publishing_the_baseline_asks_first_and_says_whose_training_it_reflects(
     result text says so, and the button comes back to rest. The nest's
     `get_spam_baseline_state` is the ground truth that the first press sent
     nothing."""
-    if app_name(admin_app.driver) not in _PUBLISH_CONFIRM_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-mail-publish-spam-baseline-button confirm",
-            detail="the baseline-publish confirm is built on tui first",
-            tracked="the six-app trickle-down of the admin-mail baseline-publish confirm",
-        )
     from i18n.strings import S
 
     page = S.admin.mail_page
@@ -471,11 +457,6 @@ def test_publishing_the_baseline_asks_first_and_says_whose_training_it_reflects(
     assert _wait(
         lambda: admin_app.admin.publish_spam_baseline_text() == page.publish_spam_baseline_button
     ), f"the confirm never came back to rest: {admin_app.admin.publish_spam_baseline_text()!r}"
-
-
-#: Apps that render the standing-publish toggle and the baseline state text
-#: (tui is the lead app; the other six follow in their batched trickle-down).
-_STANDING_BUILT_APPS = {"tui", "web", "linux", "android", "windows", "macos", "ios"}
 
 
 def _opted_in_contributors(nest_instance, seal_helper_binary, tag, n=3):
@@ -523,14 +504,6 @@ def test_standing_baseline_toggle_and_state_text(
     autouse fixture restores the spam group, standing publish included."""
     toggle = "admin-mail-spam-baseline-standing-toggle"
     state_id = "admin-mail-spam-baseline-state"
-    if app_name(admin_app.driver) not in _STANDING_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface=toggle,
-            detail="standing baseline publish and its state text are built on tui first",
-            tracked="",
-        )
-
     admin_app.admin.navigate_mail()
     assert _wait(admin_app.admin.mail_policy_present), (
         f"page did not render. error: {admin_app.error_text()!r}"
@@ -851,17 +824,6 @@ def test_alias_policy_save_round_trips(admin_app, nest_instance):
     )
 
 
-#: Apps that render the DMARC-reports group (`dmarc-reporting.md`
-#: § Implementation status today) — tui leads; linux, web and android followed
-#: in the trickle-down, windows / macos / ios are still to come.
-_DMARC_BUILT_APPS = {"tui", "linux", "web", "android"}
-
-#: Apps that render the Microsoft-registration section (`mailbox-migration.md`
-#: § Microsoft sign-in, *An admin-supplied registration*) — the same lift and
-#: the same app set as the DMARC group.
-_MICROSOFT_BUILT_APPS = {"tui", "linux", "web", "android"}
-
-
 def _expected_dmarc_records(client) -> dict:
     """Every domain's expected ``_dmarc`` record tags, read off
     ``fauna.dns.list_records`` (the one assembler the DNS page and the
@@ -899,13 +861,6 @@ def test_dmarc_policy_save_round_trips(admin_app, nest_instance):
     nest's 90-day ceiling is refused onto `error-message` and changes nothing.
     The autouse fixture puts the catalog back, so later modules see the opt-in
     off again."""
-    if app_name(admin_app.driver) not in _DMARC_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-mail-dmarc-ruf-publish-toggle",
-            detail="the DMARC-reports group is not yet on this app",
-            tracked="",
-        )
     before = _nest_now(nest_instance, lambda c: c.call("fauna.bridges.get_dmarc_policy", {}))
     assert before["ruf_publish"] is False, (
         f"the session nest already holds the forensic opt-in on: {before!r}"
@@ -996,6 +951,52 @@ def test_dmarc_policy_save_round_trips(admin_app, nest_instance):
     )
 
 
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("dmarc-reporting")
+def test_outbound_dmarc_reports_switch_round_trips(admin_app, nest_instance):
+    """An admin turns off the daily aggregate reports this nest sends to other
+    domains, and turns them back on (`dmarc-reporting.md` § Generation is on by
+    default). The switch is a draft in the DMARC group, saved by the group's
+    Save through `put_dmarc_policy` and read by its `get_dmarc_policy` twin.
+
+    switch off → Save (UI) → ground truth: `get_dmarc_policy` holds it off and
+    every tag without a control rode through; switch on → Save → it holds it on.
+    What off does to the daily pass is witnessed at the API tier by
+    `test_mail_dmarc_reports.py::test_outbound_dmarc_reports_switched_off_sends_no_report`.
+    """
+    toggle = "admin-mail-dmarc-outbound-aggregate-toggle"
+    read_policy = lambda c: c.call("fauna.bridges.get_dmarc_policy", {})  # noqa: E731
+    before = _nest_now(nest_instance, read_policy)
+    assert before["outbound_aggregate_enabled"] is True, (
+        f"the session nest already holds the reports off: {before!r}"
+    )
+
+    admin_app.admin.navigate_mail()
+    assert _wait(admin_app.admin.mail_policy_present), (
+        f"page did not render. error: {admin_app.error_text()!r}"
+    )
+    assert _wait(lambda: admin_app.admin.mail_field_present(toggle)), (
+        f"{toggle} missing. error: {admin_app.error_text()!r}"
+    )
+
+    with _admin_client(nest_instance) as client:
+        for target in (False, True):
+            admin_app.admin.toggle_mail_dmarc_outbound_aggregate()
+            admin_app.admin.save_mail_dmarc()
+            assert _wait(
+                lambda want=target: read_policy(client)["outbound_aggregate_enabled"] is want
+            ), (
+                f"put_dmarc_policy did not persist outbound_aggregate_enabled={target}. "
+                f"error: {admin_app.error_text()!r}"
+            )
+            assert read_policy(client) == {**before, "outbound_aggregate_enabled": target}
+
+    assert not admin_app.error_text().strip(), (
+        f"unexpected error after a valid save: {admin_app.error_text()!r}"
+    )
+
+
 # A registration of the admin's own, distinctive so it cannot be the project's.
 _MS_CLIENT_ID = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c"
 _MS_TENANT = "contoso.example"
@@ -1026,13 +1027,6 @@ def test_microsoft_registration_save_round_trips(admin_app, nest_instance):
     `test_mail_import.py::test_outlook_signs_in_with_microsoft_and_imports`
     (tui, linux, android)."""
     client_field = "admin-mail-microsoft-client-id-input"
-    if app_name(admin_app.driver) not in _MICROSOFT_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface=client_field,
-            detail="the Microsoft-registration section is not yet on this app",
-            tracked="",
-        )
     assert _stored_microsoft_registration(nest_instance) is None, (
         "the session nest already holds an admin Microsoft registration"
     )
@@ -1158,6 +1152,7 @@ def _spam_now(nest_instance) -> dict:
     )
 
 
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
 def test_out_of_order_spam_thresholds_show_the_nest_refusal(admin_app, nest_instance):
@@ -1198,6 +1193,7 @@ def test_out_of_order_spam_thresholds_show_the_nest_refusal(admin_app, nest_inst
     )
 
 
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
 def test_non_numeric_entry_keeps_the_saved_value(admin_app, nest_instance):
@@ -1241,6 +1237,7 @@ def _revoke_contributor_grant(nest_instance, contributor, grant_id: bytes) -> No
     assert reply.get("ok") is True, f"revoke reply not ok: {reply!r}"
 
 
+@pytest.mark.android
 @pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
 def test_publish_result_says_how_many_could_not_be_included(
@@ -1255,13 +1252,6 @@ def test_publish_result_says_how_many_could_not_be_included(
     leave it opted in, which would change both counts)."""
     from i18n.strings import S
 
-    if app_name(admin_app.driver) not in _STANDING_BUILT_APPS:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-mail-publish-spam-baseline-result",
-            detail="the skipped-contributors note is witnessed on tui first",
-            tracked="the cross-app lift row of the admin-pages witness track",
-        )
     contributors = []
     try:
         ws_api.baseline_contribution_set(nest_instance["port"], test_user, False)
@@ -1292,6 +1282,8 @@ def test_publish_result_says_how_many_could_not_be_included(
         _withdraw_baseline_contributors(nest_instance, contributors)
 
 
+@pytest.mark.android
+@pytest.mark.web
 @pytest.mark.feature("admin-mail-policy")
 def test_turning_mail_off_on_the_mail_page_stops_the_mail_server(
     app, dedicated_mail_nest, request

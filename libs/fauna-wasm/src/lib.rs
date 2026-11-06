@@ -259,6 +259,9 @@ pub mod mail_admin;
 mod mail_export_delivery;
 #[cfg(target_arch = "wasm32")]
 pub use mail_admin::*;
+// The `archive-import` page's machine over the browser plane.
+#[cfg(target_arch = "wasm32")]
+pub mod archive_import;
 
 // User-settings Linked-nests machine (the wasm twin of `fauna-ffi/src/pairing.rs`).
 // Wasm-only, same reason as `mail_admin` (tracked internally).
@@ -1410,6 +1413,17 @@ pub fn contact_status_label(status: &str) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::format::contact_status_label(status))
 }
 
+/// `fauna_core::format::contact_roster_group_order` → the roster's status
+/// groups in paint order (`string[]`) for the statuses its contacts carry (one
+/// entry per contact): the canonical confirmed → accepted → pending → blocked
+/// order for the statuses present, then any other status in first-seen order.
+/// Replaces the SPA's hard-coded `statusOrder`. See contacts.md § Where logic
+/// lives → Roster status grouping.
+#[wasm_bindgen(js_name = contactRosterGroupOrder)]
+pub fn contact_roster_group_order(statuses: Vec<String>) -> Vec<String> {
+    fauna_core::format::contact_roster_group_order(&statuses)
+}
+
 /// `fauna_core::format::bunker_app_label` → a `LocalizedText` `{ key, args }`
 /// the SPA resolves through `resolveLocalized` — a `nostr-bunker-app-item`
 /// row's primary label (the app's own `label` verbatim, else a
@@ -1540,23 +1554,6 @@ pub fn reach_policy_summary(
     ))
 }
 
-/// `fauna_core::format::content_floor_options` → the canonical guardian
-/// content-floor picker options (`inherit | collapse | block`, `{ value, label }`
-/// with `label` a `LocalizedText`), in the ratified order — the web consume leg
-/// of family-safety.md § Content policy. Mirrors [`unknown_sender_options`].
-#[wasm_bindgen(js_name = contentFloorOptions)]
-pub fn content_floor_options() -> Result<JsValue, JsValue> {
-    crate::rpc::to_js(&fauna_core::format::content_floor_options())
-}
-
-/// `fauna_core::format::content_floor_label` → the localized label for a stored
-/// guardian content-floor wire value, failing closed to `block` for anything
-/// unrecognized — the same fail-closed rule as the reach knobs.
-#[wasm_bindgen(js_name = contentFloorLabel)]
-pub fn content_floor_label(value: &str) -> Result<JsValue, JsValue> {
-    crate::rpc::to_js(&fauna_core::format::content_floor_label(value))
-}
-
 /// `fauna_client_bridges::nostr_content_toggle_options` → the five Nostr
 /// content-publishing toggles as one table (`{ key, ui_id, default_on, label,
 /// subtitle }`, `label`/`subtitle` `LocalizedText`), in the ratified render
@@ -1599,8 +1596,9 @@ pub fn atproto_depth_level_options() -> Result<JsValue, JsValue> {
 /// `[{ category, confidence_per_mille }]` shape on `PostSummary.labels` /
 /// `MessageSnapshot.labels`), the guardian `content_policy` object straight off
 /// `familyStatus()` (or `null`/`undefined` for an unsupervised viewer — deserialized
-/// to `Option<ContentPolicy>`, so `ContentFloor`'s `#[serde(other)]` keeps an
-/// unparseable floor fail-closed to `block`), and the viewer's own per-mille
+/// to `Option<ContentPolicy>`, whose document decodes version first, so a
+/// document this build cannot read stays fail-closed to `block`), and the
+/// viewer's own per-mille
 /// thresholds (both `undefined` until `spamGetPreferences` lands → no own-threshold
 /// rule composes). `u16` params, so no `i64`→`bigint` trap.
 #[wasm_bindgen(js_name = contentRenderVerdict)]
@@ -1805,7 +1803,7 @@ fn composed_to_js(composed: &fauna_core::obligation::ComposedVerdict) -> Result<
     });
     // Set when the guardian's policy drove it: the family-policy frame, with
     // the guardian rule's reason verbatim beside it — `reasonCode` and
-    // `reason` null when a floor drove it.
+    // `reason` null when the compiled floor or an unreadable document drove it.
     let guardian = composed.guardian().map(|a| {
         serde_json::json!({
             "reasonCode": a.rule.as_ref().map(|r| &r.reason_code),
@@ -1862,10 +1860,10 @@ fn content_verdict_inputs(
     Ok((labels, policy, own, regions))
 }
 
-/// The guardian-floor categories a piece of content triggers, for **Guardian
+/// The guardian categories a piece of content triggers, for **Guardian
 /// Notify** counting (family-safety.md § Guardian Notify) — the web twin of the
 /// shared `fauna_core::obligation::guardian_enforced_categories`. Returns the
-/// subset of `["nsfw","spam","phishing","commercial"]` whose guardian floor bites
+/// subset of `["nsfw","spam","phishing","commercial"]` where a guardian rule bites
 /// on this item (the categories for which "the guardian's policy is acting"). The
 /// ward's own-threshold collapses are deliberately excluded — Notify is a lens on
 /// the *guardian's* policy, not the ward's own choices — so this takes only the
@@ -1901,6 +1899,33 @@ pub fn notify_report_min_interval_secs() -> u32 {
     fauna_core::obligation::NOTIFY_REPORT_MIN_INTERVAL_SECS as u32
 }
 
+/// Does a region placeholder owe the sealed-item sentence
+/// (`region.sealed_note`)? The web twin of the native `region_sealed_note_owed`
+/// face — both over `fauna_core::obligation::region_sealed_note_owed_for`, the
+/// reduced-input form of the rule linux and tui read off their
+/// `ContentPolicyState` (`region-blocking.md` § Implementation status today).
+/// `region_drove`: the placeholder is the region's and the viewer's own report
+/// did not hide the item; `verdict`: the render's wire verdict; `encryption`:
+/// the open thread's `capabilities.encryption` as the snapshot carries it
+/// (`"E2E"` | `"TransportOnly"` | `"NestReadable"`; only end-to-end is sealed);
+/// `notify_counted`: Guardian Notify counted this item.
+#[wasm_bindgen(js_name = regionSealedNote)]
+pub fn region_sealed_note_js(
+    region_drove: bool,
+    verdict: &str,
+    encryption: JsValue,
+    notify_counted: bool,
+) -> Result<bool, JsValue> {
+    let encryption: fauna_conversations::capabilities::ThreadEncryption =
+        crate::rpc::from_js(encryption)?;
+    Ok(fauna_core::obligation::region_sealed_note_owed_for(
+        region_drove,
+        verdict,
+        encryption.is_sealed(),
+        notify_counted,
+    ))
+}
+
 /// `fauna_client_drafts::autosave_debounce` → the shared draft-autosave
 /// debounce window, so web coalesces composer edits on the same cadence as
 /// the Rust-native shells (priority #2 — one shared window, no per-app
@@ -1908,27 +1933,62 @@ pub fn notify_report_min_interval_secs() -> u32 {
 /// as `u32` milliseconds (no `i64`→`bigint` wasm trap).
 ///
 /// It reads the shared accessor rather than the constant behind it, for one
-/// door with the native shells — but **the harness's window seam cannot reach
-/// web through it**: `wasm32-unknown-unknown` has no process environment, so
-/// `std::env::var` there is always `Err(NotPresent)` and this face answers the
-/// constant on every web build, test-capable or not. Web's own 150 ms
-/// `__faunaTestAgent` override in `#lib/{conversations,feed,event-drafts}` is
-/// today's substitute, and it SHORTENS where the seam lengthens, so web's
-/// leave-flush leg (`test_web_leave_flush.py`) still races the debounce rather
-/// than ruling it out.
+/// door with the native shells — but **the harness's window seam does not
+/// reach web through it**: `wasm32-unknown-unknown` has no process
+/// environment, so `std::env::var` there is always `Err(NotPresent)` and this
+/// face answers the constant on every web build. The seam reaches web through
+/// [`e2e_drafts_autosave_window_ms`] instead.
 #[wasm_bindgen(js_name = autosaveDebounceMs)]
 pub fn autosave_debounce_ms() -> u32 {
     fauna_client_drafts::autosave_debounce().as_millis() as u32
 }
 
+/// `fauna_client_drafts::LEAVE_FLUSH_BUDGET` in milliseconds — how long one
+/// drafts rail's leave-flush may hold the sign-out door before it goes on
+/// without it (`reserved-folders.md` § The leave-flush promise), the same
+/// bound tui's doors take.
+#[wasm_bindgen(js_name = leaveFlushBudgetMs)]
+pub fn leave_flush_budget_ms() -> u32 {
+    fauna_client_drafts::LEAVE_FLUSH_BUDGET.as_millis() as u32
+}
+
+/// The harness's draft-autosave window seam on web
+/// (`fauna_client_drafts::sync::E2E_AUTOSAVE_DEBOUNCE_ENV`, the
+/// `drafts_autosave_window_ms` marker): a page reads no environment, so the e2e
+/// web driver writes the variable into the origin's `localStorage` under its
+/// own name — the escrow-trust seed's door — and this reads it, live, through
+/// the shared grammar. `undefined` when unset. The SPA's
+/// `#lib/wasm::draftSaveDebounceMs` prefers it over web's 150 ms
+/// `__faunaTestAgent` cadence, so a leave-flush witness can push the debounce
+/// out past the whole test and any save it sees is the door's own.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = e2eDraftsAutosaveWindowMs)]
+pub fn e2e_drafts_autosave_window_ms() -> Option<u32> {
+    let raw = web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item(fauna_client_drafts::sync::E2E_AUTOSAVE_DEBOUNCE_ENV)
+        .ok()
+        .flatten()?;
+    fauna_client_drafts::sync::parse_e2e_autosave_debounce(&raw).map(|d| d.as_millis() as u32)
+}
+
+/// The shipped twin (convention 15): no seam, so always `undefined`.
+#[cfg(not(feature = "test-helpers"))]
+#[wasm_bindgen(js_name = e2eDraftsAutosaveWindowMs)]
+pub fn e2e_drafts_autosave_window_ms() -> Option<u32> {
+    None
+}
+
 /// `ReachPolicy::summary_lines()` → the full read-only ward policy summary
 /// (`family-policy-summary`): the four reach-knob lines PLUS one line per
-/// non-inherit guardian content floor and, when on, the Notify line
+/// guardian content rule and, when on, the Notify line
 /// (family-safety.md § Content policy / Guardian Notify — *"the ward's read-only
 /// summary renders the content rules exactly as it renders the reach knobs"*).
 /// The web twin of the linux ward summary — pass the whole wire `ReachPolicy`
 /// object straight off `familyStatus()`. A superset of [`reach_policy_summary`],
-/// which older web code called with only the four v1 knobs (so content floors
+/// which older web code called with only the four v1 knobs (so content rules
 /// never showed).
 #[wasm_bindgen(js_name = reachPolicySummaryFull)]
 pub fn reach_policy_summary_full(policy: JsValue) -> Result<JsValue, JsValue> {
@@ -2951,6 +3011,16 @@ pub fn notification_destination(row: JsValue) -> Result<JsValue, JsValue> {
 /// from.
 #[wasm_bindgen(js_name = notificationText)]
 pub fn notification_text(row: JsValue) -> Result<JsValue, JsValue> {
+    let item: fauna_client_notifications::notifications::NotifItem =
+        serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
+    notification_text_js(fauna_client_notifications::notification_text(&item))
+}
+
+/// `{ kind: "localized", key, args }` or `{ kind: "verbatim", text }` — the one
+/// shape [`notification_text`] and `notificationTextNaming` answer in.
+pub(crate) fn notification_text_js(
+    text: fauna_client_notifications::NotificationText,
+) -> Result<JsValue, JsValue> {
     use fauna_client_notifications::NotificationText;
 
     #[derive(serde::Serialize)]
@@ -2965,16 +3035,13 @@ pub fn notification_text(row: JsValue) -> Result<JsValue, JsValue> {
         },
     }
 
-    let item: fauna_client_notifications::notifications::NotifItem =
-        serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
-    let text = match fauna_client_notifications::notification_text(&item) {
+    crate::rpc::to_js(&match text {
         NotificationText::Localized(t) => Text::Localized {
             key: t.key,
             args: t.args,
         },
         NotificationText::Verbatim(text) => Text::Verbatim { text },
-    };
-    crate::rpc::to_js(&text)
+    })
 }
 
 /// Does a muted word collapse this notification row behind `notification-muted`
@@ -4160,12 +4227,44 @@ pub(crate) async fn build_handshake_request(
 #[wasm_bindgen(js_name = challengeVerify)]
 pub fn challenge_verify(secret_hex: String, origin: String) -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        challenge_verify_inner(&secret_hex, &origin).await
+        let domain = fauna_core::web::ReachDial::domain(&origin);
+        let domain_dial = challenge_verify_inner(&secret_hex, &domain).await;
+        // The mint follows the reach hint's dial rule like the socket it feeds
+        // (`onboarding-provisioning.md` § Reach hint → *The web session's half*):
+        // the domain first, and the hint on a transport failure alone. The
+        // `ReachDial` keeps `origin` the pin key on both dials, so a box at the
+        // hint's address is judged against the domain's pin before anything is
+        // signed. A domain success here deletes nothing: the bearer socket that
+        // follows it does.
+        let unreached = matches!(
+            &domain_dial,
+            Err(e) if e.as_string().is_some_and(|s| s.starts_with("transient:"))
+        );
+        match fauna_rpc_wasm::reach_hint::hint_dial(&origin) {
+            Some(hint) if unreached => {
+                let minted = challenge_verify_inner(&secret_hex, &hint).await;
+                // This pinned ceremony over the hint vouches for the one bearer
+                // dial it feeds: it arms the entry's proof, which that dial
+                // spends (§ *Trust*). A domain mint arms nothing — it proved
+                // nothing about the hint's address.
+                if minted.as_ref().is_ok_and(|v| !v.is_null()) {
+                    fauna_rpc_wasm::reach_hint::prove(&hint);
+                }
+                minted
+            }
+            _ => domain_dial,
+        }
     })
 }
 
+/// One ceremony over a socket to `dial.dial_url()`, its identity judged on
+/// `dial.pin_key()` — the domain, whichever address the socket went to.
 #[cfg(target_arch = "wasm32")]
-async fn challenge_verify_inner(secret_hex: &str, origin: &str) -> Result<JsValue, JsValue> {
+async fn challenge_verify_inner(
+    secret_hex: &str,
+    dial: &fauna_core::web::ReachDial,
+) -> Result<JsValue, JsValue> {
+    let (dial_url, origin) = (dial.dial_url(), dial.pin_key());
     use fauna_protocol::RpcRequester;
     use fauna_protocol::auth::{ChallengeReply, ChallengeRequest, VerifyReply, VerifyRequest};
     use fauna_rpc_wasm::WsRpcError;
@@ -4176,8 +4275,8 @@ async fn challenge_verify_inner(secret_hex: &str, origin: &str) -> Result<JsValu
     // One anonymous connection carries both legs: the server keys the nonce by
     // actor, not by connection, so challenge then verify on the same socket
     // matches the HTTP twin's two stateless calls.
-    let client = fauna_rpc_wasm::AnonymousWsRpcClient::connect(origin)
-        .map_err(|e| transient_js(&format!("anonymous connect {origin}: {e}")))?;
+    let client = fauna_rpc_wasm::AnonymousWsRpcClient::connect(dial_url)
+        .map_err(|e| transient_js(&format!("anonymous connect {dial_url}: {e}")))?;
 
     // 0. The identity this login binds, checked against the origin's pin
     //    before anything is signed (`login.md` § Binding the nest).
@@ -5245,11 +5344,7 @@ pub fn takedown_form_view(
     use fauna_client_moderation::takedown::{TakedownContentType, TakedownForm};
     let view = fauna_client_moderation::takedown_form_view(&TakedownForm {
         content_id,
-        content_type: if conversation {
-            TakedownContentType::Conversation
-        } else {
-            TakedownContentType::Post
-        },
+        content_type: TakedownContentType::from_conversation(conversation),
         legal_reference,
         restore,
     });
@@ -5354,13 +5449,12 @@ pub fn report_message_subject(
 /// for an account.
 #[wasm_bindgen(js_name = reportTakedownPrefill)]
 pub fn report_takedown_prefill(subject: JsValue) -> Result<JsValue, JsValue> {
-    use fauna_client_moderation::takedown::TakedownContentType;
     let subject: fauna_protocol::moderation::AbuseReportSubject = crate::rpc::from_js(subject)?;
     crate::rpc::to_js(
         &fauna_client_moderation::report::takedown_prefill(&subject).map(|form| {
             serde_json::json!({
                 "content_id": form.content_id,
-                "conversation": form.content_type == TakedownContentType::Conversation,
+                "conversation": form.content_type.is_conversation(),
             })
         }),
     )

@@ -32,6 +32,11 @@ public final class RegionStore {
     /// section reads it, so SwiftUI repaints them.
     public private(set) var revision = 0
 
+    /// The member's nest-rules book (`nest-rules.md`), read on the same
+    /// triggers as the plane and composed into the same render call as the
+    /// nest source.
+    public let nestRules = NestRulesStore()
+
     @ObservationIgnored private var plane: FfiRegionPlane?
     @ObservationIgnored private var api: APIClient?
     @ObservationIgnored private var tick: Task<Void, Never>?
@@ -123,6 +128,7 @@ public final class RegionStore {
     @MainActor
     public func refresh(api: APIClient?) async {
         let plane = openedPlane()
+        await nestRules.refresh(api: api)
         await resolveStorefrontIfPending(plane)
         guard let api else {
             self.api = nil
@@ -162,18 +168,41 @@ public final class RegionStore {
     @MainActor
     func render(labels: [ContentLabelEntry], inputs: ContentPolicyInputs, subject: RegionSubject) -> RegionRenderDecision {
         _ = revision
-        let r = openedPlane().render(
-            labels: labels,
-            contentPolicy: inputs.contentPolicy,
-            ownSpamPermille: inputs.ownSpamPermille,
-            ownPhishingPermille: inputs.ownPhishingPermille,
-            contentIdHex: subject.contentIdHex,
-            authorHex: subject.authorHex,
-            text: subject.text,
-            hashtags: subject.hashtags,
-            hasMedia: subject.hasMedia,
-            lang: Self.uiLang)
-        return RegionRenderDecision(verdict: r.verdict, placeholder: r.placeholder)
+        _ = nestRules.revision
+        let plane = openedPlane()
+        let r: FfiRegionRender
+        if let (book, nestId) = nestRules.source() {
+            // The nest source composed in: the book's rule sets over this
+            // session's nest, strictest-wins with the region, the guardian
+            // floor and the viewer's own thresholds, all in shared Rust.
+            r = plane.renderWithNest(
+                book: book, nestId: nestId,
+                labels: labels,
+                contentPolicy: inputs.contentPolicy,
+                ownSpamPermille: inputs.ownSpamPermille,
+                ownPhishingPermille: inputs.ownPhishingPermille,
+                contentIdHex: subject.contentIdHex,
+                authorHex: subject.authorHex,
+                text: subject.text,
+                hashtags: subject.hashtags,
+                hasMedia: subject.hasMedia,
+                lang: Self.uiLang)
+        } else {
+            r = plane.render(
+                labels: labels,
+                contentPolicy: inputs.contentPolicy,
+                ownSpamPermille: inputs.ownSpamPermille,
+                ownPhishingPermille: inputs.ownPhishingPermille,
+                contentIdHex: subject.contentIdHex,
+                authorHex: subject.authorHex,
+                text: subject.text,
+                hashtags: subject.hashtags,
+                hasMedia: subject.hasMedia,
+                lang: Self.uiLang)
+        }
+        return RegionRenderDecision(
+            verdict: r.verdict, placeholder: r.placeholder,
+            nestPlaceholder: r.nestPlaceholder, guardianPlaceholder: r.guardianPlaceholder)
     }
 
     /// What the settings region section paints.
@@ -215,6 +244,14 @@ public struct RegionSubject {
 public struct RegionRenderDecision {
     public let verdict: String
     public let placeholder: FfiRegionPlaceholder?
+    /// The nest placeholder when a rule of the nest this item was read through
+    /// drove a `block` or `collapse` (`nest-rules.md` § The nest source in the
+    /// engine) — painted in the region's place, never beside it.
+    public var nestPlaceholder: FfiNestPlaceholder?
+    /// The guardian's verb and its reason, when the family policy drove a
+    /// `block` or `collapse` (`nest-rules.md` § The shared rule editor → *The
+    /// reason is the member's to read*) — painted beside the family notice.
+    public var guardianPlaceholder: FfiGuardianPlaceholder?
     /// The viewer's own report hid this item — paint "You reported this"
     /// (`moderation.report.hidden_placeholder`) in place of the body.
     public var reported: Bool = false
@@ -228,6 +265,36 @@ public struct RegionRenderDecision {
 
     /// Whether the region blocks this item — convention 17's verdict side.
     public var isRegionBlocked: Bool { placeholder?.verb == "block" }
+
+    /// The nest placeholder this item paints now: a `block`, or a `collapse`
+    /// not yet revealed (the reveal shares the family reveal state).
+    public func withheldByNest(revealed: Bool) -> FfiNestPlaceholder? {
+        guard let nestPlaceholder else { return nil }
+        return nestPlaceholder.verb == "block" || !revealed ? nestPlaceholder : nil
+    }
+
+    /// Does the region placeholder owe the sealed-item sentence
+    /// (`region.sealed_note`)? The shared `regionSealedNoteOwed` — the rule linux
+    /// and tui read off their `ContentPolicyState` — over this decision (the
+    /// region drove it and the viewer's own report did not hide the item), the
+    /// open thread's `encryption`, and whether Guardian Notify counts the item.
+    public func sealedNote(
+        encryption: ThreadEncryption, inputs: ContentPolicyInputs, labels: [ContentLabelEntry]
+    ) -> Bool {
+        regionSealedNoteOwed(
+            regionDrove: placeholder != nil && !reported, verdict: verdict,
+            encryption: encryption, notifyCounted: inputs.notifyWouldCount(labels))
+    }
+
+    /// Whether a nest rule blocks this item — convention 17's nest verdict side.
+    public var isNestBlocked: Bool { nestPlaceholder?.verb == "block" }
+
+    /// The guardian's reason for the verdict this item paints, when a rule of
+    /// the guardian's document wrote one.
+    public var guardianReason: String? {
+        guard let reason = guardianPlaceholder?.reason, !reason.isEmpty else { return nil }
+        return reason
+    }
 }
 
 /// Convention 17's "a region Block never renders silent" state field

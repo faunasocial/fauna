@@ -92,7 +92,7 @@ public partial class App : Application
     /// the onboarding-completed closure).
     ///
     /// <para>Mirrors linux's <c>register_switch_account_handler</c>
-    /// (<c>apps/fauna-linux/src/main.rs</c>) in SEQUENCE, not in GTK specifics —
+    /// (<c>apps/fauna-linux/src/lib.rs</c>) in SEQUENCE, not in GTK specifics —
     /// crucially the mutate-BEFORE-teardown ordering, so a refused activation
     /// leaves the live session untouched.</para>
     /// </summary>
@@ -210,11 +210,12 @@ public partial class App : Application
     /// Draft-persistence v2 for the feed (<c>"posts"</c>) rail
     /// (docs/goal/behavior/reserved-folders.md § Drafts Sync; docs/goal/ui/feed.md §
     /// Persistence): the sync handle built once at login (<see cref="FeedDraftsSync"/>)
-    /// stays fixed for the session, but <see cref="FfiFeedManager"/> is rebuilt on
-    /// every Feed-page load — so <see cref="FeedDrafts"/> itself is REBUILT to wrap
-    /// each freshly-built manager (<c>FeedPage.Page_Loaded</c>), mirroring android's
-    /// <c>FeedManagerHost.manager()</c> re-running <c>sync.load()</c> per fresh
-    /// manager rather than once per session. Null before login, before the feed page
+    /// stays fixed for the session, and <see cref="FfiFeedManager"/> is the session's
+    /// one (<c>FeedManagerHost</c>) — so <see cref="FeedDrafts"/> is built and
+    /// restored once per (manager, sync handle) pair by
+    /// <c>FeedDraftsService.EnsureAsync</c> from <c>FeedPage.Page_Loaded</c>, never on
+    /// a repeat load, and kept reachable here for the teardown flush
+    /// (<c>FlushDraftRailsAsync</c>). Null before login, before the feed page
     /// has ever loaded, or under the E2E bridge.
     /// </summary>
     internal static uniffi.fauna_ffi.IFfiDraftsSync? FeedDraftsSync { get; private set; }
@@ -230,7 +231,7 @@ public partial class App : Application
     /// pairs with <c>EventsPage</c>'s compose surface — which does not exist yet at
     /// login (built lazily on first Events-page visit, like <see cref="FeedDrafts"/>'s
     /// <c>FfiFeedManager</c>) — so <c>EventsPage</c> itself builds this the first time
-    /// it loads. Unlike <see cref="FeedDrafts"/> it is built only ONCE per session,
+    /// it loads. Like <see cref="FeedDrafts"/> it is built only ONCE per session,
     /// never rebuilt on re-entry: <c>EventsPage</c> is <c>NavigationCacheMode.Required</c>
     /// and its <c>TextBox</c>es are never torn down, so one instance covers the page's
     /// whole cached lifetime. Null before login, before Events has ever loaded, or
@@ -271,14 +272,17 @@ public partial class App : Application
     /// </summary>
     internal static INestHttpClient? CurrentNest => (Current as App)?._nestClient;
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// This session's live WS-RPC client, or <c>null</c> before login / after
     /// teardown. Resolved per call for the same staleness reason as <see
     /// cref="CurrentNest"/> — a login rebuilds <c>_rpcClient</c>. Used by the
     /// <c>family_notify_check_now</c> e2e command (testing.md convention 14),
-    /// which has no page-scoped ViewModel to reach through.
+    /// which has no page-scoped ViewModel to reach through — its only caller, so
+    /// it compiles out of Release with the agent (convention 15).
     /// </summary>
     internal static Core.Services.INestRpcClient? CurrentRpc => (Current as App)?._rpcClient;
+#endif
 
     /// <summary>
     /// This session's live sync-agent control channel, or <c>null</c> when none
@@ -290,13 +294,16 @@ public partial class App : Application
     internal static FaunaApp.Core.Services.SyncAgentSession? CurrentSyncAgent =>
         (Current as App)?._syncAgent.Current;
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Whether a sync-agent session install is still in flight — the causal barrier the
     /// unprovision e2e anchors its negative assert to, in place of a settle window (see
     /// <see cref="FaunaApp.Core.Services.SyncAgentSessionHost{T}.InstallInFlight"/>).
+    /// The e2e state serializer is its only reader (convention 15).
     /// </summary>
     internal static bool SyncAgentInstallInFlight =>
         (Current as App)?._syncAgent.InstallInFlight ?? false;
+#endif
 
     /// <summary>
     /// This login's folder-binding control plane — the optimistic model every binding
@@ -595,7 +602,7 @@ public partial class App : Application
     }
     // An explicit `set_state({"session": {"authenticated": …}})` override, which
     // WINS over _mainAppMounted while it is set — the exact shape of linux's
-    // `SessionOverride::authenticated` (`apps/fauna-linux/src/main.rs`, read at
+    // `SessionOverride::authenticated` (`apps/fauna-linux/src/lib.rs`, read at
     // its `authenticated_override.unwrap_or(app_state.is_some())`). It is what
     // keeps the ordinary e2e login honest: that path (the `session` block in
     // HandleTestCommand) navigates to MainPage from a DEFERRED post-action and
@@ -834,6 +841,20 @@ public partial class App : Application
     internal static string? PendingProfileTarget { get; set; }
 
     /// <summary>
+    /// The actor's home nest a door carried beside <see cref="PendingProfileTarget"/>
+    /// (the Find User result's <c>nest_url</c>, a post's / contact's
+    /// <c>home_nest_url</c>, the state-protocol entry's <c>home_nest_url</c>) —
+    /// read-then-cleared by <see cref="Views.ProfilePage"/> with the target and
+    /// seeded into the profile's actor-home slot. <c>null</c> = no hint.
+    /// </summary>
+    internal static string? PendingProfileHome { get; set; }
+
+    /// <summary>The mounted profile page's (actor id, actor-home slot), reported as
+    /// the <c>data.profile</c> state read (<c>profile.actor_id</c> /
+    /// <c>profile.home_nest_url</c>); <c>null</c> while no profile page is mounted.</summary>
+    internal static (string ActorId, string? Home)? ProfileStateNow { get; set; }
+
+    /// <summary>
     /// The <c>fauna://</c> route this process was launched with (argv), or
     /// <c>null</c> — the Explorer Share leaf's hand-off (windows.md § Shell
     /// Extension → <i>The Share hand-off</i>). A secondary launch forwards it to the
@@ -869,7 +890,8 @@ public partial class App : Application
     /// <summary>
     /// Called by the Connected apps page once <c>open_handoff</c> has returned and the
     /// card (or the one expired-link message) is painted. Clears the staged request
-    /// and releases whoever waits on <see cref="ApplyRouteAndWaitAsync"/>.
+    /// and releases whoever waits on <c>ApplyRouteAndWaitAsync</c> (the e2e twin, in
+    /// Debug and e2e-agent builds).
     /// </summary>
     internal static void FinishConsentHandoff(string requestUri)
     {
@@ -878,11 +900,13 @@ public partial class App : Application
         _consentHandoffOpened?.TrySetResult();
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// The e2e seam's twin of <see cref="ApplyRoute"/>: applies the route, then waits
     /// for the route's page work — for a <c>consent</c> route, the page's
     /// <c>open_handoff</c> — so the card is painted when the caller continues.
     /// Signed out the route is only held, and nothing is awaited. UI thread.
+    /// Compiled out of Release with the TestAgent, its one caller (convention 15).
     /// </summary>
     internal static Task ApplyRouteAndWaitAsync(string uri)
     {
@@ -891,6 +915,7 @@ public partial class App : Application
             ? Task.CompletedTask
             : _consentHandoffOpened?.Task ?? Task.CompletedTask;
     }
+#endif
 
     /// <summary>The first argv entry that is a <c>fauna://</c> URI, if any.</summary>
     private static string? RouteFromArgs(string[] args) =>
@@ -1179,6 +1204,10 @@ public partial class App : Application
         // held document binds from the first paint (region-blocking.md § How an app
         // obtains its region's policy → last-known-good). The one platform leaf.
         Services.RegionLeaf.OpenPlane();
+        // The nest-rules book, its persisted records restored (each verified again in
+        // shared Rust) AHEAD of the first read, so the last-accepted rules bind from
+        // the first paint (nest-rules.md § The nest content policy → Carriage).
+        Core.Services.NestRulesHost.Open();
     }
 
     /// <summary>
@@ -1502,6 +1531,12 @@ public partial class App : Application
         }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
+    /// <summary>What a launch broken by <c>FAUNA_E2E_FAULT_AT_LAUNCH=exit</c> exits
+    /// with: non-zero, and a code no real failure of this app reports.</summary>
+    internal const int E2eFaultAtLaunchExitCode = 73;
+#endif
+
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         // A `fauna://` route on argv (the installer's protocol registration starts
@@ -1546,6 +1581,25 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"[startup] logging install failed: {ex.Message}");
             // no ShellLog: the ring failed to install
         }
+
+#if DEBUG || FAUNA_E2E_AGENT
+        // The app's start broken on purpose: the forced faults of convention 6's
+        // launch-timeout rider (`test_launch_timeout_forced_windows.py`). Past the log
+        // install, so the launch has a record, and before the window. `exit` ends the
+        // process (the forced FAULTED); `block` parks the UI thread for good before
+        // the window (the forced blocked launch, which asks for no CPU and must read
+        // STALLED, never STARVED). Compiled out of a release artifact (convention
+        // 15), so it is artifact-set wiring, never a knob.
+        switch (Environment.GetEnvironmentVariable("FAUNA_E2E_FAULT_AT_LAUNCH"))
+        {
+            case "exit":
+                Environment.Exit(E2eFaultAtLaunchExitCode);
+                break;
+            case "block":
+                System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+                break;
+        }
+#endif
 
         // Did this plain launch collide with a live instance of the account it would
         // open (account-scoping.md § Concurrent instances → "the colliding
@@ -2841,11 +2895,18 @@ public partial class App : Application
     ///   same terminal phase and carries the verdict on this side channel.
     ///   No retry, no "use a different nest" — the nest is not the
     ///   problem.</item>
+    /// <item><c>Offline</c> with <c>lockedUntilSecs</c> set →
+    ///   <see cref="Views.LaunchAccountLockedPage"/>: the account is locked
+    ///   (devices.md § The locked state) — the standing notice and the
+    ///   stolen-identity ceremony, no retry and no fallthrough; the surface
+    ///   follows the machine's own refresh at the unlock time out
+    ///   (<see cref="ShowLockedLaunch"/>). Checked ahead of the generic Offline
+    ///   arms, like the account-index row.</item>
     /// <item><c>Offline { transient }</c> → <see cref="Views.LaunchRetryPage"/>:
     ///   Retry (re-runs the silent challenge) or "Use a different nest"
     ///   (drops to the wizard at handle_entry). The terminal
-    ///   <c>Offline { transient: false }</c> case (e.g. account locked)
-    ///   reuses the same surface for v1 per the migration design doc.</item>
+    ///   <c>Offline { transient: false }</c> case with no side channel is the
+    ///   needs-update surface below.</item>
     /// <item><c>IdentityChanged</c> → <see cref="Views.LaunchIdentityChangedPage"/>:
     ///   the nest's pinned identity changed or can no longer be proven
     ///   (security.md § Transport trust). NO Retry CTA — only
@@ -3114,6 +3175,20 @@ public partial class App : Application
                 return;
             }
 
+            // The account is LOCKED (devices.md § The locked state; ui/sessions.md
+            // § The locked surface): the machine parks here with the unlock time on
+            // its side channel and runs the one refresh at that time itself. Ahead of
+            // the generic split, which would paint a dead-end "update your nest" over
+            // it — and of the superseded row, the order tui's route(), linux, android
+            // and FaunaKit's dispatchLaunch take. The standing notice and its ONE
+            // action, the stolen-identity ceremony; no retry, no fallthrough.
+            case LaunchPhase.Offline when snap.@lockedUntilSecs is { } lockedUntil:
+            {
+                ShellLog.Warn("App", $"[launch] the account is locked until {lockedUntil}");
+                ShowLockedLaunch(machine, lockedUntil, rootFrame, account, secretHex, baseUrl, onOnboardingCompleted);
+                return;
+            }
+
             // The identity was SUCCEEDED (identity-succession.md § Propagation →
             // *Own device fleet*): route to the import flow. Ahead of the generic
             // Offline split for the same side-channel reason as the account-index
@@ -3214,7 +3289,11 @@ public partial class App : Application
                             _nestClient, _cryptoService, account,
                             RecoverFromLaunch: (secretHex, boxes),
                             OnOnboardingCompleted: onOnboardingCompleted));
-                    });
+                    },
+                    Retire: () => OpenNestRetireFromLaunch(rootFrame, baseUrl, () =>
+                        DispatchLaunchSnapshotAsync(
+                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
+                            onOnboardingCompleted)));
                 rootFrame.Navigate(typeof(Views.LaunchRetryPage), ctx);
                 // Best-effort, fired AFTER the retry surface paints (never
                 // blocks it): a transiently-failing saved nest may still answer
@@ -3257,7 +3336,7 @@ public partial class App : Application
                 return;
             }
 
-            case LaunchPhase.IdentityChanged:
+            case LaunchPhase.IdentityChanged changed:
             {
                 // The nest's pinned deployment identity changed, or a pinned
                 // nest can no longer prove any identity (security.md §
@@ -3279,7 +3358,12 @@ public partial class App : Application
                 // the one gap: reachable only post-auth, with no bridge trigger
                 // to exercise it until the silent_sign_in command existed to drive it.
                 Core.Services.E2eSessionCounters.RecordSessionTeardown();
-                ShellLog.Warn("App", "[launch] phase=IdentityChanged: possible nest identity change/withdrawal.");
+                ShellLog.Warn("App", snap.@identityFork
+                    ? "[launch] phase=IdentityChanged: rotation-chain FORK evidence — two competing heads."
+                    : "[launch] phase=IdentityChanged: possible nest identity change/withdrawal.");
+                // Fork evidence (box-recovery.md § Client acceptance) is the snapshot's
+                // `identity_fork` bit; the heads it names are the phase's own. The page
+                // then paints the fork sentence and NO trust button.
                 var ctx = new Views.LaunchIdentityChangedContext(
                     Trust: async () =>
                     {
@@ -3294,7 +3378,10 @@ public partial class App : Application
                             _nestClient, _cryptoService, account,
                             SeedSecret: secretHex,
                             OnOnboardingCompleted: onOnboardingCompleted));
-                    });
+                    },
+                    IsFork: snap.@identityFork,
+                    PinnedHex: changed.@pinnedHex,
+                    SeenHex: changed.@seenHex);
                 rootFrame.Navigate(typeof(Views.LaunchIdentityChangedPage), ctx);
                 return;
             }
@@ -3330,7 +3417,11 @@ public partial class App : Application
                             _nestClient, _cryptoService, account,
                             RecoverFromLaunch: (secretHex, boxes),
                             OnOnboardingCompleted: onOnboardingCompleted));
-                    });
+                    },
+                    Retire: () => OpenNestRetireFromLaunch(rootFrame, baseUrl, () =>
+                        DispatchLaunchSnapshotAsync(
+                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
+                            onOnboardingCompleted)));
                 rootFrame.Navigate(typeof(Views.LaunchRetryPage), ctx);
                 if (secretHex is not null && rootFrame.Content is Views.LaunchRetryPage retryPage)
                 {
@@ -3339,6 +3430,127 @@ public partial class App : Application
                 return;
             }
         }
+    }
+
+    /// <summary>The locked launch surface this process is showing (and following),
+    /// or <c>null</c>. Compared by reference: a tick or a re-read owed to a surface
+    /// that has since gone is dropped.</summary>
+    private Core.ViewModels.LockedLaunchViewModel? _lockedLaunch;
+
+    /// <summary>
+    /// Land the locked launch surface (<c>launch_account_locked</c>) for
+    /// <paramref name="lockedUntil"/>, and follow <paramref name="machine"/> out of
+    /// it (<c>ui/sessions.md</c> § The locked surface; <c>devices.md</c> § The locked
+    /// state). The same lock keeps its surface — and an open stolen-identity step;
+    /// a new one gets a fresh one.
+    ///
+    /// <para><b>Following.</b> The machine runs the one refresh at the unlock time
+    /// itself; on each of its ticks (the launch observer's <c>Ticked</c>) the shell
+    /// re-reads the snapshot and re-dispatches once the shared rule
+    /// (<c>launch_lock_notice_holds</c>, through
+    /// <see cref="Core.ViewModels.LockedLaunchViewModel.NoticeHolds"/>) says the notice
+    /// no longer stands — signed back in, or met a different lock. No timer of this
+    /// app's own. FaunaKit's <c>followLockedLaunch</c> is the twin.</para>
+    ///
+    /// <para><b>The ceremony</b> rides no session: the shared session-less
+    /// composition <c>succession_succeed_stolen_locked</c> over an anonymous
+    /// connection, with the seed this device still holds as the old identity and the
+    /// platform store location (no sandbox container on windows). A persisted landing
+    /// adopts the successor through the ordinary account switch, which re-runs
+    /// launch over it.</para>
+    /// </summary>
+    private void ShowLockedLaunch(
+        LaunchMachine machine,
+        ulong lockedUntil,
+        Frame rootFrame,
+        ISessionAccount account,
+        string? secretHex,
+        string baseUrl,
+        System.Action onOnboardingCompleted)
+    {
+        if (_lockedLaunch is { } shown
+            && shown.LockedUntilSecs == lockedUntil
+            && rootFrame.Content is Views.LaunchAccountLockedPage)
+        {
+            return;
+        }
+
+        var heldSecret = account.SecretHex ?? secretHex;
+        var nestUrl = account.NestUrl ?? baseUrl;
+        string? predecessor = null;
+        if (heldSecret is { Length: > 0 })
+        {
+            try
+            {
+                predecessor = Convert.ToHexString(uniffi.fauna_ffi.FaunaFfiMethods.ActorIdFromSecret(
+                    Convert.FromHexString(heldSecret))).ToLowerInvariant();
+            }
+            catch (Exception ex)
+            {
+                ShellLog.Warn("App", $"[locked] the held secret names no actor: {ex.GetType().Name}");
+            }
+        }
+
+        var model = new Core.ViewModels.LockedLaunchViewModel(
+            lockedUntil,
+            async kitInput =>
+            {
+                if (heldSecret is not { Length: > 0 })
+                    throw new InvalidOperationException("this device holds no identity to recover");
+                using var registry = CredentialStore.Registry();
+                return await uniffi.fauna_ffi.FaunaFfiMethods.SuccessionSucceedStolenLocked(
+                    nestUrl, Convert.FromHexString(heldSecret), kitInput, registry,
+                    new Core.Services.SuccessorStorePath());
+            },
+            predecessor);
+        _lockedLaunch = model;
+
+        void Follow()
+        {
+            if (!ReferenceEquals(_lockedLaunch, model)) return;
+            var snap = machine.Snapshot();
+            if (model.NoticeHolds(snap)) return;
+            var phaseName = DescribePhase(snap);
+            ShellLog.Info("App", $"[locked] the lock no longer stands ({phaseName}) — re-dispatching");
+            _lockedLaunch = null;
+            _ = DispatchLaunchSnapshotAsync(
+                machine, snap, rootFrame, account, secretHex, baseUrl, onOnboardingCompleted);
+        }
+
+        // The observer the app wired onto THIS machine when it built it; a machine
+        // built without one cannot be followed, and says so.
+        var observer = _selfAddressHealObserver;
+        if (observer is not null && ReferenceEquals(observer.Machine, machine))
+        {
+            observer.Ticked = () => _window?.DispatcherQueue.TryEnqueue(Follow);
+        }
+        else
+        {
+            ShellLog.Warn("App", "[locked] no observer on this launch machine — the notice cannot follow its refresh");
+        }
+
+        var ctx = new Views.LaunchAccountLockedContext(
+            Model: model,
+            Switch: successor =>
+                SwitchAccountHandler?.Invoke(successor, false) ?? Task.CompletedTask,
+            Refollow: Follow,
+            Left: () =>
+            {
+                if (!ReferenceEquals(_lockedLaunch, model)) return;
+                _lockedLaunch = null;
+                if (observer is not null && ReferenceEquals(observer.Machine, machine)) observer.Ticked = null;
+            });
+        rootFrame.Navigate(typeof(Views.LaunchAccountLockedPage), ctx);
+        // A tick may have landed between the snapshot this dispatch read and the
+        // hook going up; re-read once so it is not lost.
+        Follow();
+    }
+
+    /// <summary>The launch phase's variant name, for a log line.</summary>
+    private static string DescribePhase(LaunchSnapshot snapshot)
+    {
+        LaunchPhase phase = snapshot.phase;
+        return phase.GetType().Name;
     }
 
     /// <summary>
@@ -3385,6 +3597,33 @@ public partial class App : Application
         }
         var boxes = await Core.Helpers.DeploymentSeedCustody.LoadRecoverableBoxesAsync(nestUrl, ownerSecret);
         page.ShowRecoverButton(boxes);
+    }
+
+    /// <summary>
+    /// <c>launch-retire-button</c> (<c>nest-retirement.md</c> § Layout &amp; flow):
+    /// open <c>nest_retire</c> over the launch retry surface, in the root frame
+    /// that holds it. No session is up, so the page reads no live domains and
+    /// leaving it can never drop one: it re-dispatches the launch machine's
+    /// current snapshot (<paramref name="putRetryBack"/>), which paints the retry
+    /// surface again — its recovery entry re-read and its retire entry with it.
+    /// </summary>
+    private static void OpenNestRetireFromLaunch(Frame rootFrame, string nestUrl, Func<Task> putRetryBack)
+    {
+        rootFrame.Navigate(typeof(Views.Onboarding.NestRetirePage), new Views.Onboarding.NestRetireContext(
+            RetireEntry.Launch,
+            nestUrl,
+            () => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()),
+            sessionDropped => { _ = PutRetrySurfaceBackAsync(putRetryBack); }));
+    }
+
+    private static async Task PutRetrySurfaceBackAsync(Func<Task> putRetryBack)
+    {
+        try { await putRetryBack(); }
+        catch (Exception ex)
+        {
+            ShellLog.Error("App", $"[retire] putting the launch retry surface back failed: {ex.Message}");
+            _currentErrorMessage = Core.Services.Strings.Error(ex);
+        }
     }
 
     /// <summary>
@@ -3482,13 +3721,15 @@ public partial class App : Application
         _ = RunDeploymentSeedCustodyLegAsync(_rpcClient);
 
         // encryption-at-rest.md § Capability tiering → Content-sealing epochs: refresh
-        // this client's epoch schedule once per successful (re)connect, riding the SAME
-        // universal post-auth hook as the custody leg above. The shared
-        // MailSettingsMachine::refresh_epoch_schedule is idempotent and no-ops when mail
-        // isn't enabled, so calling it
-        // unconditionally here is correct. Fire-and-forget, log-only — invisible
-        // plumbing with no user-facing surface on any outcome.
-        _ = Core.Helpers.MailEpochSchedule.RefreshAsync(_rpcClient);
+        // this client's epoch schedule on every connect AND reconnect, riding the SAME
+        // universal post-auth hook as the custody leg above: the shared UniFFI trigger
+        // is started once per client and re-runs the idempotent
+        // MailSettingsMachine::refresh_epoch_schedule after each reconnect (it no-ops
+        // when mail isn't enabled, so starting it unconditionally here is correct).
+        // Fire-and-forget, log-only — invisible plumbing with no user-facing surface
+        // on any outcome. The e2e `session` door starts it too (it never reaches here).
+        _ = Core.Helpers.MailEpochSchedule.StartAsync(_rpcClient);
+        _ = Core.Helpers.SubscriberEncapsKeyPublish.PublishAsync(_rpcClient);
 
         // critical-alerts.md § Mechanism → How often the detector runs: the re-sweep
         // loop rides the SAME universal post-auth hook as the two calls above, and
@@ -3519,11 +3760,11 @@ public partial class App : Application
         _ = Core.Helpers.SuccessionAftermath.RunAsync(_rpcClient);
 
         // installers/README.md § Knowing a newer version is out: the ONE unasked,
-        // notify-only look per sign-in, through the shared update look's FFI face —
-        // a newer release paints the same notice the asked check paints (Settings →
-        // General), a failed look paints nothing. Fire-and-forget; it never holds
-        // sign-in up.
-        _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync();
+        // notify-only look per sign-in, on the client that just signed in — it reads
+        // that nest's newest_release, never the release host. A newer release paints
+        // the same notice the asked check paints (Settings → General), a failed look
+        // paints nothing. Fire-and-forget; it never holds sign-in up.
+        _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync(_rpcClient);
 
         // The onboarding wizard's sign-in follow-ups (the captured DNS credential,
         // the one-tap trust mint, the confirmed recovery kit), queued for THIS
@@ -3671,6 +3912,17 @@ public partial class App : Application
                     // the start. No ConfigureAwait(false) (WinUI bound-state rule).
                     try { await convSession.StartReceiveLoop(); } catch { /* best-effort */ }
 
+                    // Phase two's archive links (archive-import.md § Linking and
+                    // merging): built and registered as the session's sink by the FFI
+                    // factory above; drive them now and on the host's tick. The e2e
+                    // login path starts them through the same helper.
+                    await StartArchiveLinksAsync(_rpcClient);
+                    // The Archive rail's first read (archive-import.md § What each
+                    // category becomes): the factory registered the source; the
+                    // conversations page re-reads it on every visit. The e2e login
+                    // path reads it through the same helper.
+                    _ = RefreshArchiveThreadsAsync(convSession);
+
                     // App-lifetime DM OS-toast observer — see AttachMessageToastObserver.
                     // The e2e login path attaches the SAME observer through the same
                     // helper (BuildE2eConvSessionAsync), so the witness sees this wiring.
@@ -3769,8 +4021,8 @@ public partial class App : Application
         // classify + never-publish-a-private-address safety live entirely in the
         // shared FFI fn (priority #2). Fire-and-forget, best-effort — the native
         // twin of linux's AdminStatusLoaded → report_host_address() / web
-        // reportHostAddress. Reached only in production (the E2E set_state login
-        // never enters StartMainAppAsync), so no test nest gets a spurious report.
+        // reportHostAddress. The E2E set_state login never enters StartMainAppAsync,
+        // so its cmd-session path runs the same reporter itself.
         _ = new HostAddressReporter(_rpcClient).RunAsync();
 
         // Muted-keywords cache seed (moderation.md § Muted keywords): populate
@@ -4420,6 +4672,17 @@ public partial class App : Application
                         uniffi.fauna_ffi.FfiSessionEndingVerdict.SignInRefused, StolenCeremonyHold.Shared,
                         () => EscalateIfStillLiveAsync(sessionRpc));
                     return;
+                case LaunchPhase.Offline when snap.@lockedUntilSecs is not null:
+                    // The post-auth silent challenge was refused as LOCKED
+                    // (`fauna.auth.account_locked` — devices.md § The locked state):
+                    // locked while signed in, by this account's own Sessions page on
+                    // another device or by whoever holds its key. Re-enter launch,
+                    // whose re-run challenge meets the lock and paints its notice —
+                    // tui's SilentSignInVerdict::Locked arm, FaunaKit's
+                    // performPostAuthSilentSignIn `.AccountLocked` arm.
+                    ShellLog.Warn("App", "[post-auth] this account is locked — re-entering launch");
+                    await EscalateIfStillLiveAsync(sessionRpc);
+                    return;
                 default:
                     // Not Online and not mid-refresh → the loop's purpose is over.
                     return;
@@ -4506,13 +4769,26 @@ public partial class App : Application
     private async Task<bool> RunSilentSignInForTestAsync()
     {
         if (_liveTtlRefreshContext is not { } ctx) return false;
-        await ctx.Machine.RefreshToken();
+        var sessionRpc = _rpcClient;
+        try
+        {
+            await ctx.Machine.RefreshToken();
+        }
+        catch (uniffi.fauna_launch_machine.LaunchException.AccountLocked)
+        {
+            // Parked below on the snapshot's side channel, as the loop reads it.
+        }
         var snap = ctx.Machine.Snapshot();
         if (snap.@phase is LaunchPhase.IdentityChanged)
         {
             await DispatchLaunchSnapshotAsync(
                 ctx.Machine, snap, ctx.RootFrame, ctx.Account, ctx.SecretHex, ctx.BaseUrl,
                 _onOnboardingCompleted ?? (() => { }));
+        }
+        else if (snap.@lockedUntilSecs is not null)
+        {
+            // The loop's own Locked arm, forced now (RunTtlRefreshLoopAsync).
+            await EscalateIfStillLiveAsync(sessionRpc);
         }
         return true;
     }
@@ -4585,6 +4861,13 @@ public partial class App : Application
             _e2eRealConvSession = convSession;
             _e2eRealConvDeviceIdHex = deviceIdHex;
 
+            // Phase two's archive links, as the production login does (every login
+            // wires them, as linux's conv_backend does): the factory built them with
+            // this session; the host drives them and repaints the Contacts rows.
+            await StartArchiveLinksAsync(rpc);
+            // …and the Archive rail's first read, as the production login does.
+            _ = RefreshArchiveThreadsAsync(convSession);
+
             // The DM OS-toast observer the production login block attaches — the
             // witness for conversations outcome 11 reads what it fires, and the seeded
             // / `session` e2e login never reaches that block, so without this the e2e
@@ -4597,6 +4880,14 @@ public partial class App : Application
             // same reason: production does it in StartMainAppAsync, which this login
             // never reaches, so without it every toast would be declined (idempotent).
             NotificationService.Initialize();
+            // This builder always makes a FRESH session over a fresh manager (the
+            // predecessor was retired just above), so an observer the field still
+            // holds is bound to the discarded one — the e2e re-login reaches
+            // DropActorScopedState without any of the arms that null it (factory
+            // reset, sign-out, switch). Left set, AttachMessageToastObserver's
+            // re-entry guard would skip the new manager and no banner would ever
+            // fire for the second journey in a reused app.
+            _messageToastObserver = null;
             AttachMessageToastObserver(convSession.Manager(), _window?.DispatcherQueue);
 
             // The room-post key seam's SECOND meeting point (ui/feed.md § Encryption at
@@ -4716,8 +5007,9 @@ public partial class App : Application
     /// <summary>
     /// Build the nest-backed <c>__drafts</c> autosync (the shared <c>DraftsSync</c> wrapper)
     /// over this session's conversations manager, expose it as <see cref="ConvDrafts"/>, and
-    /// restore any stored conversation drafts INTO the manager before the page loads (so
-    /// opening the composer renders the restored body). Shared by the production login
+    /// start restoring any stored conversation drafts INTO the manager — not awaited, since the
+    /// shared load retries a lost read for minutes; the restore fills the composer whenever it
+    /// lands. Shared by the production login
     /// (<see cref="StartMainAppAsync"/>) and the e2e real-conversations harness so both wire
     /// drafts identically (file-sync.md § Drafts Sync; conversations.md § Persistence).
     /// Best-effort — a transient build/restore failure must never block login.
@@ -4730,7 +5022,12 @@ public partial class App : Application
             var draftsSync = await rpc.BuildDraftsSyncAsync("conversations");
             var convDrafts = new ConversationDraftsService(draftsSync, new ManagerDraftStore(mgr));
             ConvDrafts = convDrafts;
-            await convDrafts.RestoreOnLaunchAsync();
+            // Not awaited: the shared DraftsSync retries a launch read lost to the
+            // transport for minutes (conversation-drafts.md § Persistence, *A launch
+            // load lost to the transport is retried*), and login must not wait on it.
+            // A late restore is safe — it fills and never overwrites live typing, and
+            // RestoreOnLaunchAsync swallows its own failure.
+            _ = convDrafts.RestoreOnLaunchAsync();
         }
         catch { /* drafts are best-effort */ }
     }
@@ -4740,8 +5037,8 @@ public partial class App : Application
     /// it as <see cref="FeedDraftsSync"/>. Unlike <see cref="WireConversationDraftsAsync"/>
     /// this builds ONLY the sync handle, never a <see cref="FeedDraftsService"/> —
     /// <c>FfiFeedManager</c> does not exist yet at login (it is built lazily on first
-    /// Feed-page visit), so <c>FeedPage.Page_Loaded</c> pairs this handle with each
-    /// freshly-built manager itself. Shared by the production login
+    /// Feed-page visit), so <c>FeedPage.Page_Loaded</c> pairs this handle with the
+    /// session's manager itself, once. Shared by the production login
     /// (<see cref="StartMainAppAsync"/>) and the e2e login handler so both wire feed
     /// drafts identically. Best-effort — a transient build failure must never block
     /// login.
@@ -4833,7 +5130,19 @@ public partial class App : Application
                 } },
                 ["modal"] = (object?)null,
             },
-            ["settings"] = new Dictionary<string, object?> { ["inbox_mode"] = _testInboxMode },
+            ["settings"] = new Dictionary<string, object?>
+            {
+                ["inbox_mode"] = _testInboxMode,
+                // The token id behind each painted session-card, in order — null
+                // before a visit's first hydrate (actions/sessions.py::painted_token_ids;
+                // tui/android/apple publish the same key).
+                ["session_token_ids"] = Core.ViewModels.SessionsViewModel.PaintedTokenIdsForTest,
+            },
+            // The held session bearer's schedule and this app's own session ids
+            // (`fauna_e2e_agent::LAUNCH_TOKEN_KEY`), TOP-level like the other
+            // apps'. On the UniFFI apps the bearer is this client's
+            // WsChallengeBearer; shared Rust builds the value.
+            ["launch_token"] = LaunchTokenForSerialization(),
             // The `barrier` self-test's only observables — TOP-level, not under
             // `data`, because the cross-app test reads `get_state("barrier_probe")`
             // and tui/linux/web publish them at the same depth
@@ -4873,6 +5182,15 @@ public partial class App : Application
             // deliberately NOT apple's omit-the-key deviation: windows HAS this
             // leg, so `null`/absent must stay reserved for an app that doesn't.
             ["mls_folded_commits"] = MlsFoldedCommitsForSerialization(),
+            // Every chat channel this device has bound a thread to — the
+            // `mls_folded_commits` twin, TOP-level at the same depth
+            // (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`, which owns the
+            // contract; `helpers/waiting.py::await_channel_bound` reads it). A
+            // Welcome-only direct thread is bound but listed on no rail, so a
+            // second device's restore is witnessed here, not in
+            // `data.conversation_threads`. No session yet publishes `[]`, never
+            // omits the key: an absent key is refused loudly by the wait.
+            ["mls_bound_channels"] = MlsBoundChannelsForSerialization(),
             // Convention 14's `conv_receive_cycles` observable, also TOP-level —
             // same depth as `mls_folded_commits` above, and the depth
             // `helpers/waiting.py` reads (`fauna_e2e_agent::CONV_RECEIVE_CYCLES_KEY`;
@@ -4919,6 +5237,12 @@ public partial class App : Application
             // omitted key, which would read as "this app has no leg" and windows
             // HAS one.
             ["serving_enablement"] = ServingEnablementForSerialization(),
+            // What this process's custody ceremony sink did with each received
+            // offer / accept / deliver (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`),
+            // top-level like tui's and linux's — devices outcome 15's barrier for the
+            // owner's send-again. Five atomic loads on the FFI side (convention 11's
+            // corollary); null before a client exists (pre-auth), never zeros.
+            ["custody_ceremony_ingest"] = CustodyCeremonyIngestForSerialization(),
 #if P2P_SHARE
             // What this process's share plane has served to peers
             // (`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`), top-level like tui's — the
@@ -4978,6 +5302,12 @@ public partial class App : Application
             ["diagnostics"] = new Dictionary<string, object?>
             {
                 ["live_sync_agent_pollers"] = Views.MainPage.LiveSyncAgentPollers,
+                // Feed pages still attached to the session's feed manager: at most 1
+                // while the Feed page is on screen, 0 anywhere else. A left Feed page
+                // that stays attached re-renders on every manager tick and blanks the
+                // app-wide error mirror under the page on screen (see
+                // Views.FeedPage.LiveFeedPages; apps/windows.md § Client lifetime).
+                ["live_feed_pages"] = Views.FeedPage.LiveFeedPages,
                 // Registered ConversationsManager observer count: the manager-wide total -- the once-per-manager app-lifetime
                 // observers plus exactly one page-scoped observer, which must never
                 // grow however many times the Conversations tab is re-navigated. Always
@@ -4997,7 +5327,7 @@ public partial class App : Application
             // protocol first and never fall through to the element once the `messages`
             // key exists — a surfaced failure then reads identically to a swallowed
             // one. Linux resolves its own `messages.error` the same way
-            // (`apps/fauna-linux/src/main.rs`, the `error_text` block).
+            // (`apps/fauna-linux/src/lib.rs`, the `error_text` block).
             //
             // `_agentCommandFailure` OUTRANKS it, on every page (convention 11, and
             // the same precedence linux gives `agent_command_failure` and tui gives
@@ -5026,14 +5356,14 @@ public partial class App : Application
             ["machine_method_result"] = _machineMethodResult,
             // The `serve_enable_folder` test-agent command's outcome — top-level,
             // the same depth linux's `webdav_serve_reply` sits at
-            // (`apps/fauna-linux/src/main.rs`), so
+            // (`apps/fauna-linux/src/lib.rs`), so
             // `helpers/webdav_roundtrip.py::serve_enable_folder`'s poll loop reads
             // one shape regardless of app. Null between invocations and while one
             // is in flight (cleared by the case itself before returning).
             ["webdav_serve_reply"] = _webdavServeReply,
             // The `enable_caldav_mailbox` test-agent command's outcome — top-level,
             // the same depth linux's `caldav_mailbox_reply` sits at
-            // (`apps/fauna-linux/src/main.rs`), so
+            // (`apps/fauna-linux/src/lib.rs`), so
             // `helpers/mail_dedicated_nest.py::mint_caldav_mailbox`'s poll loop reads
             // one shape regardless of app. Null between invocations and while one
             // is in flight (cleared by the case itself before returning).
@@ -5045,6 +5375,19 @@ public partial class App : Application
             // actually painted (RegionPlaneHost.BlockRenderState). Two set counts —
             // field reads only, as this ack path requires.
             ["region_block_render"] = Core.Services.RegionPlaneHost.BlockRenderState(),
+            // The nest source's twin (`_check_nest_block_never_silent`, nest-rules.md
+            // § Element IDs): the on-screen items a nest rule blocks against the nest
+            // block placeholders painted (NestRulesHost.BlockRenderState) — two set
+            // counts, field reads only.
+            ["nest_block_render"] = Core.Services.NestRulesHost.BlockRenderState(),
+            // The shell's one-line changed notice while it is up, else null
+            // (`tests/e2e-unified/tests/test_nest_rules.py`; the notice carries no id).
+            ["nest_rules_changed_notice"] = Core.Services.NestRulesHost.ChangedNoticeText,
+            // The witness that a guardian's save reached this ward's device: how many
+            // rules the guardian's document holds here, read through the shared
+            // editor's own view (never counted in C#); null for an unsupervised viewer
+            // or a policy with no document. tui's, android's and apple's twin.
+            ["ward_rule_document_rules"] = WardRuleDocumentRules(),
             ["data"] = new Dictionary<string, object?>
             {
                 // null = not implemented (test skips), populated = real data
@@ -5058,6 +5401,15 @@ public partial class App : Application
                 // conversation_sort_json, also published by tui/linux/macos/ios).
                 ["conversation_sort"] = conversationSort,
                 ["contacts"] = (object?)contacts,
+                // The mounted profile page's viewed actor + actor-home slot
+                // (`profile.actor_id`, `profile.home_nest_url`); null = no profile page.
+                ["profile"] = ProfileStateNow is { } ps
+                    ? new Dictionary<string, object?>
+                    {
+                        ["actor_id"] = ps.ActorId,
+                        ["home_nest_url"] = ps.Home,
+                    }
+                    : (object?)null,
                 ["events"] = (object?)events,
                 ["knocks"] = (object?)knocks,
                 ["sync"] = (object?)sync,
@@ -5156,6 +5508,27 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// The <c>launch_token</c> state value DECODED (never the raw JSON string — the
+    /// double-encode trap <see cref="MlsFoldedCommitsForSerialization"/> names):
+    /// <c>{"expires_in_secs", "own_session_ids"}</c> from the live client's held
+    /// bearer, built by shared Rust (<c>FfiNestClient.LaunchTokenJsonForTest</c>, a
+    /// non-minting, non-waiting read). <c>null</c> — the key's documented "cannot
+    /// answer yet" — with no connected client or while a mint is in flight.
+    /// </summary>
+    private object? LaunchTokenForSerialization()
+    {
+        var json = _rpcClient?.LaunchTokenJsonForTest();
+        return json is null ? null : System.Text.Json.JsonSerializer.Deserialize<object>(json);
+    }
+
+    /// <summary>The <c>launch_refresh_token</c> agent command's mechanism on the live
+    /// client (<c>NestRpcClient.RefreshHeldBearerForTestAsync</c>): drop the held
+    /// bearer and re-mint over the silent challenge, awaited. <c>false</c> with no
+    /// connected client.</summary>
+    internal static Task<bool> RefreshHeldBearerForTestAsync() =>
+        (Current as App)?._rpcClient?.RefreshHeldBearerForTestAsync() ?? Task.FromResult(false);
+
+    /// <summary>
     /// Convention 14's <c>mls_folded_commits</c> observable as the state
     /// serializer publishes it: the DECODED <c>{channel_hex: count}</c> object,
     /// never the raw JSON string (which would double-encode at the wire
@@ -5172,6 +5545,25 @@ public partial class App : Application
         var json = _e2eRealConvSession.MlsFoldedCommitsJson();
         return System.Text.Json.JsonSerializer.Deserialize<object>(json)
             ?? new Dictionary<string, object?>();
+    }
+
+    /// <summary>
+    /// The <c>mls_bound_channels</c> state value: the DECODED sorted array of
+    /// the channel hex ids the session's MLS backend has bound a thread to,
+    /// never the raw JSON string (the double-encode trap
+    /// <see cref="MlsFoldedCommitsForSerialization"/> names). No session yet
+    /// returns <c>[]</c> rather than omitting the key — the shared-Rust
+    /// contract's own pre-session arm
+    /// (<c>fauna_conversations::state_json::mls_bound_channels_json_for_session</c>):
+    /// windows HAS this leg, so <c>null</c>/absent stays reserved for an app
+    /// that does not.
+    /// </summary>
+    private object MlsBoundChannelsForSerialization()
+    {
+        if (_e2eRealConvSession is null) return new List<object?>();
+        var json = _e2eRealConvSession.MlsBoundChannelsJson();
+        return System.Text.Json.JsonSerializer.Deserialize<object>(json)
+            ?? new List<object?>();
     }
 
     /// <summary>
@@ -5297,6 +5689,31 @@ public partial class App : Application
             uniffi.fauna_conversations.FaunaConversationsMethods.MessageBannersJsonText());
 
     /// <summary>
+    /// The <c>ward_rule_document_rules</c> observable (tui's, android's and apple's
+    /// <c>ContentPolicyTestState.wardRuleDocumentRules</c>; <c>test_nest_rules.py</c>'s
+    /// guardian journey): how many rules the guardian's document holds on this ward's
+    /// device, read through the shared editor's own view
+    /// (<c>FfiRuleEditor.ForGuardian(policy).View().rows</c>) — never counted in C#.
+    /// <c>null</c> for an unsupervised viewer or a policy with no document. An
+    /// in-process FFI read over the held snapshot, no I/O (convention 11).
+    /// </summary>
+    private static int? WardRuleDocumentRules()
+    {
+        var policy = Core.Services.ContentPolicyCache.Current.ContentPolicy;
+        if (policy?.document is null) return null;
+        try
+        {
+            using var editor = uniffi.fauna_ffi.FfiRuleEditor.ForGuardian(policy);
+            return editor.View().rows.Length;
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("App", $"ward rule document unreadable for the state field: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The cross-app <c>connection</c> observable
     /// (<c>fauna_e2e_agent::CONNECTION_KEY</c>) as the state serializer
     /// publishes it: <c>{"state": word, "online": bool}</c>, built the same way
@@ -5379,6 +5796,25 @@ public partial class App : Application
     internal static void AccountPumpNowForTest() =>
         _ = (Current as App)?._rpcClient?.AccountPumpNowAsync();
 
+    /// <summary>The <c>custody_ceremony_ingest</c> state value, decoded from the
+    /// FFI's shared-builder JSON; <c>null</c> before a client exists.</summary>
+    private object? CustodyCeremonyIngestForSerialization()
+    {
+        var json = _rpcClient?.CustodyCeremonyIngestJson();
+        return string.IsNullOrEmpty(json) ? null : System.Text.Json.JsonSerializer.Deserialize<object>(json);
+    }
+
+    /// <summary>
+    /// The <c>custody_owner_resend_now</c> poke on the live e2e client —
+    /// fire-and-forget, the HOST's <c>custody_ceremony_ingest</c> being the
+    /// barrier (<c>fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW</c>). Called from
+    /// <c>TestAgent.ProcessCommand</c>'s <c>custody_owner_resend_now</c> case, the
+    /// same static-call shape as <see cref="AccountPumpNowForTest"/>. No client,
+    /// session or account store yet is a quiet no-op the callee reports.
+    /// </summary>
+    internal static void CustodyOwnerResendNowForTest() =>
+        _ = (Current as App)?._rpcClient?.CustodyOwnerResendNowAsync();
+
     /// <summary>
     /// The <c>device_set_state</c> e2e reader on the live client — the raw JSON
     /// from <c>NestRpcClient.DeviceSetStateJsonAsync</c>, or <c>null</c> when no
@@ -5401,6 +5837,17 @@ public partial class App : Application
     /// </summary>
     internal static Task<string?> ReadMarkerStateForTest(string channelIdHex) =>
         (Current as App)?._rpcClient?.ReadMarkerStateJsonAsync(channelIdHex)
+        ?? Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// The <c>escrow_wrap_coordinates</c> e2e reader on the live client — the raw
+    /// JSON from <c>NestRpcClient.EscrowWrapCoordinatesJsonAsync</c>, or
+    /// <c>null</c> when no client is connected (pre-auth), which <c>TestAgent</c>
+    /// reports as <c>{"found":false}</c>. The <see cref="DeviceSetStateForTest"/>
+    /// shape.
+    /// </summary>
+    internal static Task<string?> EscrowWrapCoordinatesForTest() =>
+        (Current as App)?._rpcClient?.EscrowWrapCoordinatesJsonAsync()
         ?? Task.FromResult<string?>(null);
 
     /// <summary>
@@ -5490,11 +5937,11 @@ public partial class App : Application
             var machine = await rpc.BuildMailSettingsMachineAsync().ConfigureAwait(false);
             if (!string.IsNullOrEmpty(password))
             {
-                await machine.EnableCaldavMailboxWithPassword("Default", password).ConfigureAwait(false);
+                await machine.EnableDavMailboxWithPassword("Default", password).ConfigureAwait(false);
             }
             else
             {
-                await machine.EnableCaldavMailboxWithGeneratedPassword("Default").ConfigureAwait(false);
+                await machine.EnableDavMailboxWithGeneratedPassword("Default").ConfigureAwait(false);
             }
             return (true, null);
         }
@@ -5558,6 +6005,7 @@ public partial class App : Application
         // (Core.FeedManagerHost), so an actor change is exactly the boundary at
         // which it must be dropped rather than handed to the incoming account.
         Core.FeedManagerHost.ResetForActorChange();
+        Core.PostBlobHostsHost.ResetForActorChange();
 
         // And the Devices/Folders pages' one session machine: it holds this
         // identity's folder, device and followed rows, and rides its transport.
@@ -5623,6 +6071,55 @@ public partial class App : Application
     /// is closed on completion rather than left to the finalizer. Double-close is safe
     /// — the binding's <c>Destroy()</c> is <c>Interlocked</c>-guarded.</param>
     /// <param name="session">The already-built session, if any.</param>
+    /// <summary>
+    /// Hand this login's archive links to <see cref="Core.Services.ArchiveLinksHost"/>
+    /// (archive-import.md § Linking and merging, ruling 8): read them off the
+    /// <c>FfiNestClient</c> the conversations session was just built on (the factory
+    /// built them and registered them as the session's sink), drive them once now, and
+    /// let the host's one-second tick drive again on <c>LinkWorkDue()</c> and repaint the
+    /// Contacts rows when <c>LinkCaptures()</c> moves. A session with no links (no sync
+    /// device id) stops the host instead. Best-effort: a failed read costs phase two,
+    /// never the login. The host is stopped on an actor change by
+    /// <c>ActorScope.DropActorScopedState</c>.
+    /// </summary>
+    private static async Task StartArchiveLinksAsync(Core.Services.INestRpcClient rpc)
+    {
+        try
+        {
+            Core.Services.ArchiveLinksHost.Instance.Start(await rpc.ArchiveLinksAsync());
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("ArchiveLinks", $"start: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Re-read the imported archives' message threads onto the conversations
+    /// <c>Archive</c> rail (archive-import.md § What each category becomes, the
+    /// message-threads row). The shared conversations factory registered the source
+    /// over this login's recording device, so this only asks the session to read the
+    /// archive folders again — at login and on every visit to the conversations page,
+    /// so an import finished since login lists with no re-login (tui's
+    /// <c>App::set_page</c>, linux's <c>conv_backend::refresh_archive_threads</c>,
+    /// apple's <c>ConversationsVM.refreshArchiveThreads</c>). The read lands in the
+    /// shared manager, which notifies the page's observer, so nothing here repaints.
+    /// Best-effort: no session is a no-op, and a failed read keeps what the last one
+    /// listed. No <c>ConfigureAwait(false)</c> (WinUI bound-state rule).
+    /// </summary>
+    internal static async Task RefreshArchiveThreadsAsync(ConversationsSession? session)
+    {
+        if (session is null) return;
+        try
+        {
+            await uniffi.fauna_ffi.FaunaFfiMethods.RefreshArchiveThreads(session);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Info("ArchiveThreads", $"refresh: {ex.Message}");
+        }
+    }
+
     private static void RetireConvSession(
         Task<ConversationsSession?>? pending,
         ConversationsSession? session)
@@ -5939,6 +6436,12 @@ public partial class App : Application
         // pin store, config-replica, app settings) is unnamed and survives.
         var sweep = Core.Services.AccountStateDir.EraseAll();
         ActiveActorHex = null;
+        // The window serves no account now: put down the process holder's
+        // instance lock and its shared-root serving lock, AFTER the erase — a
+        // holder kept past here made this signed-out window a "sibling" to every
+        // later sign-out of the account it left (account-scoping.md § Concurrent
+        // instances → An erase refuses while a sibling serves the account).
+        Core.Services.SessionInstance.Release();
         return (sweep, credentials);
     }
 
@@ -5961,6 +6464,7 @@ public partial class App : Application
         (uniffi.fauna_ffi.FfiEraseSweep? Sweep, uniffi.fauna_ffi.FfiCredentialSweep Credentials) erased)
         => Core.Services.SignOutResidueSurface.Record(SignOutResidueSeat, erased.Sweep, erased.Credentials);
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// <summary>
     /// Whether a session-patch <c>device_id</c> is sync-shaped (32-byte hex) —
     /// the ONE case the e2e session door adopts verbatim rather than deriving
@@ -5968,13 +6472,15 @@ public partial class App : Application
     /// session door's forced id keeps working unchanged"). Anything else,
     /// including the un-forced sentinel (<c>helpers/enrollment.py</c>'s
     /// <c>UNFORCED_DEVICE_ID</c>), is not a device id this store may ever
-    /// register a row under — never adopted.
+    /// register a row under — never adopted. The session door is the test
+    /// command handler below, so this compiles out of Release with it.
     /// </summary>
     private static bool IsSyncShapedDeviceId(string id)
     {
         try { return Convert.FromHexString(id).Length == 32; }
         catch (FormatException) { return false; }
     }
+#endif
 
     /// <summary>
     /// The admin auto-default (Stage 2, <c>long-term-store.md</c> § Per-account re-auth):
@@ -6086,6 +6592,11 @@ public partial class App : Application
                     // e2e-ONLY extra stays hand-listed at this site, per the rule in
                     // DropActorScopedState's header.
                     DropActorScopedState();
+                    // Session field, nulled at each teardown site per that same header —
+                    // the production sign-out, switch and factory-reset arms do too. The
+                    // observer is bound to the manager DropActorScopedState just retired,
+                    // and holding it would keep that manager alive until the next login.
+                    _messageToastObserver = null;
                     try { FaunaApp.Conversations.ConversationsManagerHost.Instance.ClearForTest(); }
                     catch { /* test-helpers may be off in non-e2e builds */ }
                     // A reset app is a new device, and a new device is a new process
@@ -6138,6 +6649,8 @@ public partial class App : Application
                     ClearBarrierProbes();
                     // Same canonical drop as the `reset` arm above.
                     DropActorScopedState();
+                    // Same session-field null as the `reset` arm above.
+                    _messageToastObserver = null;
                     try { FaunaApp.Conversations.ConversationsManagerHost.Instance.ClearForTest(); }
                     catch { /* test-helpers may be off in non-e2e builds */ }
                     return async () =>
@@ -6396,6 +6909,10 @@ public partial class App : Application
                         if (rpc is not null)
                         {
                             _ = rpc.StartAccountRuntimeAsync(Core.Services.AccountStateDir.Base, account.ResolveDeviceId());
+                            // Same gap for the mail connect-time refresh: the set_state
+                            // path never reaches StartMainAppAsync's start. Idempotent per
+                            // client, never throws (macOS makes the same second call).
+                            _ = Core.Helpers.MailEpochSchedule.StartAsync(rpc);
                         }
 
                         // Author-side subscriptions reconciliation for the e2e login
@@ -6429,6 +6946,16 @@ public partial class App : Application
                         // arrives).
                         rpc?.StartKnockPump();
                         Core.Logs.E2eTrace.Write("[cmd-session] after StartKnockPump");
+
+                        // Admin host-address report for the e2e login (the set_state path
+                        // never reaches StartMainAppAsync, where production runs it) — the
+                        // never-publish-a-private-address witness
+                        // (test_admin_dns_host_address_lan.py) reads the shared fn's
+                        // outcome line off the app's stderr. am_i_admin-gated like
+                        // production, and safe on any test nest: STUN is deferred, so a
+                        // loopback or LAN dial reports nothing. Mirrors linux, which runs
+                        // its real session under e2e for every login.
+                        if (rpc is not null) _ = new HostAddressReporter(rpc).RunAsync();
 
                         // Draft-persistence v2, feed leg (reserved-folders.md § Drafts
                         // Sync): build the nest-backed __drafts autosync (rail "posts")
@@ -6507,9 +7034,10 @@ public partial class App : Application
                         // The once-per-sign-in newer-version look rides the SAME
                         // universal post-auth hook in production (StartMainAppAsync),
                         // which this login never reaches — so without this call no e2e
-                        // sign-in would ever look. One look per login, against the
-                        // harness's stub feed (UpdateCheck's compile-gated origin seam).
-                        _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync();
+                        // sign-in would ever look. One look per login, on this login's
+                        // own client: it reads the session nest's newest_release.
+                        if (rpc is not null)
+                            _ = Core.Services.UpdateCheck.Shared.LookOnceAtSignInAsync(rpc);
 
                         // Push session start — the announce and the opt-in-gated
                         // re-arm production runs in StartMainAppAsync, which this
@@ -6642,10 +7170,16 @@ public partial class App : Application
                     // trim + ASCII-case-insensitive self-compare linux/tui/android/apple
                     // already share — priority #1/#2).
                     string? profileActor = null;
+                    string? profileHome = null;
                     if (last.TryGetProperty("actor_id", out var actorEl) && actorEl.ValueKind == System.Text.Json.JsonValueKind.String)
                     {
                         var selfActorId = _cryptoService?.HasKey == true ? _cryptoService.ActorIdHex : null;
                         profileActor = uniffi.fauna_ffi.FaunaFfiMethods.ProfileNavTarget(actorEl.GetString() ?? "", selfActorId);
+                        // The entry's optional home_nest_url is the open target's routing
+                        // hint (testing.md convention 11), passed into the same opener.
+                        if (last.TryGetProperty("home_nest_url", out var homeEl) && homeEl.ValueKind == System.Text.Json.JsonValueKind.String
+                            && !string.IsNullOrWhiteSpace(homeEl.GetString()))
+                            profileHome = homeEl.GetString();
                     }
                     _testCurrentView = view;
                     _currentErrorMessage = null;
@@ -6717,6 +7251,7 @@ public partial class App : Application
                                 // Stash the OTHER-profile target (null for SELF / any
                                 // non-profile view) for ProfilePage.OnNavigatedTo to read.
                                 PendingProfileTarget = view == "profile" ? profileActor : null;
+                                PendingProfileHome = view == "profile" && profileActor is not null ? profileHome : null;
                                 Views.MainPage.Current?.NavigateToView(view);
                             }
                         }
@@ -6768,6 +7303,10 @@ public partial class App : Application
                 _injectedErrorMessage = errEl.ValueKind == System.Text.Json.JsonValueKind.String
                     ? errEl.GetString()
                     : null;
+                // A displayed error is logged as `ViewModelBase.SetError` logs it,
+                // so the displayed-banner→ring witness checks the same funnel.
+                if (!string.IsNullOrEmpty(_injectedErrorMessage))
+                    ShellLog.Error("App", _injectedErrorMessage);
             }
             if (msgEl.TryGetProperty("warning", out var warnEl))
             {
@@ -7034,6 +7573,14 @@ internal record ServiceClients(
     /// </summary>
     string? DeepLinkPostId = null,
     /// <summary>
+    /// Set beside <see cref="DeepLinkPostId"/> by <c>ConversationsPage</c> when a room-search
+    /// <c>RoomSearchNav.Post</c> hit is activated in a room homed on ANOTHER nest
+    /// (<c>room-search.md</c> § The surface → <i>Opening a hit</i>): the room's recorded home.
+    /// <c>FeedPage</c> then opens the post through <c>resolve_post_from(post_id, home)</c>
+    /// instead of <c>resolve_post</c>. Null for every other deep link.
+    /// </summary>
+    string? DeepLinkPostHomeUrl = null,
+    /// <summary>
     /// Set by <c>SearchResultsPage</c> when a <c>SearchNav.Mail</c> or
     /// <c>SearchNav.Draft</c> row is activated — <c>true</c> for either arm,
     /// distinguishing "no conversations deep link" from "a Draft whose own
@@ -7072,6 +7619,14 @@ internal record ServiceClients(
     /// silent no-op, and never <c>CardDetailPage</c> with nothing to show.
     /// </summary>
     bool DeepLinkContactNotFound = false,
+    /// <summary>
+    /// Set by <c>MainPage.OpenModerationAppeal</c> when a <c>dm-message-withheld-badge</c>
+    /// is tapped (takedown-and-block.md § Legal takedown → <i>App render</i>, the fourth
+    /// surface): the matched queue row's <c>content_id</c>. <c>ModerationPage</c> hands it
+    /// to <c>ModerationViewModel.RequestAppeal</c>, so the queue read it starts opens that
+    /// row's own appeal. Null on every ordinary Moderation navigation.
+    /// </summary>
+    string? DeepLinkAppealContentId = null,
     /// <summary>
     /// What a sign-out's erase could not remove, while it still owes work
     /// (<c>account-scoping.md</c> § Erasure follows scope → <i>the residue

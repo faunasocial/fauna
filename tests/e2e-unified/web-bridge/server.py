@@ -145,7 +145,15 @@ _next_page_id = 2
 # to the foreign nest could not open its `wss://`, `resolve_foreign` mapped the
 # error to `NotFound`, the recipient degraded to an `Email` chip, and the DM
 # went out over SMTP — no exception, just a key-package count that never moved.
-_CONTEXT_KWARGS = {"ignore_https_errors": True}
+#
+# `permissions`: the app's own `navigator.clipboard.writeText` needs the grant at
+# the moment it copies, so it is given when the context is made. Granted only
+# when a test reads (`/clipboard/text`), a test that copies before it ever reads
+# copies nothing, and the app's catch swallows the refusal.
+_CONTEXT_KWARGS = {
+    "ignore_https_errors": True,
+    "permissions": ["clipboard-read", "clipboard-write"],
+}
 
 _command_queue = []
 # Page ids whose renderer died (Playwright's `crash` event). Playwright 1.60
@@ -461,6 +469,47 @@ def _actuate(handler, route: str, req: dict, loc, act) -> None:
 # computed the identical way: per-testid occurrence index among VISIBLE
 # elements, document order — exactly what a scope step or an indexed action
 # call resolves against.
+# `POST /element/scroll-to-bottom-fraction` — place an element so that
+# `fraction` of its height shows above its scroll container's bottom edge, by
+# moving that container's real `scrollTop` (what the SPA's cue sampler reads),
+# then measure the fraction reached. The container is the nearest ancestor that
+# scrolls vertically, else the document's scrolling element — the same "nearest
+# scrollable ancestor" the linux agent and the flaui bridge's measured
+# `/element/scroll-into-view-fraction` use. `getBoundingClientRect` after the
+# assignment forces layout, so the reading is the post-scroll geometry, and a
+# clamp at either end of the list is measured, never assumed
+# (`e2e-conventions.md` § Driver primitives → *Placing an element at a measured
+# fraction*). Never Playwright's own scrolling, which aligns whole elements.
+_SCROLL_TO_BOTTOM_FRACTION_JS = r"""
+(el, fraction) => {
+  function scroller(node) {
+    for (let a = node.parentElement; a; a = a.parentElement) {
+      const oy = getComputedStyle(a).overflowY;
+      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && a.scrollHeight > a.clientHeight) {
+        return a;
+      }
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+  const box = scroller(el);
+  const isDoc = box === document.scrollingElement || box === document.documentElement;
+  function band() {
+    if (isDoc) return { top: 0, bottom: window.innerHeight };
+    const r = box.getBoundingClientRect();
+    return { top: r.top + box.clientTop, bottom: r.top + box.clientTop + box.clientHeight };
+  }
+  const before = el.getBoundingClientRect();
+  if (before.height <= 0) return { error: 'the element has no height to place' };
+  const vp = band();
+  box.scrollTop += before.top - (vp.bottom - fraction * before.height);
+  const after = el.getBoundingClientRect();
+  const now = band();
+  const visible = Math.max(0, Math.min(after.bottom, now.bottom) - Math.max(after.top, now.top));
+  return { found: true, fraction: Math.min(1, visible / after.height) };
+}
+"""
+
+
 _REGISTRY_SNAPSHOT_JS = r"""
 () => {
   function isVisible(el) {
@@ -897,12 +946,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # The browser's real async clipboard, read the way a page would —
                 # never an intercepted `writeText` call (that would witness the
                 # SPA's intent, not what landed). Chromium gates `readText` on
-                # the `clipboard-read` permission and on a focused document, so
-                # grant it for this page's context and focus the page first.
+                # the `clipboard-read` permission (`_CONTEXT_KWARGS` grants it)
+                # and on a focused document, so focus the page first.
                 # The windows twin is the FlaUI bridge's GET /clipboard/text.
                 q = self._query()
                 page = self._require_page(q)
-                page.context.grant_permissions(["clipboard-read", "clipboard-write"])
                 page.bring_to_front()
                 text = page.evaluate(
                     "async () => { try { return await navigator.clipboard.readText(); }"
@@ -1134,6 +1182,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     # non-zero count into a leading warning line, so an absent
                     # line is never read as proof it was never logged.
                     "dropped": _console_dropped(pid),
+                    # Whether this page's renderer has crashed (Playwright's
+                    # `crash` event). Read by the driver BEFORE each close
+                    # (convention 6's close rider, `drivers/web.py`).
+                    "crashed": pid in _crashed,
                 })
 
             elif route == "/app/state":
@@ -1225,6 +1277,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         return
                     raise
                 self._respond(200, {"found": True})
+
+            elif route == "/element/scroll-to-bottom-fraction":
+                req = self._read_json()
+                page = self._require_page(req)
+                root = _scoped_root(page, self._parse_scope(req))
+                loc = root.locator(_selector(req["id"])).nth(req.get("index", 0))
+                fraction = float(req.get("fraction", -1))
+                if not 0.0 <= fraction <= 1.0:
+                    self._respond(400, {"error": f"fraction {fraction!r} is not in 0..=1"})
+                    return
+                if loc.count() == 0:
+                    self._respond(404, {"error": f"could not find element: {req['id']!r}"})
+                    return
+                reply = loc.evaluate(_SCROLL_TO_BOTTOM_FRACTION_JS, fraction)
+                self._respond(200 if reply.get("found") else 500, reply)
 
             elif route == "/element/key":
                 # Focus the element, then dispatch a single named keypress.
@@ -1344,9 +1411,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # list would mean "offers nothing", which would refuse every
                 # value on it. A real <select> with zero options DOES return `[]`
                 # and correctly refuses.
-                offered = loc.evaluate(
-                    "el => el.options ? Array.from(el.options).map(o => o.value) : null"
+                # A caller may name the option by its painted LABEL — the one
+                # spelling every app shares (a native picker offers only the
+                # label; web's `<option value="Mbox">` also carries a wire
+                # value). The label resolves to its option's value here, so a
+                # cross-app action passes `S.<key>` text on web unchanged.
+                options = loc.evaluate(
+                    "el => el.options ? Array.from(el.options).map("
+                    "o => ({value: o.value, text: (o.textContent || '').trim()})) : null"
                 )
+                offered = None if options is None else [o["value"] for o in options]
+                if isinstance(options, list) and req["value"] not in offered:
+                    by_label = [o["value"] for o in options if o["text"] == req["value"]]
+                    if by_label:
+                        req["value"] = by_label[0]
                 if isinstance(offered, list) and req["value"] not in offered:
                     # The disabled refusal outranks this one (tui's ordering,
                     # `e2e-conventions.md` § convention 11): a disabled
@@ -1598,6 +1676,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         pid = str(req.get("page") or "1")
         page = _pages.pop(pid, None)
         _cached_app_state.pop(pid, None)
+        _crashed.discard(pid)  # the dead renderer is gone with its page
         if page is not None:
             try:
                 page.close()  # run_before_unload defaults False → abrupt, no flush
@@ -1625,6 +1704,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 f"No preserved BrowserContext for page '{pid}'; /page/kill it first"
             )
         old = _pages.pop(pid, None)
+        _crashed.discard(pid)
         if old is not None:
             try:
                 old.close()

@@ -126,6 +126,9 @@ def _positions(app, cat_needle: str, control_needle: str, timeout: float = 30.0)
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("community-labelers")
 def test_a_subscribed_labeler_over_public_posts_scores_the_posts_you_see(
     logged_in_app, nest_instance, run_seal_helper
@@ -156,6 +159,9 @@ def test_a_subscribed_labeler_over_public_posts_scores_the_posts_you_see(
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("community-labelers")
 def test_a_labeler_your_app_is_too_old_to_read_leaves_your_feeds_as_they_were(
     logged_in_app, nest_instance, run_seal_helper

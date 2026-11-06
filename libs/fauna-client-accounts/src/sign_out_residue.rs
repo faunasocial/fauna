@@ -64,6 +64,8 @@ pub const SIGN_OUT_RESIDUE_FILE: &str = "sign-out-residue.json";
 pub struct ResiduePath {
     /// An actor scope (`<base>/<64-hex>/`) or, when the base itself could not
     /// be listed, that base — exactly `EraseSweep::survivors`' two shapes.
+    /// Absolute in memory; on disk relative to the record's own base when it
+    /// lies under it ([`SignOutResidue::save`]).
     pub path: PathBuf,
     /// The path's [`TreeFingerprint`] when it was recorded — taken AFTER the
     /// erase gave up on it, so the erase's own partial deletes are inside it.
@@ -189,7 +191,14 @@ impl SignOutResidue {
             }
         };
         match serde_json::from_slice::<Self>(&bytes) {
-            Ok(record) => Some(record),
+            Ok(mut record) => {
+                for residue in &mut record.paths {
+                    if residue.path.is_relative() {
+                        residue.path = state_base.join(&residue.path);
+                    }
+                }
+                Some(record)
+            }
             Err(e) => {
                 tracing::warn!("[sign-out residue] {} malformed: {e}", file.display());
                 None
@@ -201,6 +210,14 @@ impl SignOutResidue {
     /// file: a clean record on disk would be a residue the next launch re-checks
     /// for nothing. Written through a temp file and a rename, so a crash leaves
     /// the old record or the new one, never half of either.
+    ///
+    /// A path under `state_base` is written relative to it, and [`Self::load`]
+    /// rejoins it under the base it is loaded from: the base can move between
+    /// two launches with everything in it (an iOS app update hands the app its
+    /// data container under a fresh path), and an absolute path would then name
+    /// a residue that reads as gone while it is still on the device. A path
+    /// outside the base (the shared account-store root on linux and windows) is
+    /// written as it was recorded.
     pub fn save(&self, state_base: &Path) -> std::io::Result<()> {
         let file = state_base.join(SIGN_OUT_RESIDUE_FILE);
         if !self.owes_work() {
@@ -211,7 +228,13 @@ impl SignOutResidue {
         }
         std::fs::create_dir_all(state_base)?;
         let tmp = state_base.join(format!("{SIGN_OUT_RESIDUE_FILE}.tmp"));
-        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        let mut stored = self.clone();
+        for residue in &mut stored.paths {
+            if let Ok(rel) = residue.path.strip_prefix(state_base) {
+                residue.path = rel.to_path_buf();
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&stored).map_err(std::io::Error::other)?;
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &file)
     }
@@ -359,6 +382,117 @@ pub fn retry_sign_out_residue(
         erase_credentials(recorded)
     };
     ResidueRetry::Swept(SignOutResidue::record(&survivors, &credentials))
+}
+
+/// The residue as a seat's `sign-out-residue` view paints it: the install-scoped
+/// record the re-sweep needs, and the one line the user is shown. The one type
+/// linux and tui both hold (it was a hand-copied twin in each app).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidueSurface {
+    pub record: SignOutResidue,
+    /// `sign-out-residue-message` — the shared `Rendered` copy, or the retry's
+    /// own refusal while another instance serves one of the residue's accounts.
+    pub line: String,
+}
+
+impl ResidueSurface {
+    /// The paint for an owing record; `None` for a clean one.
+    ///
+    /// `lookup` is the seat's string catalog (`fauna_i18n::strings::lookup`);
+    /// this crate does not link the catalog, so each seat hands it in.
+    pub fn for_record<F, S>(record: SignOutResidue, lookup: F) -> Option<Self>
+    where
+        F: Fn(&str) -> Option<S>,
+        S: AsRef<str>,
+    {
+        let line = record.view().copy().warning?.resolve(lookup);
+        Some(Self { record, line })
+    }
+}
+
+/// The residue's log half — paths and key names, which never reach the user.
+pub fn log_residue(survivors: &[PathBuf], credentials: &CredentialSweep) {
+    if !survivors.is_empty() {
+        tracing::warn!(
+            "sign-out: {} path(s) SURVIVED the erase and still hold this user's data: {}",
+            survivors.len(),
+            survivors
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !credentials.is_clean() {
+        tracing::warn!(
+            "sign-out: sign-in credentials SURVIVED the erase (namespace wipe failed: {}); \
+             still readable: [{}]",
+            credentials.wipe_failed,
+            credentials.survivors.join(", ")
+        );
+    }
+}
+
+/// Write the record into the seat's install base — or remove it, when clean. A
+/// failed write is logged and not fatal: the view still paints for this
+/// process, and the paths are in the log the erase wrote. A `None` base (no
+/// resolvable install dir) writes nothing.
+pub fn persist_residue(record: &SignOutResidue, base: Option<&Path>) {
+    let Some(base) = base else {
+        return;
+    };
+    if let Err(e) = record.save(base) {
+        tracing::warn!(
+            "sign-out: the residue record under {} could not be written: {e}",
+            base.display()
+        );
+    }
+}
+
+/// Report what a sign-out's erase left: survivor paths to the log, the record
+/// to install-scoped state, the paint to the caller. `None` is the clean
+/// outcome.
+pub fn report_residue<F, S>(
+    survivors: &[PathBuf],
+    credentials: &CredentialSweep,
+    base: Option<&Path>,
+    lookup: F,
+) -> Option<ResidueSurface>
+where
+    F: Fn(&str) -> Option<S>,
+    S: AsRef<str>,
+{
+    log_residue(survivors, credentials);
+    let record = SignOutResidue::record(survivors, credentials);
+    persist_residue(&record, base);
+    ResidueSurface::for_record(record, lookup)
+}
+
+/// What a seat paints after [`retry_sign_out_residue`] returned `outcome` over
+/// `record`: the refusal line for a blocked retry, otherwise the swept
+/// remainder reported like a fresh erase's.
+pub fn settle_residue_retry<F, S>(
+    record: SignOutResidue,
+    outcome: ResidueRetry,
+    base: Option<&Path>,
+    lookup: F,
+) -> Option<ResidueSurface>
+where
+    F: Fn(&str) -> Option<S>,
+    S: AsRef<str>,
+{
+    match outcome {
+        ResidueRetry::Blocked(_) => Some(ResidueSurface {
+            record,
+            line: crate::sign_out_residue_retry_blocked_copy().resolve(lookup),
+        }),
+        ResidueRetry::Swept(left) => {
+            let paths: Vec<PathBuf> = left.paths.iter().map(|p| p.path.clone()).collect();
+            log_residue(&paths, &left.credentials());
+            persist_residue(&left, base);
+            ResidueSurface::for_record(left, lookup)
+        }
+    }
 }
 
 /// The actor a recorded path is the scope of, when it is one: a directory named
@@ -533,6 +667,49 @@ mod tests {
             "a clean record on disk would be re-checked at every launch for nothing"
         );
         assert_eq!(SignOutResidue::load(base.path()), None);
+    }
+
+    /// An app's install base can move between two launches with everything in
+    /// it — an iOS app update hands the app its data container under a fresh
+    /// path — so a path recorded under the base is kept relative to it and
+    /// rejoined under the base it is loaded from. Recorded absolute, the moved
+    /// residue read as "gone": the launch's re-sweep dropped it untouched and
+    /// the view never came back over data still on the device.
+    #[test]
+    fn a_record_follows_its_base_when_the_base_moves() {
+        let parent = tempfile::tempdir().expect("parent");
+        let before = parent.path().join("container-1");
+        let dir = scope(&before.join("sync"), "b2");
+        let record = SignOutResidue::record(std::slice::from_ref(&dir), &dirty_credentials());
+        record.save(&before).expect("save");
+
+        let after = parent.path().join("container-2");
+        std::fs::rename(&before, &after).expect("move the base");
+        let moved = after.join("sync").join(actor("b2"));
+        let loaded = SignOutResidue::load(&after).expect("the record moved with its base");
+        assert_eq!(loaded.paths[0].path, moved);
+        assert_eq!(loaded.paths[0].fingerprint, record.paths[0].fingerprint);
+
+        let left = swept(retry_sign_out_residue(&loaded, no_bases(), |_| {
+            CredentialSweep::default()
+        }));
+        assert!(!moved.exists(), "the moved residue is still the residue");
+        assert!(!left.owes_work(), "{left:?}");
+    }
+
+    /// A survivor outside the install base (the shared account-store root on
+    /// linux and windows) is kept as it was recorded.
+    #[test]
+    fn a_path_outside_the_base_is_kept_absolute() {
+        let base = tempfile::tempdir().expect("base");
+        let elsewhere = tempfile::tempdir().expect("store root");
+        let dir = scope(elsewhere.path(), "c3");
+        let record = SignOutResidue::record(std::slice::from_ref(&dir), &dirty_credentials());
+        record.save(base.path()).expect("save");
+        assert_eq!(
+            SignOutResidue::load(base.path()).expect("load").paths[0].path,
+            dir
+        );
     }
 
     #[test]

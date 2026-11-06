@@ -30,6 +30,14 @@ pub enum Rail {
     /// [`crate::snapshot::ThreadSummary::bridge`] — and the address —
     /// [`TypedAddress::Bridged`] — never the rail.
     Bridged,
+    /// The read-only threads of an imported export archive (Facebook
+    /// Messenger, Instagram direct messages) — a **client-local projection**
+    /// the manager builds from the archive folder's `model/threads.cbor` and
+    /// `model/messages.cbor` through [`crate::backend::ArchiveThreadSource`],
+    /// never written to the thread store or to `__conv`, and never on the
+    /// wire (`behavior/archive-import.md` § What each category becomes).
+    /// Nothing sends on it: it has no backend, no send kind and no compose.
+    Archive,
 }
 
 impl Rail {
@@ -49,6 +57,7 @@ impl Rail {
             Rail::FaunaMls => SourceGlyph::Fox,
             Rail::Smtp => SourceGlyph::Envelope,
             Rail::Bridged => SourceGlyph::Bridge,
+            Rail::Archive => SourceGlyph::Archive,
         }
     }
 
@@ -59,6 +68,7 @@ impl Rail {
             Rail::FaunaMls => "FaunaMls",
             Rail::Smtp => "Smtp",
             Rail::Bridged => "Bridged",
+            Rail::Archive => "Archive",
         }
     }
 
@@ -85,6 +95,8 @@ impl Rail {
             // Phase G), registered nest-side and in the shared offline-class
             // table since 2026-10-03.
             Rail::Bridged => Some("fauna.bridges.conversation.send"),
+            // A read-only record of another platform's past: nothing sends.
+            Rail::Archive => None,
         }
     }
 
@@ -97,6 +109,7 @@ impl Rail {
         match s {
             "Smtp" => Rail::Smtp,
             "Bridged" => Rail::Bridged,
+            "Archive" => Rail::Archive,
             _ => Rail::FaunaMls,
         }
     }
@@ -148,6 +161,18 @@ pub enum TypedAddress {
         bridge_id: String,
         address: String,
     },
+    /// A person as an imported export archive names them — `platform` is the
+    /// archive's platform token (`facebook`, `instagram`; `fauna_core::source`),
+    /// `name` their display name there (`behavior/archive-import.md` § What
+    /// each category becomes, the message-threads row). Only ever built by the
+    /// [`Rail::Archive`] projection, which is never stored or sent, so no
+    /// history slice or drafts blob carries one. It names nobody on Fauna
+    /// (no shadow profile — § Architectural rules there): nothing resolves,
+    /// dials or sends to it.
+    Archive {
+        platform: String,
+        name: String,
+    },
     /// An address of a kind a newer build writes and this one does not name —
     /// a participant or sender of a rail this build lacks, read out of a
     /// history slice or drafts blob another device wrote. Carried whole as
@@ -176,6 +201,7 @@ impl TypedAddress {
             TypedAddress::Fauna { .. } => Some(Rail::FaunaMls),
             TypedAddress::Email { .. } => Some(Rail::Smtp),
             TypedAddress::Bridged { .. } => Some(Rail::Bridged),
+            TypedAddress::Archive { .. } => Some(Rail::Archive),
             TypedAddress::Unknown { .. } => None,
         }
     }
@@ -228,7 +254,9 @@ impl TypedAddress {
             Rail::Smtp => Some(TypedAddress::Email {
                 email_address: raw.to_string(),
             }),
-            Rail::Bridged => None,
+            // Like a bridged address, an archive one is two strings (the
+            // platform and the name), and nothing addresses it anyway.
+            Rail::Bridged | Rail::Archive => None,
         }
     }
 
@@ -357,6 +385,8 @@ impl TypedAddress {
             // The far network's own spelling; the bridge is named by the
             // thread's glyph and label, never repeated on every participant.
             TypedAddress::Bridged { address, .. } => address.clone(),
+            // The name the archive recorded; the platform is the thread's glyph.
+            TypedAddress::Archive { name, .. } => name.clone(),
             // A kind this build cannot read has no field to show: a neutral,
             // language-free placeholder, never a guessed name.
             TypedAddress::Unknown { .. } => UNKNOWN_ADDRESS_DISPLAY.to_string(),

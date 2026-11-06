@@ -967,6 +967,7 @@ mod tests {
             &begun.scope_id,
             &member().actor_id(),
             now(),
+            None,
         )
         .expect("deliver");
         mark_group_delivered(auth_cfg, &begun.scope_id, &member().actor_id());
@@ -1167,6 +1168,7 @@ mod tests {
                 .map(|r| GroupPlaneRow {
                     kind: r.kind.clone(),
                     key: r.key.clone(),
+                    merge_meta: None,
                     value: r.value.clone(),
                 })
                 .collect();
@@ -1948,6 +1950,7 @@ mod tests {
         let add = GroupPlaneRow {
             kind: KIND_GROUP_ROSTER.into(),
             key: roster_cell_key(&entry_id, &device_c().verifying_key().to_bytes()),
+            merge_meta: None,
             value: canonical_encode(&record).unwrap().to_vec(),
         };
         b.adopt_plane_rows(std::slice::from_ref(&add)).await;
@@ -2031,6 +2034,7 @@ mod tests {
             GroupPlaneRow {
                 kind: KIND_GROUP_ROSTER.into(),
                 key: roster_cell_key(&entry_id, &device_b().verifying_key().to_bytes()),
+                merge_meta: None,
                 value: canonical_encode(&record).unwrap().to_vec(),
             }
         };
@@ -2208,6 +2212,7 @@ mod tests {
             .adopt_rows(&[GroupPlaneRow {
                 kind: KIND_GROUP_ROSTER.into(),
                 key: genuine_cell.clone(),
+                merge_meta: None,
                 value: rebound.clone(),
             }])
             .await
@@ -2225,6 +2230,7 @@ mod tests {
             .adopt_rows(&[GroupPlaneRow {
                 kind: KIND_GROUP_ROSTER.into(),
                 key: genuine_cell.clone(),
+                merge_meta: None,
                 value: rebound.clone(),
             }])
             .await
@@ -2242,6 +2248,7 @@ mod tests {
         c.adopt_plane_rows(&[GroupPlaneRow {
             kind: KIND_GROUP_ROSTER.into(),
             key: dead_cell.clone(),
+            merge_meta: None,
             value: rebound,
         }])
         .await;
@@ -2370,11 +2377,13 @@ mod tests {
                 GroupPlaneRow {
                     kind: KIND_GROUP_ROSTER.into(),
                     key: cell.clone(),
+                    merge_meta: None,
                     value: canonical_encode(&refiled).unwrap().to_vec(),
                 },
                 GroupPlaneRow {
                     kind: KIND_GROUP_ROSTER.into(),
                     key: fresh_cell.clone(),
+                    merge_meta: None,
                     value: canonical_encode(&squat).unwrap().to_vec(),
                 },
             ])

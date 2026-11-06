@@ -12,7 +12,11 @@ nest-served `/app/` and the central origin*, on a real ``fauna-nest`` binary.
 
 **Where "bundled" is observed.** A tier_3 nest ships no SPA (``node.static_dir``
 unset), so its bundled ``/app`` answers **404** — the path is still reserved and
-never falls through to user content (invariant 3). What the SPA itself serves
+never falls through to user content (invariant 3); an image nest bundles its SPA
+build, so there bundled answers it with a **200**. Either way bundled is never a
+redirect, and the nest handle's ``serves_spa`` says which status to expect, so
+the release-candidate run asserts the bundled shape it ships rather than
+blanking the cell (``testing.md`` § Default app and nest mode). What the SPA itself serves
 under bundled is pinned in Rust against the real ``mount_spa``
 (``bins/fauna-nest/tests/spa_web_app_origin.rs``); what this file adds is the
 state → kind → live router flow, which only a running nest has.
@@ -59,6 +63,11 @@ def _set(nest, mode: str) -> dict:
         return admin.call("fauna.admin.web_app_origin.set", {"mode": mode})
 
 
+def _bundled_status(nest) -> int:
+    """What `/app/` answers under bundled: the SPA build, or the reserved 404."""
+    return 200 if nest["serves_spa"] else 404
+
+
 def _status(nest) -> dict:
     with WsRpcAnonClient(nest["url"]) as anon:
         return anon.call("fauna.setup.status", {})
@@ -72,8 +81,9 @@ def test_the_admin_choice_flips_app_to_the_central_origin_and_back(web_hosting_n
     assert before["mode"] == "bundled", f"absent row must read bundled: {before}"
     assert not before.get("redirect_target")
     status, headers = _get(nest["url"], "/app/")
-    assert status == 404 and headers.get("Location") is None, (
-        f"bundled with no shipped SPA must answer 404, not redirect: {status}"
+    assert status == _bundled_status(nest) and headers.get("Location") is None, (
+        f"bundled must answer {_bundled_status(nest)} (serves_spa="
+        f"{nest['serves_spa']}), not redirect: {status}"
     )
 
     from conftest import WEB_HOSTING_DOMAIN
@@ -106,8 +116,8 @@ def test_the_admin_choice_flips_app_to_the_central_origin_and_back(web_hosting_n
 
     assert back["mode"] == "bundled" and not back.get("redirect_target")
     status, headers = _get(nest["url"], "/app/")
-    assert status == 404 and headers.get("Location") is None, (
-        "moving back to bundled must stop the redirect at once"
+    assert status == _bundled_status(nest) and headers.get("Location") is None, (
+        f"moving back to bundled must stop the redirect at once: {status}"
     )
     s = _status(nest)
     assert s["web_app_origin"] == "bundled"

@@ -109,6 +109,7 @@ def test_media_explorer_chrome(empty_media_app):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.tui
 @pytest.mark.feature("media")
 def test_media_browse_switches_list_and_grid_and_sorts_by_name_size_and_date(
@@ -170,6 +171,54 @@ def test_media_browse_switches_list_and_grid_and_sorts_by_name_size_and_date(
     app.media.toggle_view()
     back = app.media.wait_for_view_label_change(after)
     assert back == before, f"a second switch should return to {before!r}, got {back!r}"
+    assert not app.has_error(), f"unexpected media error: {app.error_text()!r}"
+
+
+# The apps that have not built the select read unbuilt, not red, through the
+# surface registry (convention 7): every app is marked so the gate is the only
+# declaration of who has it.
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.tui
+@pytest.mark.feature("media")
+def test_media_sort_direction_select_reverses_the_active_sort_key(sortable_media_app):
+    """The sort-direction select reverses the active sort key, ascending by
+    default (``docs/goal/ui/media.md`` § Layout & flow — *Sort direction*,
+    ``media-sort-direction``; ``docs/features/media.md`` outcome 14).
+
+    Rides ``sortable_media_app`` for the same reason the key test does: the name
+    order differs from the size and date orders, so a reversal of the wrong key
+    would show the wrong list instead of passing by coincidence. Under the name
+    key, the order is read back whole: default (ascending), then ``descending``
+    (exactly reversed), then ``ascending`` again (restored). Setting a direction
+    is idempotent (``set_sort_direction``), so no read-then-toggle race.
+    """
+    app, _set_name, rows = sortable_media_app
+    app.media.navigate()
+    app.media.ensure_loaded()
+
+    ascending = sorted(name for name, _ in rows)
+    descending = list(reversed(ascending))
+    assert ascending != descending
+
+    app.media.set_sort("name")
+    shown = app.media.wait_for_item_names(ascending)
+    assert shown == ascending, f"name sort should default to ascending {ascending}; got {shown}"
+
+    for direction, expected in (
+        ("descending", descending),
+        ("ascending", ascending),
+    ):
+        app.media.set_sort_direction(direction)
+        shown = app.media.wait_for_item_names(expected)
+        assert shown == expected, (
+            f"direction {direction} under the name key should list {expected}; "
+            f"the page shows {shown}; error={app.error_text()!r}"
+        )
     assert not app.has_error(), f"unexpected media error: {app.error_text()!r}"
 
 
@@ -386,6 +435,7 @@ def test_media_upload_no_set_error(empty_media_app, tmp_path):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.tui
 @pytest.mark.feature("media")
 def test_media_upload_with_no_file_chosen_says_so(seeded_media_app):
@@ -590,7 +640,7 @@ def test_media_upload_into_selected_set(seeded_media_app):
     Its single-file ``media-seed-clips`` set gives the clean 1 → 2.
 
     The logged-in client's device (the e2e session ``device_id``,
-    ``_E2E_LOGIN_DEVICE_ID``) is NOT the seeding device, so it was never registered
+    ``e2e_login_device_id``) is NOT the seeding device, so it was never registered
     write-capable — exactly the self-heal case: the first ``changes.record`` is
     rejected ``device_unregistered`` and the shared write seam registers + retries
     (the same path on linux + windows).
@@ -677,6 +727,7 @@ def test_media_upload_into_selected_set(seeded_media_app):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.tui
 @pytest.mark.feature("media")
 def test_media_item_shows_its_picture_or_a_placeholder(seeded_media_app):
@@ -960,6 +1011,55 @@ def test_media_delete_removes_the_file_from_disk(bound_location_media_app):
 
 
 @pytest.mark.tui
+@pytest.mark.real_sync_agent
+@pytest.mark.isolated_sync_agent
+@pytest.mark.feature("media")
+def test_media_upload_reaches_the_folder_this_device_serves(bound_location_media_app, tmp_path):
+    """A Media upload into a folder this device also serves lands on this device's
+    **disk** (``docs/goal/behavior/file-versions.md`` § Restore, ordering 1).
+
+    The upload half of ``test_media_delete_removes_the_file_from_disk``: the app and
+    the engine share a device id, so the record comes back to the engine as its own
+    echo, and an echo only ever worked on a file already on the disk. With none there
+    the anchor moved past the row, and the file reached every device but this one.
+
+    Red probe: drop the ``applies_as_remote`` arm from the create/modify arm in
+    ``libs/fauna-sync-engine/src/engine.rs``, rebuild, rerun. The disk assertion below
+    must fail while the item still lists.
+    """
+    app, tracked, folder = bound_location_media_app
+    picked = tmp_path / "picked" / "from-media.png"
+    picked.parent.mkdir()
+    picked.write_bytes(FIXTURE_IMAGE.read_bytes())
+    landed = tracked.parent / picked.name
+    assert not landed.exists(), f"precondition: nothing at {landed} before the upload"
+
+    app.media.navigate()
+    app.media.ensure_loaded()
+    assert app.media.wait_for_item_count(1, timeout=30) == 1, (
+        f"precondition: the engine-uploaded file in {folder!r} should be listed; "
+        f"error={app.error_text()!r}"
+    )
+
+    app.media.upload_file(str(picked))
+    assert app.media.wait_for_item_count(2, timeout=60) == 2, (
+        f"the upload should list beside the tracked file; error={app.error_text()!r}"
+    )
+
+    deadline = time.monotonic() + 60
+    while not landed.exists() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert landed.exists(), (
+        f"THE BUG: {picked.name!r} is on the nest and in Media, but never reached "
+        f"{landed} on the device that uploaded it. The engine read its own app's record "
+        f"as a self-echo over a missing file and the anchor moved past it. "
+        f"on disk: {sorted(p.name for p in tracked.parent.iterdir())}"
+    )
+    assert landed.read_bytes() == FIXTURE_IMAGE.read_bytes()
+    assert not app.has_error(), f"unexpected page error: {app.error_text()!r}"
+
+
+@pytest.mark.tui
 @pytest.mark.feature("media")
 def test_upload_into_a_freshly_created_empty_folder(empty_media_app, tmp_path):
     """The **first-use journey**: create a folder in Settings → Folders, then
@@ -1036,6 +1136,15 @@ def test_upload_into_a_freshly_created_empty_folder(empty_media_app, tmp_path):
 
 
 @pytest.mark.tui
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+# The residency control this test drives is built on apple too
+# (`FoldersContent.swift`; `test_folder_residency_control.py` passes there), so
+# its cells are plain marks, not a surface gate.
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("media")
 def test_upload_into_a_metadata_only_folder_is_refused_with_its_reason(
     empty_media_app, tmp_path

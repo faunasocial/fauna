@@ -25,14 +25,10 @@ import urllib.request
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3]
-
-# Apps that paint the failing-order line; each joins as its trickle-down lands.
-_RENDERS_ISSUANCE_ERROR = {"tui", "linux", "web", "android"}
 
 _DOMAIN = f"certerr-{secrets.token_hex(4)}.test"
 _CA_DETAIL = (
@@ -85,15 +81,6 @@ def _seed_local_domain(nest_instance, domain: str) -> None:
 def test_admin_dns_shows_the_cas_error_for_a_failing_order(admin_app, nest_instance):
     """A failing domain order paints one line naming it, with the CA's text as
     data; the order's success (its clear) takes the line away."""
-    if app_name(admin_app.driver) not in _RENDERS_ISSUANCE_ERROR:
-        skip_unbuilt(
-            admin_app.driver,
-            surface="admin-dns-cert-issuance-error",
-            detail="the failing-order line renders on tui, linux, web and android; "
-                   "the rest follow in the apps trickle-down",
-            tracked="",
-        )
-
     url = nest_instance["url"]
     _seed_local_domain(nest_instance, _DOMAIN)
     _clear_all(url)

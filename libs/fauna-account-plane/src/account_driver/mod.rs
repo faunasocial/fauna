@@ -71,8 +71,14 @@
 //! intent enqueue, a scope registration, the endpoint facts) is served at the
 //! pass's next yield point on this same task and connection, and a
 //! **pass-bound** one (`reconcile_now`, the sign-out's retirement, a
-//! shutdown, the barrier — and a tip-sealed door put whose door would mint)
-//! is parked and served after the pass in arrival order. Every unit of
+//! shutdown, the barrier) is parked and served after the pass in arrival
+//! order. A tip-sealed door put whose door would mint is parked too, but
+//! waits for a tip rather than the pass: re-asked at every breath, served at
+//! the first where a tip resolves, refused not-ready at `FIRST_PASS_WAIT`
+//! (`drive::drive_pass`). An awaited publish (`Cmd::PublishOwn`) is
+//! pass-bound — the publish step is the pass's own — but its park takes the
+//! same bound: refused not-ready at `FIRST_PASS_WAIT`, nothing sent, the
+//! rows owed to the next publish. Every unit of
 //! local work inside a pass ends in a yield (`pass_breath`), so a stretch
 //! with no network parks a command — and the sign-out cut — by at most one
 //! unit. The explicit barrier is [`AccountStoreHandle::settled`].
@@ -152,7 +158,8 @@ pub use enrollment::{
 };
 pub use handle::{
     AccountStoreHandle, GroupCeremonyAuthority, HolderWalk, HolderWalkSeat, LedgerIdentity,
-    PumpCycles, PumpCyclesView, RUNTIME_GONE,
+    PumpCycles, PumpCyclesView, RUNTIME_GONE, SecondConnection, SecondConnectionClose,
+    ServeStoreFacts, ServeStoreSeat,
 };
 pub use handle_source::{
     ACCOUNT_HANDLE_WAIT, AccountHandleSource, AccountMailImportSourceStore, AccountMailStore,
@@ -467,6 +474,11 @@ pub struct DriverConfig {
     /// Backstop reconcile cadence — [`DEFAULT_BACKSTOP_INTERVAL`] in
     /// production; tests shrink it.
     pub backstop_interval: Duration,
+    /// How long a tip-sealed door put parked behind a pass waits for a tip,
+    /// and an awaited publish parked behind one waits for the pass's end,
+    /// before it is refused not-ready ([`drive::drive_pass`]) —
+    /// [`FIRST_PASS_WAIT`] in production; tests shrink it.
+    pub tip_wait: Duration,
     /// Where the member half of the content-scope set comes from
     /// ([`MembershipSource`]). `None` walks the own-actor scopes only.
     pub memberships: Option<MembershipSource>,
@@ -488,6 +500,15 @@ pub struct DriverConfig {
     /// registers the principal's grant (`sync-agent-credentials.md`
     /// § Credential model → the RULED 2026-09-28 block, decision 3).
     pub enrollment_target_device_id: String,
+    /// The label the enrollment ceremony's register-create names that row
+    /// with when it does not exist yet — the host app's **app default**
+    /// (`devices.md` § Device names, class (2): `fauna-tui` … `fauna-android`),
+    /// the same constant the app hands its engine host. `None` is a host with
+    /// no app to name (the seedless agent, the web SPA, the e2e harness seat):
+    /// it registers under the `fauna` placeholder
+    /// ([`fauna_client_sync::SELF_REGISTER_LABEL`]), which the app's own
+    /// labeled register later supersedes.
+    pub enrollment_device_label: Option<String>,
 }
 
 /// What one assembly resolved, borrowed for one [`AccountDriver::serve`]: the
@@ -947,6 +968,9 @@ pub struct AccountDriver {
     escrow_recovery_memo: EscrowRecoveryMemo,
     /// The handle's grant-registered signal (the sending half is shared).
     grant_registered: Arc<watch::Sender<bool>>,
+    /// The handle's serve-store facts (the seat is shared) — the native
+    /// host seats each assembly's through [`Self::serve_store_seat`].
+    serve_store: handle::ServeStoreSeat,
     config: DriverConfig,
 }
 
@@ -965,6 +989,7 @@ impl AccountDriver {
         let cycles = Arc::new(PumpCycles::default());
         let first_listings = Arc::new(FirstListings::default());
         let grant_registered = Arc::new(watch::channel(false).0);
+        let serve_store = handle::ServeStoreSeat::default();
         let ledger_identity = fauna_core::hex32::decode(&config.actor_id_hex)
             .ok()
             .map(|id| {
@@ -992,6 +1017,7 @@ impl AccountDriver {
             burnt_heal_taken: false,
             escrow_recovery_memo: EscrowRecoveryMemo::default(),
             grant_registered: Arc::clone(&grant_registered),
+            serve_store: serve_store.clone(),
             config,
         };
         let handle = AccountStoreHandle {
@@ -1004,8 +1030,16 @@ impl AccountDriver {
             grant_registered,
             ledger_identity,
             holder_walk: HolderWalkSeat::default(),
+            serve_store,
         };
         (driver, handle)
+    }
+
+    /// The seat the native host puts each assembly's
+    /// [`handle::ServeStoreFacts`] in — shared with every clone of the handle
+    /// this driver was minted with.
+    pub fn serve_store_seat(&self) -> handle::ServeStoreSeat {
+        self.serve_store.clone()
     }
 
     /// The writer a pass of this driver found removed on the fleet plane —
@@ -1078,6 +1112,8 @@ impl AccountDriver {
             burnt_heal_taken,
             escrow_recovery_memo,
             grant_registered,
+            // Seated by the host before serve; nothing in the loop reads it.
+            serve_store: _,
             config: settings,
         } = self;
         let first_listings: &FirstListings = first_listings;
@@ -1204,6 +1240,7 @@ impl AccountDriver {
             session_rpc,
             schedule: &schedule,
             enrollment_target: &settings.enrollment_target_device_id,
+            enrollment_label: settings.enrollment_device_label.as_deref(),
             departed_devices: settings.attested_predecessors.departed_devices(),
             // The two seed-only slots are filled for the seed-leg role's
             // holder alone — `writer!()` below.
@@ -1352,6 +1389,7 @@ impl AccountDriver {
                     parked: &mut *parked,
                     local: local!(true),
                     cycles,
+                    tip_wait: settings.tip_wait,
                 }
             };
         }
@@ -1551,6 +1589,12 @@ impl AccountDriver {
         // cadence, never a burst. Pinned outside the loop so a stream of other
         // wakes cannot starve it: the deadline survives every select.
         let mut backstop = std::pin::pin!(fauna_sleep::sleep(settings.backstop_interval));
+
+        // The sign-out's retirement, once the nest has answered it. A host
+        // stops a superseded runtime twice (`host.rs`, the `finish` arm and the
+        // teardown holding the published clone), and the first run ends the
+        // session a second would ride, so the second reads this outcome.
+        let mut retired_enrollment: Option<EnrollmentRetirement> = None;
 
         loop {
             // The local-write wake (the pump bullet's wake source (4)): a
@@ -1835,6 +1879,10 @@ impl AccountDriver {
                             let _ = reply.send(());
                         }
                         Cmd::RetireEnrollment { reply } => {
+                            if let Some(outcome) = retired_enrollment.clone() {
+                                let _ = reply.send(outcome);
+                                continue;
+                            }
                             // Between passes by construction — commands are
                             // served one at a time on this loop — so no pass
                             // is mid-flight when the principal's sessions die
@@ -1897,6 +1945,11 @@ impl AccountDriver {
                                     ))
                                 }
                             };
+                            // A `Deferred` answer proved nothing landed, so a
+                            // second stop may still ask.
+                            if !matches!(outcome, EnrollmentRetirement::Deferred(_)) {
+                                retired_enrollment = Some(outcome.clone());
+                            }
                             let _ = reply.send(outcome);
                         }
                         // The let-go (`crate::generation_let_go`): between

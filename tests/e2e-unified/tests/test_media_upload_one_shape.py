@@ -119,7 +119,11 @@ def test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens(
     m.close_detail()
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui"], indirect=True)
+@pytest.mark.tui
+@pytest.mark.ios
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "ios", "web", "android"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.timeout(900)
 @pytest.mark.feature("public-folders-and-websites")

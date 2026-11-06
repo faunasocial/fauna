@@ -183,15 +183,20 @@ class SettingsActions:
         `FAUNA_E2E_DOWNLOAD_DIR` seam, apple's `AccountSettingsView.exportAndPresent`
         and windows' `SettingsViewModel.ExportAccountDataAsync` take the same seam
         via `SnapshotFileSaver`/`ISnapshotFileSaver` — and the file is read back
-        from there. Built on all 7 apps."""
+        from there, as the save THIS click made: tui keeps an earlier archive and
+        numbers the next one, so a second export in one app is not at the bare name
+        (`BackupsActions.wait_for_fresh_download`). Built on all 7
+        apps."""
         self._navigate_subpage("account")
         self.driver.wait_for("settings-export-data-button")
         if self.driver.is_web():
             return self.driver.download_via_click("settings-export-data-button")
-        self.driver.click("settings-export-data-button")
         from actions.backups import BackupsActions
 
-        return BackupsActions(self.driver).wait_for_downloaded_file("fauna-export.zip")
+        backups = BackupsActions(self.driver)
+        before = backups.download_signatures()
+        self.driver.click("settings-export-data-button")
+        return backups.wait_for_fresh_download(r"fauna-export( \(\d+\))?\.zip", before)
 
     def toggle_identity_qr(self) -> None:
         """Press the identity-export show/hide toggle once.
@@ -640,6 +645,125 @@ class SettingsActions:
         else:
             self.driver.click("settings-nav-back")
 
+    # --- Encryption: the starter-key supply (docs/features/encryption-settings.md) ---
+
+    def leave_sub_page_by_click(self) -> None:
+        """Leave an open Settings sub-page by its own way out, by clicks: the
+        desktop shells' ``settings-nav-back``; on iOS, which has none (a
+        declared optional absence in ``ui-actual-ios.yaml``), the More shell's
+        ``more-back-button``, which leaves the More item and drops any Settings
+        sub-page with it (``ContentView.exitMoreSubview``). Nothing open →
+        nothing clicked. Keyed on the control being painted (convention 3)."""
+        if self.driver.is_visible("settings-nav-back"):
+            self.driver.click("settings-nav-back")
+        elif self.driver.is_visible("more-back-button"):
+            self.driver.click("more-back-button")
+            self.driver.wait_for("more-tab", timeout=15.0)
+
+    def open_rail_row_by_click(self, row: str, canary: str | None,
+                               timeout: float = 60.0) -> None:
+        """Reach the Settings sub-page behind rail row ``row`` the way a human
+        does, from wherever the app is — leave a sub-page that is open (so this
+        visit is a fresh one: tui hydrates a sub-page on the nav edge), then
+        ``settings-tab`` (through ``more-tab`` on iOS, ``click_settings_tab``)
+        and the row — and wait for ``canary``; ``None`` waits instead for the
+        row to leave the screen, which is all a pushed mobile page with no
+        always-painted element shows. No nav patch: for a caller whose rule
+        forbids injected navigation (the live drives).
+
+        A rail row that never shows has several causes the row's own snapshot
+        cannot tell apart — the ``settings-tab`` press went nowhere (the shell
+        never opened: no ``settings-nav-back``), the shell opened on a rail
+        without the row, or the app is not signed in at all — so the timeout
+        carries all three (e2e rule 6)."""
+        from helpers.settings_tab_click import click_settings_tab
+        from helpers.waiting import wait_until
+
+        self.leave_sub_page_by_click()
+        if not self.driver.is_visible(row):
+            click_settings_tab(self.driver, timeout=timeout)
+            try:
+                self.driver.wait_for(row, timeout=timeout)
+            except TimeoutError as e:
+                raise TimeoutError(
+                    f"{e}; after the settings-tab press: "
+                    f"{self.driver.diagnose('settings-tab')}, "
+                    f"{self.driver.diagnose('settings-nav-back')}, "
+                    f"{self.driver.diagnose('create-identity-button')}"
+                ) from e
+        self.driver.click(row)
+        if canary is None:
+            wait_until(
+                lambda: self.driver.is_absent(row) or None,
+                timeout,
+                diagnose=lambda: f"{row} still on screen after its click: "
+                                 f"{self.driver.diagnose(row)}",
+            )
+        else:
+            self.driver.wait_for(canary, timeout=timeout)
+
+    def open_devices_by_click(self, timeout: float = 60.0) -> None:
+        """Settings → Devices by clicks (``open_rail_row_by_click``). The page
+        has no element that is always painted (an empty roster paints no card),
+        so the canary is the sub-page's own way out — on mobile, which has none
+        (the system back), the rail row leaving the screen."""
+        canary = None if self.driver.is_mobile() else "settings-nav-back"
+        self.open_rail_row_by_click("settings-nav-row[devices]", canary, timeout)
+
+    def sign_out_by_click(self, timeout: float = 60.0) -> None:
+        """``sign_out`` with the Account sub-page reached by clicks
+        (``account-settings-link`` keeps its older id as the Account rail row,
+        ui.yaml ``navigation.sub_page_nav_rows``). Sign-out also retires this
+        device's enrollment nest-side (`fleet-scope-reclamation.md` clause (4)),
+        but the machine's named device row stays on the roster: a sign-in from
+        the same install comes back to it, while a fresh instance registers a
+        new one (`sync-agent-credentials.md`, the 2026-09-20 named-row ruling),
+        so a drive on a fresh instance per run still owes a removal."""
+        self.open_rail_row_by_click("account-settings-link", "sign-out-button", timeout)
+        self.driver.click("sign-out-button")
+        self.driver.wait_for("sign-out-confirm-button", timeout=10.0)
+        self.driver.click("sign-out-confirm-button")
+        self.driver.wait_for("create-identity-button", timeout=timeout)
+
+    def open_encryption(self, timeout: float = 60.0) -> None:
+        """Reach Settings → Encryption the way a human does, from wherever the
+        app is: leave the page if it is open (so this visit is a fresh one, and
+        reads the nest's count again), then ``settings-tab`` and the rail row.
+
+        The leave is waited out before the rail is read: web navigates
+        asynchronously, so straight after the click the old rail is still
+        painted and a click on its row lands on a node being torn down."""
+        from helpers.waiting import wait_until
+
+        if self.driver.is_mobile():
+            # Mobile keeps the platform's idiomatic back (iOS has no
+            # `settings-nav-back`) and reaches `settings-tab` through `more-tab`:
+            # a Settings navigate does both, landing on the root page list, off
+            # any open sub-page, so this visit is a fresh one.
+            self.driver.navigate_to("settings")
+            self.driver.wait_for("settings-nav-row[encryption]", timeout=timeout)
+            self.driver.click("settings-nav-row[encryption]")
+            self.driver.wait_for("encryption-keypackage-count", timeout=timeout)
+            return
+        if self.driver.is_visible("encryption-keypackage-count"):
+            self.driver.click("settings-nav-back")
+            wait_until(
+                lambda: self.driver.is_absent("encryption-keypackage-count"),
+                timeout,
+                diagnose=lambda: self.driver.diagnose("encryption-keypackage-count"),
+            )
+        if not self.driver.is_visible("settings-nav-row[encryption]"):
+            self.driver.click("settings-tab")
+            self.driver.wait_for("settings-nav-row[encryption]", timeout=timeout)
+        self.driver.click("settings-nav-row[encryption]")
+        self.driver.wait_for("encryption-keypackage-count", timeout=timeout)
+
+    def encryption_keypackage_count(self) -> int | None:
+        """The one-use starter-key count the open Encryption page states, or
+        ``None`` while it still shows its loading copy."""
+        text = self.driver.get_text("encryption-keypackage-count").strip()
+        return int(text) if text.isdigit() else None
+
     # --- Recovery kit (settings.md § Recovery kit) ---
 
     def open_recovery_kit(self) -> None:
@@ -652,37 +776,6 @@ class SettingsActions:
         """
         self._navigate_subpage("account")
         self.driver.wait_for("recovery-kit-create-button", timeout=10.0)
-
-    def open_recovery_kit_or_skip(self) -> None:
-        """Open Recovery Kit, or skip declaring the class if the section never lands.
-
-        Does the navigation itself, on purpose — a caller that navigated first
-        and gate-checked second would hard-fail with a ``TimeoutError`` on an
-        app lacking the section instead of skipping, reporting a broken
-        succession/kit journey where the truth is an unbuilt surface. Lifted
-        from ``test_identity_succession_aftermath.py``'s local
-        ``_require_recovery_section`` (2026-08-22) so every recovery-kit
-        journey test shares one gate instead of five separate copies.
-        """
-        try:
-            self.open_recovery_kit()
-            return
-        except Exception:
-            pass
-        from helpers.app_surface import skip_unbuilt
-
-        skip_unbuilt(
-            self.driver,
-            surface="recovery-kit-section",
-            detail=(
-                "settings.md § Recovery kit; tui leads and the other six "
-                "follow in batched trickle-down"
-            ),
-            tracked=(
-                "docs/goal/behavior/identity-succession.md "
-                "§ Implementation status today"
-            ),
-        )
 
     def recovery_kit_status(self) -> str:
         """The one status line, or "" before the read resolves.
@@ -1027,6 +1120,33 @@ class SettingsActions:
         if not self.driver.is_visible_scrolled("recovery-kit-secret-display"):
             return ""
         return self.driver.get_text("recovery-kit-secret-display")
+
+    # --- The let-go of a dead generation (`settings.md` § Recovery kit) ---
+
+    def unreadable_status(self) -> str:
+        """`recovery-kit-unreadable-status`, or "" while nothing is dead.
+
+        The line, its confirm field and its button render only while the
+        account runtime's dead read answers non-empty (ui.yaml lists the trio
+        in `optional_elements`), so its absence is a state, not a fault.
+        """
+        if not self.driver.is_visible_scrolled("recovery-kit-unreadable-status"):
+            return ""
+        return self.driver.get_text("recovery-kit-unreadable-status")
+
+    def type_let_go_confirm(self, word: str) -> None:
+        """Type `word` into `recovery-kit-let-go-confirm-field`, replacing
+        whatever it held — the stolen gate's type-to-confirm idiom."""
+        self.driver.clear_and_type("recovery-kit-let-go-confirm-field", word)
+
+    def let_go_armed(self) -> bool:
+        """Whether `recovery-kit-let-go-button` is armed (it arms on the
+        confirm word alone)."""
+        return self.driver.is_enabled("recovery-kit-let-go-button")
+
+    def press_let_go(self) -> None:
+        """Press `recovery-kit-let-go-button` — the user's irreversible act."""
+        self.driver.click("recovery-kit-let-go-button")
 
     # --- Quotas ---
 

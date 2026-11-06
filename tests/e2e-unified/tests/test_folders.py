@@ -22,12 +22,57 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.launch_harness import reached_authenticated_app
-from helpers.app_surface import declared_absence, skip_unbuilt
+from helpers.app_surface import require_surface, require_surface
+from helpers.relaunch import pin_store_across_relaunch
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.set_names import find_set
 from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
+
+
+@pytest.fixture(scope="module")
+def _folder_seat_users():
+    """One admitted account per app leg, for this module only."""
+    return {}
+
+
+@pytest.fixture
+def folder_seat(test_user, app, nest_instance, _folder_seat_users):
+    """This module's signed-in seat: one account per app leg, never the session's.
+
+    Every test here relaunches the app signed in (`logged_in_app`), and a launch
+    draws three to four `fauna.nest.info` reads on the actor (the connection's
+    shared read, its identity proof, the peer leg's passes — `security.md`
+    § Transport trust → *The nest's self-description is read once per
+    connection*). The module's short tests launch about fourteen times a minute,
+    so on the one session actor they reached the shipped discovery budget (60 a
+    minute per actor and kind, `anonymous_rate_limit.rs`) under `--nest docker`
+    and the identity proof behind the folder row's destination read was refused
+    `rate_limited`. Split per leg, each account carries half the launches and
+    none of the earlier modules' draw — the shipped-budget fit rule's refit
+    (`testing.md` § Default app and nest mode), never a raised limit or a pause.
+
+    Requesting the session `test_user` first keeps its setup (the tier caps
+    every seat on this nest is admitted under) ahead of these accounts, which
+    are admitted over the admin path (`conftest._make_user`). The name is not
+    `test_user`: the session-scoped driver cache resolves that one by name.
+    """
+    from conftest import _make_user
+
+    leg = type(app.driver).__name__
+    if leg not in _folder_seat_users:
+        _folder_seat_users[leg] = _make_user(nest_instance)
+    return _folder_seat_users[leg]
+
+
+@pytest.fixture
+def logged_in_app(request, app, nest_instance, folder_seat):
+    """The conftest fixture's shape, signed in as this module's `folder_seat`."""
+    from conftest import _login_app_as
+
+    _login_app_as(app, request, nest_instance, folder_seat)
+    return app
 
 
 @pytest.mark.feature("folders")
@@ -67,7 +112,7 @@ def test_folders_empty_state(logged_in_app):
     that clicking add opens the wizard — exercised here regardless of how many
     sets the actor already holds.
 
-    Seed-robust: `nest_instance`/`test_user` are session-scoped, so earlier
+    Seed-robust: `nest_instance` is session-scoped and `folder_seat` module-scoped, so earlier
     batch tests (this file's own create tests, `test_device_cards`, …) leave
     folders behind for the same actor. A brittle absolute `folder_count()
     == 0` therefore fails under co-run while passing on a clean nest — the same
@@ -151,7 +196,7 @@ def test_edit_folder_paths(logged_in_app):
 
 
 @pytest.mark.feature("folders")
-def test_delete_folder(logged_in_app, nest_instance, test_user):
+def test_delete_folder(logged_in_app, nest_instance, folder_seat):
     """Delete a folder through the destructive confirmation dialog (Task 17).
 
     A wizard-created sync set has no snapshots, so `fauna.folders.delete`
@@ -176,7 +221,7 @@ def test_delete_folder(logged_in_app, nest_instance, test_user):
     b.confirm_folder_delete()
 
     b.wait_for_folder_row_gone(name)
-    assert find_set(_nest_sets(nest_instance["url"], test_user), name) is None, (
+    assert find_set(_nest_sets(nest_instance["url"], folder_seat), name) is None, (
         f"the row left the list but {name!r} is still on the nest — the list "
         f"hid it rather than deleting it. error={logged_in_app.error_text()!r}"
     )
@@ -309,7 +354,18 @@ def test_folder_save_paths_does_not_drop_pending_location_path(logged_in_app, tm
 
     # Fill the folder-binding path field (the picker itself isn't e2e-driveable —
     # same substitution the sibling test above uses) but click Save Paths instead
-    # of the dedicated Add button, exactly as reported.
+    # of the dedicated Add button, exactly as reported. The expand's body can be
+    # mid-rebuild (the member-roster load rebuilds the row it just opened), so wait
+    # for the field on its observed presence before typing (convention 14).
+    wait_until(
+        lambda: logged_in_app.driver.count("folder-location-path-input") >= 1,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "the expanded row never painted its binding form: "
+            f"{logged_in_app.driver.diagnose('folder-location-path-input')} "
+            f"error={logged_in_app.error_text()!r}"
+        ),
+    )
     logged_in_app.driver.type_text("folder-location-path-input", folder_path)
     logged_in_app.driver.click("folder-save-paths")
 
@@ -324,17 +380,22 @@ def test_folder_save_paths_does_not_drop_pending_location_path(logged_in_app, tm
     # `helpers/sync_agent_config.py` (the agent re-scopes to `<base>/<actor-hex>/`
     # on provision, so the flat path alone never appears).
     config_home = logged_in_app.driver.config_home
+    # The driver's agent root where it is not `<config_home>/fauna/sync` — darwin
+    # (`<HOME>/Library/Application Support/Fauna/sync`) and windows (`--data-dir`);
+    # `None` on linux. Same uniform call as the sibling test above: without it a
+    # darwin tui run polls a directory the agent never writes and reads as a drop.
+    agent_base = getattr(logged_in_app.driver, "sync_agent_state_base", None)
     bound = None
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        bound = bound_sync_folder(config_home, folder_path)
+        bound = bound_sync_folder(config_home, folder_path, agent_base)
         if bound:
             break
         time.sleep(0.2)
     assert bound is not None and bound.get("folder") == name, (
         f"pending folder path {folder_path!r} was silently dropped when Save Paths was "
         f"clicked instead of the dedicated Add button; error={logged_in_app.error_text()!r}. "
-        f"{describe_agent_config(config_home)}"
+        f"{describe_agent_config(config_home, agent_base)}"
     )
 
 
@@ -467,11 +528,18 @@ def test_folder_owner_side_sharing_affordances(logged_in_app):
     b.create_folder_via_wizard(name)
     b.find_and_expand_folder(name)
 
-    # The owner-side Share… affordance renders on the expanded row.
-    assert b.share_button_visible(), (
-        "expanded folder-row should render the owner-side folder-share-button: "
-        f"{logged_in_app.driver.diagnose('folder-share-button')} "
-        f"error={logged_in_app.error_text()!r}"
+    # The owner-side Share… affordance renders on the expanded row. Polled, not
+    # read once: the member-roster load rebuilds the row just after the expand, and
+    # a one-shot read inside that rebuild missed a button the next read found
+    # (the 2026-10-30 linux sweep; convention 14).
+    wait_until(
+        b.share_button_visible,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            "expanded folder-row should render the owner-side folder-share-button: "
+            f"{logged_in_app.driver.diagnose('folder-share-button')} "
+            f"error={logged_in_app.error_text()!r}"
+        ),
     )
     # An owner-only set is NOT shared: no members, no badge, and no page error
     # (the `not_shared` read is an empty roster, not a failure).
@@ -520,13 +588,14 @@ def test_folder_full_share_round_trip(folder_share_owner_app):
     actor_by_handle`; apple → the raw actor-id, since the handle path would need
     a real DNS-resolvable domain `handled_nest`'s synthetic one isn't — see
     `BackupsActions.share_recipient`'s docstring for the full per-app
-    divergence; windows classifies locally through the same shared
-    `classify_recipient`, so it takes the actor-id branch like apple), and
+    divergence; windows types the bare local-part handle too, which its picker
+    resolves through the shared `find_user` on the home nest alone, no DNS hop),
+    and
     `share_set` → `keypackage_fetch` (an actor with no KP →
     `NoKeyPackage`). So this rides `folder_share_owner_app` (a fresh driver —
     linux/macOS/iOS/tui/windows, per `folder_share_owner_app`'s fixture params — logged in as
     a handled owner on the handle-enabled `handled_nest`, its MLS session live) and
-    seeds `bob` headlessly with `register_handled_actor` + a real minted KeyPackage
+    seeds `bob` headlessly with `admit_adult` (the admin door) + a real minted KeyPackage
     (`conv_api.mint_key_packages` → `keypackage_upload`) — the same seed
     `cross_nest_foreign_actor` / the conversations 2-actor suites use. `bob` never
     comes online: the owner-side roster shows him from the Welcome delivery alone.
@@ -539,7 +608,7 @@ def test_folder_full_share_round_trip(folder_share_owner_app):
     """
     import secrets
 
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from tests.api import conv_api
 
@@ -549,7 +618,7 @@ def test_folder_full_share_round_trip(folder_share_owner_app):
     # the owner can fetch it + admit him to the MLS group (no KP → NoKeyPackage). Two
     # KPs so the single share's destructive fetch leaves the pool observably non-empty.
     bob_handle = "folderbob" + secrets.token_hex(2)
-    bob = register_handled_actor(nest["port"], handle=bob_handle, domain=MAIL_PRIMARY_DOMAIN)
+    bob = admit_adult(nest, bob_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     conv_api.keypackage_upload(
         nest["port"], bob, conv_api.mint_key_packages(bytes(bob["signing_key"]), 2)
     )
@@ -662,40 +731,14 @@ def test_folder_member_role_and_cap_editing(folder_share_owner_app):
     """
     import secrets
 
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from tests.api import conv_api
 
     app, nest, owner = folder_share_owner_app
-    if not (app.driver.is_linux() or app.driver.is_tui() or app.driver.is_windows()):
-        # Declared debt rather than a bare skip (convention 7): the shared
-        # `member_access_options()` catalog + `members.set_access` are app-agnostic,
-        # so every remaining shell owes only the member-row controls.
-        #
-        # windows joined 2026-09-03 and its
-        # story is worth keeping, because the gate outlived its cause twice. The UI
-        # had been built and rendering all along; what blocked the CAP
-        # half was `set_member_cap`'s type-then-click-same-field commit contract
-        # reaching the bridge's only "commit an editable" gesture — a physical Enter.
-        # `SendInput` needs an ATTACHED INTERACTIVE DESKTOP, not merely the right
-        # foreground window, so on a box whose automation session runs disconnected
-        # (`query session` → `Disc`) it fails `Win32Exception(5)` however correct the
-        # foreground handling is. Two real bugs were fixed on the way to that
-        # diagnosis (`ForceForeground` attaching to the wrong thread; a bare
-        # `is_visible` missing the below-the-fold trap), and neither was the cause.
-        # The cause went away when the bridge stopped needing SendInput here at all:
-        # `Actions.cs::CommitEditable` now commits by shifting UIA focus to the
-        # field's nearest focusable neighbour, firing the app's own `LostFocus`
-        # handler. Convention 14 — the dependency is removed, not retried harder.
-        skip_unbuilt(
-            app.driver,
-            surface="folder-member-cap-input",
-            detail="multi-writer member-row byte-cap editing (linux + tui + windows built)",
-            tracked="ui/folders.md § Sharing (multi-writer Phase 1)",
-        )
 
     bob_handle = "rolebob" + secrets.token_hex(2)
-    bob = register_handled_actor(nest["port"], handle=bob_handle, domain=MAIL_PRIMARY_DOMAIN)
+    bob = admit_adult(nest, bob_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     conv_api.keypackage_upload(
         nest["port"], bob, conv_api.mint_key_packages(bytes(bob["signing_key"]), 2)
     )
@@ -808,7 +851,7 @@ def test_folder_writer_warning_follows_whether_the_folder_is_published(
     ``fauna_folders_machine::writer_grant_reach``'s tier_1 tests; this journey
     proves the app actually asks that decision and paints its answer.
     """
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from helpers.waiting import wait_until
     from i18n.strings import S
@@ -816,16 +859,8 @@ def test_folder_writer_warning_follows_whether_the_folder_is_published(
 
     app, nest, owner = folder_share_owner_app
     driver = app.driver
-    if driver.is_macos() or driver.is_ios():
-        declared_absence(
-            driver,
-            capability="owner-side access-grant UI (folder-share-role-select, "
-            "folder-member-role-select) — so no writer warning either",
-            doc="docs/goal/ui/folders.md § Implementation status today "
-            "(the published-folder writer warning)",
-        )
     bob_handle = "reachbob" + secrets.token_hex(2)
-    bob = register_handled_actor(nest["port"], handle=bob_handle, domain=MAIL_PRIMARY_DOMAIN)
+    bob = admit_adult(nest, bob_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     conv_api.keypackage_upload(
         nest["port"], bob, conv_api.mint_key_packages(bytes(bob["signing_key"]), 2)
     )
@@ -875,10 +910,9 @@ def test_folder_writer_warning_follows_whether_the_folder_is_published(
     assert b.writer_uncapped_warning_visible(0, row=row), (
         "the uncapped writer still carries the quota warning alongside it"
     )
-    if driver.is_tui() or driver.is_linux():
-        # The cap commit gesture is proven on these two (the same idiom
-        # `test_folder_member_role_and_cap_editing` drives); web's cap input
-        # commits on a blur the shared driver does not yet issue.
+    if driver.is_tui() or driver.is_linux() or driver.is_macos() or driver.is_ios() or driver.is_web():
+        # The cap commit gesture is proven on these (the same idiom
+        # `test_folder_member_role_and_cap_editing` drives); web commits on Enter.
         b.set_member_cap("4096", 0, row=row)
         wait_until(
             lambda: not b.writer_uncapped_warning_visible(0, row=row),
@@ -986,7 +1020,7 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
     """
     import secrets
 
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from tests.api import conv_api
 
@@ -1004,9 +1038,7 @@ def test_folder_pending_share_accept_decline(folder_share_recipient_app):
         knock row and, once accepted, the shared-with-me badge); the hex is the raw
         ActorId that must NOT leak into that surface once the handle resolves."""
         stranger_handle = "strngr" + secrets.token_hex(3)
-        stranger = register_handled_actor(
-            port, handle=stranger_handle, domain=MAIL_PRIMARY_DOMAIN
-        )
+        stranger = admit_adult(nest, stranger_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
         # The recipient's login-time KeyPackage publish is best-effort async — poll
         # a destructive fetch until one is available so the stranger can admit the
         # recipient to a fresh MLS group.
@@ -1262,7 +1294,8 @@ def test_a_known_persons_share_appears_and_only_a_strangers_waits(
     carve-out (b)): it is the recipient's own row toward the sharer that the gate
     reads, arranged exactly as ``test_folder_member_media_decrypt.py`` does.
     """
-    from common.auth import _user_call, register_handled_actor
+    from common.auth import _user_call
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from helpers.waiting import wait_until
 
@@ -1271,9 +1304,9 @@ def test_a_known_persons_share_appears_and_only_a_strangers_waits(
     b = app.backups
 
     friend_handle = "friend" + secrets.token_hex(3)
-    friend = register_handled_actor(port, handle=friend_handle, domain=MAIL_PRIMARY_DOMAIN)
+    friend = admit_adult(nest, friend_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     stranger_handle = "strngr" + secrets.token_hex(3)
-    stranger = register_handled_actor(port, handle=stranger_handle, domain=MAIL_PRIMARY_DOMAIN)
+    stranger = admit_adult(nest, stranger_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
 
     # The recipient knows `friend`: accept + confirm their row toward them. Both
     # states map to Auto (`contact_arrival_disposition`); confirming as well keeps
@@ -1298,9 +1331,9 @@ def test_a_known_persons_share_appears_and_only_a_strangers_waits(
     b.navigate_folders()
 
     def _friend_row() -> int | None:
-        for i in range(b.folder_count()):
-            if friend_set in b.folder_title(i):
-                return i
+        idx = b.folder_index(friend_set)
+        if idx is not None:
+            return idx
         b.navigate_devices()
         b.navigate_folders()
         return None
@@ -1310,7 +1343,7 @@ def test_a_known_persons_share_appears_and_only_a_strangers_waits(
         90.0,
         diagnose=lambda: (
             f"the contact's shared folder {friend_set!r} never appeared in the list "
-            f"(rows: {[b.folder_title(i) for i in range(b.folder_count())]!r}, "
+            f"(rows: {b.folder_titles()!r}, "
             f"pending knocks: {[b.pending_share_text(i) for i in range(b.pending_share_count())]!r}) "
             f"— a knock for it means the gate treated a contact as a stranger. "
             f"error={app.error_text()!r}"
@@ -1335,7 +1368,7 @@ def test_a_known_persons_share_appears_and_only_a_strangers_waits(
     assert not any(friend_handle in k for k in knocks), (
         f"the contact's share must never wait for an answer; knocks: {knocks!r}"
     )
-    rows = [b.folder_title(i) for i in range(b.folder_count())]
+    rows = b.folder_titles()
     assert not any(stranger_set in r for r in rows), (
         f"a stranger's share must not enter the list before it is accepted: {rows!r}"
     )
@@ -1372,7 +1405,7 @@ def test_writer_member_binds_location(folder_share_recipient_app, tmp_path):
     HAS the seam, `test_bind_location_nested_under_folder` below, so this
     stays a shared assertion rather than a tui-only strengthening).
     """
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from helpers.waiting import wait_until
     from tests.api import conv_api
@@ -1386,7 +1419,7 @@ def test_writer_member_binds_location(folder_share_recipient_app, tmp_path):
     # BEFORE delivering the Welcome — mirrors a share-time writer grant (the
     # order `members.set_access` supports either way; `folders.md` § Sharing).
     stranger_handle = "wr" + secrets.token_hex(3)
-    stranger = register_handled_actor(port, handle=stranger_handle, domain=MAIL_PRIMARY_DOMAIN)
+    stranger = admit_adult(nest, stranger_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     kp = wait_until(
         lambda: conv_api.keypackage_fetch(port, stranger, recipient_id),
         30.0,
@@ -1540,7 +1573,7 @@ def _wait_policy(nest_url, test_user, name: str, want, timeout: float = 20.0):
 @pytest.mark.web
 @pytest.mark.tui
 @pytest.mark.feature("folders")
-def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_user):
+def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, folder_seat):
     """The per-set conflict policy is editable in place and persists to the nest.
 
     `folder-conflict-policy-select` (indexed, every owner row) writes
@@ -1568,7 +1601,7 @@ def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_us
         f"error={app.error_text()!r}"
     )
     # ...and a fresh set starts on the default policy (auto — merge where possible).
-    assert _policy_of(nest_url, test_user, name) in (None, "auto"), (
+    assert _policy_of(nest_url, folder_seat, name) in (None, "auto"), (
         "a freshly-created set should start on the default 'auto' conflict policy"
     )
 
@@ -1579,7 +1612,7 @@ def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_us
     b.set_conflict_policy("latest_wins_always", row=row)
 
     # VERIFICATION (nest ground truth, by NAME — a wrong-row write cannot pass this).
-    seen = _wait_policy(nest_url, test_user, name, {"latest_wins_always"})
+    seen = _wait_policy(nest_url, folder_seat, name, {"latest_wins_always"})
     assert seen == "latest_wins_always", (
         f"selecting latest_wins_always must persist to the nest row for {name!r}; "
         f"nest reports {seen!r}. If the UI reads back correctly but the nest does not, "
@@ -1592,7 +1625,7 @@ def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_us
     # And back again — the edit is not one-way.
     row = b.open_conflict_policy_row(name)
     b.set_conflict_policy("auto", row=row)
-    seen = _wait_policy(nest_url, test_user, name, {None, "auto"})
+    seen = _wait_policy(nest_url, folder_seat, name, {None, "auto"})
     assert seen in (None, "auto"), (
         f"selecting auto must persist to the nest row for {name!r}; got {seen!r}"
     )
@@ -1607,7 +1640,7 @@ def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_us
 @pytest.mark.tui
 @pytest.mark.feature("folders")
 def test_sync_default_conflict_policy_stamps_new_sets(
-    logged_in_app, nest_instance, test_user
+    logged_in_app, nest_instance, folder_seat
 ):
     """The page-level default is stamped onto NEWLY created sets, not existing ones.
 
@@ -1617,7 +1650,7 @@ def test_sync_default_conflict_policy_stamps_new_sets(
     only" scope is the assertion: a set created BEFORE the default changes keeps its
     own policy.
 
-    ⚠ Restores the default afterwards. `test_user` is SESSION-scoped, so a leaked
+    ⚠ Restores the default afterwards. `folder_seat` is MODULE-scoped, so a leaked
     `latest_wins_always` default would silently stamp every set a later test creates —
     the same shared-session contamination class as the spam-model teardown in
     test_mail_client_*.
@@ -1630,7 +1663,7 @@ def test_sync_default_conflict_policy_stamps_new_sets(
     # A set created under the CURRENT default — its policy must survive the change below.
     before = f"policy-before-{secrets.token_hex(4)}"
     b.create_folder_via_wizard(before)
-    before_policy = _policy_of(nest_url, test_user, before)
+    before_policy = _policy_of(nest_url, folder_seat, before)
 
     try:
         # MUTATION (UI): change the page-level default.
@@ -1640,13 +1673,13 @@ def test_sync_default_conflict_policy_stamps_new_sets(
         # A NEW set is stamped with it...
         after = f"policy-after-{secrets.token_hex(4)}"
         b.create_folder_via_wizard(after)
-        seen = _wait_policy(nest_url, test_user, after, {"latest_wins_always"})
+        seen = _wait_policy(nest_url, folder_seat, after, {"latest_wins_always"})
         assert seen == "latest_wins_always", (
             "the sync-default conflict policy must be stamped onto a newly created "
             f"set; nest reports {seen!r} for {after!r}. error={app.error_text()!r}"
         )
         # ...while the set created beforehand keeps the policy it was made with.
-        assert _policy_of(nest_url, test_user, before) == before_policy, (
+        assert _policy_of(nest_url, folder_seat, before) == before_policy, (
             f"changing the default must NOT retro-edit the existing set {before!r} "
             "(the default is stamped at creation, not a live pointer)"
         )
@@ -1675,7 +1708,7 @@ def test_sync_default_conflict_policy_survives_relaunch(logged_in_app):
     Non-default value on purpose: an absent default renders `auto`, so a page that
     forgot the choice would pass an assertion written against `auto`.
 
-    ⚠ Restores the default afterwards. `test_user` is SESSION-scoped, so a leaked
+    ⚠ Restores the default afterwards. `folder_seat` is MODULE-scoped, so a leaked
     `latest_wins_always` would stamp every set a later test creates.
     """
     driver = logged_in_app.driver
@@ -1691,28 +1724,8 @@ def test_sync_default_conflict_policy_survives_relaunch(logged_in_app):
 
         # Same two preconditions as test_settings.py's inbox-mode relaunch test: the
         # client store and the injected identity must both survive the relaunch.
-        if not driver.preserve_state_across_relaunch():
-            skip_unbuilt(
-                driver,
-                surface="a client store that can be pinned across a relaunch",
-                detail=(
-                    "the driver hands the relaunched process a fresh store, so the "
-                    "app returns signed out and cannot re-read the stored default"
-                ),
-                tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-            )
-        if not driver.relaunch_preserves_injected_identity():
-            skip_unbuilt(
-                driver,
-                surface="a login that survives a relaunch",
-                detail=(
-                    "logged_in_app injects the session with set_state and on this "
-                    "app the injection does not reach a store the relaunch keeps, "
-                    "so the stored default can never be re-read. The product "
-                    "behaviour here is UNVERIFIED, not known-good"
-                ),
-                tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-            )
+        pin_store_across_relaunch(driver)
+        require_surface(driver, "relaunch-injected-identity")
         assert driver.recover(), "the app did not come back up after the relaunch"
         reached_authenticated_app(driver, timeout=90)
 
@@ -1736,7 +1749,7 @@ def test_sync_default_conflict_policy_survives_relaunch(logged_in_app):
 
 @pytest.mark.feature("folders")
 def test_folder_device_activity_reflects_recorded_changes(
-    logged_in_app, nest_instance, test_user,
+    logged_in_app, nest_instance, folder_seat,
 ):
     """Per-set device activity (`folder-device-activity-item`/-label/-count) —
     the ordinary sync change signal that makes web's `fauna.sync.changed`
@@ -1774,7 +1787,7 @@ def test_folder_device_activity_reflects_recorded_changes(
     )
 
     device_id = secrets.token_hex(32)
-    secret_key = test_user["signing_key"].encode().hex()
+    secret_key = folder_seat["signing_key"].encode().hex()
     sync_register(
         nest_instance["port"], secret_key=secret_key, device_id=device_id,
         label="activity-device", base_url=nest_instance["url"],

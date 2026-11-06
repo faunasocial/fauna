@@ -125,9 +125,7 @@ you can keep several and switch between them in the feed list.
   your own words to a quote is on the way. **Like and repost are both
   toggles**: tap once, tap again to take it back — no confirmation dance either
   way. A liked post keeps its heart lit so you can see at a glance what you
-  have already reacted to, and the count moves in both directions. A repost
-  shows up in the timeline as a compact card of the original with a "reposted"
-  note; open it to read and react to the original itself.
+  have already reacted to, and the count moves in both directions. A repost shows up in the timeline as a compact card of the original with a "reposted" note; open it to read and react to the original itself. When people have reacted to a post with an emoji, each emoji shows under the row of buttons with how many people chose it, and the ones you added are highlighted. Tap one to add the same reaction, or tap one of yours to take it back, again with no confirmation. There is no way yet to pick an emoji nobody has used on the post. A post from Bluesky shows no reactions, and on a post that came in over a bridge from another network, such as the Fediverse or Nostr, they show but you cannot add your own there yet.
 - **See who tipped a post** — a post that has received tips shows the total and
   how many people sent one, right on the card. Tap the total to see who they
   were: each tip names the sender when it can, or the account it came from on
@@ -186,9 +184,7 @@ each thread shows which; the reading and writing experience is the same.
   opening the thread clears it.
 - **New conversation** — type a handle or an email address into the recipient
   picker; it resolves and confirms who you will reach, and the chip shows which
-  way the message will travel. If someone you already talk to over Fauna can't
-  be reached right now, the picker says *Lookup failed — try again* instead of
-  quietly falling back to plain email. As you type, the picker offers the
+  way the message will travel. If someone you already talk to over Fauna can't be reached right now, the picker says **Lookup failed — try again** instead of quietly falling back to plain email. If you type the handle of someone on your own nest who has not opened Fauna yet, the picker says **Not reachable yet — they need to open Fauna first** and adds no chip: once they have signed in, you can write to them, and in the meantime nothing is sent to them as plain email. As you type, the picker offers the
   people you already know — your contacts first, then people you have written
   with — matching a name, a nickname you gave them, a label or part of their
   address; pick one and it is checked exactly as if you had typed it in full.
@@ -198,9 +194,7 @@ each thread shows which; the reading and writing experience is the same.
 - **In a thread** — messages with timestamps and attachments (images inline),
   a reply box with formatting toolbar and file attach. A file you attach shows
   up in the reply box as a small tag with its name and size, so you can see
-  what is going out — and take it back off with the × before you send. Badges
-  mark what the cryptography actually verified: *encrypted*, *signed*,
-  *verified sender*. A received image carrying embedded content-credential
+  what is going out — and take it back off with the × before you send. Click or tap a picture someone sent you to open it full-screen, as on a post, and dismiss it to go back to the conversation. Badges mark what the cryptography actually verified: *encrypted*, *signed*, *verified sender*. A received image carrying embedded content-credential
   (C2PA) information — the same provenance data the Feeds badge shows — wears
   its own small badge too.
 - **Conversations over a bridge** — when an app you connected carries another
@@ -320,7 +314,7 @@ each thread shows which; the reading and writing experience is the same.
   nest's key back at any time: *Home nest reads this room* in the room
   settings, switched to *no* and saved. The nest then deletes everything it
   had built from the room, and the room keeps working exactly as before,
-  only without the nest's search.
+  only without the nest's search. To search a community room, open it and choose **Search this room** on its header: type what you are looking for and press **Search**, and the room's messages and the posts addressed to it that match take the conversation's place, best match first. Opening a message takes you to it in the conversation; opening a post shows it in Feeds — even one your own nest does not hold, when the room's home nest is another nest than yours. **Search this room** again, or Esc, puts the conversation back. A search that finds nothing says so, and so does every search once the home nest's key has been taken back.
 - **Unfinished messages keep themselves** — a half-written message is not
   something you have to remember to save. Leave a thread mid-sentence, start a
   new conversation and come back, quit the app entirely, sign out and back in,
@@ -349,8 +343,7 @@ Two address books in one page, switched by a segment control:
   and block senders. Your inbox-mode setting (under Settings → privacy)
   decides who may knock at all. The person does not have to be on your own
   server: type their full address — `someone@their-server` — and the knock
-  travels to wherever they are, landing in their requests list there. You need
-  nothing set up in advance for this, and neither do they.
+  travels to wherever they are, landing in their requests list there. You need nothing set up in advance for this, and neither do they. Once someone accepts your contact request, either of you can start a conversation right away — the person who accepted does not have to send a request back. When you are both on the same server, they also appear in your contacts, marked **Accepted**.
 - **Address Book** — classic contact *cards* (names, emails, phone numbers,
   addresses), the kind your phone's contacts app holds. These sync over
   CardDAV — see [Calendar and contacts](calendar-and-contacts.md) — and open
@@ -358,7 +351,7 @@ Two address books in one page, switched by a segment control:
 
 ## Profile
 
-Your public face — and everyone else's. Opening your own profile shows
+Your public face — and everyone else's. The top of a profile shows the person's picture and banner image, when they have set them — for someone on another nest, once they let other nests see their profile (below). Opening your own profile shows
 editing controls — display name, bio, links, and a profile picture and banner
 image — plus a Tiers tab; opening someone else's adds the relationship
 actions: **follow**, **message**, **block**, **report**, and **request
@@ -368,6 +361,8 @@ without having to look the person up first.
 A profile opens on its **Posts** tab: that person's posts, newest first, each one looking just as it does in your feed. Reaching the bottom of the list brings in older posts, and opening one shows it in its full view, exactly as opening it from a feed does. A post meant for subscribers, buyers or a room shows its teaser and the badge it wears in your feed, and opens in full only if you can read it — a room post names its room when you are a member. For someone whose account lives on another nest, the tab shows the posts that have reached your own nest: once you follow them, their recent posts and each new one; otherwise usually none.
 
 You can follow someone whose account lives on another nest, too. Look them up in [Contacts](#contacts) by their full address — `someone@their-server` — press **View profile** on the result, and press **Follow**. Your nest passes the follow on to theirs. A plain follow needs no approval from them: it goes through on its own the next time their app is running. From then on their posts arrive in your feed on your own nest — first their recent ones, then each new one as they post it, the ones they share only with their followers included. A post they delete leaves your feed too.
+
+Your profile can also be shown to people on other nests. The edit form's **People on other nests can see your profile** switch is off until you turn it on. While it is off, someone on another nest who opens your profile sees the start of your Actor ID where your name would be; once it is on, they see your display name, which their nest fetches from yours, and your picture and banner. The same goes for your posts in their feed: while the switch is on, their app names each post of yours by your display name; while it is off, by the start of your Actor ID. A nickname they give you takes the place of either. Everyone on your own nest sees your profile either way. The switch is about Fauna only: the Fediverse, once you enable it, and Bluesky, when your nest hosts your Bluesky identity, publish your profile whatever it says (see [Who can see what](who-can-see-what.md#public-posts-and-your-profile)).
 
 **Reporting** tells your nest's admin about something you think they should see — an account from its profile, a post from its **⋯** menu, or a message someone sent you from that message's **⋯** menu. You pick a reason, can add a note, and can also block the person in the same step. A message, or a post only some people can open, is private, so your admin cannot read it unless you tick the box that attaches its text — the box says so. When the person you are reporting lives on another nest, your report is passed on to that nest's admin too, without your name. A report informs; it removes nothing by itself, and the person you report is never told who reported them. What it does change is your own view: what you reported shows **You reported this** in its place from then on. Your reports, and what became of each, are listed under **Your reports** on the **Moderation** page (in the web app, the **Content Moderation** section of Settings → **Privacy**), where you can withdraw one while it is still open.
 
@@ -482,7 +477,7 @@ sound, video or plain-text file shown in place; the file is unlocked in their
 own browser, and your nest never sees it, its name or the key. Because the
 key exists only in the link you copied when you made it, **Shared links**
 cannot copy a private link again — keep the one you copied. Files in a folder shared with other people offer no link unless the folder is public, and files in a folder you serve over WebDAV offer none.
-On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither.
+On Windows you can start from File Explorer too, and on Linux from GNOME Files or KDE's Dolphin: right-click a file in a public synced folder → **Fauna → Share**, and Fauna opens on that file with **Share a link** ready; on a synced folder itself, **Share** opens that folder's sharing in Fauna. In GNOME Files the entry appears once its Python extension support is installed (the `python3-nautilus` package on Debian and Ubuntu). Dolphin lists **Share** on every file and folder, and on one that can't be shared, choosing it does nothing. The Snap package offers the entry in neither. On a Mac the same **Share** is in Finder's menu for a file in a public Fauna location and for a Fauna location itself, and on iPhone and iPad it is in the Files app's menu for the same items.
 
 In the terminal app — which plays no audio or video inline — an audio or video file's detail view offers **Open externally** instead, and so does a video on a post in the feed: Fauna saves the file to a private temporary location (decrypting it first if it is stored encrypted) and hands it to your system's own media player. By default it asks before opening anything; **Play audio & video externally**, on the **Terminal** page of Settings, lets you choose **Always open** or **Never open (show details only)** instead, and the second removes the option from a file's detail view (a video on a post then just shows as a marker that opens nothing).
 
@@ -567,19 +562,24 @@ On Windows the count is the badge on Fauna's taskbar icon, which Windows keeps
 showing even after you close the window; it needs the Explorer integration
 that a default install includes, and an install without it shows no badge.
 
-**Alerts on a device that isn't open.** In the browser, on a Mac and on an iPhone, **Settings → General** turns on alerts your nest can send while the app is closed — one switch, **Notify me on this device**. Switching it on asks your device for permission once, then tells your
-nest where to send them; switching it off tells your nest to stop and forget
-the address. Off
-stays off — the app will not quietly turn alerts back on the next time you open
-it, and the switch reads off again so you can see that the change took. If
-switching on does not work, the switch settles back off and a line under it
-says why. Your device's own notification permission is
-separate and stays as you left it; to take that back, use your operating
-system's notification settings, and Fauna links you straight there if you have
-refused it. What the alerts *say* is encrypted on the way — Apple, Google and
-Mozilla only ever relay it, and only your device can read it. On a device
-holding several identities, alerts follow the one you're using — the identity
-you switch away from stops alerting here until you return.
+**Alerts on a device that isn't open.** In the browser, **Settings → General**
+turns on alerts your nest can send while the app is closed — one switch,
+**Notify me on this device**; an iPhone has the same switch there, but its
+alerts arrive only from a nest holding the project's key for Apple's
+notification service, which no nest you run holds. Switching it on asks your
+device for permission once, then tells your nest where to send them; switching
+it off tells your nest to stop and forget the address. Off stays off — the app
+will not quietly turn alerts back on the next time you open it, and the switch
+reads off again so you can see that the change took. If switching on does not
+work, the switch settles back off and a line under it says why. Your device's
+own notification permission is separate and stays as you left it; to take that
+back, use your operating system's notification settings, and Fauna links you
+straight there if you have refused it. What the alerts *say* is encrypted on the
+way — your browser's push service only ever relays it, and only your device can
+read it; on an iPhone, Apple's notification service, which only a nest holding
+that key uses, also carries a generic alert and the number of unread items in
+the clear. On a device holding several identities, alerts follow the one you're
+using — the identity you switch away from stops alerting here until you return.
 
 **On an Android phone, a push service app delivers the alert.** **Settings → Account → Push Notifications** has the same switch, **Notify me on this device**. Alerts reach an Android phone through a push service app you install yourself, such as ntfy; Fauna asks it for an address, hands that address to your nest, and your nest sends the alert there even after you close Fauna. Your nest only sends to a push service on the public internet, never to an address inside its own network, so a push service reachable only from your home network will not do. If no push service app is installed, the switch settles back off and the line under it says so. Switching it on asks for Android's notification permission once; if you refuse, nothing is turned on. What the alert says is encrypted on the way, so the push service only relays it, and it says only that something arrived ("New message"), not who sent it or what it says. As everywhere, off stays off, and the switch stays as you set it when you switch identities or sign out and back in.
 
@@ -607,13 +607,13 @@ this way. Your nest keeps a recent window of bridged posts rather than all of
 them, so very old ones eventually drop out of search while staying untouched
 on the network they came from.
 
-Much of what's yours is searched **privately, on your device** — and that half works differently, because that content is stored encrypted, in a form your nest cannot search. Your device builds a private search index as content arrives — and as you send it, so a message you just wrote is findable straight away — encrypts it with a key only you hold, and stores it alongside the rest of your content. (The web app runs in your browser, which cannot build this private index, so there search covers public posts and profiles only.)
-Searching runs that index on your device, so the results appear mixed in with
-everything else while your nest never learns what you searched for or what
-matched. A device that hasn't caught up yet simply shows fewer results rather
-than an error, and it catches up on its own. Today this on-device search
-covers your mail, your conversations, your unsent drafts, your contacts, your
-own posts, and your synced or backed-up files.
+Much of what's yours is searched **privately, on your own devices** — and that half works differently, because that content is stored encrypted on your nest. Your apps on a computer build a private search index as content arrives — and as you send it, so a message you just wrote there is findable straight away — and the index travels between your devices encrypted, stored alongside the rest of your content; a phone searches the index your computers built rather than building its own. Your nest cannot read the index, apart from the part covering your mail, which it can open with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session — the session in which that app's own searches of your mail run on your nest. (The web app runs in your browser, which cannot use this private index, so there search covers public posts and profiles only.)
+Each search runs that index on your device and also asks your nest's own
+search, and the results appear mixed in together. A device that hasn't caught
+up yet simply shows fewer results rather than an error, and it catches up on
+its own. Today this on-device search covers your mail, your conversations,
+your unsent drafts, your contacts, your own posts, and your synced or
+backed-up files by their names.
 
 Every result says what kind of thing it is — a post, a profile, an email, a
 message, a draft, a contact, a file — and shows the words around what matched,
@@ -720,7 +720,7 @@ do. The sub-pages:
     force until newer ones arrive. If an authority publishes its rules in a
     newer format than your app understands, the section says so, and nothing
     is filtered under them until you update.
-  - **Rules of** your nest — if your nest has published rules of its own (see [Feeds](#feeds)), they are listed here under its name: the version in force and when it was issued, then each rule — **Block** or **Hide behind a warning**, how strict it is where that applies, and the admin's reason. A rule your device cannot apply is marked **Not applied on this device**. When your nest changes rules it had already published, the feed and conversations pages show a one-line notice saying so, which brings you here; seeing the rules here clears it. The new rules apply as soon as your app learns of the change, whether or not you have opened them yet.
+  - **Rules of** your nest — if your nest has published rules of its own (see [Feeds](#feeds)), they are listed here under its name: the version in force and when it was issued, then each rule — **Block** or **Hide behind a warning**, how strict it is where that applies, and the admin's reason. A rule your device cannot apply is marked **Not applied on this device**. If none of your nest's rules can apply on this device — because they were written by a newer version of Fauna, or contain an error — the section says so under the nest's name, and it may list no rules at all; for rules from a newer version, updating the app shows and applies them. When your nest changes rules it had already published, the feed and conversations pages show a one-line notice saying so, which brings you here; seeing the rules here clears it. The new rules apply as soon as your app learns of the change, whether or not you have opened them yet.
 - **Account** — change your handle and manage **multiple accounts**: add another identity, switch between them, remove
   one. Each account row also has a **Require confirmation to switch** toggle:
   turn it on (say, for your admin identity) and switching to that account
@@ -765,30 +765,49 @@ do. The sub-pages:
   themselves come too — the files you uploaded, the message bodies behind your
   mail, posts, calendar entries and contact cards, and the messages in your
   conversations — so the archive can be large if you keep a lot on your nest.
-  There is nothing to choose: every export carries everything it can, and the manifest names the few things it leaves out. Anything your nest keeps encrypted stays encrypted in the archive — it is copied out exactly as it rests; your keys are what open it, and they are on your devices, not in the archive. Inside the archive, a *manifest* lists what it contains and, just as importantly, what it does not, each thing left out named with its reason — worth a look, because nothing is quietly missing. Deleted messages are not carried. Nor is anything your nest is under a legal obligation to withhold, though the archive still shows that something stood where it was, so nothing disappears silently. A post or message of yours that your nest's admin has blocked after a report is in the archive as usual, because a block never takes your own copy. A blocked message someone else sent is left out, and, as for a legal withhold, the archive shows that something stood there. Recovery and sign-in secrets are never written into a downloadable file: the zip outlives the moment you made it,
-  and an export can be fetched with a weaker key than the one that unlocks your
-  account — so a copy of your secrets inside it would be a second place for
-  someone to steal them from. Things the archive can already rebuild from what
-  it carries are left out as duplication, and so is your nest's own
-  housekeeping about you, which means nothing away from that nest. Anything not
-  yet reviewed for export is listed by name too, rather than quietly missing,
-  so the archive never claims to be more complete than it is. **Delete account**
-  lives here too. If you own a community room that has other members on your
-  nest, hand the room to one of them first: until you do, deleting your account
-  is refused, so the room is never left without an owner. The big asks — changing your handle, deleting your account, and deleting a backup snapshot on the Backups page (unless you choose to delete it immediately there) — don't happen straight away: they
-  sit for a waiting period first, so you can change your mind. The **Pending
-  actions** list on this page is where you see them waiting. It is always
-  there — empty most of the time — and each entry says what will happen and
-  when, with a **Cancel** beside it. Cancelling takes one click and asks no
-  questions: taking something back is the safe direction. Until the waiting
-  period runs out, nothing has changed — a handle change you cancel never
-  takes effect, and your old name keeps working exactly as before. One thing is not in this list, because it is not yours to cancel: if your nest's admin starts removing your account from the nest, every page of the app says so, with the date your access ends and the date your account and its data are deleted, two weeks later, and you can export everything until access ends.
+  There is nothing to choose: every export carries everything it can, and the
+  manifest names the few things it leaves out. Anything your nest keeps
+  encrypted stays encrypted in the archive — it is copied out exactly as it
+  rests; your keys are what open it, and they are on your devices, not in the
+  archive. Inside the archive, a *manifest* lists what it contains and, just as
+  importantly, what it does not, each thing left out named with its reason —
+  worth a look, because nothing is quietly missing. Deleted messages are not
+  carried. Nor is anything your nest is under a legal obligation to withhold,
+  though the archive still shows that something stood where it was, so nothing
+  disappears silently. A post or message of yours that your nest's admin has
+  blocked after a report is in the archive as usual, because a block withholds
+  an item from everyone the nest serves except its author. A blocked message
+  someone else sent is left out, and, as for a legal withhold, the archive shows
+  that something stood there. Recovery and sign-in secrets are never written
+  into a downloadable file: the zip outlives the moment you made it, and an
+  export can be fetched with a weaker key than the one that unlocks your account
+  — so a copy of your secrets inside it would be a second place for someone to
+  steal them from. Things the archive can already rebuild from what it carries
+  are left out as duplication, and so is your nest's own housekeeping about you,
+  which means nothing away from that nest. Anything not yet reviewed for export
+  is listed by name too, rather than quietly missing, so the archive never
+  claims to be more complete than it is. **Delete account** lives here too. If
+  you own a community room that has other members on your nest, hand the room to
+  one of them first: until you do, deleting your account is refused, so the room
+  is never left without an owner. The big asks — changing your handle, deleting
+  your account, and deleting a backup snapshot on the Backups page (unless you
+  choose to delete it immediately there) — don't happen straight away: they sit
+  for a waiting period first, so you can change your mind. The **Pending
+  actions** list on this page is where you see them waiting. It is always there
+  — empty most of the time — and each entry says what will happen and when, with
+  a **Cancel** beside it. Cancelling takes one click and asks no questions:
+  taking something back is the safe direction. Until the waiting period runs
+  out, nothing has changed — a handle change you cancel never takes effect, and
+  your old name keeps working exactly as before. One thing is not in this list,
+  because it is not yours to cancel: if your nest's admin starts removing your
+  account from the nest, every page of the app says so, with the date your
+  access ends and the date your account and its data are deleted, two weeks
+  later, and you can export everything until access ends.
 - **Encryption** — how many one-use starter keys are waiting on your nest for
   people who want to start an encrypted conversation with you while your
   devices are off. Your app tops the supply up each time you sign in; the page
   tells you when it is running low, and **Refresh** tops it up on the spot.
-- **Privacy** — who may reach you (*inbox mode*: open, knock-first,
-  contacts-only, or closed), spam thresholds, and mail filter rules — create,
+- **Privacy** — who may reach you (*inbox mode*: **Open**, **Allow Knocks**, **Contacts Only** or **Closed** — Allow Knocks and Contacts Only aren't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room), spam thresholds, and mail filter rules — create,
   edit, or delete a rule any time; editing changes it in place, no need to
   delete and recreate.
 - **Devices** — every device signed into your identity, with online status
@@ -810,8 +829,7 @@ do. The sub-pages:
   signing in: it says when the lock ends and that a lock you did not set means
   somebody else holds your secret key. If you set the lock yourself, there is
   nothing to do but wait — the app signs back in by itself once the lock ends.
-  If you did not, press **My Identity Was Stolen** on that screen, paste your
-  recovery kit and type `SUCCEED`: the account moves to a new key the other
+  If you did not, press **My Identity Was Stolen** on that screen, paste your recovery kit, type `SUCCEED` and press **My Identity Was Stolen** again: the account moves to a new key the other
   person does not have, the lock does not apply to it, and you are signed in
   straight away. You can also lock your account without signing in: when your device was taken and you are on someone else's, the screen where you create or import an identity offers **Lock my account for 24 hours**. Paste your secret key, enter your handle (or let the key's link supply it), read the same warning and type `LOCK`. When the lock lands you are back on that screen with the time it ends, and nothing of your account stays on that device.
 - **Folders** — the control plane for file sync; big enough to get its
@@ -856,7 +874,7 @@ do. The sub-pages:
   app syncs. Unsubscribing works the same way: your leave is recorded at
   once, needs no approval from the creator, and completes the next time
   their app syncs — the row stays listed until then.
-- **Nests** — link your *other* nests — the servers, or boxes, your account lives on — so one identity can live on several. A nest you have set up as a custodian (below), whether another of your own or a friend's, keeps a copy of your account that it cannot read — apart from what you have published to everyone, which is public by design — so if one of your nests is lost you can restore what it holds for you from it: **Restore from a custodian nest…** on this page takes the custodian's address, and works on a new device too, once you have signed in there. Each nest's row shows
+- **Nests** — link your *other* nests — the servers, or boxes, your account lives on — so one identity can live on several. A nest you have set up as a custodian (below), whether another of your own or a friend's, keeps a copy of your account that it cannot read — apart from what you have published to everyone, which is public by design — so if one of your nests is lost you can restore what it holds for you from it: **Restore from a custodian nest…** on this page takes the custodian's address, and works on a new device too, once you have signed in there (the steps are in [Your identity, devices & recovery](identity-and-devices.md#if-you-lose-every-device-and-your-nest)). Each nest's row shows
   what it is trusted to read, renewable and
   revocable per item, with a history view of every change. A folder you
   have put behind a paywall shows on its row by name, and so does each
@@ -886,7 +904,7 @@ do. The sub-pages:
   goes dark while you sort things out — and marks each one for you to check,
   with **Keep** beside the usual **Revoke**. Keep it if you recognise it;
   revoke it if you don't. Most rows will be yours: the mark means "not yet
-  checked", never "something is wrong". Whichever nest holds an encrypted copy of your recovery escrow is labeled "Holds your recovery escrow" right on its row, so you always know where that copy lives. A nest that's keeping a backup copy of your account for you that it cannot read, apart from what you have published to everyone — a custodian — gets its own row here too, once you've set that up: what it's
+  checked", never "something is wrong". Whichever nest holds the copy of your secret key that only your recovery kit opens is labeled "Holds the copy your recovery kit opens" right on its row, so you always know where that copy lives. A nest that's keeping a backup copy of your account for you that it cannot read, apart from what you have published to everyone — a custodian — gets its own row here too, once you've set that up: what it's
   trusted to hold (never to read), and how recently it last checked in —
   current, gone stale, or not checked in yet, so a custodian that's quietly
   stopped keeping up shows up as exactly that, never as if nothing were
@@ -922,8 +940,7 @@ do. The sub-pages:
   apps signed in with one of your app passwords, and the Nostr apps your nest
   signs for. Each row says what the app is, where it comes from, what it may
   reach in plain words, when it was last used and how long it lasts, and has
-  a **Disconnect** button that asks you to confirm before it acts. While **Allow external apps** is off on the AT Protocol page, where your Bluesky settings live, every app it affects is still listed here, marked **Paused** until you turn it back on. Above the
-  list, **Connect an app** is where you type the code an app on another device
+  a **Disconnect** button that asks you to confirm before it acts. Turning off **Allow external apps**, just above the list, pauses every app it affects at once: they are still listed here, marked **Paused**, until you turn it back on. Above the switch, **Connect an app** is where you type the code an app on another device
   (a TV, a watch, a command-line tool) shows you; a valid code opens the same
   approval card a browser sign-in shows. An app on the same device as Fauna
   can skip the code: it hands you a link that opens Fauna straight onto its
@@ -935,22 +952,67 @@ do. The sub-pages:
   you with a notification: its request just waits here. If you did not expect
   it, decline it, or choose **Never show requests from this app**. An app you
   blocked that way is listed at the bottom of the page under **Blocked apps**,
-  with **Allow requests again** to undo it. A mail app password's row also shows the exact address a mail app signs in with, and lets you copy it and reveal or copy the password itself. A plugin's row also has **Plugin settings**, which opens its card on the Bridges page. An app your nest has signed for — Nostr events with the Nostr key it holds for you, say, a short-lived Bluesky service token signed with your Bluesky account's signing key, or records written to your Bluesky repository for it, which shows the kind of record and its key — also says how many times that happened in the current window, how many of its requests your nest has answered in all, and what the most recent one was and when, worded the way its approval card worded the permission. No app is ever handed one of those keys, and none of them is your identity key: your nest never holds that in a form it can use.
-- **Content Moderation** — its own **Moderation** page beside Settings, except in the web app, where it is a section of Settings → **Privacy**. It holds the training queue: correct the classifier when it mislabels something, and it learns. If your nest's admin has ever been legally compelled to withhold something you posted, or has blocked a post or message of yours after someone reported it, that decision shows here too, named as what it was — **Removed under legal obligation**, or **Blocked by this nest's admin** with the report's reason — and, for a post, you can **appeal** it. An appeal asks for a reason, and goes on your nest's permanent record for an admin to review; it does not undo the decision by itself, and the entry stays in your queue either way, so nothing about the action is quietly erased. A decision made by another nest's admin about your content — a nest that shows your post to its own people, or the home nest of a community room you are in — shows here too, marked **decided by** and that nest's name, and for a post you appeal it the same way; the appeal goes on that nest's record, for its admins to review, and your own nest keeps only a note, with your reason, that it passed your appeal on. A block is narrower than a legal removal. Everyone else the deciding nest serves sees a notice in place of your post or message, naming the reason, but you still see it, with the notice beside it: on each of your devices and in your account export when the post or the room is on your own nest, and, for a message in a room another nest runs, on the devices that already had it. One thing is withheld from you as well, because of how it is stored: the photos and files attached to a blocked post or message are no longer served to anyone, you included, so your app shows the text, the notice and whatever it had already saved. Nothing is deleted: if the admin lifts the block, the item is served again exactly as it was. A block holds only on the nest that made it; copies that had already reached other networks are not recalled. Flags your own device made carry no appeal — there is no one else's decision behind them; correcting them is the lever. Below the queue, **Your reports** lists everything you have reported: the reason, where it went, and whether it is still open, was acted on, or was dismissed. Withdrawing an open report deletes your note and any text you attached here, and asks every nest it was sent to to delete them too.
+  with **Allow requests again** to undo it. A mail app password's row also shows the exact address a mail app signs in with, and lets you copy it and reveal or copy the password itself. A plugin's row also has **Plugin settings**, which opens its card on the Bridges page. An app Fauna has acted for — your nest signing for it with a key it keeps for you (Nostr events with the Nostr key it holds for you, say, a short-lived Bluesky service token signed with your Bluesky account's signing key, or records written to your Bluesky repository for it, which shows the kind of record and its key), or a Fauna app of yours reading or sending in your conversations for it — also says how many times that happened in the current window, how many of its requests were answered in all, and what the most recent one was and when, worded the way its approval card worded the permission. No app is ever handed one of those keys, or the keys that open your conversations, and none of them is your identity key: your nest never holds that in a form it can use.
+- **Content Moderation** — its own **Moderation** page beside Settings, except
+  in the web app, where it is a section of Settings → **Privacy**. It holds the
+  training queue: correct the classifier when it mislabels something, and it
+  learns. If your nest's admin has ever been legally compelled to withhold
+  something you posted or sent, or has blocked a post or message of yours after
+  someone reported it, that decision shows here too, named as what it was —
+  **Removed under legal obligation**, or **Blocked by this nest's admin** with
+  the report's reason — and you can **appeal** it. An appeal asks for a reason,
+  and goes on your nest's permanent record for an admin to review; it does not
+  undo the decision by itself, and the entry stays in your queue either way, so
+  nothing about the action is quietly erased. A decision made by another nest's
+  admin about your content — a nest that shows your post to its own people, or
+  the home nest of a community room you are in — shows here too, marked
+  **decided by** and that nest's name, and you appeal it the same way; the
+  appeal goes on that nest's record, for its admins to review, and your own nest
+  keeps only a note, with your reason, that it passed your appeal on. A message
+  you sent in a conversation that was withheld or blocked this way also says so
+  in the conversation itself: your copy keeps its text, with a notice beside it
+  naming the decision (and the nest that made it, if it was another), and
+  choosing the notice takes you to that entry's appeal. Like the entry, the
+  notice stays even if the decision is later reversed. A block is narrower than
+  a legal removal, which withholds the item from you as well, apart from a
+  message's copy already on your devices (above). Everyone else the deciding
+  nest serves sees a notice in place of your blocked post or message, naming the
+  reason, but you still see it, with the notice beside it: on each of your
+  devices and in your account export when the post or the room is on your own
+  nest, and, for a message in a room another nest runs, on the devices that
+  already had it. One thing is withheld from you as well, because of how it is
+  stored: the photos and files attached to a blocked post or message are no
+  longer served to anyone, you included, so your app shows the text, the notice
+  and whatever it had already saved. Nothing is deleted: if the admin lifts the
+  block, the item is served again exactly as it was. A block holds only on the
+  nest that made it; copies that had already reached other networks are not
+  recalled. Flags your own device made carry no appeal — there is no one else's
+  decision behind them; correcting them is the lever. Below the queue, **Your
+  reports** lists everything you have reported: the reason, where it went, and
+  whether it is still open, was acted on, or was dismissed. Withdrawing an open
+  report deletes your note and any text you attached here, and asks every nest
+  it was sent to to delete them too.
 - **Logs** — the app's own recent log, filterable by severity, copyable in
   one click for a bug report. (Admins get the equivalent page for the nest in
   the [admin area](admin-tour.md).)
-- **General** — in the browser, on a Mac and on an iPhone, the **Notify me on this device** switch for alerts while the app is closed (see [Notifications](#notifications)); on the desktop apps, small platform comforts too. Fauna starts automatically when you sign in to your computer, and on Linux and Windows it keeps running in the system tray when you close its window (on a Mac, closing a window never quits it), so folder badges and message notifications stay live without the app being open on screen — turn either behavior off here ("Start Fauna when you sign in", and on Linux and Windows "Close to tray"). When
-  Fauna starts at sign-in it starts quietly, with no window — open it from the
-  tray or menu-bar icon, or the Dock — unless it needs you to sign in, in which
-  case its window appears. On a Mac, turning Fauna off under System Settings →
-  General → Login Items counts too: the switch here then shows off, and turning
-  it back on takes you to that System Settings page. To
-  stop Fauna entirely, use **Quit** in the tray icon's menu. File sync
-  itself runs as its own small background helper, so your synced folders
-  keep uploading and downloading even when Fauna is fully quit — it signs
-  itself in with a limited per-device credential you can revoke any time
-  from the Devices page.
+- **General** — in the browser and on an iPhone, the **Notify me on this
+  device** switch for alerts while the app is closed (see
+  [Notifications](#notifications)); on the desktop apps, small platform comforts
+  too. Fauna starts automatically when you sign in to your computer, and on
+  Linux and Windows it keeps running in the system tray when you close its
+  window (on a Mac, closing a window never quits it), so folder badges and
+  message notifications stay live without the app being open on screen — turn
+  either behavior off here ("Start Fauna when you sign in", and on Linux and
+  Windows "Close to tray"). When Fauna starts at sign-in it starts quietly, with
+  no window — open it from the tray or menu-bar icon, or the Dock — unless it
+  needs you to sign in, in which case its window appears. On a Mac, turning
+  Fauna off under System Settings → General → Login Items counts too: the switch
+  here then shows off, and turning it back on takes you to that System Settings
+  page. To stop Fauna entirely, use **Quit** in the tray icon's menu. File sync
+  itself runs as its own small background helper, so your synced folders keep
+  uploading and downloading even when Fauna is fully quit — it signs itself in
+  with a limited per-device credential you can revoke any time from the Devices
+  page.
 
 ### Folders
 

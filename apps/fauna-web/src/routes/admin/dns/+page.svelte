@@ -38,6 +38,7 @@
     type CertIssuanceErrorRow,
     hexFull,
     roleAddressOptions,
+    localDomainActionMovesRecordMatrix,
     dmarcPolicyOptions,
     removeConfirmTitle,
     removeConfirmBody,
@@ -48,6 +49,7 @@
   } from '#lib/wasm';
   import { graceCountdown } from '#lib/value-format';
   import { onMount } from 'svelte';
+  import { certAutoRenewPasses } from '#lib/cert-auto-renew';
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import { t } from '#lib/i18n/strings';
   import { resolveKey, resolveLocalized } from '#lib/i18n/localized';
@@ -417,6 +419,38 @@
     };
   });
 
+  // The shell's certificate auto-renew tick (`#lib/cert-auto-renew`) runs on its
+  // own machine; after a pass that issued or tried something, this page re-reads
+  // the served-cert health so the badge shows what the tick just did — the web
+  // twin of tui shipping the refreshed snapshot to an open `admin-dns` page.
+  onMount(() =>
+    certAutoRenewPasses.subscribe((n) => {
+      if (n === 0 || !dnsMachine) return;
+      void dnsMachine.dispatch('RefreshCertStatus').finally(applySnapshots);
+    }),
+  );
+
+  // One local-domain action, then — when it moved the record matrix — the DNS
+  // machine's shared `recheckMatrix` (re-read + verify) before the one render, so
+  // an added domain appears with its records and their status
+  // (mail-multidomain.md § Wizard steps, step 8). A thrown dispatch skips the
+  // re-check; the machine records the error on its snapshot, which wins.
+  async function dispatchLd(
+    action: Parameters<NonNullable<typeof ldMachine>['dispatch']>[0],
+  ): Promise<void> {
+    if (!ldMachine) return;
+    try {
+      await ldMachine.dispatch(action);
+      if (dnsMachine && localDomainActionMovesRecordMatrix(action)) {
+        await dnsMachine.recheckMatrix();
+      }
+      applySnapshots();
+    } catch (e) {
+      applySnapshots();
+      if (!error) error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   function openAddForm(): void {
     addFormOpen = true;
     addInput = '';
@@ -430,20 +464,12 @@
     if (!domain || !ldMachine) return;
     addFormOpen = false;
     addInput = '';
-    try {
-      await ldMachine.dispatch({
-        AddDomain: {
-          domain,
-          mta_sts_cert_mode: DEFAULT_CERT_MODE,
-        },
-      });
-      applySnapshots();
-      await refreshDnsMatrix();
-    } catch (e) {
-      // The machine also records the error on its snapshot; prefer that.
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({
+      AddDomain: {
+        domain,
+        mta_sts_cert_mode: DEFAULT_CERT_MODE,
+      },
+    });
   }
   // The row's Remove only opens the shared confirm (synchronous, no nest); the
   // dialog's confirm removes the armed domain, its cancel closes it.
@@ -457,24 +483,11 @@
   }
   async function confirmRemoveDomain(): Promise<void> {
     if (!ldMachine) return;
-    try {
-      await ldMachine.dispatch('ConfirmRemoveDomain');
-      applySnapshots();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd('ConfirmRemoveDomain');
   }
   async function restoreDomain(domain: string): Promise<void> {
     if (!ldMachine) return;
-    try {
-      await ldMachine.dispatch({ RestoreDomain: { domain } });
-      applySnapshots();
-      await refreshDnsMatrix();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({ RestoreDomain: { domain } });
   }
 
   // ── Primary-domain rename (mail-primary-domain-rename.md § UX surface) ──
@@ -503,19 +516,12 @@
     const rawDays = String(renameGraceDays ?? '').trim();
     const days = rawDays === '' ? null : Number(rawDays);
     renameSheetOpen = false;
-    try {
-      await ldMachine.dispatch({
-        StartPrimaryRename: {
-          new_primary_domain_id: Array.from(toBytes(target.domain_id)),
-          grace_days: days,
-        },
-      });
-      applySnapshots();
-      await refreshDnsMatrix();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({
+      StartPrimaryRename: {
+        new_primary_domain_id: Array.from(toBytes(target.domain_id)),
+        grace_days: days,
+      },
+    });
   }
   async function completeRename(): Promise<void> {
     if (!ldMachine || !renameActive) return;
@@ -524,40 +530,20 @@
     const force = renameActive.can_force_complete;
     const rename_id = Array.from(toBytes(renameActive.rename_id));
     confirmingComplete = false;
-    try {
-      await ldMachine.dispatch({ CompletePrimaryRename: { rename_id, force } });
-      applySnapshots();
-      await refreshDnsMatrix();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({ CompletePrimaryRename: { rename_id, force } });
   }
   async function extendRename(): Promise<void> {
     if (!ldMachine || !renameActive) return;
     const n = Number(extendDays);
     if (!Number.isFinite(n) || n < 1) return;
     const rename_id = Array.from(toBytes(renameActive.rename_id));
-    try {
-      await ldMachine.dispatch({ ExtendPrimaryRenameGrace: { rename_id, additional_days: n } });
-      applySnapshots();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({ ExtendPrimaryRenameGrace: { rename_id, additional_days: n } });
   }
   async function abortRename(): Promise<void> {
     if (!ldMachine || !renameActive) return;
     const rename_id = Array.from(toBytes(renameActive.rename_id));
     confirmingAbort = false;
-    try {
-      await ldMachine.dispatch({ AbortPrimaryRename: { rename_id, reason: null } });
-      applySnapshots();
-      await refreshDnsMatrix();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({ AbortPrimaryRename: { rename_id, reason: null } });
   }
   // Client-rendered countdown to `grace_ends_at` (mail-primary-domain-rename.md —
   // the state is nest-authoritative; only the *display* is client-side). Routes
@@ -614,15 +600,9 @@
   // snapshot's `catch_all_actor_id` reflects the change; we re-render from it.
   async function setCatchAll(domain: string, actorId: Uint8Array | null): Promise<void> {
     if (!ldMachine) return;
-    try {
-      await ldMachine.dispatch({
-        SetCatchAllActor: { domain, actor_id: actorId ? Array.from(actorId) : null },
-      });
-      applySnapshots();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({
+      SetCatchAllActor: { domain, actor_id: actorId ? Array.from(actorId) : null },
+    });
   }
 
   // ── Per-domain role-address overrides (`admin-dns-domain-role-address-*`) ──
@@ -694,15 +674,9 @@
     actorId: Uint8Array | null,
   ): Promise<void> {
     if (!ldMachine) return;
-    try {
-      await ldMachine.dispatch({
-        SetRoleAddress: { domain, role: kind, actor_id: actorId ? Array.from(actorId) : null },
-      });
-      applySnapshots();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({
+      SetRoleAddress: { domain, role: kind, actor_id: actorId ? Array.from(actorId) : null },
+    });
   }
 
   // ── Per-domain DMARC policy (`admin-dns-domain-dmarc-policy-select`) ──
@@ -721,21 +695,15 @@
     if (!ldMachine) return;
     const opt = DMARC_POLICIES.find((o) => o.value === tag);
     if (!opt) return;
-    try {
-      await ldMachine.dispatch({
-        UpdateConfig: {
-          domain,
-          mta_sts_max_age_seconds: null,
-          mta_sts_cert_mode: null,
-          spf_record: null,
-          dmarc_policy: opt.policy,
-        },
-      });
-      applySnapshots();
-    } catch (e) {
-      applySnapshots();
-      if (!error) error = e instanceof Error ? e.message : String(e);
-    }
+    await dispatchLd({
+      UpdateConfig: {
+        domain,
+        mta_sts_max_age_seconds: null,
+        mta_sts_cert_mode: null,
+        spf_record: null,
+        dmarc_policy: opt.policy,
+      },
+    });
   }
 
   // ── Managed mode: credentials + per-domain mode ──────────────────────

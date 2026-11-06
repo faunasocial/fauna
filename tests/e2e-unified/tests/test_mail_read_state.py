@@ -48,6 +48,8 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
     pytest.mark.real_conversations,
 ]
 
@@ -87,6 +89,7 @@ def _wait_unread(app, nonce: str, expected: int, *, what: str, bridge_log) -> No
 
 
 @pytest.mark.web
+@pytest.mark.android
 @pytest.mark.feature("email-in-conversations")
 def test_a_mail_nobody_opened_is_still_unread_after_a_restart(
     logged_in_app, mail_bridge_mta, nest_instance, test_user
@@ -117,11 +120,17 @@ def test_a_mail_nobody_opened_is_still_unread_after_a_restart(
 
 
 @pytest.mark.web
+@pytest.mark.android
 @pytest.mark.feature("email-in-conversations")
 def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
-    request, logged_in_app, mail_bridge_mta, nest_instance, test_user
+    request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,
+    test_user
 ):
-    device_a = logged_in_app
+    # On android the roles swap (`alice_second_device`'s docstring): the
+    # outcome is about the OTHER device hearing the read, so a tui seat is
+    # device A, who reads, and the phone — signed in all along — is device B.
+    seat = android_other_device_seat
+    device_a = logged_in_app if seat is None else seat("read-state-reader")[0]
     recipient = route_inbound_mail_to_app(
         device_a, mail_bridge_mta, nest_instance, test_user, "readstate-seats"
     )
@@ -135,11 +144,15 @@ def test_a_mail_read_on_one_device_reads_on_the_other_and_stays_read(
 
     # The same account's second device: its own launch, its own receive loop,
     # the same mailbox. Web's second device is a twin page in its own
-    # BrowserContext; every other app launches a second process.
-    second_device = (
-        "alice_second_web_device" if device_a.driver.is_web() else "alice_second_device"
-    )
-    device_b, _driver_b = request.getfixturevalue(second_device)
+    # BrowserContext; every other app launches a second process; on android it
+    # is the phone itself.
+    if seat is not None:
+        device_b = logged_in_app
+    else:
+        second_device = (
+            "alice_second_web_device" if device_a.driver.is_web() else "alice_second_device"
+        )
+        device_b, _driver_b = request.getfixturevalue(second_device)
     wait_for_thread_with_nonce(device_b, nonce, what="device B", budget_s=MLS_HANDSHAKE_S,
                                bridge_log=log)
     _wait_unread(device_b, nonce, 1, what="device B before any read", bridge_log=log)

@@ -403,6 +403,35 @@ pub struct FeedPostItem {
     /// — the plane then keeps the WebPKI floor. Additive + `None`-default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_nest_actor_id: Option<String>,
+    /// The post's per-emoji reaction tally — one [`PostReactionGroup`] per
+    /// emoji any actor reacted with through a signed `React` post, ordered by
+    /// first-added time, projected from the actor-keyed `content_links
+    /// link_type='react'` rows (`docs/goal/ui/feed.md` § Layout & flow →
+    /// *Reaction posts count and paint*, rulings 2 and 5). Never folded into
+    /// the four counts. Empty on a `bluesky` row (its counters live at the
+    /// origin). Additive + empty-default, omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<PostReactionGroup>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One emoji's share of a post's reaction tally — the feed twin of the
+/// conversations rail's `ReactionGroup` (`docs/goal/ui/feed.md` § Layout &
+/// flow → *Reaction posts count and paint*, ruling 2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PostReactionGroup {
+    pub emoji: String,
+    /// The number of **distinct actors** with a live `React` post of this
+    /// emoji on the post (two devices racing one reaction count once).
+    pub count: i64,
+    /// Hex-encoded post id of the **connection actor's own live `React`
+    /// post** of this emoji — presence means "reacted by me", and the value
+    /// is exactly the delete's argument (the `viewer_repost_id` shape; the
+    /// latest wins when the actor holds several). `None` = the viewer has
+    /// not reacted with this emoji.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_react_id: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -499,8 +528,11 @@ pub struct FeedLocalPostsReply {
 /// tab read (`feed.md` § The read model → *The author read*). The
 /// `FeedLocalPosts*` twin narrowed to one `author` (hex actor id): no rules,
 /// the local feed's mandatory set (spam guard, the viewer's block list),
-/// always chronological on the `created_at` keyset `cursor`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// always chronological on the `created_at` keyset `cursor`. `search` and
+/// `sources` narrow it further, each folded into the mandatory set exactly as
+/// the local read folds `search` (`feed-read-model.md` § The read model →
+/// *The author read*; the imported-posts selection is their caller).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct FeedAuthorPostsRequest {
     /// The author whose posts to list — a hex-encoded 32-byte actor id.
     pub author: String,
@@ -508,6 +540,13 @@ pub struct FeedAuthorPostsRequest {
     pub cursor: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Body-substring narrowing — the local read's `search` twin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    /// Origin-platform narrowing over `fauna_core::source` tokens. A token
+    /// the normalizer refuses is a bad request; an empty list narrows nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<String>>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1243,11 +1282,32 @@ mod tests {
             author: "22".repeat(32),
             cursor: Some(1_700_000_000_000_000),
             limit: Some(25),
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&req).unwrap();
         let decoded: FeedAuthorPostsRequest = decode(&bytes).unwrap();
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn feed_author_posts_request_carries_search_and_sources() {
+        let req = FeedAuthorPostsRequest {
+            author: "22".repeat(32),
+            search: Some("beach".into()),
+            sources: Some(vec!["instagram".into()]),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        let decoded: FeedAuthorPostsRequest = decode(&bytes).unwrap();
+        assert_eq!(req, decoded);
+        // Unset, neither key reaches the wire: an older nest reads the old shape.
+        let bare = encode_canonical(&FeedAuthorPostsRequest {
+            author: "22".repeat(32),
+            ..Default::default()
+        })
+        .unwrap();
+        let has = |needle: &[u8]| bare.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(b"search") && !has(b"sources"));
     }
 
     #[test]

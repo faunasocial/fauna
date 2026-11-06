@@ -28,8 +28,9 @@ self-invalidation guard ``test_conv_rail_push_wakes_web`` uses:
 single-rail push wakes, so growth there means some other arm ran and the
 attribution to the push arm would be unearned.
 
-Runs on the direct-Rust clients (linux + tui) — web is out of scope here; its
-own leg of this same property is ``test_conv_rail_push_wakes_web``.
+Runs on the direct-Rust clients (linux + tui) and apple, whose real rail opens
+at launch under ``real_conversations`` — web is out of scope here; its own leg of
+this same property is ``test_conv_rail_push_wakes_web``.
 """
 
 from __future__ import annotations
@@ -45,18 +46,18 @@ from tests.api import conv_api
 pytestmark = pytest.mark.tier_3
 
 
-# App scope, declared where COLLECTION can see it — the module docstring has
-# always said "the direct-Rust clients (linux + tui)", but nothing enforced it,
-# so this test also collected on macos/ios/windows/android and reached
-# `real_faunamls_app` WITHOUT the `real_conversations` marker. On apple that
+# App scope, declared where COLLECTION can see it. Before the app markers this
+# test also collected on macos/ios/windows/android and reached
+# `real_faunamls_app` WITHOUT the `real_conversations` marker: on apple that
 # silently yielded a MOCK-backed app (measured 2026-09-22: the app's own log
-# said `real-conversations gate CLOSED`), and on windows the fixture's readiness
-# poll had been burning its 60 s budget and erroring for the same reason. That
-# measurement is this change's own red-first proof;
-# the marker is the cure, and `helpers/real_rail_control.py` is what made the
-# defect legible instead of silent.
+# said `real-conversations gate CLOSED`), so an apple record from then proves
+# nothing. The marker is what makes apple's run a real rail, and
+# `helpers/real_rail_control.py` is what made the defect legible instead of silent.
 @pytest.mark.linux
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.real_conversations
 @pytest.mark.feature("conversations")
 def test_conv_rail_push_wakes_native(
     real_faunamls_app, second_real_faunamls_app_push_only, nest_instance

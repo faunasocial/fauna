@@ -109,6 +109,21 @@ def fake(tmp_path):
     dns.stop()
 
 
+def test_a_wildcard_owner_answers_every_name_below_it_but_not_its_parent(fake):
+    """RFC 4592, as far as a venue needs it: `*.<parent>` answers any name under
+    the parent that is not published itself — a mail venue's never-seen sender
+    domains (`grey-<hex>.external.test`, fresh per test because the greylist
+    keys on the sender DOMAIN) must resolve, or the envelope-sender gate refuses
+    them before the greylist is ever asked. An exact name still wins, and the
+    parent itself is not matched."""
+    dns, records = fake
+    records.write_text(json.dumps({"txt": {"*.w.test": "wild", "exact.w.test": "exact"}}))
+    assert _txt_values(_udp(dns.port, _query("grey-1a2b.w.test"))) == ["wild"]
+    assert _txt_values(_udp(dns.port, _query("deep.grey-1a2b.w.test"))) == ["wild"]
+    assert _txt_values(_udp(dns.port, _query("exact.w.test"))) == ["exact"]
+    assert _rcode(_udp(dns.port, _query("w.test"))) == 3, "the parent is not the wildcard's"
+
+
 def test_a_txt_query_is_answered_over_tcp(fake):
     dns, records = fake
     records.write_text(json.dumps({"txt": {"file.test": "from-file"}}))

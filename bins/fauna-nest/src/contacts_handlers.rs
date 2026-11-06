@@ -148,18 +148,34 @@ async fn deny_if_contact_approval(
     Ok(())
 }
 
-/// Accept a knock from `peer_id`: mark the contact `accepted`, release the
-/// arrival the knock was holding, then best-effort dismiss the now-handled knock
-/// (a `dismiss_knock` failure is logged but does not fail the accept — the
-/// contact relationship is the source of truth).
+/// Accept a knock from `peer_id`: mark the contact `accepted`, write the
+/// requester's own edge when the knock proves their wish
+/// ([`write_requester_edge`]), release the arrival the knock was holding, then
+/// best-effort dismiss the now-handled knock (a `dismiss_knock` failure is
+/// logged but does not fail the accept — the contact relationship is the
+/// source of truth).
 pub(crate) async fn accept_contact_core(
     state: &Arc<AppState>,
     actor_id: &[u8; 32],
     peer_id: &[u8; 32],
 ) -> Result<(), ApiError> {
+    // Read BEFORE the knock is dismissed below: the stored knock is the proof
+    // of the request.
+    let knock_on_file = match state.db.has_pending_knock(actor_id, peer_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("has_pending_knock before accept: {e}");
+            false
+        }
+    };
+
     if let Err(e) = state.db.accept_contact(actor_id, peer_id).await {
         tracing::error!("accept_contact error: {e}");
         return Err(ApiError::internal("storage error"));
+    }
+
+    if knock_on_file {
+        write_requester_edge(state, peer_id, actor_id).await;
     }
 
     // Read the held arrival BEFORE dismissing the knock that holds it. Accepting
@@ -186,6 +202,43 @@ pub(crate) async fn accept_contact_core(
     }
 
     Ok(())
+}
+
+/// The requester's half of an accepted knock: write `(requester, acceptor)
+/// accepted`, because a contact request is the requester's standing consent to
+/// hear from the person they asked (`docs/goal/ui/contacts.md` § Persistence →
+/// *The accept makes the edge mutual*). The caller has already seen the knock
+/// on file (guard 1); this checks the other three, each failing closed — a read
+/// that errors skips the write and never fails the accept:
+/// (2) the requester is a user of this nest (a federated knocker's edge is
+/// their own nest's fact); (3) a ward under `contact_approval` gets edges from
+/// their guardian only; (4) insert-only — an edge the requester already holds
+/// toward the acceptor, whatever its status, is their own later decision and
+/// stays.
+async fn write_requester_edge(state: &Arc<AppState>, requester: &[u8; 32], acceptor: &[u8; 32]) {
+    match state.db.get_user(requester).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("requester edge: user read: {e}");
+            return;
+        }
+    }
+    match state.db.get_guardian_policy(requester).await {
+        Ok(Some(policy)) if policy.contact_approval => return,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("requester edge: guardian policy read: {e}");
+            return;
+        }
+    }
+    if let Err(e) = state
+        .db
+        .insert_accepted_contact_if_absent(requester, acceptor)
+        .await
+    {
+        tracing::warn!("requester edge: insert: {e}");
+    }
 }
 
 /// Block a knock sender `peer_id`: mark the contact `blocked`, best-effort

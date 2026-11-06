@@ -88,6 +88,28 @@ struct OfflineReasonCaptionTests {
         )
     }
 
+    // The mail-export wizard's five controls each gate on one of these kinds
+    // (`MailExportView`); offline, every one must give a non-empty reason.
+    @Test("every mail-export wizard kind is unavailable with a reason when disconnected")
+    func exportKindsGateWhenDisconnected() {
+        for kind in [
+            "fauna.bridges.start_export_session",
+            "fauna.bridges.pause_export_session",
+            "fauna.bridges.resume_export_session",
+            "fauna.bridges.cancel_export_session",
+            "fauna.bridges.discard_export_blob",
+        ] {
+            #expect(
+                offlineAffordance(kind: kind, connectionState: "disconnected").available == false,
+                "\(kind) must desensitize when disconnected"
+            )
+            #expect(
+                FaunaOfflineReason.captionText(kind: kind, connectionState: "disconnected")?.isEmpty == false,
+                "\(kind) must caption a reason when disconnected"
+            )
+        }
+    }
+
     // The property that makes one call site honest: the caption and the
     // control's own desensitizing come from the SAME `offlineAffordance` call,
     // so "captioned" and "disabled" cannot disagree for any connection word.

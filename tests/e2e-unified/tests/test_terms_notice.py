@@ -14,8 +14,8 @@ Pure UI rendering through the machine's test setters, as
 `fauna_core::TERMS_URL`; a terminal cannot open a browser, so tui's link shows
 the URL and copies it — the walk reads the URL off the button.
 
-tui leads (`onboarding.md` § 2, § 3, § 3a; `onboarding-provisioning.md` § 6);
-the six other apps follow in the batched trickle-down and skip as unbuilt here.
+tui led (`onboarding.md` § 2, § 3, § 3a; `onboarding-provisioning.md` § 6); all
+seven apps paint it.
 """
 
 import json
@@ -23,31 +23,18 @@ import json
 import pytest
 
 from drivers.machine_test_setter import set_handle_check_snapshot
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name
 from i18n.strings import S
 
-pytestmark = pytest.mark.tier_2
+pytestmark = [pytest.mark.tier_2, pytest.mark.feature("terms-and-content-guidelines")]
 
 #: `fauna_core::TERMS_URL` — the one constant every app's link opens.
 TERMS_URL = "https://fauna.social/terms"
-
-#: The apps that paint the notice today (tui first, then the trickle-down).
-_PAINTED = ("tui", "web", "linux", "android", "macos", "ios")
 
 #: The apps whose link text carries the URL: a terminal cannot open a browser,
 #: so tui shows and copies it. The others open it in the browser and label the
 #: link — their target is pinned by the shared `terms_url` faces' unit tests.
 _SHOWS_URL = ("tui",)
-
-
-def _require_the_notice(app):
-    if app_name(app.driver) not in _PAINTED:
-        skip_unbuilt(
-            app.driver,
-            surface="onboarding-terms-notice",
-            detail="the by-continuing terms notice is painted on tui first",
-            tracked="docs/goal/behavior/terms-and-content-guidelines.md § Implementation status today",
-        )
 
 
 def _land(app, step: str):
@@ -110,7 +97,6 @@ def _handle_outcome(app, outcome, key: str, args: dict):
 
 
 def test_invite_request_shows_the_terms_notice(app):
-    _require_the_notice(app)
     _land(app, "InviteRequest")
     assert app.is_visible("invite-request-submit-button"), app.driver.diagnose(
         "invite-request-submit-button"
@@ -119,14 +105,12 @@ def test_invite_request_shows_the_terms_notice(app):
 
 
 def test_claim_code_shows_the_terms_notice(app):
-    _require_the_notice(app)
     _land(app, "ClaimCode")
     assert app.is_visible("claim-code-input"), app.driver.diagnose("claim-code-input")
     _assert_the_notice(app, "claim_code")
 
 
 def test_nest_provisioning_shows_the_terms_notice(app):
-    _require_the_notice(app)
     _land(app, "NestProvisioning")
     # The page's own region, not the price recap: web paints the recap only once
     # the wizard holds a priced line, and this walk injects the step alone.
@@ -137,7 +121,6 @@ def test_nest_provisioning_shows_the_terms_notice(app):
 
 
 def test_handle_entry_shows_the_notice_only_when_continue_signs_in(app):
-    _require_the_notice(app)
     # Before any check: nothing to continue to, no notice.
     set_handle_check_snapshot(app, {
         "phase": "Idle",

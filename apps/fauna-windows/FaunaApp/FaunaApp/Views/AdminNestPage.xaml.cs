@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Controls;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
@@ -56,6 +57,9 @@ public sealed partial class AdminNestPage : Page
     /// <summary>The same guard for the web-app origin radios.</summary>
     private bool _syncingWebAppOrigin;
 
+    /// <summary>The same guard for the update-channel radios.</summary>
+    private bool _syncingUpdateChannel;
+
     public AdminNestPage()
     {
         this.InitializeComponent();
@@ -68,6 +72,9 @@ public sealed partial class AdminNestPage : Page
         // OnlineOnly); the radios above it are the local buffer and dispatch
         // nothing, so only the commit is gated (android's WebAppOriginSection).
         WebAppOriginSaveButton.FaunaGate("fauna.admin.web_app_origin.set");
+        // Same shape for the update channel: radios are the local buffer, only the
+        // commit is an Admin-class wire write.
+        UpdateChannelSaveButton.FaunaGate("fauna.admin.update_channel.set");
         // The admin pairing master switch — one `fauna.admin.services.update`
         // row (name "pairing"), the same kind linux declares on its own toggle
         // (apps/fauna-linux/src/views/admin.rs:2844). Found MISSING here by
@@ -87,6 +94,9 @@ public sealed partial class AdminNestPage : Page
         // The dispatching control, not the arm: arming reads nothing over the
         // wire, exactly as the seed-rotation ceremony gates its confirm alone.
         TakedownConfirmButton.FaunaGate("fauna.moderation.legal_takedown");
+        // The admin block's confirm — Block and Unblock both dispatch the one
+        // kind; their arm buttons and cancel dispatch nothing over the wire.
+        BlockConfirmButton.FaunaGate("fauna.moderation.admin_block");
         // Outside-app sign-in keys (authorization-server.md § The issuer → Two
         // rotation arms). The ordinary rotate is the one control whose kind
         // never changes; the two arm buttons and cancel dispatch nothing over
@@ -95,6 +105,10 @@ public sealed partial class AdminNestPage : Page
         // (OfflineGate.Declare's documented "declare it again after the paint
         // decides" shape — the same control paints two different ceremonies).
         OauthRotateButton.FaunaGate("fauna.oauth.rotate_issuer_key");
+        // The nest rules' save (nest-rules.md § The shared rule editor) — the
+        // shared editor's own button, gated with this host's write kind.
+        RulesEditor.SaveButtonControl.FaunaGate("fauna.admin.content_policy.set");
+        RulesEditor.SaveHandler = SaveNestRulesAsync;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -115,6 +129,10 @@ public sealed partial class AdminNestPage : Page
     {
         if (_vm is null) return;
 
+        // The nest rules read beside the page's own (it never throws — a failure
+        // lands on the editor's status line).
+        _ = LoadNestRulesAsync();
+
         LoadProgress.IsActive = true;
         LoadProgress.Visibility = Visibility.Visible;
         try
@@ -129,12 +147,14 @@ public sealed partial class AdminNestPage : Page
             RenderOsMaintenance();
             RenderRegion();
             RenderWebAppOrigin();
+            RenderUpdateChannel();
             RenderSeedRotate();
             // Fold the (empty) form once so the arm control opens with the
             // shared `arm_label` and its blocked reason, not a blank button.
             _vm.RefreshTakedownArm();
             RenderTakedown();
             RenderReports();
+            RenderBlocked();
             RenderOauth();
 
             await LoadNatModeAsync();
@@ -483,6 +503,63 @@ public sealed partial class AdminNestPage : Page
         RenderError(_vm.Error);
     }
 
+    // ── Update channel (fauna.admin.update_channel.{get,set}) ───────────────
+
+    /// <summary>Paint the section from the VM: radios unmarked and disabled until
+    /// the read lands and whenever <c>can_set</c> is false; each radio's label +
+    /// description and the status line are the shared view's.</summary>
+    private void RenderUpdateChannel()
+    {
+        if (_vm is null) return;
+        _syncingUpdateChannel = true;
+        foreach (var (radio, channel) in UpdateChannelRadios())
+        {
+            var selected = _vm.IsUpdateChannelSelected(channel);
+            if (radio.IsChecked != selected) radio.IsChecked = selected;
+            var (label, description) = _vm.UpdateChannelOptionText(channel);
+            radio.Content = string.IsNullOrEmpty(description) ? label : $"{label} — {description}";
+            radio.IsEnabled = _vm.UpdateChannelCanSet;
+        }
+        _syncingUpdateChannel = false;
+        UpdateChannelStatusText.Text = _vm.UpdateChannelStatus;
+        UpdateChannelSaveButton.IsEnabled = _vm.UpdateChannelCanSave;
+    }
+
+    private (RadioButton Radio, uniffi.fauna_provisioning.UpdateChannel Channel)[] UpdateChannelRadios() => new[]
+    {
+        (UpdateChannelStableRadio, uniffi.fauna_provisioning.UpdateChannel.Stable),
+        (UpdateChannelTestRadio, uniffi.fauna_provisioning.UpdateChannel.Test),
+        (UpdateChannelDevRadio, uniffi.fauna_provisioning.UpdateChannel.Dev),
+    };
+
+    private void PickUpdateChannel(uniffi.fauna_provisioning.UpdateChannel channel)
+    {
+        if (_syncingUpdateChannel || _vm is null) return;
+        _vm.SelectUpdateChannel(channel);
+        RenderUpdateChannel();
+    }
+
+    private void UpdateChannelStableRadio_Checked(object sender, RoutedEventArgs e) =>
+        PickUpdateChannel(uniffi.fauna_provisioning.UpdateChannel.Stable);
+
+    private void UpdateChannelTestRadio_Checked(object sender, RoutedEventArgs e) =>
+        PickUpdateChannel(uniffi.fauna_provisioning.UpdateChannel.Test);
+
+    private void UpdateChannelDevRadio_Checked(object sender, RoutedEventArgs e) =>
+        PickUpdateChannel(uniffi.fauna_provisioning.UpdateChannel.Dev);
+
+    /// <summary>admin-nest-update-channel-save-button → commit the marked channel
+    /// via the VM and repaint from the fresh read (disabled mid-flight).</summary>
+    private async void UpdateChannelSaveButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        var save = _vm.SaveUpdateChannelAsync();
+        RenderUpdateChannel();
+        await save;
+        RenderUpdateChannel();
+        RenderError(_vm.Error);
+    }
+
     // ── Deployment-identity rotation (box-recovery.md § Deployment-seed
     //     rotation) ────────────────────────────────────────────────────────────
 
@@ -556,7 +633,9 @@ public sealed partial class AdminNestPage : Page
                 Text = _vm.SeedRotateRoster[i].Label,
                 TextWrapping = TextWrapping.Wrap,
             };
-            AutomationProperties.SetAutomationId(row, $"admin-nest-seed-rotate-roster-item-{i}");
+            // One repeated id per row; a driver picks row n by index
+            // (e2e-conventions.md convention 1).
+            AutomationProperties.SetAutomationId(row, Ids.AdminNestSeedRotateRosterItem);
             AutomationProperties.SetName(row, _vm.SeedRotateRoster[i].Label);
             SeedRotateRosterBox.Children.Add(row);
         }
@@ -747,6 +826,85 @@ public sealed partial class AdminNestPage : Page
         RenderReports();
     }
 
+    // ── The admin block of a reported item (admin-nest-report-block-*,
+    //    admin-nest-blocked-*; takedown-and-block.md § Admin block of a reported
+    //    item) ─────────────────────────────────────────────────────────────────
+
+    private bool _blockedBound;
+
+    /// <summary>Paint the blocked list and the armed confirm from the VM: the rows
+    /// bind once to the VM's flat collection; the loading line shows until a list
+    /// read has landed and the empty line only after it; the confirm is present only
+    /// while armed (Collapsed → no UIA peer, so the e2e counts 0 once disarmed); the
+    /// status line only once a dispatch has said something.</summary>
+    private void RenderBlocked()
+    {
+        if (_vm is null) return;
+        if (!_blockedBound)
+        {
+            BlockedList.ItemsSource = _vm.Blocked;
+            _blockedBound = true;
+        }
+        BlockedLoadingText.Visibility =
+            _vm.BlockedLoaded ? Visibility.Collapsed : Visibility.Visible;
+        BlockedEmptyText.Visibility =
+            _vm.BlockedLoaded && _vm.Blocked.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        if (_vm.BlockArmed is { } armed)
+        {
+            BlockConfirmSummaryText.Text = armed.Summary;
+            // Name beside the text, set per arm, or FlaUI reads a stale peer name.
+            AutomationProperties.SetName(BlockConfirmSummaryText, armed.Summary);
+            BlockConfirmButton.Content = armed.ConfirmLabel;
+            BlockConfirmPanel.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            BlockConfirmPanel.Visibility = Visibility.Collapsed;
+        }
+
+        BlockStatusText.Text = _vm.BlockStatus ?? string.Empty;
+        BlockStatusText.Visibility =
+            string.IsNullOrEmpty(_vm.BlockStatus) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>admin-nest-report-block-button → arm the confirm for this row.</summary>
+    private void ReportBlock_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: string reportId }) return;
+        _vm.ArmBlock(reportId);
+        RenderBlocked();
+    }
+
+    /// <summary>admin-nest-blocked-unblock-button → arm the same confirm, restoring.</summary>
+    private void BlockedUnblock_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: string reportId }) return;
+        _vm.ArmUnblock(reportId);
+        RenderBlocked();
+    }
+
+    /// <summary>admin-nest-report-block-cancel-button → disarm, touching nothing.</summary>
+    private void BlockCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _vm?.CancelBlock();
+        RenderBlocked();
+    }
+
+    /// <summary>admin-nest-report-block-confirm-button → dispatch. The VM disarms
+    /// before it dispatches, so the confirm is collapsed in the same paint the
+    /// press lands on — a second press has nothing to repeat.</summary>
+    private async void BlockConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        var dispatch = _vm.ConfirmBlockAsync();
+        RenderBlocked();
+        await dispatch;
+        RenderReports();
+        RenderBlocked();
+        RenderError(_vm.Error);
+    }
+
     // ── Outside-app sign-in keys (admin-nest-oauth-*, authorization-server.md
     //    § The issuer → Two rotation arms) ─────────────────────────────────────
 
@@ -829,7 +987,7 @@ public sealed partial class AdminNestPage : Page
                 Text = _vm.OauthKeyRows[i],
                 TextWrapping = TextWrapping.Wrap,
             };
-            AutomationProperties.SetAutomationId(row, $"admin-nest-oauth-key-item-{i}");
+            AutomationProperties.SetAutomationId(row, Ids.AdminNestOauthKeyItem);
             AutomationProperties.SetName(row, _vm.OauthKeyRows[i]);
             OauthKeyRowsBox.Children.Add(row);
         }
@@ -859,18 +1017,73 @@ public sealed partial class AdminNestPage : Page
     // ── Factory reset (Danger zone — moved off admin-settings) ───────────────
 
     /// <summary>
+    /// <c>admin-nest-retire-button</c> (<c>nest-retirement.md</c> § Layout &amp; flow):
+    /// open the <c>nest_retire</c> page over this live session, in the admin shell's
+    /// content frame that holds this page. The page takes the session nest's URL (an
+    /// attribution candidate and the <i>current</i> badge's host) and, through
+    /// <see cref="ReadActiveLocalDomainsAsync"/>, the nest's active local domains.
+    /// Leaving it shows this page again — unless this session's own nest was just
+    /// retired, when the session ends keeping credentials and launch routing runs
+    /// again on the kept identity (§ Where logic lives, ruled 2026-11-01):
+    /// <see cref="App.EscalateToLaunchSurfaceHandler"/>, the account-switch-shaped
+    /// teardown that erases nothing stored.
+    /// </summary>
+    private void RetireButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_clients is not { } clients || Frame is not { } frame) return;
+        frame.Navigate(typeof(Onboarding.NestRetirePage), new Onboarding.NestRetireContext(
+            RetireEntry.Admin,
+            clients.Account.NestUrl,
+            () => ReadActiveLocalDomainsAsync(clients),
+            sessionDropped =>
+            {
+                if (sessionDropped && App.EscalateToLaunchSurfaceHandler is { } escalate)
+                {
+                    _ = escalate();
+                    return;
+                }
+                frame.Navigate(typeof(AdminNestPage), clients);
+            }));
+    }
+
+    /// <summary>The nest's ACTIVE local domains, re-read live — the admin entry's
+    /// attribution candidates (soft-deleted ones no longer publish). Best-effort: no
+    /// connection or a failed read is empty (FaunaKit's
+    /// <c>NestRetireVM.activeLocalDomains</c>).</summary>
+    private static async Task<IReadOnlyList<string>> ReadActiveLocalDomainsAsync(ServiceClients clients)
+    {
+        if (clients.Rpc is not { } rpc) return Array.Empty<string>();
+        try
+        {
+            var local = await rpc.BuildLocalDomainsMachineAsync();
+            await local.Hydrate();
+            return local.Snapshot().active.Select(d => d.domain).ToList();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("AdminNestPage", $"[retire] active local domains read failed: {ex.Message}");
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
     /// admin-factory-reset-button → a confirm <see cref="ContentDialog"/> whose
-    /// confirm control carries the <c>admin-factory-reset-confirm-button</c>
-    /// AutomationId (placed in the dialog's content so the id is directly
-    /// queryable by the e2e bridge; Cancel rides the dialog's close button).
+    /// confirm and cancel controls carry the <c>admin-factory-reset-confirm-button</c>
+    /// / <c>admin-factory-reset-cancel-button</c> AutomationIds (both placed in the
+    /// dialog's content: a ContentDialog's own buttons take no AutomationId, the
+    /// <see cref="BridgeCardActions"/> unlink-confirm idiom).
     /// On confirm, run the reset. Per mail-bridge-lifecycle.md § Factory reset.
     /// </summary>
     private async void FactoryResetButton_Click(object sender, RoutedEventArgs e)
     {
+        var cancelButton = new Button
+        {
+            Content = S.Get("admin/settings_page/factory_reset_cancel"),
+        };
+        AutomationProperties.SetAutomationId(cancelButton, Ids.AdminFactoryResetCancelButton);
         var confirmButton = new Button
         {
             Content = S.Get("admin/settings_page/factory_reset_confirm_button"),
-            HorizontalAlignment = HorizontalAlignment.Right,
         };
         AutomationProperties.SetAutomationId(confirmButton, Ids.AdminFactoryResetConfirmButton);
 
@@ -879,17 +1092,25 @@ public sealed partial class AdminNestPage : Page
             Text = S.Get("admin/settings_page/factory_reset_confirm_body"),
             TextWrapping = TextWrapping.Wrap,
         };
+        var buttonRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        buttonRow.Children.Add(cancelButton);
+        buttonRow.Children.Add(confirmButton);
         var panel = new StackPanel { Spacing = 16 };
         panel.Children.Add(body);
-        panel.Children.Add(confirmButton);
+        panel.Children.Add(buttonRow);
 
         var dialog = new ContentDialog
         {
             XamlRoot = this.XamlRoot,
             Title = S.Get("admin/settings_page/factory_reset_confirm_title"),
             Content = panel,
-            CloseButtonText = S.Get("admin/settings_page/factory_reset_cancel"),
         };
+        cancelButton.Click += (_, _) => dialog.Hide();
         confirmButton.Click += async (_, _) =>
         {
             dialog.Hide();
@@ -975,6 +1196,45 @@ public sealed partial class AdminNestPage : Page
         {
             RenderError(Strings.Error(ex));
         }
+    }
+
+    // ── Nest rules (admin-nest-rules-section — nest-rules.md § The shared rule
+    //     editor (a); admin.md § N. Nest → Nest rules) ──────────────────────────
+
+    /// <summary>Bumped per read, so a page entry's slower read never paints over a
+    /// later one.</summary>
+    private int _rulesReads;
+
+    /// <summary>The publisher the open editor writes under — the session nest's
+    /// domain as its self-description named it; a save reloads the editor under it.</summary>
+    private string? _rulesDomain;
+
+    /// <summary>Open the admin's editor over the nest's rules on every page entry —
+    /// <c>fauna.admin.content_policy.get</c> beside the self-description's domain
+    /// (<see cref="RuleEditorHosts.OpenNestAsync"/>). Until it lands the editor paints
+    /// only its status line, so its add button appears only over a loaded
+    /// document.</summary>
+    private async Task LoadNestRulesAsync()
+    {
+        if (_clients?.Rpc is not { } rpc) return;
+        var read = ++_rulesReads;
+        RulesEditor.Rpc = rpc;
+        RulesEditor.Load(null);
+        var (editor, domain, status) = await RuleEditorHosts.OpenNestAsync(rpc);
+        if (read != _rulesReads) return;
+        _rulesDomain = domain;
+        RulesEditor.Load(editor);
+        if (status is not null) RulesEditor.SetStatus(status);
+    }
+
+    /// <summary><c>rule-editor-save-button</c> — <c>fauna.admin.content_policy.set</c>;
+    /// the reply's stored document re-seeds the editor and the status names the
+    /// version in force, or the nest's named defect.</summary>
+    private Task<RuleEditorSaveOutcome> SaveNestRulesAsync(byte[] document)
+    {
+        if (_clients?.Rpc is not { } rpc || _rulesDomain is not { } domain)
+            return Task.FromResult(new RuleEditorSaveOutcome(null));
+        return RuleEditorHosts.SaveNestAsync(rpc, domain, document);
     }
 
     // ── Error surface (page-level error-message, admin.md § N Nest) ──────────

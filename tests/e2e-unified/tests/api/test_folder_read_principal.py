@@ -119,6 +119,10 @@ def principal_mda(consent_nest, mail_bridge_binary, tmp_path_factory):
             {"domain": MDA_DOMAIN, "mta_sts_cert_mode": "per_host"},
         )
         ws.call("fauna.bridges.set_webdav_enabled", {"enabled": True})
+        domains = ws.call("fauna.bridges.list_local_domains", {})
+    primary = next(
+        row["domain_name"] for row in domains.get("active", []) if row.get("is_primary")
+    )
     spawned = _spawn_mda_bridge(
         mail_bridge_binary=mail_bridge_binary,
         nest_instance=nest,
@@ -126,6 +130,8 @@ def principal_mda(consent_nest, mail_bridge_binary, tmp_path_factory):
         bridge_id=f"principal-mda-{secrets.token_hex(3)}",
         domain=MDA_DOMAIN,
     )
+    # The nest's own DAV host, which a bearer proof's ``htu`` must name.
+    spawned.dav_host = f"mail.{primary}"
     try:
         yield spawned
     finally:
@@ -243,8 +249,12 @@ def _dav(mda, client, token: str, method: str, path: str, keys: str | None, dept
     fresh proof over the request's own URL, and the keys header when given;
     one ``use_dpop_nonce`` retry, the protocol's own. Returns ``(status,
     body)``."""
-    origin = f"127.0.0.1:{mda.caldav_port}"
-    htu = f"https://{origin}{path}"
+    # The proof names the nest's own DAV host, ``mail.<primary>`` (the
+    # admission refuses any other); the socket goes to the MDA's loopback
+    # listener, the ``Host`` header carrying the name.
+    dav_host = mda.dav_host
+    htu = f"https://{dav_host}{path}"
+    url = f"https://127.0.0.1:{mda.caldav_port}{path}"
     # The MDA's cert is self-signed for its mail domain; the door's subject is
     # the bearer admission, not the TLS chain.
     tls = ssl.create_default_context()
@@ -253,6 +263,7 @@ def _dav(mda, client, token: str, method: str, path: str, keys: str | None, dept
 
     def send():
         headers = {
+            "Host": dav_host,
             "Authorization": f"DPoP {token}",
             "DPoP": client.dpop_proof(method, htu, access_token=token),
         }
@@ -260,7 +271,7 @@ def _dav(mda, client, token: str, method: str, path: str, keys: str | None, dept
             headers["Depth"] = depth
         if keys is not None:
             headers["Fauna-Folder-Keys"] = keys
-        request = urllib.request.Request(htu, method=method, headers=headers)
+        request = urllib.request.Request(url, method=method, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=RPC_ROUNDTRIP_S, context=tls) as resp:
                 return resp.status, dict(resp.headers), resp.read()

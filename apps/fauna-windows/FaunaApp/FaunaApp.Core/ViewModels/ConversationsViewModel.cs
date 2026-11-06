@@ -30,13 +30,6 @@ namespace FaunaApp.Core.ViewModels;
 /// </summary>
 internal partial class ConversationsViewModel : ObservableObject
 {
-    /// <summary>
-    /// Singleton accessor mirroring <c>OnboardingViewModel.Current</c>.
-    /// Used by <c>TestAgent</c> to route bridge commands at the manager
-    /// without threading the VM through every command-handler call.
-    /// </summary>
-    internal static ConversationsViewModel? Current { get; private set; }
-
     private readonly ConversationsManager _manager;
     // Observer held to keep its callback alive for the manager's lifetime.
     private readonly SnapshotObserver _observer;
@@ -59,13 +52,11 @@ internal partial class ConversationsViewModel : ObservableObject
         _manager = manager;
         _observer = observer;
         _spamWrite = spamWrite;
-        Current = this;
 
         if (observer is INotifyPropertyChanged inpc)
             inpc.PropertyChanged += (_, _) =>
             {
-                _cachedSnapshot = null;
-                _cachedDetail = null;
+                DropCachedSnapshot();
                 OnPropertyChanged(string.Empty);
             };
 
@@ -76,6 +67,37 @@ internal partial class ConversationsViewModel : ObservableObject
     public ConversationsManager Manager => _manager;
 
     public ConversationsSnapshot Snapshot => _cachedSnapshot ??= _manager.Snapshot();
+
+    private void DropCachedSnapshot()
+    {
+        _cachedSnapshot = null;
+        _cachedDetail = null;
+    }
+
+    /// <summary>
+    /// Every manager await in this VM goes through here, so a read after a mutator
+    /// returns sees the manager's current state. The observer above clears the cache
+    /// too, but <c>ConversationsNotifyObserver</c> reaches this VM through a dispatcher
+    /// hop: its PropertyChanged is enqueued, and runs AFTER the continuation that
+    /// awaited the mutation. A page that awaits a mutator and repaints in the same
+    /// continuation (<c>await _vm.LeaveRoom(id); Refresh();</c>) would otherwise paint
+    /// the pre-mutation snapshot until the queued tick repainted it: a refusal shown a
+    /// beat late, an accepted invitation still listed. Dropped in <c>finally</c>, so a
+    /// mutator that throws is read back fresh too. The observer's tick still raises
+    /// PropertyChanged; this only stops the stale read in between. (FeedPage's
+    /// gated-unlock reads <c>Manager.Snapshot()</c> directly for the same reason.)
+    /// </summary>
+    private async Task Mutated(Task call)
+    {
+        try { await call; }
+        finally { DropCachedSnapshot(); }
+    }
+
+    private async Task<T> Mutated<T>(Task<T> call)
+    {
+        try { return await call; }
+        finally { DropCachedSnapshot(); }
+    }
 
     public IReadOnlyList<ThreadSummary> Threads => Snapshot.threads;
 
@@ -103,7 +125,8 @@ internal partial class ConversationsViewModel : ObservableObject
     /// rename seed, the recipient picker, the room roster), so the same derivation was
     /// paid over and over WITHIN one pass.</para>
     /// Keyed by thread id and cleared wherever <see cref="_cachedSnapshot"/> is — the
-    /// observer tick — so it can never outlive a state change or serve the previously
+    /// observer tick and every mutator's return (<see cref="Mutated"/>) — so it can
+    /// never outlive a state change or serve the previously
     /// selected thread's detail (<see cref="SelectedThreadId"/> is itself read off the
     /// cached snapshot, so the two caches turn over together).</summary>
     public ThreadDetail? SelectedDetail
@@ -177,6 +200,7 @@ internal partial class ConversationsViewModel : ObservableObject
         get
         {
             if (EngineServedElsewhere) return Strings.Get("conversations/errors/served_elsewhere");
+            if (EngineStateNeedsNewerApp) return Strings.Get("conversations/errors/state_needs_newer_app");
             if (ReceiveStopped) return Strings.Get("conversations/errors/receive_stopped");
             if (Snapshot.@error is { } pageError) return Strings.Resolve(pageError);
             if ((NewThreadCompose?.sendState ?? SelectedDetail?.compose.sendState)
@@ -205,6 +229,29 @@ internal partial class ConversationsViewModel : ObservableObject
             try
             {
                 return _manager.EngineServedElsewhere();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Did this account's <c>mls.db</c> carry a newer build's breaking stamp, so the
+    /// engine refused to open it (<c>conversations.md</c> § Errors &amp; edge cases —
+    /// the sixth truth)? A read of shared state the engine-construction seam arms
+    /// (<c>set_engine_state_needs_newer_app</c>), never set by this VM; no gesture
+    /// clears it. An FFI fault degrades to <c>false</c>, same posture as
+    /// <see cref="EngineServedElsewhere"/>.
+    /// </summary>
+    public bool EngineStateNeedsNewerApp
+    {
+        get
+        {
+            try
+            {
+                return _manager.EngineStateNeedsNewerApp();
             }
             catch (Exception)
             {
@@ -332,7 +379,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// so it won't re-fire; the cached, idempotent resolve is the in-flight backstop — mirroring
     /// the feed trigger). No <c>ConfigureAwait(false)</c> (a WinUI VM must resume on the UI
     /// thread; off-thread bound-state mutation throws a silent COMException).</summary>
-    public async Task ResolveLinkPreviewAsync(string url) => await _manager.ResolveLinkPreview(url);
+    public async Task ResolveLinkPreviewAsync(string url) => await Mutated(_manager.ResolveLinkPreview(url));
 
     // ── Attachments ──────────────────────────────────────────────
     // conversations.md § Attachments. Render resolves bytes through the shared
@@ -414,7 +461,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// thread, and fires the MLS wire op for a bound FaunaMls-group add. Returns the
     /// (possibly new) thread id, or null if no recipient was committed.
     /// </summary>
-    public async Task<string?> ConfirmAddParticipant() => await _manager.ConfirmAddParticipant();
+    public async Task<string?> ConfirmAddParticipant() => await Mutated(_manager.ConfirmAddParticipant());
 
     public bool AcceptCurrentRecipientChip() => _manager.AcceptCurrentRecipientChip();
 
@@ -427,7 +474,17 @@ internal partial class ConversationsViewModel : ObservableObject
     /// <i>The picker tells the truth</i>; the same order android, web, linux and tui
     /// drive). The snapshot round-trip carries the resolve state back to the widget.
     /// </summary>
-    public async Task ResolveRecipientAsync() => await _manager.ResolveRecipient();
+    public async Task ResolveRecipientAsync() => await Mutated(_manager.ResolveRecipient());
+
+    /// <summary><c>recipient-picker-suggestion[i]</c>: accept the active picker's
+    /// <paramref name="index"/>th suggestion — the Enter path, in shared Rust.</summary>
+    public async Task<bool> AcceptSuggestionAsync(uint index) => await Mutated(_manager.AcceptSuggestion(index));
+
+    /// <summary><c>recipient-picker-chip[i]</c>'s ×: drop the active picker's
+    /// <paramref name="index"/>th chip — the add-participant overlay first, else the
+    /// new-thread composer's (shared <c>remove_recipient_chip</c>; an index past the
+    /// chips is a no-op).</summary>
+    public void RemoveRecipientChip(uint index) => _manager.RemoveRecipientChip(index);
 
     /// <summary>
     /// Re-read the list-send texts (<c>dm-compose-list-send-warning</c> /
@@ -437,7 +494,41 @@ internal partial class ConversationsViewModel : ObservableObject
     /// message). The result rides the manager's snapshot notify into
     /// <c>ComposeState.listSend</c>; nothing to return.
     /// </summary>
-    public async Task RefreshListSendAsync(string? threadId) => await _manager.RefreshListSend(threadId);
+    public async Task RefreshListSendAsync(string? threadId) => await Mutated(_manager.RefreshListSend(threadId));
+
+    /// <summary>
+    /// Read the nest's per-message scan verdict for each received mail message of the
+    /// thread that just opened (<c>mail-content-scanning.md</c> § User sees their own
+    /// message's row). The manager folds it into <c>MessageSnapshot.scanResultLines</c>
+    /// and re-emits; the bubble paints <c>dm-message-scan-result</c> from those lines —
+    /// no wording or verdict logic here (tui's <c>RefreshOpenedThread</c> twin).
+    /// </summary>
+    public async Task RefreshMessageScanResultsAsync(string threadId) =>
+        await Mutated(_manager.RefreshMessageScanResults(threadId));
+
+    /// <summary>
+    /// Read the account's alias rows so each received mail message of the thread that
+    /// just opened can say which alias it arrived on (<c>mail-aliases.md</c> § Label).
+    /// The manager resolves and words it into <c>MessageSnapshot.deliveredTo</c> and
+    /// re-emits; the bubble paints <c>dm-message-delivered-to-alias</c> from that text
+    /// (the snapshot path every app shares; tui's <c>RefreshOpenedThread</c> twin).
+    /// </summary>
+    public async Task RefreshDeliveredAliasesAsync(string threadId) =>
+        await Mutated(_manager.RefreshDeliveredAliases(threadId));
+
+    /// <summary>
+    /// Read the account's own queue rows so each of the viewer's own messages in the
+    /// thread the nest withholds can say so (takedown-and-block.md § Legal takedown →
+    /// <i>App render</i>, the fourth surface). The manager matches them by record digest
+    /// into <c>MessageSnapshot.withheld</c> and re-emits; the bubble paints
+    /// <c>dm-message-withheld-badge</c> from it. Called beside
+    /// <see cref="RefreshDeliveredAliasesAsync"/> when a thread opens, and when the page
+    /// is shown again with a thread still selected — a decision lands while no app is
+    /// looking (linux reads it on the page's map). A failed read keeps what the last one
+    /// said (the manager never throws here).
+    /// </summary>
+    public async Task RefreshWithheldMessagesAsync(string threadId) =>
+        await Mutated(_manager.RefreshWithheldMessages(threadId));
 
     /// <summary>
     /// Rename a thread via the shared manager's wire-propagating
@@ -445,7 +536,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// snapshot immediately, then posts the encrypted <c>GroupMeta::NameChanged</c>
     /// application message for a bound FaunaMls group so peers apply it.
     /// </summary>
-    public async Task RenameThread(string id, string label) => await _manager.RenameThread(id, label);
+    public async Task RenameThread(string id, string label) => await Mutated(_manager.RenameThread(id, label));
 
     /// <summary>
     /// Remove a participant via the shared manager's wire-propagating
@@ -456,7 +547,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// — no try/catch here, the page's existing error surface already reads it.
     /// </summary>
     public async Task RemoveParticipant(string id, TypedAddress addr) =>
-        await _manager.RemoveParticipant(id, addr);
+        await Mutated(_manager.RemoveParticipant(id, addr));
 
     /// <summary>
     /// Commit everything staged in the room policy editor
@@ -471,7 +562,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// VM must resume on the UI thread (reference_windows_vm_configureawait_comexception).
     /// </summary>
     internal async Task<bool> ApplyRoomSettings(string id, RoomSettingsEdit[] edits) =>
-        await _manager.ApplyRoomSettings(id, edits);
+        await Mutated(_manager.ApplyRoomSettings(id, edits));
 
     /// <summary>
     /// Walk out of the room <paramref name="id"/> (<c>room-leave-confirm</c>) — the
@@ -484,7 +575,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// list: the user keeps their own copy. No <c>ConfigureAwait(false)</c> — a
     /// WinUI VM must resume on the UI thread.
     /// </summary>
-    internal async Task LeaveRoom(string id) => await _manager.LeaveRoom(id);
+    internal async Task LeaveRoom(string id) => await Mutated(_manager.LeaveRoom(id));
 
     /// <summary>
     /// The new-thread composer's home-nest choice
@@ -511,7 +602,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// <c>ConfigureAwait(false)</c> — the <see cref="LeaveRoom"/> posture.
     /// </summary>
     internal async Task<string?> AcceptRoomInvitation(long id) =>
-        await _manager.AcceptRoomInvitation(id);
+        await Mutated(_manager.AcceptRoomInvitation(id));
 
     /// <summary>
     /// <c>room-invitation-decline-button[i]</c>: the invitation stops standing for
@@ -519,7 +610,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// nothing.
     /// </summary>
     internal async Task DeclineRoomInvitation(long id) =>
-        await _manager.DeclineRoomInvitation(id);
+        await Mutated(_manager.DeclineRoomInvitation(id));
 
     /// <summary>
     /// <c>room-pending-invite-withdraw-button[i]</c>: withdraw the invitation
@@ -528,7 +619,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// success the list is read again and the row is gone.
     /// </summary>
     internal async Task WithdrawRoomInvite(string id, string inviteeActorHex) =>
-        await _manager.WithdrawRoomInvite(id, inviteeActorHex);
+        await Mutated(_manager.WithdrawRoomInvite(id, inviteeActorHex));
 
     /// <summary>
     /// Send the active draft on an existing thread (<c>dm-send-button →
@@ -553,7 +644,7 @@ internal partial class ConversationsViewModel : ObservableObject
     {
         try
         {
-            await _manager.Send(threadId);
+            await Mutated(_manager.Send(threadId));
             return true;
         }
         catch (BackendException)
@@ -576,7 +667,7 @@ internal partial class ConversationsViewModel : ObservableObject
     {
         try
         {
-            return await _manager.SendNewThread();
+            return await Mutated(_manager.SendNewThread());
         }
         catch (BackendException)
         {
@@ -611,7 +702,7 @@ internal partial class ConversationsViewModel : ObservableObject
     /// (off-thread bound-state mutation throws a silent COMException).
     /// </summary>
     public async Task ToggleReactionAsync(string threadId, string messageId, string emoji) =>
-        await _manager.ToggleReaction(threadId, messageId, emoji);
+        await Mutated(_manager.ToggleReaction(threadId, messageId, emoji));
 
     /// <summary>
     /// Delete an own message (<c>dm-message-delete-confirm-button</c> →
@@ -621,7 +712,27 @@ internal partial class ConversationsViewModel : ObservableObject
     /// FaunaMls wire op. No <c>ConfigureAwait(false)</c> (WinUI bound-state rule).
     /// </summary>
     public async Task DeleteMessageAsync(string threadId, string messageId) =>
-        await _manager.DeleteMessage(threadId, messageId);
+        await Mutated(_manager.DeleteMessage(threadId, messageId));
+
+    // ── Room search (room-search.md § The surface) ───────────────
+    // The strip is view state on the detail (ThreadDetail.room.search), never a draft;
+    // the shared manager owns open/close, the submit and every word a hit row paints,
+    // and the page renders the snapshot — no app picks a kind or re-sorts the rows.
+
+    /// <summary><c>room-search-button</c> (closed → open): <c>manager.open_room_search</c>.</summary>
+    public void OpenRoomSearch(string threadId) => _manager.OpenRoomSearch(threadId);
+
+    /// <summary><c>room-search-button</c> (open → closed), or Esc: <c>manager.close_room_search</c>,
+    /// which also drops the query and the rows and restores the message stream.</summary>
+    public void CloseRoomSearch(string threadId) => _manager.CloseRoomSearch(threadId);
+
+    /// <summary>
+    /// <c>room-search-submit-button</c> / Enter on <c>room-search-field</c>:
+    /// <c>manager.room_search(thread, query)</c>, submit-driven with no debounce; a blank
+    /// query is the manager's to drop. No <c>ConfigureAwait(false)</c> (WinUI bound-state rule).
+    /// </summary>
+    public async Task RoomSearchAsync(string threadId, string query) =>
+        await Mutated(_manager.RoomSearch(threadId, query));
 
     // ── Mark as spam (the live Insert consumer) ──────────────────
     // mail-spam.md § Wire shapes / § Encrypted-mode interaction — the

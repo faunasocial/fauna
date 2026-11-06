@@ -21,7 +21,34 @@
 //! — pure-machine consumers skip it.
 
 use crate::error::{NestError, nest_error};
+use crate::machine::RegisteredRecipientPubkeys;
+use fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyReply;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
+
+/// The X25519 halves of a `fetch_recipient_mls_pubkey` reply for the
+/// `fetch_own_recipient_pubkey` seam, shared by both transport arms. A mail key
+/// without both DAV keys is half a registration, which the nest never answers.
+fn registered_recipient_pubkeys(
+    reply: FetchRecipientMlsPubkeyReply,
+) -> Result<Option<RegisteredRecipientPubkeys>, NestError> {
+    let x25519 = |k: &fauna_protocol::bridge_routing::RecipientSealKeyHalves| {
+        <[u8; 32]>::try_from(k.mls_pubkey.as_slice())
+            .map_err(|_| NestError::Rejected("recipient pubkey is not 32 bytes".into()))
+    };
+    let Some(mail) = reply.key else {
+        return Ok(None);
+    };
+    let (Some(calendar), Some(card)) = (reply.calendar_key, reply.card_key) else {
+        return Err(NestError::Rejected(
+            "recipient registration carries the mail key without its calendar and card keys".into(),
+        ));
+    };
+    Ok(Some(RegisteredRecipientPubkeys {
+        mail: x25519(&mail)?,
+        calendar: x25519(&calendar)?,
+        card: x25519(&card)?,
+    }))
+}
 
 /// Attempts (initial + retries) for an idempotent mail provision/revoke RPC
 /// against a transiently-unreachable nest.
@@ -110,6 +137,45 @@ where
     }
 }
 
+/// `fauna.nest.info` through the transport's per-connection memo
+/// ([`fauna_protocol::read_nest_info`]), under [`request_idempotent`]'s
+/// transient-retry policy — for `nest_supports`, whose every caller asks about
+/// a static capability token, an answer fixed for the connection
+/// (`security.md` § Transport trust → *The nest's self-description is read
+/// once per connection*). Read directly, every spam-model write and history
+/// read paid one of the actor's discovery budget (60 per minute on a release
+/// nest) on the same answer, and a refused read was re-sent three times more.
+/// Through the memo only a connection's first read reaches the nest; a retry
+/// after a mid-flight drop reads afresh on the new connection.
+async fn nest_info_idempotent<R, Sleep, SleepFut>(
+    nest: &R,
+    sleep: Sleep,
+) -> Result<fauna_protocol::discovery::NestInfoReply, NestError>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+    Sleep: Fn(u32) -> SleepFut,
+    SleepFut: core::future::Future<Output = ()>,
+{
+    let mut attempt = 1u32;
+    loop {
+        match fauna_protocol::read_nest_info(nest).await {
+            Ok(reply) => return Ok(reply),
+            Err(e) => {
+                let mapped = nest_error(e);
+                if attempt < MAIL_PROVISION_MAX_ATTEMPTS
+                    && matches!(mapped, NestError::Transient(_))
+                {
+                    sleep(200u32 << (attempt - 1)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(mapped);
+            }
+        }
+    }
+}
+
 /// The owner's custody's served state, as the mail-settings seam holds it —
 /// what `serves_any_webdav_set` folds the rows through (ruling (7)(b)(ii)
 /// rule (2)). `None` (a machine that never hydrates the URL row) reads not
@@ -157,14 +223,6 @@ where
         .await
         .map(|_reply| ())
         .map_err(nest_error)
-}
-
-/// The honest `Rejected` an unbuilt-backend seam method returns. Shared by the
-/// native + wasm `MailSpamNest` stubs (the per-user spam backend has no nest
-/// handler yet — `mail-spam.md` § Implementation status today); the page renders
-/// it via `error-message`, never fakes green.
-fn unimplemented_rejection(rpc: &str, doc: &str) -> NestError {
-    NestError::Rejected(format!("unimplemented: {rpc} (backend not built — {doc})"))
 }
 
 /// A sheet text field → its optional wire field: an empty (or whitespace-only)
@@ -375,18 +433,16 @@ fn fresh_import_session(
     }
 }
 
-/// The honest `Rejected` the wasm `ImportSourceNest` stub returns — the web
-/// IMAP transport (sans-io `rustls` over a blind byte relay) is user-gated +
-/// POSTPONED (`mailbox-migration.md` § Where the IMAP client runs), same
-/// relay-host blocker as Track C's web IMAP leg.
-/// The nest half ([`MailImportNest`](crate::import::MailImportNest)) is real
-/// on wasm too — only the foreign-source connection needs the relay.
-#[allow(dead_code)] // Only the wasm module calls this.
+/// The honest `Rejected` the wasm `ImportSourceNest` stub returns while the
+/// web tunnel's client half waits on its bump round (`web-mail-tunnel`, off;
+/// `mailbox-migration.md` § Implementation status today). The nest half
+/// ([`MailImportNest`](crate::import::MailImportNest)) is real on wasm too.
+#[cfg(all(target_arch = "wasm32", not(feature = "web-mail-tunnel")))]
 fn import_source_unimpl(rpc: &str) -> NestError {
-    unimplemented_rejection(
-        rpc,
-        "mailbox-migration.md § Where the IMAP client runs — web IMAP transport POSTPONED",
-    )
+    NestError::Rejected(format!(
+        "unimplemented: {rpc} (backend not built — mailbox-migration.md § Where the IMAP \
+         client runs — the web tunnel's client half)"
+    ))
 }
 
 /// The wizard's scope as the `scope_descriptor` blob `start_export_session`
@@ -564,20 +620,18 @@ mod native {
         UnsubscribeListMemberReply, UnsubscribeListMemberRequest, UpdateAccountListReply,
         UpdateAccountListRequest,
     };
-    use fauna_protocol::discovery::{
-        NestInfoReply, NestInfoRequest, SetupStatusReply, SetupStatusRequest, capability,
-    };
+    use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest, capability};
     use fauna_protocol::folders::{FoldersListReply, FoldersListRequest, KIND_FOLDERS_LIST};
     use fauna_protocol::wrapped_blob::{
-        GetCaldavPortReply, GetCaldavPortRequest, GetMailServingEnabledReply,
-        GetMailServingEnabledRequest, ProvisionMlsSnapshotBlobRequest, ProvisionReply,
-        ProvisionWrappedMlsBlobRequest, ProvisionWrappedSubmissionTokenRequest,
-        PutSpamModelOutcome, RevokeReply, RevokeWrappedMlsBlobRequest,
-        RevokeWrappedSubmissionTokenRequest, ServiceUserInfo, SetMailEnabledReply,
+        GetActorMailEnabledReply, GetActorMailEnabledRequest, GetCaldavPortReply,
+        GetCaldavPortRequest, GetMailServingEnabledReply, GetMailServingEnabledRequest,
+        ProvisionMlsSnapshotBlobRequest, ProvisionReply, ProvisionWrappedMlsBlobRequest,
+        ProvisionWrappedSubmissionTokenRequest, PutSpamModelOutcome, RevokeReply,
+        RevokeWrappedMlsBlobRequest, RevokeWrappedSubmissionTokenRequest, ServiceUserInfo,
+        SetActorMailEnabledReply, SetActorMailEnabledRequest, SetMailEnabledReply,
         SetMailEnabledRequest, SetMailServingEnabledReply, SetMailServingEnabledRequest,
         SpamModelHolderCopy, SpamModelPrecondition,
     };
-    use tokio::sync::Mutex as AsyncMutex;
 
     use crate::admin_policy::{MailPolicyMachine, MailPolicyNest};
     use crate::aliases::{MailAliasesMachine, MailAliasesNest};
@@ -592,11 +646,7 @@ mod native {
         ExportUploadAck, MailExportKeyCustody, MailExportMachine, MailExportNest, SealedBlobStream,
     };
     use crate::forwarders::{ForwarderMachine, ForwarderNest};
-    use crate::import::{
-        ImportOAuthHttp, ImportSourceNest, ImportTlsMode, MailImportMachine, MailImportNest,
-        MailboxCursor, RetryClock, SourceAuth, SourceConnectError, SourceConnectFailure,
-        SourceConnectParams, SourceMailboxView,
-    };
+    use crate::import::{ImportOAuthHttp, MailImportMachine, MailImportNest, RetryClock};
     use crate::lists::{
         ImportResult, ListDraft, ListMembers, ListView, MailListMembersMachine,
         MailListMembersNest, MailListsMachine, MailListsNest,
@@ -605,7 +655,7 @@ mod native {
         DomainDmarcPolicy, LocalDomainMachine, LocalDomainNest, RoleAddressKind,
     };
     use crate::machine::{
-        FetchedSpamModel, IdentitySigner, MailSettingsMachine, MailStore,
+        DeploymentStatus, FetchedSpamModel, IdentitySigner, MailSettingsMachine, MailStore,
         NestClient as MailNestClient, SealedModelWriter,
     };
     use crate::spam::{MailSpamMachine, MailSpamNest, SpamHistory};
@@ -2346,342 +2396,6 @@ mod native {
         }
     }
 
-    /// § Failure handling's TCP/TLS-fault classification, shared by every
-    /// [`ImportSourceNest`] method: [`imap_client::ImapClientError::Transport`]/`Eof`
-    /// are the retryable transport faults `run_import`'s backoff loop targets;
-    /// every other variant is the source telling us something true (bad
-    /// creds, a rejected command, a rebuilt mailbox) and is never retried.
-    fn imap_error(e: imap_client::ImapClientError) -> NestError {
-        use imap_client::ImapClientError;
-        match e {
-            ImapClientError::Transport(_) | ImapClientError::Eof => {
-                NestError::Transient(e.to_string())
-            }
-            _ => NestError::Rejected(e.to_string()),
-        }
-    }
-
-    /// [`imap_client::NativeImapConnector::connect`]'s pre-IMAP transport
-    /// faults, classed for the wizard's sentence (§ Wizard steps step 2): a
-    /// bad hostname or a dead socket is "could not reach", a failed handshake
-    /// or an unusable trust anchor is "could not secure".
-    fn native_transport_failure(e: imap_client::NativeTransportError) -> SourceConnectError {
-        use imap_client::NativeTransportError;
-        let failure = match e {
-            NativeTransportError::InvalidHostname(_)
-            | NativeTransportError::Connect { .. }
-            | NativeTransportError::Io(_) => SourceConnectFailure::Reach,
-            NativeTransportError::Tls { .. } | NativeTransportError::TrustAnchor(_) => {
-                SourceConnectFailure::Secure
-            }
-        };
-        SourceConnectError::new(failure, e.to_string())
-    }
-
-    /// Open, secure and sign in one source session. Each phase's failure is
-    /// classed by where it happened: before the greeting it is the
-    /// transport's own; during a `STARTTLS` upgrade it is "could not secure";
-    /// a refused `LOGIN` or `AUTHENTICATE XOAUTH2` is "could not sign in", a
-    /// dropped one "could not reach".
-    async fn open_source_session(
-        params: &SourceConnectParams,
-    ) -> Result<imap_client::ImapSession<imap_client::NativeTlsTransport>, SourceConnectError> {
-        use imap_client::ImapClientError;
-        let mode = match params.tls_mode {
-            ImportTlsMode::Implicit => imap_client::TlsMode::Implicit,
-            ImportTlsMode::StartTls => imap_client::TlsMode::StartTls,
-        };
-        let connector = imap_client::NativeImapConnector::new(mode);
-        let transport = connector
-            .connect(&params.host, params.port)
-            .await
-            .map_err(native_transport_failure)?;
-        let mut session = match mode {
-            imap_client::TlsMode::Implicit => imap_client::ImapSession::connect(transport).await,
-            imap_client::TlsMode::StartTls => {
-                imap_client::ImapSession::connect_starttls(transport).await
-            }
-        }
-        .map_err(|e| {
-            let failure = match mode {
-                imap_client::TlsMode::StartTls => SourceConnectFailure::Secure,
-                imap_client::TlsMode::Implicit => SourceConnectFailure::Reach,
-            };
-            SourceConnectError::new(failure, e.to_string())
-        })?;
-        let signed_in = match &params.auth {
-            SourceAuth::Password(password) => {
-                session.login(&params.username, password.as_str()).await
-            }
-            SourceAuth::MicrosoftToken { user, access_token } => {
-                session
-                    .authenticate_xoauth2(user, access_token.as_str())
-                    .await
-            }
-        };
-        signed_in.map_err(|e| {
-            let failure = match e {
-                ImapClientError::Transport(_) | ImapClientError::Eof => SourceConnectFailure::Reach,
-                _ => SourceConnectFailure::SignIn,
-            };
-            SourceConnectError::new(failure, e.to_string())
-        })?;
-        Ok(session)
-    }
-
-    fn source_not_connected() -> NestError {
-        NestError::Rejected("not connected to the source server".into())
-    }
-
-    type NativeSourceSession = imap_client::ImapSession<imap_client::NativeTlsTransport>;
-
-    /// One source connection, native transport. § Throttling's budget lives
-    /// inside `ImapSession` itself (per source *server*, not per mailbox), so
-    /// this seam holds exactly one session — mirrors
-    /// `fauna-ffi::mail_import::FfiMailImportClient`'s internals.
-    struct RpcImportSourceNest {
-        session: AsyncMutex<Option<NativeSourceSession>>,
-        /// What `connect` signed in with, kept until `logout` (§ Credential
-        /// handling: the source password lives in client memory until
-        /// LOGOUT). A transport fault drops `session`; the next call opens it
-        /// again from these, so the drive loop's retries — and a Resume after
-        /// the loop paused on a lost connection (§ Failure handling) — reach
-        /// a live server rather than the dead socket.
-        params: AsyncMutex<Option<SourceConnectParams>>,
-        /// The source refused the kept credential on a re-open
-        /// ([`ImportSourceNest::take_sign_in_refused`]).
-        sign_in_refused: std::sync::atomic::AtomicBool,
-        clock: imap_client::TokioClock,
-    }
-
-    impl RpcImportSourceNest {
-        fn new() -> Self {
-            Self {
-                session: AsyncMutex::new(None),
-                params: AsyncMutex::new(None),
-                sign_in_refused: std::sync::atomic::AtomicBool::new(false),
-                clock: imap_client::TokioClock::new(),
-            }
-        }
-
-        /// The live session, re-opened from the kept parameters when a fault
-        /// dropped it — `true` alongside when it was, since a fresh session
-        /// has no mailbox `EXAMINE`d. A failure to reach or secure the source
-        /// is transient — the loop retries and then pauses. A refused sign-in
-        /// is not: the source has stopped taking the credential (§ Failure
-        /// handling → *Source-side errors*, the `LOGIN` row), so it is
-        /// [`NestError::Rejected`] with the refusal flagged, and the loop ends
-        /// the session asking for new credentials.
-        async fn live_session(
-            &self,
-        ) -> Result<
-            (
-                tokio::sync::MutexGuard<'_, Option<NativeSourceSession>>,
-                bool,
-            ),
-            NestError,
-        > {
-            let mut guard = self.session.lock().await;
-            if guard.is_some() {
-                return Ok((guard, false));
-            }
-            let params = self
-                .params
-                .lock()
-                .await
-                .clone()
-                .ok_or_else(source_not_connected)?;
-            let session = open_source_session(&params).await.map_err(|e| {
-                if e.failure == SourceConnectFailure::SignIn {
-                    self.sign_in_refused
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    NestError::Rejected(e.to_string())
-                } else {
-                    NestError::Transient(e.to_string())
-                }
-            })?;
-            *guard = Some(session);
-            Ok((guard, true))
-        }
-    }
-
-    /// Drop a session a transport fault broke, so the next call re-opens it.
-    fn drop_if_broken<T>(
-        guard: &mut Option<NativeSourceSession>,
-        result: Result<T, NestError>,
-    ) -> Result<T, NestError> {
-        if matches!(result, Err(NestError::Transient(_))) {
-            *guard = None;
-        }
-        result
-    }
-
-    #[async_trait]
-    impl ImportSourceNest for RpcImportSourceNest {
-        async fn connect(&self, params: SourceConnectParams) -> Result<(), SourceConnectError> {
-            let session = open_source_session(&params).await?;
-            *self.session.lock().await = Some(session);
-            *self.params.lock().await = Some(params);
-            Ok(())
-        }
-
-        async fn list_source_mailboxes(&self) -> Result<Vec<SourceMailboxView>, NestError> {
-            let mut guard = self.session.lock().await;
-            let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            let boxes = session.list_mailboxes().await.map_err(imap_error)?;
-            Ok(boxes
-                .into_iter()
-                .map(|m| SourceMailboxView {
-                    name: m.name,
-                    selectable: m.selectable,
-                    special_use: m.special_use,
-                })
-                .collect())
-        }
-
-        async fn estimate_mailbox(
-            &self,
-            mailbox: &str,
-            since_epoch: Option<i64>,
-        ) -> Result<imap_client::MailboxEstimate, NestError> {
-            let (mut guard, _) = self.live_session().await?;
-            let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            let estimate = session
-                .estimate_mailbox(mailbox, since_epoch)
-                .await
-                .map_err(imap_error);
-            drop_if_broken(&mut guard, estimate)
-        }
-
-        async fn examine(&self, mailbox: &str) -> Result<imap_client::MailboxStatus, NestError> {
-            let (mut guard, _) = self.live_session().await?;
-            let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            // No expected UIDVALIDITY: the loop compares the one reported
-            // against its cursor itself (§ Resume protocol step 4).
-            let status = session.examine(mailbox, None).await.map_err(imap_error);
-            drop_if_broken(&mut guard, status)
-        }
-
-        async fn fetch_window(
-            &self,
-            // Read only when the session was just re-opened:
-            // `ImapSession::enumerate_uids`/`fetch_messages` act on whichever
-            // mailbox this session currently has `EXAMINE`d, and
-            // `run_import_inner`'s calling contract always issues an
-            // `examine(mailbox, cursor)` immediately before every
-            // `fetch_window(mailbox, cursor, _)` for that same mailbox — so
-            // a session that lived through it is already on the right one,
-            // and only one a fault made us re-open needs it `EXAMINE`d again.
-            // `require_selected` inside the session is the backstop if a
-            // future caller ever breaks that ordering.
-            mailbox: &str,
-            cursor: Option<MailboxCursor>,
-            max: usize,
-            max_size_bytes: u64,
-        ) -> Result<crate::import::FetchWindow, NestError> {
-            let (mut guard, reopened) = self.live_session().await?;
-            let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            let window = self
-                .fetch_window_on(session, reopened, mailbox, cursor, max, max_size_bytes)
-                .await;
-            drop_if_broken(&mut guard, window)
-        }
-
-        async fn enumerate_window(
-            &self,
-            mailbox: &str,
-            cursor: Option<MailboxCursor>,
-            max: usize,
-        ) -> Result<Vec<imap_client::UidEntry>, NestError> {
-            let (mut guard, reopened) = self.live_session().await?;
-            let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            let entries = enumerate_window_on(session, reopened, mailbox, cursor, max).await;
-            drop_if_broken(&mut guard, entries)
-        }
-
-        async fn logout(&self) -> Result<(), NestError> {
-            *self.params.lock().await = None;
-            imap_client::logout_and_clear(&self.session)
-                .await
-                .map_err(imap_error)
-        }
-
-        async fn replace_auth(&self, auth: SourceAuth) {
-            if let Some(params) = self.params.lock().await.as_mut() {
-                params.auth = auth;
-            }
-        }
-
-        fn take_sign_in_refused(&self) -> bool {
-            self.sign_in_refused
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    impl RpcImportSourceNest {
-        async fn fetch_window_on(
-            &self,
-            session: &mut NativeSourceSession,
-            reopened: bool,
-            mailbox: &str,
-            cursor: Option<MailboxCursor>,
-            max: usize,
-            max_size_bytes: u64,
-        ) -> Result<crate::import::FetchWindow, NestError> {
-            // § Per-message flow step 1: the size is compared on the
-            // enumeration's `RFC822.SIZE`, so an over-limit body is never
-            // transferred at all.
-            let (too_large, wanted): (Vec<_>, Vec<_>) =
-                enumerate_window_on(session, reopened, mailbox, cursor, max)
-                    .await?
-                    .into_iter()
-                    .partition(|e| e.is_oversize(max_size_bytes));
-            let uids: Vec<u32> = wanted.into_iter().map(|e| e.uid).collect();
-            let mut outcomes = Vec::with_capacity(uids.len());
-            session
-                .fetch_messages(&uids, &self.clock, |o| outcomes.push(o))
-                .await
-                .map_err(imap_error)?;
-            Ok(crate::import::FetchWindow {
-                outcomes,
-                too_large,
-            })
-        }
-    }
-
-    /// At most `max` of `mailbox`'s messages after `cursor`, by enumeration
-    /// alone — the first half of [`ImportSourceNest::fetch_window`] and the
-    /// whole of [`ImportSourceNest::enumerate_window`]. A session just
-    /// re-opened is `EXAMINE`d first (`fetch_window`'s comment on `reopened`).
-    async fn enumerate_window_on(
-        session: &mut NativeSourceSession,
-        reopened: bool,
-        mailbox: &str,
-        cursor: Option<MailboxCursor>,
-        max: usize,
-    ) -> Result<Vec<imap_client::UidEntry>, NestError> {
-        if reopened {
-            session
-                .examine(mailbox, cursor.map(|c| c.source_uid_validity))
-                .await
-                .map_err(imap_error)?;
-        }
-        let from_uid = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
-        // `enumerate_uids` has no cap of its own (§ its own docs), so a
-        // large mailbox is re-enumerated from `from_uid` on every window —
-        // correct (each call returns the right slice) but not the cheapest
-        // possible re-fetch pattern; a future pass could cache the
-        // enumeration per mailbox inside this seam if it becomes a measured
-        // cost.
-        Ok(session
-            .enumerate_uids(from_uid)
-            .await
-            .map_err(imap_error)?
-            .into_iter()
-            .take(max)
-            .collect())
-    }
-
     /// § Failure handling's TCP/TLS backoff (5 s / 30 s / 2 min), on tokio —
     /// the real [`RetryClock`] `MailImportMachine::retrying` sleeps through
     /// between attempts.
@@ -2732,7 +2446,7 @@ mod native {
                 setup: MailAdminClient::new(Arc::clone(&nest)),
                 nest,
             }),
-            Arc::new(RpcImportSourceNest::new()),
+            Arc::new(crate::import_source::native::source_seam()),
             Arc::new(RpcRetryClock),
         );
         match imap_client::NativeOAuthHttp::new() {
@@ -3130,6 +2844,7 @@ mod native {
             actor_id: [u8; 32],
             pubkey: [u8; 32],
             mlkem_ek: Vec<u8>,
+            dav: crate::machine::DavSealPubkeys,
             epoch_keys: Option<Vec<EpochSealKey>>,
         ) -> Result<(), NestError> {
             let _: ProvisionReply = super::request_idempotent(
@@ -3142,6 +2857,12 @@ mod native {
                     // content-sealing-epoch schedule — the machine always
                     // publishes both.
                     mlkem_ek: ByteBuf::from(mlkem_ek),
+                    // The calendar and card pairs, in the same row
+                    // (`owner-key-material.md` § Path B-sibling-5 → *Registration*).
+                    calendar_pubkey: ByteBuf::from(dav.calendar_pubkey.to_vec()),
+                    calendar_mlkem_ek: ByteBuf::from(dav.calendar_mlkem_ek),
+                    card_pubkey: ByteBuf::from(dav.card_pubkey.to_vec()),
+                    card_mlkem_ek: ByteBuf::from(dav.card_mlkem_ek),
                     epoch_keys,
                 },
                 provision_backoff,
@@ -3153,36 +2874,23 @@ mod native {
         async fn fetch_own_recipient_pubkey(
             &self,
             actor_id: [u8; 32],
-        ) -> Result<Option<[u8; 32]>, NestError> {
-            let reply: fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyReply =
-                super::request_idempotent(
-                    &*self.nest,
-                    "fauna.bridges.fetch_recipient_mls_pubkey",
-                    fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
-                        actor_id: actor_id.to_vec(),
-                        // The standing key, never the per-epoch one.
-                        mail_new_ingest: false,
-                    },
-                    provision_backoff,
-                )
-                .await?;
-            reply
-                .key
-                .map(|k| {
-                    <[u8; 32]>::try_from(k.mls_pubkey.as_slice())
-                        .map_err(|_| NestError::Rejected("recipient pubkey is not 32 bytes".into()))
-                })
-                .transpose()
-        }
-
-        async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
-            let reply: NestInfoReply = super::request_idempotent(
+        ) -> Result<Option<super::RegisteredRecipientPubkeys>, NestError> {
+            let reply: super::FetchRecipientMlsPubkeyReply = super::request_idempotent(
                 &*self.nest,
-                "fauna.nest.info",
-                NestInfoRequest::default(),
+                "fauna.bridges.fetch_recipient_mls_pubkey",
+                fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
+                    actor_id: actor_id.to_vec(),
+                    // The standing key, never the per-epoch one.
+                    mail_new_ingest: false,
+                },
                 provision_backoff,
             )
             .await?;
+            super::registered_recipient_pubkeys(reply)
+        }
+
+        async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
+            let reply = super::nest_info_idempotent(&*self.nest, provision_backoff).await?;
             Ok(capability::supports(&reply.capabilities, token))
         }
 
@@ -3202,7 +2910,7 @@ mod native {
             Ok(())
         }
 
-        async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
+        async fn deployment_status(&self) -> Result<DeploymentStatus, NestError> {
             let reply: SetupStatusReply = super::request_idempotent(
                 &*self.nest,
                 "fauna.setup.status",
@@ -3210,7 +2918,7 @@ mod native {
                 provision_backoff,
             )
             .await?;
-            Ok(reply.mail_unavailable_here())
+            Ok(DeploymentStatus::of(&reply))
         }
 
         async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
@@ -3234,6 +2942,31 @@ mod native {
                 &*self.nest,
                 "fauna.bridges.get_mail_serving_enabled",
                 GetMailServingEnabledRequest::default(),
+                provision_backoff,
+            )
+            .await?;
+            Ok(reply.enabled)
+        }
+
+        async fn set_actor_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+            let _: SetActorMailEnabledReply = super::request_idempotent(
+                &*self.nest,
+                "fauna.bridges.set_actor_mail_enabled",
+                SetActorMailEnabledRequest {
+                    enabled,
+                    extra: Default::default(),
+                },
+                provision_backoff,
+            )
+            .await?;
+            Ok(())
+        }
+
+        async fn get_actor_mail_enabled(&self) -> Result<bool, NestError> {
+            let reply: GetActorMailEnabledReply = super::request_idempotent(
+                &*self.nest,
+                "fauna.bridges.get_actor_mail_enabled",
+                GetActorMailEnabledRequest::default(),
                 provision_backoff,
             )
             .await?;
@@ -3630,7 +3363,14 @@ mod native {
             // the user's same identity (registered on both), then provision the
             // read recipe there reusing the account's MSEK.
             let peer = NestClient::new(peer_url.to_string(), self.keypair());
-            peer.connect().await.map_err(|e| {
+            // The mint first: an unreachable home box fails here, named as the
+            // connect (`connect()` alone is `Ok` over it, its supervisor retrying).
+            async {
+                peer.authenticate().await?;
+                peer.connect().await
+            }
+            .await
+            .map_err(|e| {
                 PairDispatchError::Nest(PairNestError::Transient(format!(
                     "connect to home box {peer_url}: {e}"
                 )))
@@ -4110,16 +3850,15 @@ mod wasm {
         UnsubscribeListMemberReply, UnsubscribeListMemberRequest, UpdateAccountListReply,
         UpdateAccountListRequest,
     };
-    use fauna_protocol::discovery::{
-        NestInfoReply, NestInfoRequest, SetupStatusReply, SetupStatusRequest, capability,
-    };
+    use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest, capability};
     use fauna_protocol::folders::{FoldersListReply, FoldersListRequest, KIND_FOLDERS_LIST};
     use fauna_protocol::wrapped_blob::{
-        GetCaldavPortReply, GetCaldavPortRequest, GetMailServingEnabledReply,
-        GetMailServingEnabledRequest, ProvisionMlsSnapshotBlobRequest, ProvisionReply,
-        ProvisionWrappedMlsBlobRequest, ProvisionWrappedSubmissionTokenRequest,
-        PutSpamModelOutcome, RevokeReply, RevokeWrappedMlsBlobRequest,
-        RevokeWrappedSubmissionTokenRequest, ServiceUserInfo, SetMailEnabledReply,
+        GetActorMailEnabledReply, GetActorMailEnabledRequest, GetCaldavPortReply,
+        GetCaldavPortRequest, GetMailServingEnabledReply, GetMailServingEnabledRequest,
+        ProvisionMlsSnapshotBlobRequest, ProvisionReply, ProvisionWrappedMlsBlobRequest,
+        ProvisionWrappedSubmissionTokenRequest, PutSpamModelOutcome, RevokeReply,
+        RevokeWrappedMlsBlobRequest, RevokeWrappedSubmissionTokenRequest, ServiceUserInfo,
+        SetActorMailEnabledReply, SetActorMailEnabledRequest, SetMailEnabledReply,
         SetMailEnabledRequest, SetMailServingEnabledReply, SetMailServingEnabledRequest,
         SpamModelHolderCopy, SpamModelPrecondition,
     };
@@ -4137,10 +3876,7 @@ mod wasm {
         ExportUploadAck, MailExportKeyCustody, MailExportMachine, MailExportNest,
     };
     use crate::forwarders::{ForwarderMachine, ForwarderNest};
-    use crate::import::{
-        ImportSourceNest, MailImportMachine, MailImportNest, MailboxCursor, RetryClock,
-        SourceConnectError, SourceConnectFailure, SourceConnectParams, SourceMailboxView,
-    };
+    use crate::import::{MailImportMachine, MailImportNest, RetryClock};
     use crate::lists::{
         ImportResult, ListDraft, ListMembers, ListView, MailListMembersMachine,
         MailListMembersNest, MailListsMachine, MailListsNest,
@@ -4149,7 +3885,7 @@ mod wasm {
         DomainDmarcPolicy, LocalDomainMachine, LocalDomainNest, RoleAddressKind,
     };
     use crate::machine::{
-        FetchedSpamModel, IdentitySigner, MailSettingsMachine, MailStore,
+        DeploymentStatus, FetchedSpamModel, IdentitySigner, MailSettingsMachine, MailStore,
         NestClient as MailNestClient, SealedModelWriter,
     };
     use crate::spam::{MailSpamMachine, MailSpamNest, SpamHistory};
@@ -5429,68 +5165,6 @@ mod wasm {
         }
     }
 
-    struct RpcImportSourceNest;
-
-    #[async_trait(?Send)]
-    impl ImportSourceNest for RpcImportSourceNest {
-        async fn connect(&self, _params: SourceConnectParams) -> Result<(), SourceConnectError> {
-            Err(SourceConnectError::new(
-                SourceConnectFailure::Reach,
-                super::import_source_unimpl("(web IMAP transport) connect").to_string(),
-            ))
-        }
-        async fn list_source_mailboxes(&self) -> Result<Vec<SourceMailboxView>, NestError> {
-            Err(super::import_source_unimpl(
-                "(web IMAP transport) list_source_mailboxes",
-            ))
-        }
-        async fn estimate_mailbox(
-            &self,
-            _mailbox: &str,
-            _since_epoch: Option<i64>,
-        ) -> Result<imap_client::MailboxEstimate, NestError> {
-            Err(super::import_source_unimpl(
-                "(web IMAP transport) estimate_mailbox",
-            ))
-        }
-        async fn examine(&self, _mailbox: &str) -> Result<imap_client::MailboxStatus, NestError> {
-            Err(super::import_source_unimpl("(web IMAP transport) examine"))
-        }
-        async fn fetch_window(
-            &self,
-            _mailbox: &str,
-            _cursor: Option<MailboxCursor>,
-            _max: usize,
-            _max_size_bytes: u64,
-        ) -> Result<crate::import::FetchWindow, NestError> {
-            Err(super::import_source_unimpl(
-                "(web IMAP transport) fetch_window",
-            ))
-        }
-        async fn enumerate_window(
-            &self,
-            _mailbox: &str,
-            _cursor: Option<MailboxCursor>,
-            _max: usize,
-        ) -> Result<Vec<imap_client::UidEntry>, NestError> {
-            Err(super::import_source_unimpl(
-                "(web IMAP transport) enumerate_window",
-            ))
-        }
-        async fn logout(&self) -> Result<(), NestError> {
-            Err(super::import_source_unimpl("(web IMAP transport) logout"))
-        }
-
-        // The web relay transport is unbuilt, not merely down — `connect` can
-        // never succeed on this platform (§ Where the IMAP client runs), so
-        // `MailImportMachine::connect` clears the password on failure instead
-        // of retaining it for a retry that can never happen (
-        // `mailbox-migration.md` § Credential handling).
-        fn can_ever_connect(&self) -> bool {
-            false
-        }
-    }
-
     struct RpcRetryClock;
 
     #[async_trait(?Send)]
@@ -5504,24 +5178,161 @@ mod wasm {
         }
     }
 
-    /// Build a [`MailImportMachine`] over the browser `WsRpcClient`. The
-    /// Microsoft sign-in is a typed not-yet here — no `with_oauth_http`, so
-    /// `microsoft_signin_available` reads `false`: Microsoft's `/devicecode`
-    /// and `/token` send no CORS headers, and the sign-in lands with the
-    /// relay (§ Where the IMAP client runs). The nest
-    /// half is real; the source half is a stub (see the section note above) —
-    /// `hydrate`/`list_sessions` (viewing a session a native app started) and
-    /// resume/pause/cancel on an existing session still work, but `Connect`
-    /// (starting a fresh import) surfaces the stub's `error-message`.
+    /// The web `ImportSourceNest` while the tunnel's client half waits on its
+    /// bump round (`web-mail-tunnel`, off): `Connect` answers the honest
+    /// `Rejected`; hydrate, the session list and pause/resume/cancel on a
+    /// session a native app started still work through the real nest half.
+    #[cfg(not(feature = "web-mail-tunnel"))]
+    mod source_stub {
+        use super::*;
+        use crate::import::{
+            ImportSourceNest, MailboxCursor, SourceConnectError, SourceConnectFailure,
+            SourceConnectParams, SourceMailboxView,
+        };
+        use crate::rpc_glue::import_source_unimpl;
+
+        pub(super) struct RpcImportSourceNest;
+
+        #[async_trait(?Send)]
+        impl ImportSourceNest for RpcImportSourceNest {
+            async fn connect(
+                &self,
+                _params: SourceConnectParams,
+            ) -> Result<(), SourceConnectError> {
+                Err(SourceConnectError::new(
+                    SourceConnectFailure::Reach,
+                    import_source_unimpl("(web IMAP transport) connect").to_string(),
+                ))
+            }
+            async fn list_source_mailboxes(&self) -> Result<Vec<SourceMailboxView>, NestError> {
+                Err(import_source_unimpl(
+                    "(web IMAP transport) list_source_mailboxes",
+                ))
+            }
+            async fn estimate_mailbox(
+                &self,
+                _mailbox: &str,
+                _since_epoch: Option<i64>,
+            ) -> Result<imap_client::MailboxEstimate, NestError> {
+                Err(import_source_unimpl(
+                    "(web IMAP transport) estimate_mailbox",
+                ))
+            }
+            async fn examine(
+                &self,
+                _mailbox: &str,
+            ) -> Result<imap_client::MailboxStatus, NestError> {
+                Err(import_source_unimpl("(web IMAP transport) examine"))
+            }
+            async fn fetch_window(
+                &self,
+                _mailbox: &str,
+                _cursor: Option<MailboxCursor>,
+                _max: usize,
+                _max_size_bytes: u64,
+            ) -> Result<crate::import::FetchWindow, NestError> {
+                Err(import_source_unimpl("(web IMAP transport) fetch_window"))
+            }
+            async fn enumerate_window(
+                &self,
+                _mailbox: &str,
+                _cursor: Option<MailboxCursor>,
+                _max: usize,
+            ) -> Result<Vec<imap_client::UidEntry>, NestError> {
+                Err(import_source_unimpl(
+                    "(web IMAP transport) enumerate_window",
+                ))
+            }
+            async fn logout(&self) -> Result<(), NestError> {
+                Err(import_source_unimpl("(web IMAP transport) logout"))
+            }
+
+            // `connect` can never succeed on this build, so
+            // `MailImportMachine::connect` clears the password on failure
+            // instead of retaining it for a retry that can never happen
+            // (`mailbox-migration.md` § Credential handling).
+            fn can_ever_connect(&self) -> bool {
+                false
+            }
+        }
+    }
+
+    /// Build a [`MailImportMachine`] over the browser `WsRpcClient` while the
+    /// web tunnel's client half waits on its bump round: the nest half is
+    /// real, the source half the stub above, and the Microsoft sign-in a typed
+    /// not-yet (no `with_oauth_http`, so `microsoft_signin_available` reads
+    /// `false`).
+    #[cfg(not(feature = "web-mail-tunnel"))]
     pub fn build_mail_import_machine(nest: WsRpcClient) -> MailImportMachine {
         MailImportMachine::new(
             Arc::new(RpcMailImportNest {
                 client: imap_client::MailImportClient::new(nest.clone()),
                 setup: MailAdminClient::new(nest),
             }),
-            Arc::new(RpcImportSourceNest),
+            Arc::new(source_stub::RpcImportSourceNest),
             Arc::new(RpcRetryClock),
         )
+    }
+
+    /// The Microsoft sign-in's HTTPS seam on web: the shared
+    /// `TunnelOAuthHttp` over the nest's byte tunnel (Microsoft's
+    /// `/devicecode` and `/token` send no CORS headers, so a browser `fetch`
+    /// cannot read them), behind the machine's dyn seam.
+    #[cfg(feature = "web-mail-tunnel")]
+    struct RpcOAuthHttp(imap_client::TunnelOAuthHttp<crate::import_source::web::WebDialer>);
+
+    #[cfg(feature = "web-mail-tunnel")]
+    #[async_trait(?Send)]
+    impl crate::import::ImportOAuthHttp for RpcOAuthHttp {
+        async fn post_form(
+            &self,
+            url: &str,
+            form: &str,
+        ) -> Result<imap_client::OAuthHttpResponse, String> {
+            imap_client::OAuthHttp::post_form(&self.0, url, form)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    /// Build a [`MailImportMachine`] over the browser `WsRpcClient`. Both
+    /// seams are real, as on native: the nest half wraps
+    /// `MailImportClient`; the source half and the Microsoft sign-in ride the
+    /// nest's blind WebSocket byte tunnel with TLS inside the client
+    /// (`mailbox-migration.md` § Where the IMAP client runs → *The web
+    /// tunnel*).
+    #[cfg(feature = "web-mail-tunnel")]
+    pub fn build_mail_import_machine(nest: WsRpcClient) -> MailImportMachine {
+        build_mail_import_machine_with_trust(nest, None)
+    }
+
+    /// [`build_mail_import_machine`] with additional trust anchors for the
+    /// source and the identity authority: only ever the e2e source-IMAP trust
+    /// seed, which `fauna-wasm` reads under `test-helpers`
+    /// (`e2e-gated-seeds.md` § The source-IMAP trust seed); a shipped build
+    /// passes `None`.
+    #[cfg(feature = "web-mail-tunnel")]
+    pub fn build_mail_import_machine_with_trust(
+        nest: WsRpcClient,
+        extra_root_pem: Option<&str>,
+    ) -> MailImportMachine {
+        let source = match crate::import_source::web::source_seam(nest.clone(), extra_root_pem) {
+            Ok(seam) => seam,
+            // The bundled roots always build; only a malformed seed can fail,
+            // and only the harness writes one.
+            Err(e) => panic!("the mail-import trust seed is not a usable PEM: {e}"),
+        };
+        let oauth = crate::import_source::web::oauth_http(nest.clone(), extra_root_pem)
+            .unwrap_or_else(|e| panic!("the mail-import trust seed is not a usable PEM: {e}"));
+        MailImportMachine::new(
+            Arc::new(RpcMailImportNest {
+                client: imap_client::MailImportClient::new(nest.clone()),
+                setup: MailAdminClient::new(nest),
+            }),
+            Arc::new(source),
+            Arc::new(RpcRetryClock),
+        )
+        .with_oauth_http(Arc::new(RpcOAuthHttp(oauth)))
     }
 
     // ── MailLists / MailListMembers (user-tier mailing lists) ───────────
@@ -5886,6 +5697,7 @@ mod wasm {
             actor_id: [u8; 32],
             pubkey: [u8; 32],
             mlkem_ek: Vec<u8>,
+            dav: crate::machine::DavSealPubkeys,
             epoch_keys: Option<Vec<EpochSealKey>>,
         ) -> Result<(), NestError> {
             let _: ProvisionReply = super::request_idempotent(
@@ -5898,6 +5710,12 @@ mod wasm {
                     // content-sealing-epoch schedule — the machine always
                     // publishes both.
                     mlkem_ek: ByteBuf::from(mlkem_ek),
+                    // The calendar and card pairs, in the same row
+                    // (`owner-key-material.md` § Path B-sibling-5 → *Registration*).
+                    calendar_pubkey: ByteBuf::from(dav.calendar_pubkey.to_vec()),
+                    calendar_mlkem_ek: ByteBuf::from(dav.calendar_mlkem_ek),
+                    card_pubkey: ByteBuf::from(dav.card_pubkey.to_vec()),
+                    card_mlkem_ek: ByteBuf::from(dav.card_mlkem_ek),
                     epoch_keys,
                 },
                 provision_backoff,
@@ -5909,36 +5727,23 @@ mod wasm {
         async fn fetch_own_recipient_pubkey(
             &self,
             actor_id: [u8; 32],
-        ) -> Result<Option<[u8; 32]>, NestError> {
-            let reply: fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyReply =
-                super::request_idempotent(
-                    &self.nest,
-                    "fauna.bridges.fetch_recipient_mls_pubkey",
-                    fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
-                        actor_id: actor_id.to_vec(),
-                        // The standing key, never the per-epoch one.
-                        mail_new_ingest: false,
-                    },
-                    provision_backoff,
-                )
-                .await?;
-            reply
-                .key
-                .map(|k| {
-                    <[u8; 32]>::try_from(k.mls_pubkey.as_slice())
-                        .map_err(|_| NestError::Rejected("recipient pubkey is not 32 bytes".into()))
-                })
-                .transpose()
-        }
-
-        async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
-            let reply: NestInfoReply = super::request_idempotent(
+        ) -> Result<Option<super::RegisteredRecipientPubkeys>, NestError> {
+            let reply: super::FetchRecipientMlsPubkeyReply = super::request_idempotent(
                 &self.nest,
-                "fauna.nest.info",
-                NestInfoRequest::default(),
+                "fauna.bridges.fetch_recipient_mls_pubkey",
+                fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
+                    actor_id: actor_id.to_vec(),
+                    // The standing key, never the per-epoch one.
+                    mail_new_ingest: false,
+                },
                 provision_backoff,
             )
             .await?;
+            super::registered_recipient_pubkeys(reply)
+        }
+
+        async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
+            let reply = super::nest_info_idempotent(&self.nest, provision_backoff).await?;
             Ok(capability::supports(&reply.capabilities, token))
         }
 
@@ -5958,7 +5763,7 @@ mod wasm {
             Ok(())
         }
 
-        async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
+        async fn deployment_status(&self) -> Result<DeploymentStatus, NestError> {
             let reply: SetupStatusReply = super::request_idempotent(
                 &self.nest,
                 "fauna.setup.status",
@@ -5966,7 +5771,7 @@ mod wasm {
                 provision_backoff,
             )
             .await?;
-            Ok(reply.mail_unavailable_here())
+            Ok(DeploymentStatus::of(&reply))
         }
 
         async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
@@ -5990,6 +5795,31 @@ mod wasm {
                 &self.nest,
                 "fauna.bridges.get_mail_serving_enabled",
                 GetMailServingEnabledRequest::default(),
+                provision_backoff,
+            )
+            .await?;
+            Ok(reply.enabled)
+        }
+
+        async fn set_actor_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+            let _: SetActorMailEnabledReply = super::request_idempotent(
+                &self.nest,
+                "fauna.bridges.set_actor_mail_enabled",
+                SetActorMailEnabledRequest {
+                    enabled,
+                    extra: Default::default(),
+                },
+                provision_backoff,
+            )
+            .await?;
+            Ok(())
+        }
+
+        async fn get_actor_mail_enabled(&self) -> Result<bool, NestError> {
+            let reply: GetActorMailEnabledReply = super::request_idempotent(
+                &self.nest,
+                "fauna.bridges.get_actor_mail_enabled",
+                GetActorMailEnabledRequest::default(),
                 provision_backoff,
             )
             .await?;
@@ -6187,6 +6017,8 @@ mod wasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "web-mail-tunnel"))]
+pub use wasm::build_mail_import_machine_with_trust;
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
     build_bridge_approval_machine, build_caldav_policy_machine, build_carddav_policy_machine,
@@ -6341,6 +6173,62 @@ mod tests {
             "rejection must not retry: {res:?}"
         );
         assert_eq!(calls, 1, "rejection returns on the first call");
+    }
+
+    /// One live connection carrying the transport's `fauna.nest.info` memo,
+    /// answering from a script like [`ScriptedRequester`].
+    struct MemoNest {
+        inner: ScriptedRequester,
+        memo: fauna_protocol::NestInfoMemo,
+    }
+    impl RpcRequester for MemoNest {
+        type Error = FakeErr;
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, FakeErr>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            assert_eq!(kind, "fauna.nest.info");
+            // Answer a reply-typed value: the scripted `Ok` yields `()`, so
+            // re-encode an empty `NestInfoReply` instead.
+            self.inner.request::<Req, ()>(kind, payload).await?;
+            let bytes = fauna_protocol::encode_canonical(
+                &fauna_protocol::discovery::NestInfoReply::default(),
+            )
+            .expect("encode reply");
+            Ok(fauna_protocol::decode_strict(&bytes).expect("decode reply"))
+        }
+        fn live_connection_id(&self) -> Option<u64> {
+            Some(1)
+        }
+        fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+            Some(&self.memo)
+        }
+    }
+
+    /// `nest_supports` reads through the per-connection memo: a spam-model
+    /// write and a history read on one connection send ONE `fauna.nest.info`,
+    /// and a transient drop still retries (`super::nest_info_idempotent`).
+    #[tokio::test]
+    async fn nest_supports_reads_once_per_connection_and_still_retries_a_drop() {
+        let nest = MemoNest {
+            inner: ScriptedRequester::new([Outcome::Transient, Outcome::Ok]),
+            memo: fauna_protocol::NestInfoMemo::new(),
+        };
+        for _ in 0..3 {
+            super::nest_info_idempotent(&nest, no_sleep)
+                .await
+                .expect("the drop retries to the reply");
+        }
+        assert_eq!(
+            nest.inner.calls.get(),
+            2,
+            "one dropped read, one retry, then every later read off the memo"
+        );
     }
 
     /// The shared `mail-spam` wire→view projection both seam arms call. Pins

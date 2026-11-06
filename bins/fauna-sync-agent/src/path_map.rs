@@ -148,41 +148,27 @@ pub struct ResolvedFolder {
     pub rel: String,
     /// The serving location's mode — what a verb acting on the file's local
     /// copy chooses its road by (a restore replaces a copy an always-resident
-    /// root keeps, and frees one an on-demand root caches).
+    /// root keeps, and frees one an on-demand root caches; a free or a pin
+    /// refuses a kept copy).
     pub mode: LocationMode,
 }
 
 /// Resolve an absolute path to the bound folder serving it plus its folder
-/// relative path. Only **on-demand** folders with a **binding** are served;
-/// always-resident and unbound on-demand folders return `None`. A bound
-/// resident root keeps its state DB at the same identity-keyed path; only the
-/// share arm answers for one ([`resolve_bound_location`]), the other shell
-/// verbs not yet. First matching folder wins.
+/// relative path: every location with a **binding** whose mode an engine
+/// serves — on-demand **and** always-resident, since a set's identity does not
+/// depend on how its files are present, and both engines keep their state DB at
+/// the same identity-keyed path. An unbound location, and one carrying a mode
+/// this build cannot name (no engine serves it — `engine_driver::plan_engines`),
+/// return `None`. First matching folder wins.
 ///
 /// The single resolver for the IPC read/write sites: it carries the binding's
 /// `folder_ref` so no consumer re-reads config to recover the identity it
 /// needs for the state-DB path (one-resolver rule, as `engine_driver` resolves
-/// once per engine).
+/// once per engine), and the location's `mode`, which a verb that frees or pins
+/// a copy reads to refuse an always-resident root's.
 pub fn resolve_to_folder_rel(config: &SyncConfig, abs_path: &str) -> Option<ResolvedFolder> {
-    resolve_bound(config, abs_path, |mode| *mode == LocationMode::OnDemand)
-}
-
-/// [`resolve_to_folder_rel`] over **every** bound location, whatever its mode —
-/// the `ShareFile` arm's resolver alone: a set's identity does not depend on
-/// how its files are present, and on linux the common presence is a bound
-/// always-resident root (`apps/linux.md` § The file manager's Share entry,
-/// link 1). The other verbs keep the on-demand scope above.
-pub fn resolve_bound_location(config: &SyncConfig, abs_path: &str) -> Option<ResolvedFolder> {
-    resolve_bound(config, abs_path, |_| true)
-}
-
-fn resolve_bound(
-    config: &SyncConfig,
-    abs_path: &str,
-    serves: impl Fn(&LocationMode) -> bool,
-) -> Option<ResolvedFolder> {
     config.locations.iter().find_map(|f| {
-        if !serves(&f.mode) {
+        if matches!(f.mode, LocationMode::Other(_)) {
             return None;
         }
         let binding = f.binding()?;
@@ -199,10 +185,11 @@ fn resolve_bound(
 /// The overlay status event a successful dehydrate (`FreeSpace`) must broadcast
 /// for `abs_path` — the symmetric reverse of the hydrate path's
 /// `FileStatusChanged { Synced }` (this crate's `run_hydration_loop`
-/// success arm). Returns `Some` iff `abs_path` resolves to a served on-demand
-/// folder via [`resolve_to_folder_rel`] (only those carry a per-root state DB
-/// and a meaningful overlay — the same structural gate under which the hydrate
-/// loop fires); `None` leaves an untracked path's overlay alone. The event key is
+/// success arm). Returns `Some` iff `abs_path` resolves to an **on-demand**
+/// folder via [`resolve_to_folder_rel`] — the only root whose copies are freed
+/// to a placeholder, the same structural gate under which the hydrate loop
+/// fires; `None` leaves an untracked path's overlay alone, and an
+/// always-resident one's, whose kept copy is never freed. The event key is
 /// the absolute path Explorer's overlay cache uses verbatim (no normalization),
 /// and `CloudOnly` equals [`file_status_from_state`]`(SyncState::Placeholder)`, so
 /// the live flip and the 30 s cache re-query agree (no badge flicker).
@@ -212,7 +199,8 @@ fn resolve_bound(
 // but that leaves it unreferenced by any non-test code on a Linux --lib build.
 #[allow(dead_code)]
 pub fn dehydrate_status_event(config: &SyncConfig, abs_path: &str) -> Option<Event> {
-    resolve_to_folder_rel(config, abs_path).map(|_| Event {
+    let resolved = resolve_to_folder_rel(config, abs_path)?;
+    (resolved.mode == LocationMode::OnDemand).then(|| Event {
         event: EventKind::FileStatusChanged {
             path: abs_path.to_string(),
             // == file_status_from_state(SyncState::Placeholder); hardcoded to mirror the
@@ -527,53 +515,59 @@ mod tests {
         assert_eq!(resolve_to_folder_rel(&config, r"C:\od-docs\a.txt"), None);
     }
 
+    /// A bound always-resident root is resolved like an on-demand one — a set's
+    /// identity does not depend on how its files are present — and carries its
+    /// mode, which the verbs that free or pin a copy refuse it by. The resident
+    /// engine keeps its state DB at the same identity-keyed path. Both shapes: a
+    /// windows root (Explorer's badge, menu, versions and restore) and a unix one
+    /// (`apps/linux.md` § The file manager's Share entry, link 1).
     #[test]
-    fn always_resident_folder_is_not_resolved() {
-        // Not yet served: the resident engine keeps its state DB at the same
-        // identity-keyed path, but no shell verb answers for a resident root
-        // yet.
-        let config = config_with(vec![folder(
-            r"C:\always",
-            LocationMode::Always,
-            Some(("ignored", 2)),
-        )]);
-        assert_eq!(resolve_to_folder_rel(&config, r"C:\always\a.txt"), None);
-    }
-
-    /// The share arm's resolver answers for every bound location whatever its
-    /// mode — a set's identity does not depend on how its files are present
-    /// (`apps/linux.md` § The file manager's Share entry, link 1) — while the
-    /// other verbs' resolver keeps its on-demand scope.
-    #[test]
-    fn bound_location_resolver_answers_for_an_always_resident_root() {
-        let config = config_with(vec![folder(
-            "/home/u/Site",
-            LocationMode::Always,
-            Some(("site", 2)),
-        )]);
+    fn an_always_resident_bound_folder_is_resolved_with_its_mode() {
+        let config = config_with(vec![
+            folder(r"C:\always", LocationMode::Always, Some(("docs", 2))),
+            folder("/home/u/Site", LocationMode::Always, Some(("site", 3))),
+        ]);
         assert_eq!(
-            resolve_bound_location(&config, "/home/u/Site/img/a.jpg"),
+            resolve_to_folder_rel(&config, r"C:\always\sub\a.txt"),
+            Some(ResolvedFolder {
+                folder: "docs".to_string(),
+                folder_ref: FolderRef::Local(2),
+                rel: "sub/a.txt".to_string(),
+                mode: LocationMode::Always,
+            })
+        );
+        assert_eq!(
+            resolve_to_folder_rel(&config, "/home/u/Site/img/a.jpg"),
             Some(ResolvedFolder {
                 folder: "site".to_string(),
-                folder_ref: FolderRef::Local(2),
+                folder_ref: FolderRef::Local(3),
                 rel: "img/a.jpg".to_string(),
                 mode: LocationMode::Always,
             })
         );
         assert_eq!(
-            resolve_bound_location(&config, "/home/u/Site").map(|r| r.rel),
+            resolve_to_folder_rel(&config, "/home/u/Site").map(|r| r.rel),
             Some(String::new())
-        );
-        assert_eq!(
-            resolve_to_folder_rel(&config, "/home/u/Site/img/a.jpg"),
-            None
         );
     }
 
+    /// A mode this build cannot name is served by no engine
+    /// (`engine_driver::plan_engines`): its location sits untracked, so no verb
+    /// answers for it.
     #[test]
-    fn bound_location_resolver_still_refuses_an_unbound_root() {
+    fn a_mode_this_build_cannot_name_is_not_resolved() {
+        let config = config_with(vec![folder(
+            r"C:\newer",
+            LocationMode::Other("pinned-cloud".into()),
+            Some(("docs", 2)),
+        )]);
+        assert_eq!(resolve_to_folder_rel(&config, r"C:\newer\a.txt"), None);
+    }
+
+    #[test]
+    fn unbound_always_resident_folder_is_not_resolved() {
         let config = config_with(vec![folder("/home/u/Loose", LocationMode::Always, None)]);
-        assert_eq!(resolve_bound_location(&config, "/home/u/Loose/a.jpg"), None);
+        assert_eq!(resolve_to_folder_rel(&config, "/home/u/Loose/a.jpg"), None);
     }
 
     #[test]
@@ -663,12 +657,14 @@ mod tests {
 
     #[test]
     fn dehydrate_status_event_is_none_for_untracked_paths() {
-        // always-mode: not served by the host, so no per-root DB / overlay.
+        // always-resident: tracked, but a kept copy is never freed — no flip to
+        // CloudOnly may be pushed for it.
         let always = config_with(vec![folder(
             r"C:\always",
             LocationMode::Always,
             Some(("x", 4)),
         )]);
+        assert!(resolve_to_folder_rel(&always, r"C:\always\a.txt").is_some());
         assert!(dehydrate_status_event(&always, r"C:\always\a.txt").is_none());
         // unbound on-demand: no folder → not served.
         let unbound = config_with(vec![folder(r"C:\od", LocationMode::OnDemand, None)]);

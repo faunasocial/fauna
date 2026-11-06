@@ -69,7 +69,7 @@ class ConversationsVM @Inject constructor(
     }
 
     /**
-     * The shared content-policy render inputs (guardian floor + the viewer's own
+     * The shared content-policy render inputs (guardian rules + the viewer's own
      * spam/phishing thresholds) — each message bubble resolves its block/collapse
      * verdict off this via [ContentPolicyInputs.verdictFor] (family-safety.md
      * § Content policy). The SAME [ContentPolicyStore] the feed uses, so the two
@@ -81,9 +81,9 @@ class ConversationsVM @Inject constructor(
      *  (moderation.md § User-initiated reporting; the shell's ReportHost paints it). */
     fun openReport(target: com.fauna.ffi.FfiReportTarget) = contentPolicyStore.report.open(target)
 
-    /** Count a rendered message's guardian-floor enforcement for **Guardian
+    /** Count a rendered message's guardian-rule enforcement for **Guardian
      *  Notify** (family-safety.md § Guardian Notify) — a no-op unless the
-     *  ward's `content_notify` knob is on and the guardian floor bites. */
+     *  ward's `content_notify` knob is on and the guardian rules bite. */
     fun noteContentEnforcement(messageId: String, labels: List<ContentLabelEntry>) =
         familyNotifyStore.record(messageId, labels)
 
@@ -156,7 +156,7 @@ class ConversationsVM @Inject constructor(
         get() = api.mutedWords.words
 
     /** Refresh the muted-word list (best-effort; a failed read keeps it). Also
-     *  re-pulls the content-policy inputs (guardian floor + own spam thresholds) so a
+     *  re-pulls the content-policy inputs (guardian rules + own spam thresholds) so a
      *  guardian's policy change reaches the conversation render on the next detail open. */
     fun loadMutedKeywords() {
         contentPolicyStore.refresh()

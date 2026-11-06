@@ -177,9 +177,9 @@ public class SessionInstanceTests : IDisposable
     /// disk" test uses, so no secret backend plumbing is needed.</summary>
     private sealed class EmptyBackend : ISecretBackend
     {
-        public string? Get(string resource, string user) => null;
-        public void Set(string resource, string user, string value) { }
-        public void Delete(string resource, string user) { }
+        public string? Get(string resource) => null;
+        public void Set(string resource, string value) { }
+        public void Delete(string resource) { }
     }
 
     private static uniffi.fauna_ffi.FfiAccountRegistry NewEmptyRegistry() =>

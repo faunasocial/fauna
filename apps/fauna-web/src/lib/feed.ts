@@ -23,8 +23,11 @@ import { get, writable, type Writable } from 'svelte/store';
 import { identity } from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
-import { autosaveDebounceMs, ensureWasm, logMessage } from './wasm';
-import { feedManager } from './rpc';
+import { draftSaveDebounceMs, ensureWasm, logMessage } from './wasm';
+import { feedManager, registerArchiveComments } from './rpc';
+import { getDeviceId } from './device-id';
+import { accountRuntimeNextSettled, accountRuntimeStarted } from './account-runtime';
+import { runAtLaterEdge } from './launch-pass';
 import type { WasmFeedManager } from '../../static/fauna_wasm.js';
 
 /** The raw `manager.snapshot()` — the shared `FeedSnapshot` serde JSON the Feed
@@ -38,6 +41,18 @@ export const feedSnapshot: Writable<any> = writable(null);
 let manager: WasmFeedManager | null = null;
 let managerPromise: Promise<WasmFeedManager> | null = null;
 
+/** Called when the launch drafts restore has landed on the current manager —
+ *  the Feed page's door for painting a restore that lands after it read the
+ *  compose back (the load retries a read lost to the transport for minutes, so
+ *  it routinely does). The events rail's `onEventDraftRestored` twin. */
+const draftRestoredListeners = new Set<() => void>();
+
+/** Subscribe to {@link draftRestoredListeners}; returns the unsubscribe. */
+export function onFeedDraftRestored(listener: () => void): () => void {
+  draftRestoredListeners.add(listener);
+  return () => draftRestoredListeners.delete(listener);
+}
+
 /** The built feed manager, or `null` — never builds. The twin of
  *  `conversationsManagerIfReady`, for a caller that may act only on a manager
  *  something else already built: the conversations tick installing the
@@ -45,6 +60,18 @@ let managerPromise: Promise<WasmFeedManager> | null = null;
  *  a Feed manager for a session that never opened the feed. */
 export function feedManagerIfReady(): WasmFeedManager | null {
   return manager;
+}
+
+/** Re-read the folded archive comments on the built manager — the feed page
+ *  calls it on every visit, so an import finished since login folds without a
+ *  reload (`archive-import.md` § What each category becomes). No manager yet,
+ *  or no source registered yet, is a no-op; a failed read keeps the last fold. */
+export function refreshArchiveCommentsIfReady(): void {
+  const m = manager;
+  if (!m) return;
+  m.refreshArchiveComments().catch((e: unknown) =>
+    logMessage('warn', 'fauna_web::feed', `archive comments: ${e}`),
+  );
 }
 
 /** The single shared `FeedManager` for the SPA. Built once the identity is
@@ -82,21 +109,49 @@ export function getFeedManager(): Promise<WasmFeedManager> {
     // manager's own mutation, so it only queues the re-read.
     built.subscribe({ onChanged: scheduleFeedRefresh });
     // Draft-persistence v2, posts rail (feed.md § Persistence): restore the
-    // owner's persisted feed-composer draft once, before any save can run — so
-    // an in-progress post survives a restart and appears on the user's other
-    // devices. Every caller of this singleton (the Feed page, quote/reply from
-    // conversations, PersonalizationSection) awaits the SAME promise, so this
-    // runs exactly once per manager build regardless of who triggers it —
-    // matching `getConversationsManager`'s restoreDrafts shape one rail over.
-    // A transient/seal failure is logged + swallowed (the page must still
-    // open); the wasm side's shared `DraftsSync` keeps its save gate closed
-    // until a restore *succeeds*, so a later save can't clobber an unread
-    // (incl. undecryptable) blob — the next launch retries the load.
-    try {
-      await built.restoreDrafts();
-    } catch (e) {
-      logMessage('warn', 'fauna_web::feed', `restore drafts failed: ${e}`);
-    }
+    // owner's persisted feed-composer draft once per manager build — so an
+    // in-progress post survives a restart and appears on the user's other
+    // devices — matching `getConversationsManager`'s restoreDrafts shape one
+    // rail over. NOT awaited: the shared `DraftsSync` retries a launch read
+    // lost to the transport for minutes (`conversation-drafts.md`
+    // § Persistence), and a build held that long would trip its settle
+    // deadline. Landing late is safe because the restore FILLS — it never
+    // overwrites what the user typed meanwhile (`PostDrafts::fill`) — and its
+    // notify reaches the subscription above. A transient/seal failure is
+    // logged + swallowed; the save gate stays closed until a restore
+    // *succeeds*, so a later save can't clobber an unread (incl.
+    // undecryptable) blob.
+    built.restoreDrafts().then(
+      () => {
+        // The identity and settle seams: a restore for a departed actor or an
+        // abandoned build must not repaint the current page.
+        if (!stillThisActor() || !stillWanted()) return;
+        for (const listener of draftRestoredListeners) listener();
+      },
+      (e: unknown) => logMessage('warn', 'fauna_web::feed', `restore drafts failed: ${e}`),
+    );
+    // The folded archive comments (`archive-import.md` § What each category
+    // becomes): read from the archive folders whose keys rest in the account
+    // runtime, so registered and first read at the later of the build and the
+    // runtime's start (`#lib/launch-pass`). The feed page re-reads on every
+    // visit (`refreshArchiveCommentsIfReady`); the fold reaches it through the
+    // snapshot. Not awaited: a failed read must never hold the feed back.
+    void runAtLaterEdge({
+      started: accountRuntimeStarted,
+      // The NEXT settle: the feed is built at sign-in, often before the
+      // conversations build has asked for the runtime at all.
+      settled: accountRuntimeNextSettled,
+      stillWanted: () => stillThisActor() && stillWanted(),
+      pass: async () => {
+        try {
+          await registerArchiveComments(id.secretHex, built, getDeviceId(id.actorId));
+          await built.refreshArchiveComments();
+        } catch (e) {
+          logMessage('warn', 'fauna_web::feed', `archive comments: ${e}`);
+        }
+      },
+      skipped: (why) => logMessage('warn', 'fauna_web::feed', `archive comments skipped — ${why}`),
+    });
     return built;
   };
   // ⚠ A PROMISE MEMO CACHES A REJECTION AS DURABLY AS A VALUE. Without this
@@ -156,19 +211,7 @@ export function getFeedManager(): Promise<WasmFeedManager> {
 // not-yet-synced draft is not a user-facing error). The restore-on-launch half
 // lives in `getFeedManager` above.
 
-// Under the Playwright e2e agent, debounce far shorter so a restart round-trip
-// test (`test_feed_draft_persistence.py`) needn't wait the production window —
-// mirrors `conversations.ts`'s identical E2E cadence.
-const DRAFT_SAVE_DEBOUNCE_E2E_MS = 150;
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-function draftSaveDebounceMs(): number {
-  const hasAgent =
-    __FAUNA_E2E_AUTOMATION__ &&
-    typeof window !== 'undefined' &&
-    (window as unknown as { __faunaTestAgent?: unknown }).__faunaTestAgent != null;
-  return hasAgent ? DRAFT_SAVE_DEBOUNCE_E2E_MS : autosaveDebounceMs();
-}
 
 /** Debounced persist of the feed-composer draft after a compose change
  *  (feed.md § Persistence). Coalesces a burst of edits into one
@@ -190,13 +233,13 @@ export function scheduleDraftSave(): void {
  *  such handler on the web platform (the goal doc's own wording: a browser
  *  grants no reliable async work after either event) — mirrors
  *  `conversations.ts`'s twin one rail over. */
-export function flushDraftsNow(): void {
+export function flushDraftsNow(): Promise<void> {
   if (draftSaveTimer) {
     clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
   }
-  if (!manager) return;
-  void manager.saveDrafts().catch((e) => {
+  if (!manager) return Promise.resolve();
+  return manager.saveDrafts().catch((e) => {
     logMessage('debug', 'fauna_web::feed', `leave-flush drafts failed: ${e}`);
   });
 }

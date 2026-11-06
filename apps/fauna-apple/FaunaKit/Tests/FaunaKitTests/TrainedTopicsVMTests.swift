@@ -30,3 +30,18 @@ import Testing
     let vm = TrainedTopicsVM()
     #expect(vm.mapError(CancellationError()) == nil)
 }
+
+// topic-factors.md § Authoring surface & picker, outcome 13: a blank name is
+// refused before the round trip with the blank-name sentence — never a silent
+// no-op — on create and rename alike (linux's `submit`, tui's paint).
+@Test @MainActor func aBlankCreateSaysItNeedsAName() async {
+    let vm = TrainedTopicsVM()
+    await vm.create(name: "   ")
+    #expect(vm.errorMessage == L.personalization.trainedFactorBlankName)
+}
+
+@Test @MainActor func aBlankRenameSaysItNeedsAName() async {
+    let vm = TrainedTopicsVM()
+    await vm.rename(id: Data([1]), name: "\n ")
+    #expect(vm.errorMessage == L.personalization.trainedFactorBlankName)
+}

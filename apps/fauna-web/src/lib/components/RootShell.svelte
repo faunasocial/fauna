@@ -8,7 +8,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { identity, contacts, connectionStatus, onSignedInActorChange, familyTabGated } from '#lib/store';
+  import { identity, contacts, connectionStatus, onSignedInActorChange, signedInIdentity, familyTabGated } from '#lib/store';
   import { t } from '#lib/i18n/strings';
   import {
     selfHealDeploymentSeedCustody,
@@ -25,17 +25,17 @@
   import MessageBanner from '#lib/components/MessageBanner.svelte';
   import CriticalAlertsBanner from '#lib/components/CriticalAlertsBanner.svelte';
   import AppShellFrame from '#lib/components/AppShellFrame.svelte';
-  import { checkIsAdmin } from '#lib/api';
+  import { readAdminGate } from '#lib/api';
+  import { applyAdminGateRead } from '#lib/admin-gate';
   import { accountsAutoEnableRequireConfirm, accountsTabSessionMaterial } from '#lib/accounts';
   import { tabPin } from '#lib/tabPin';
   import { createConnectEdge } from '#lib/connectEdge';
   import { loadPendingFactoryReset } from '#lib/onboarding/pending-factory-reset-store';
   import { ensureLogging, ensureWasm, connectionStateLabel, tokenRefreshTickSecs } from '#lib/wasm';
   import { resolveLocalized, type LocalizedText } from '#lib/i18n/localized';
-  import { startReceivePoll, flushDraftsNow as flushConversationsDraftsNow } from '#lib/conversations';
-  import { flushDraftsNow as flushFeedDraftsNow } from '#lib/feed';
+  import { startReceivePoll } from '#lib/conversations';
   import { flushCuesNow } from '#lib/feed-cues';
-  import { flushEventDraftNow } from '#lib/event-drafts';
+  import { flushDraftRailsNow } from '#lib/drafts-leave-flush';
   import { startSubscriptionsAuthorPump } from '#lib/subscriptionsAuthor';
   import { rearmPush } from '#lib/push';
   // The post-succession aftermath pass — see its registration below.
@@ -178,17 +178,13 @@
     // best-effort — same posture as every other handler in this block
     // (fire-and-forget), just with no guarantee the write lands before the
     // tab is gone. Each rail's own flush is a no-op when nothing is open on
-    // that rail (no manager / no held draft).
-    const flushAllDraftsNow = () => {
-      flushConversationsDraftsNow();
-      flushFeedDraftsNow();
-      flushEventDraftNow();
-    };
+    // that rail (no manager / no held draft). Sign-out is the other leave door
+    // and awaits the same body (`#lib/drafts-leave-flush`).
     // The engagement-cue rollup rides the same last signal
     // (engagement-cues.md § At rest: put on background/close): end the live
     // capture's exposures, then put the sealed rollup.
     const flushAllNow = () => {
-      flushAllDraftsNow();
+      void flushDraftRailsNow();
       flushCuesNow();
     };
     document.addEventListener('visibilitychange', () => {
@@ -246,18 +242,35 @@
   // nav-row entry the linux/windows reference clients render and that ui.yaml's
   // `navigation.gated_tabs` now declares + lint-enforces; web previously only
   // inlined an untagged link into Settings (the drift this closes). The check
-  // is fail-closed (checkIsAdmin treats any transport/auth failure as not-admin).
+  // is fail-closed: the gate starts closed and opens on a successful admin reply.
+  //
+  // Re-read on every connection-state change (`transport.md` `admin_gate`: a login
+  // read that finds no nest fails closed, and only a re-read shows the entry). A
+  // FAILED read moves nothing (`applyAdminGateRead`); the once-per-session effects
+  // below fire on the false→true transition only. An actor change resets the gate.
   let userIsAdmin = $state(false);
+  let adminGateActor: string | null = null;
   $effect(() => {
-    const id = $identity;
+    const id = $signedInIdentity;
     const secret = id?.secretHex;
+    void $connectionStatus;
     if (!secret) {
       userIsAdmin = false;
+      adminGateActor = null;
       return;
     }
-    checkIsAdmin(secret)
-      .then((ok) => {
-        userIsAdmin = ok;
+    const actor = id.actorId ?? null;
+    if (actor !== adminGateActor) {
+      adminGateActor = actor;
+      userIsAdmin = false;
+    }
+    readAdminGate(secret)
+      .then((read) => {
+        // A reply fired under a previous actor is dropped.
+        if (actor !== adminGateActor) return;
+        const { gate, becameAdmin } = applyAdminGateRead(userIsAdmin, read);
+        userIsAdmin = gate;
+        const ok = becameAdmin; // the false→true transition: the once-per-session effects
         // The Stage-2 admin auto-default (long-term-store.md § Multi-account
         // evolution → Per-account re-auth): every am-i-admin=true observation
         // auto-enables the observed account's require-confirm flag — unless the
@@ -274,7 +287,7 @@
           accountsAutoEnableRequireConfirm(id.actorId).catch(() => {});
         }
       })
-      .catch(() => { userIsAdmin = false; });
+      .catch(() => { /* a failed read moves nothing */ });
   });
 
   // The caller's family relationships (family-safety.md § App surface) — ONE
@@ -309,7 +322,7 @@
     if (actorId) void restoreSupervisionSnapshot(actorId);
   });
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     void $connectionStatus;
     if (!secret) {
       famStatus = null;
@@ -342,10 +355,10 @@
     // the session. A failed read keeps the loaded thresholds; a reply fired
     // under a previous actor is dropped — the actor-scoped reset clears the
     // state but cannot stop a late reply.
-    const firedFor = $identity?.actorId ?? null;
+    const firedFor = $signedInIdentity?.actorId ?? null;
     spamGetPreferences(secret)
       .then((prefs) => {
-        if (($identity?.actorId ?? null) !== firedFor) return;
+        if (($signedInIdentity?.actorId ?? null) !== firedFor) return;
         setSpamPreferences(prefs.spam_threshold, prefs.phishing_threshold);
       })
       .catch(() => {});
@@ -401,7 +414,7 @@
   // signed-in app comes up, then every `AUTO_RENEW_CHECK_SECS`; restarted when
   // the identity changes.
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
@@ -413,10 +426,29 @@
       stop?.();
     };
   });
+  // The certificate auto-renew tick (`#lib/cert-auto-renew`, `tls-certificates.md`
+  // § C.3 — any synced admin device renews, web included): the shared
+  // `autoRenewScan` / `autoRenewIssue` on the shared six-hour cadence, for as long
+  // as a signed-in ADMIN's tab is open. Gated on the admin gate (the scan's RPCs
+  // are Admin-only), restarted when the identity changes, stopped when the gate
+  // closes.
+  $effect(() => {
+    const secret = $signedInIdentity?.secretHex;
+    if (!secret || !userIsAdmin) return;
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void import('#lib/cert-auto-renew').then((m) => {
+      if (!cancelled) stop = m.startCertAutoRenew(secret);
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  });
   $effect(() => {
     const timer = setInterval(() => {
       lockTick += 1;
-      const secret = $identity?.secretHex;
+      const secret = $signedInIdentity?.secretHex;
       if (secret) void tickUsageHeartbeat(secret);
       if (secret) void refreshRegion(secret, false);
     }, 60_000);
@@ -447,7 +479,7 @@
   }
   let seedCustodyEdgeFor: string | null = null;
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret || $connectionStatus !== 'connected') {
       // Leaving `connected` arms the next post-auth edge.
       seedCustodyEdgeFor = null;
@@ -474,7 +506,7 @@
   // safely, so a failure here is never surfaced to the user.
   const mailEpochEdge = createConnectEdge();
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!mailEpochEdge(secret, $connectionStatus) || !secret) return;
     void refreshMailEpochSchedule(secret).catch((e) => {
       // Best-effort — re-converges on the next connect.
@@ -501,7 +533,7 @@
       });
   }
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret || $connectionStatus !== 'connected') return;
     const timer = setInterval(() => runSubmissionTokenRefresh(secret), tokenRefreshTickSecs() * 1000);
     return () => clearInterval(timer);
@@ -512,7 +544,7 @@
   // mirroring linux's `publish_subscriber_encaps_key`.
   let didPublishEncapsKey = false;
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (didPublishEncapsKey || !secret || $connectionStatus !== 'connected') return;
     didPublishEncapsKey = true;
     void publishSubscriberEncapsKey(secret).catch((e) => {
@@ -530,7 +562,7 @@
     void openRegion().catch((e) => console.warn('region plane failed to open:', e));
   });
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret || $connectionStatus !== 'connected') return;
     void refreshRegion(secret, true);
   });
@@ -545,12 +577,12 @@
     void openNestRules().catch((e) => console.warn('nest rules failed to open:', e));
   });
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret || $connectionStatus !== 'connected') return;
     void refreshNestRules(secret);
   });
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (!secret) return;
     return onPushEvent((kind) => {
       if (staleSurfacesForPushKind(kind).nest_info) void refreshNestRules(secret);
@@ -567,7 +599,7 @@
   // `skipped_no_public_ip` on a LAN box is normal, never publishes a private address.
   let didReportHost = false;
   $effect(() => {
-    const secret = $identity?.secretHex;
+    const secret = $signedInIdentity?.secretHex;
     if (didReportHost || !secret || !userIsAdmin || $connectionStatus !== 'connected') return;
     didReportHost = true;
     void reportHostAddress(secret).catch((e) => {
@@ -596,7 +628,7 @@
   // lets a same-actor re-establish re-trigger the sweep.
   let sweptForIdentity: unknown = undefined;
   $effect(() => {
-    const id = $identity;
+    const id = $signedInIdentity;
     const secret = id?.secretHex;
     if (!secret || $connectionStatus !== 'connected' || sweptForIdentity === id) return;
     sweptForIdentity = id;

@@ -226,7 +226,9 @@ where
             fetcher,
             &self.licensed_keys(keys, &licence),
             manifest,
-            licence.content_key_version,
+            licence
+                .content_key_version
+                .map(fauna_core::blob_seal::SealStamp::Version),
             relative_path,
         )
         .await

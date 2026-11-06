@@ -94,7 +94,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers import live_box_door
 from helpers.caldav_roundtrip import wait_caldav_serving
 from helpers.live_admin import approve_pending_bridges, reach_admin_shell, wait_connected
@@ -184,14 +184,7 @@ def test_live_caldav_autoschedule_fans_imip(app):
     """Organizer test@example.net PUTs a CalDAV invite to its own sub-address →
     iMIP REQUEST loops back to its INBOX (observed in the linux app); remove
     the attendee → iMIP CANCEL loops back the same way."""
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the live-nest CalDAV autoschedule iMIP observer drive",
-            detail="drives the linux Fauna app UI as the observer; the "
-            "other apps are the remaining cross-app follow-on",
-            tracked="caldav-server.md",
-        )
+    require_surface(app.driver, "caldav-autoschedule-imip-drive")
 
     from helpers.caldav_client import CalDAVClient, build_invite_vevent
 

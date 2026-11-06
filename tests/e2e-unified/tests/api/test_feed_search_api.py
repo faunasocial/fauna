@@ -66,10 +66,9 @@ def test_local_feed_search_narrows_by_body(two_nodes):
 def test_custom_any_feed_search_narrows_by_body(two_nodes):
     """Search must narrow a CUSTOM feed regardless of its rule combination.
 
-    The exact shape every apple e2e login sees: the conftest's default
-    "General" feed is empty-rules + ``combination: "any"``, and the apple
-    apps auto-select the first feed — so the feed-search re-query rides
-    ``fauna.feed.posts``. Search (like the spam guard) is a MANDATORY
+    The conftest's default "General" feed is empty-rules +
+    ``combination: "any"``, and selecting it makes the feed-search re-query
+    ride ``fauna.feed.posts``. Search (like the spam guard) is a MANDATORY
     constraint: pushed into the feed's own rule set under an ``Any``
     combination it becomes just another OR-alternative and can never narrow
     (the month-old ``test_feed_search_filters_posts`` apple red).

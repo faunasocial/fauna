@@ -8,16 +8,18 @@ guide: docs/guides/identity-and-devices.md § If a device is lost or stolen
 
 ## What a user gets
 
-If your identity key is stolen, the recovery kit lets you succeed it: the old
-key stops working everywhere, your groups re-point to you, and any device still on
-the old key is told what happened and routed to import the new one. Your data,
-backups, conversations, drafts and mail come back under the new key, the old mail
-passwords are burned, and anything the thief could have changed is raised for your
-review.
+If your identity key is stolen, the recovery kit moves your account to a fresh
+identity the thief cannot follow: the old key stops working, at your nest at
+once and at each other nest your account is linked to once one of your devices
+next syncs with it; your groups move with you (and if some do not, you can
+finish moving them yourself); and any device still on the old key is told what
+happened and asked to import the new one. Your data, backups, conversations,
+drafts and mail come back under the new key, the old mail passwords stop
+working, and anything the thief could have changed is raised for your review.
 
 ## Coverage contract
 
-Stamped 2026-10-09 at 940c2f209a.
+Stamped 2026-11-01 at a6047fbd8b.
 
 1. [app] A kit holder takes the account back and comes back up as the successor; an unconfirmed attempt is refused out loud — `docs/goal/behavior/identity-succession.md` § Enforcement on the home nest
    - `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor`
@@ -32,7 +34,6 @@ Stamped 2026-10-09 at 940c2f209a.
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_still_read_the_config_it_inherited`
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_open_muted_words_page_paints_what_it_inherited`
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_read_the_corpus_it_inherited`
-   - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_paints_the_thumbnail_its_predecessor_sealed`
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_backups_restart_without_a_user_command`
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_conversations_unlock_without_a_user_command`
    - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_unsent_drafts_come_back`
@@ -105,79 +106,93 @@ Stamped 2026-10-09 at 940c2f209a.
     - `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_taking_the_account_back_lands_in_an_account_that_is_not_locked`
 27. [nest] After you take your account back, the stolen key can no longer lock the account: the nest tells it where the account went instead — `docs/goal/behavior/identity-succession.md` § Enforcement on the home nest
     - `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_after_taking_it_back_the_stolen_key_cannot_lock_the_account_and_is_told_where_it_went`
+28. [app] After you take your account back, the stolen key also stops signing in at every other nest you had linked, as soon as one of your devices reaches that nest — `docs/goal/behavior/succession-linked-nests.md` § Every nest the identity is linked to
+    - `tests/e2e-unified/tests/test_identity_succession_refusal.py::test_the_successors_device_retires_the_stolen_key_at_a_linked_nest`
+29. [app] Linking two nests that hold different recovery keys for you is refused, and you are told why — `docs/goal/behavior/succession-linked-nests.md` § Every nest the identity is linked to
+    - `tests/e2e-unified/tests/test_linked_nests.py::test_link_refuses_two_nests_holding_different_recovery_keys`
+30. [nest] A nest accepts a recovery only when it checks out against the records that nest holds itself; one relayed from another nest is refused — `docs/goal/behavior/succession-linked-nests.md` § Every nest the identity is linked to
+    - `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_nest_accepts_a_recovery_only_against_its_own_records`
+31. [nest] A linked nest the recovery has not reached yet stays owed until one of your devices gets through to it — `docs/goal/behavior/succession-linked-nests.md` § Every nest the identity is linked to
+    - `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_linked_nest_the_recovery_has_not_reached_stays_owed_until_a_device_gets_through`
+32. [app] After you take your account back, a Nostr app the stolen key had connected shows on Connected apps as revoked, with its own line saying so, never as an ordinary disconnected app — `docs/goal/ui/nostr.md` § Key succession and rotation
+   - `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_burned_signer_connection_reads_revoked`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| web | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| tui | ⚠ partial | 0.1.5-dev+98cd13b0 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_confirm_gate_refuses_rather_than_dropping_the_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_identity_succession_refusal.py::test_a_succeeded_device_is_refused_and_routed_to_import` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_ceremony_re_points_a_real_group_and_evicts_the_stolen_leaf` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_real_member_re_points_the_succeeded_participant_on_their_own_client` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): skipped, ios (macos): skipped, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_succession_witness_registered.py::test_a_conversations_seat_registers_a_succession_witness` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_still_read_the_config_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_open_muted_words_page_paints_what_it_inherited` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_read_the_corpus_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): failed, ios (macos): passed, tui (linux): passed, tui (windows): failed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_paints_the_thumbnail_its_predecessor_sealed` | tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_backups_restart_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_conversations_unlock_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_unsent_drafts_come_back` | linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_about_the_trust_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_about_the_destination_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_first_session_raises_the_member_it_cannot_vouch_for` | web (linux): passed, linux (linux): skipped, windows (windows): failed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_to_confirm_its_npub` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_dismiss_npub_confirm_into_a_fresh_key` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_mail_passwords_are_burned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_identity_succession_mail_auth.py::test_a_succession_stops_the_predecessors_mail_password_authenticating` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_confirm_gate_refuses_rather_than_dropping_the_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 2 | app | `tests/e2e-unified/tests/test_identity_succession_refusal.py::test_a_succeeded_device_is_refused_and_routed_to_import` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_ceremony_re_points_a_real_group_and_evicts_the_stolen_leaf` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_real_member_re_points_the_succeeded_participant_on_their_own_client` — requires `succession-witness-member-seat` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 3 | app | `tests/e2e-unified/tests/test_succession_witness_registered.py::test_a_conversations_seat_registers_a_succession_witness` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_still_read_the_config_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_open_muted_words_page_paints_what_it_inherited` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_read_the_corpus_it_inherited` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_backups_restart_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_conversations_unlock_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 4 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_unsent_drafts_come_back` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_about_the_trust_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_about_the_destination_it_inherited` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_first_session_raises_the_member_it_cannot_vouch_for` — requires `member-review-defer-button` (not built: windows, android) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_is_asked_to_confirm_its_npub` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successor_can_dismiss_npub_confirm_into_a_fresh_key` | web (linux): passed, linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_mail_passwords_are_burned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_identity_succession_mail_auth.py::test_a_succession_stops_the_predecessors_mail_password_authenticating` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_succession_fixture.py::test_the_fixture_succeeds_an_identity_and_the_nest_records_it` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_recovery_pre_identity_remedies.py::test_a_succession_lands_through_an_active_lockout_with_no_session` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_recovery_pre_identity_remedies.py::test_the_key_holder_vetoes_a_seed_alone_replacement_over_an_anonymous_connection` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_succession_lost_reply.py::test_a_dropped_submit_reply_fails_at_transport_while_the_succession_lands` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_succession_sweep_retry.py::test_a_half_done_sweep_renders_the_retry_and_the_press_is_honoured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_a_bound_instance_survives_its_own_succession` | tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_succession_sweep_retry.py::test_a_half_done_sweep_renders_the_retry_and_the_press_is_honoured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 9 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_a_bound_instance_survives_its_own_succession` | tui (linux): passed, tui (macos): passed, tui (windows): failed |
 | 9 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_a_bound_instance_survives_its_own_succession` | macos (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_a_bound_instance_survives_its_own_succession` | windows (windows): passed |
 | 9 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_a_bound_instance_survives_its_own_succession` | linux (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_succession_second_tab_web.py::test_web_a_second_tab_runs_the_ceremony_and_comes_back_as_the_successor` | web (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_a_launch_bound_to_a_retired_id_comes_up_as_the_successor` | tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_a_launch_bound_to_a_retired_id_comes_up_as_the_successor` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_a_launch_bound_to_a_retired_id_comes_up_as_the_successor` | macos (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_a_launch_bound_to_a_retired_id_comes_up_as_the_successor` | windows (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_a_launch_bound_to_a_retired_id_comes_up_as_the_successor` | linux (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_succession_second_tab_web.py::test_web_a_tab_pinned_to_the_retired_id_comes_up_as_the_successor` | web (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_backups_restart_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_conversations_unlock_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): failed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_mail_passwords_are_burned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_kit_holder_takes_the_account_back_and_comes_back_up_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_backups_restart_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): failed |
+| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_conversations_unlock_without_a_user_command` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_mail_passwords_are_burned` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_succession_nest_enforcement.py::test_the_account_comes_back_at_the_same_handle_with_tier_and_admin_role` | nest (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_mail_rules_from_before_the_recovery_are_flagged_to_keep_or_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_first_session_raises_the_member_it_cannot_vouch_for` | web (linux): passed, linux (linux): skipped, windows (windows): failed, macos (macos): failed, ios (macos): failed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_profile_linkless_successor.py::test_a_device_that_never_held_the_predecessor_saves_a_profile_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_profile_linkless_successor.py::test_a_profile_edit_still_saves_after_the_retired_account_is_removed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_mail_rules_from_before_the_recovery_are_flagged_to_keep_or_remove` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): skipped, tui (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_first_session_raises_the_member_it_cannot_vouch_for` — requires `member-review-defer-button` (not built: windows, android) | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_profile_linkless_successor.py::test_a_device_that_never_held_the_predecessor_saves_a_profile_edit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_profile_linkless_successor.py::test_a_profile_edit_still_saves_after_the_retired_account_is_removed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 16 | app | `tests/e2e-unified/tests/test_profile_linkless_successor.py::test_web_learns_the_predecessor_link_only_under_a_sibling_tabs_registry_lock` | web (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_reply_you_cannot_check_or_store_keeps_the_only_key_on_screen` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_submit_reply_still_brings_you_back_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_key_this_device_cannot_store_stays_on_screen_until_you_leave` — requires `registry-refuse-secret-writes` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 17 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_reply_you_cannot_check_or_store_keeps_the_only_key_on_screen` — requires `registry-refuse-secret-writes` (test harness) (not built: android) | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 18 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_reply_you_cannot_check_says_so_and_reopening_signs_you_in` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 18 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_a_lost_submit_reply_still_brings_you_back_as_the_successor` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 18 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_relaunch_adoption_writes_its_link_only_under_a_sibling_tabs_registry_lock` | web (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_succession_nest_enforcement.py::test_content_still_signed_with_the_superseded_key_is_refused` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_succession_nest_enforcement.py::test_an_old_key_or_handle_is_pointed_at_the_successor` | nest (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_after_a_succession_the_successors_own_phrase_restores_the_predecessor_corpus` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_ceremony_tells_you_what_it_swept_and_whom_it_cannot_vouch_for` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_subscriber_tier_is_re_keyed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_after_a_succession_the_successors_own_phrase_restores_the_predecessor_corpus` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 22 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_the_ceremony_tells_you_what_it_swept_and_whom_it_cannot_vouch_for` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 23 | app | `tests/e2e-unified/tests/test_identity_succession_ceremony.py::test_after_the_recovery_a_contact_can_still_add_you_to_a_conversation` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 24 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_subscriber_tier_is_re_keyed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_succession_nest_enforcement.py::test_the_recovery_disconnects_the_apps_you_had_authorized` | nest (linux): passed |
 | 26 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_taking_the_account_back_lands_in_an_account_that_is_not_locked` | nest (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_after_taking_it_back_the_stolen_key_cannot_lock_the_account_and_is_told_where_it_went` | nest (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_identity_succession_refusal.py::test_the_successors_device_retires_the_stolen_key_at_a_linked_nest` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 29 | app | `tests/e2e-unified/tests/test_linked_nests.py::test_link_refuses_two_nests_holding_different_recovery_keys` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 30 | nest | `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_nest_accepts_a_recovery_only_against_its_own_records` | nest (linux): passed |
+| 31 | nest | `tests/e2e-unified/tests/api/test_succession_linked_nests.py::test_a_linked_nest_the_recovery_has_not_reached_stays_owed_until_a_device_gets_through` | nest (linux): passed |
+| 32 | app | `tests/e2e-unified/tests/test_identity_succession_aftermath.py::test_the_successors_burned_signer_connection_reads_revoked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

@@ -142,6 +142,10 @@ public sealed class NestRowItem
     /// panel-level "No linked nests yet" x:Name="EmptyText" to avoid a
     /// WMC1507 named-element/field collision inside the DataTemplate.</summary>
     public string TrustEmptyText { get; init; } = string.Empty;
+    /// <summary><c>nest-trust-holders-status</c>: Now lens + home row; text is
+    /// the unreachable copy or empty (nests.md § Trust facet — grants).</summary>
+    public Visibility HoldersStatusVisibility { get; init; } = Visibility.Collapsed;
+    public string HoldersStatusText { get; init; } = string.Empty;
     public IReadOnlyList<TrustGrantItem> GrantItems { get; init; } = Array.Empty<TrustGrantItem>();
     /// <summary>Now lens + backup rows present (home row only — the shared
     /// machine populates <c>trustBackups</c> nowhere else). Independent of
@@ -214,6 +218,10 @@ public sealed class NestCustodyItem
     public string RevokeLabel { get; init; } = string.Empty;
     /// <summary>Disabled while the ceremony is <c>Pending</c>: nothing is minted to revoke yet.</summary>
     public bool RevokeEnabled { get; init; }
+    /// <summary>The custodian's address — what the row's
+    /// <c>nest-trust-custody-restore-button</c> dispatches.</summary>
+    public string Url { get; init; } = string.Empty;
+    public string RestoreLabel { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -458,6 +466,81 @@ public sealed partial class NestsPanel : UserControl
         }
         EmptyText.Visibility = _nests.Count == 0 && _custodyNests.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
+        PaintCustodyRestore();
+    }
+
+    /// <summary>Paint the restore block from <see cref="NestsCustodyView"/>'s
+    /// state. The input is written only when the view's address differs (a
+    /// closing outcome or a cancel cleared it), so a repaint never fights the
+    /// user's typing.</summary>
+    private void PaintCustodyRestore()
+    {
+        CustodyRestoreForm.Visibility = _custody.RestoreFormOpen ? Visibility.Visible : Visibility.Collapsed;
+        if (CustodyRestoreInput.Text != _custody.RestoreAddress) CustodyRestoreInput.Text = _custody.RestoreAddress;
+        CustodyRestoreSubmitButton.IsEnabled = _custody.RestoreSubmitEnabled;
+        var notice = _custody.RestoreNotice;
+        CustodyRestoreNotice.Text = notice ?? string.Empty;
+        CustodyRestoreNotice.Visibility = notice is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Repaint the whole panel after a custody gesture — from the
+    /// machine's snapshot when there is one (which surfaces the gesture's error
+    /// beside the machine's), else the restore block and the error alone.</summary>
+    private void RepaintAfterCustodyGesture()
+    {
+        if (_machine is not null)
+        {
+            RenderSnapshot(_machine.Snapshot());
+            return;
+        }
+        PaintCustodyRestore();
+        ErrorChanged?.Invoke(_custody.Error);
+    }
+
+    /// <summary><c>nests-custody-restore-button</c> — reveal the form.</summary>
+    private void CustodyRestoreReveal_Click(object sender, RoutedEventArgs e)
+    {
+        _custody.OpenRestoreForm();
+        PaintCustodyRestore();
+        CustodyRestoreInput.Focus(FocusState.Programmatic);
+    }
+
+    /// <summary><c>nests-custody-restore-cancel-button</c> — close the form.</summary>
+    private void CustodyRestoreCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _custody.CancelRestoreForm();
+        PaintCustodyRestore();
+    }
+
+    private void CustodyRestoreInput_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _custody.SetRestoreAddress(CustodyRestoreInput.Text);
+        CustodyRestoreSubmitButton.IsEnabled = _custody.RestoreSubmitEnabled;
+    }
+
+    /// <summary><c>nests-custody-restore-submit-button</c> — the typed-address entry.</summary>
+    private async void CustodyRestoreSubmit_Click(object sender, RoutedEventArgs e)
+        => await RestoreFromCustodianAsync(_custody.RestoreAddress);
+
+    /// <summary><c>nest-trust-custody-restore-button</c> — the warm explicit
+    /// gesture: the same command, the row's own address.</summary>
+    private async void RestoreFromCustodyRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: NestCustodyItem item }) return;
+        await RestoreFromCustodianAsync(item.Url);
+    }
+
+    /// <summary>Dispatch the restore: paint the running notice the view set
+    /// before its first await, then repaint from the outcome (the form, the
+    /// notice, a <c>Failed</c> gesture's reason on <c>error-message</c>, and the
+    /// re-read custody rows).</summary>
+    private async Task RestoreFromCustodianAsync(string address)
+    {
+        if (_clients?.Rpc is null) return;
+        var restore = _custody.RestoreAsync(_clients.Rpc, address);
+        PaintCustodyRestore();
+        await restore;
+        RepaintAfterCustodyGesture();
     }
 
     private static NestCustodyItem ToCustodyItem(NestCustodyRow c) => new()
@@ -478,6 +561,8 @@ public sealed partial class NestsPanel : UserControl
         BoundNote = c.Pending ? string.Empty : S.Get("devices/custody_revoke_bound_note"),
         RevokeLabel = S.Get("devices/custody_revoke"),
         RevokeEnabled = c.RevokeEnabled,
+        Url = c.Url,
+        RestoreLabel = S.Get("nests/custody_restore_row_button"),
     };
 
     private static NestRowItem ToItem(LinkedNestRow row, TrustRestoreOutcome? restoreOutcome, bool holdsEscrow)
@@ -510,8 +595,13 @@ public sealed partial class NestsPanel : UserControl
             NowLensVisibility = isNowLens ? Visibility.Visible : Visibility.Collapsed,
             HistoryLensVisibility = isNowLens ? Visibility.Collapsed : Visibility.Visible,
             GrantListVisibility = isNowLens && grants.Count > 0 ? Visibility.Visible : Visibility.Collapsed,
-            EmptyVisibility = isNowLens && grants.Count == 0 && backups.Count == 0
+            EmptyVisibility = isNowLens
+                && NestTrustFormat.TrustEmptyVisible(grants.Count, backups.Count, row.trustHoldersUnreachable)
                 ? Visibility.Visible : Visibility.Collapsed,
+            // Home row only, Now lens; EMPTY text unless the roster read failed.
+            HoldersStatusVisibility = isNowLens && row.isHome
+                ? Visibility.Visible : Visibility.Collapsed,
+            HoldersStatusText = NestTrustFormat.HoldersStatusText(row.trustHoldersUnreachable),
             TrustEmptyText = S.Get("nests/not_trusted"),
             GrantItems = grants,
             BackupListVisibility = isNowLens && backups.Count > 0 ? Visibility.Visible : Visibility.Collapsed,

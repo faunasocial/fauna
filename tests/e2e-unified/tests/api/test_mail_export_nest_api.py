@@ -20,8 +20,11 @@ client's half and the nest cannot tell the difference.
 
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+
 import pytest
-import requests
 
 from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_admin_client import WsRpcAdminClient
@@ -92,12 +95,30 @@ def _finish(ws: WsRpcAdminClient, session_id: str, payload: bytes = b"sealed-fra
     return _action(ws, "finalize_export_session", session_id)
 
 
-def _download(nest, token: str, session_id: str) -> requests.Response:
-    return requests.get(
+@dataclass
+class _Download:
+    status_code: int
+    content: bytes
+
+    @property
+    def text(self) -> str:
+        return self.content.decode("utf-8", "replace")
+
+
+def _download(nest, token: str, session_id: str) -> _Download:
+    """GET the export through urllib's installed opener, which trusts the
+    self-signed floor cert a TLS-serving loopback nest presents
+    (`common.auth.mark_tls_nest`). `requests` bypasses that opener, so under
+    `--nest docker` every download failed `CERTIFICATE_VERIFY_FAILED`."""
+    req = urllib.request.Request(
         f"{nest['url']}/api/v1/export/{session_id}",
         headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
     )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return _Download(resp.status, resp.read())
+    except urllib.error.HTTPError as err:
+        return _Download(err.code, err.read())
 
 
 def _sessions(ws: WsRpcAdminClient) -> list[dict]:

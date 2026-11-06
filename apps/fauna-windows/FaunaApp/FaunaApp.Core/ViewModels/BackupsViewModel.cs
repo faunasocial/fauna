@@ -84,10 +84,11 @@ public partial class BackupsViewModel : ViewModelBase
     [ObservableProperty] private long? _openSnapshotId;
 
     /// <summary>The folder selector's options — the machine's owner-scoped,
-    /// reserved-excluded, name-ordered <c>fauna.folders.list</c> read. The
-    /// retired <c>fauna.sync.backup_status</c> source rendered a set's last FILE
-    /// CHANGE, not its last snapshot.</summary>
-    public ObservableCollection<string> FolderNames { get; } = new();
+    /// reserved-excluded, name-ordered <c>fauna.folders.list</c> read, then the
+    /// kind entries (§ Snapshot-list shape → *Kind entries*). The retired
+    /// <c>fauna.sync.backup_status</c> source rendered a set's last FILE CHANGE,
+    /// not its last snapshot.</summary>
+    public ObservableCollection<BackupFolderOption> FolderOptions { get; } = new();
 
     /// <summary>The machine's current selection (page-lifetime, deterministic
     /// default). The page re-points its picker at this under a re-entry guard.</summary>
@@ -100,9 +101,67 @@ public partial class BackupsViewModel : ViewModelBase
     /// <summary>The open snapshot's file rows (empty when none is open).</summary>
     public ObservableCollection<SnapshotFileDisplayRow> DetailFiles { get; } = new();
 
+    /// <summary>The line <c>snapshot-detail-files</c> paints in place of a file
+    /// list when the open snapshot belongs to a kind entry — such a snapshot holds
+    /// messages, not files, and restores from the Restore section below (§
+    /// Snapshot-list shape → *Kind entries*). Null for a folder snapshot.</summary>
+    [ObservableProperty] private string? _detailNoticeText;
+
+    // ── Whole-snapshot restore (ui/backups.md § Whole-snapshot restore) ──
+    // The open FOLDER snapshot's whole tree into a typed directory, over the
+    // free FFI fn (windows builds no engine host). The panel is hidden on a kind
+    // entry's snapshot, which restores from the Restore section instead.
+
+    /// <summary>Whether the four <c>snapshot-restore-*</c> controls show: a
+    /// folder snapshot is open. A kind entry's detail (<c>message_kind</c> set)
+    /// hides them — the whole-snapshot restore into a folder does not apply to
+    /// it (linux <c>snapshot_restore.rs</c>, tui <c>detail_elements</c>).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRestoreSnapshot))]
+    private bool _snapshotRestoreVisible;
+
+    /// <summary><c>snapshot-restore-destination-input</c> — the typed path the
+    /// untagged <i>Choose…</i> folder picker also fills.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRestoreSnapshot))]
+    private string _snapshotRestoreDestination = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanRestoreSnapshot))]
+    private bool _snapshotRestoreRunning;
+
+    /// <summary><c>snapshot-restore-progress</c> — non-null only while a walk
+    /// runs.</summary>
+    [ObservableProperty] private string? _snapshotRestoreProgressText;
+
+    /// <summary><c>snapshot-restore-result</c> — non-null only after a run: the
+    /// done or partial line, a failure before the walk, or a refused
+    /// destination. Never routed to <c>error-message</c> (§ <i>Outcome</i>).</summary>
+    [ObservableProperty] private string? _snapshotRestoreResultText;
+
+    /// <summary><c>snapshot-restore-button</c>'s enabled state: disabled until a
+    /// destination is typed and while a restore runs (§ <i>Destination</i>).</summary>
+    public bool CanRestoreSnapshot =>
+        SnapshotRestoreVisible && !SnapshotRestoreRunning
+        && !string.IsNullOrWhiteSpace(SnapshotRestoreDestination);
+
+    /// <summary>The snapshot the restore panel currently belongs to.</summary>
+    private long? _snapshotRestoreFor;
+
+    /// <summary>Bumped whenever the panel resets, so a run still in flight for
+    /// the snapshot that was open before never paints over the new one.</summary>
+    private int _snapshotRestoreEpoch;
+
     /// <summary>The prune preview's rendered lines: the policy-state sentence or
     /// the would-prune/remaining counts, then one line per candidate.</summary>
     public ObservableCollection<string> PrunePreviewLines { get; } = new();
+
+    /// <summary>The prune preview's verdict sentence — the first
+    /// <see cref="PrunePreviewLines"/> entry (policy not set / unparseable /
+    /// nothing to prune / counts), empty when there is no preview. The page
+    /// folds it into the panel's UIA name so a driver read says which kind of
+    /// nothing stands.</summary>
+    public string PrunePreviewVerdict { get; private set; } = "";
 
     /// <summary>The configured backup destinations (backups.md § Manage backup
     /// destinations). Repopulated from the shared FFI mutate seam on every
@@ -300,8 +359,8 @@ public partial class BackupsViewModel : ViewModelBase
         // The selector's options + the machine's selection. Assigning
         // SelectedFolder raises the page's re-entry-guarded re-point; the page
         // never dispatches a select for a selection the machine already holds.
-        FolderNames.Clear();
-        foreach (var fs in snap.folders) FolderNames.Add(fs.name);
+        FolderOptions.Clear();
+        foreach (var fs in snap.folders) FolderOptions.Add(new BackupFolderOption(fs.name, FolderRowLabel(fs)));
         SelectedFolder = snap.selectedFolder;
 
         LastBackedUpText = snap.lastBackedUp is { } at
@@ -317,6 +376,11 @@ public partial class BackupsViewModel : ViewModelBase
         ApplyPrunePreview(snap.prunePreview);
 
         DetailFiles.Clear();
+        // Before OpenSnapshotId: its change is what repaints the detail pane.
+        DetailNoticeText = snap.detail?.messageKind is not null
+            ? Strings.Get("backups/kind_snapshot_restores_below")
+            : null;
+        ApplySnapshotRestore(snap.detail);
         OpenSnapshotId = snap.detail?.snapshotId;
         if (snap.detail is { } detail)
         {
@@ -336,6 +400,14 @@ public partial class BackupsViewModel : ViewModelBase
         // completed prune or check reports through its own result surface.
         SetError(snap.error is { } err ? Strings.Resolve(err) : null);
     }
+
+    /// A selector row's label: a folder's own name, or a kind entry's label key
+    /// resolved (§ Snapshot-list shape → *Kind entries*). Paint-only — the
+    /// option's value stays the row's <c>name</c>.
+    internal static string FolderRowLabel(BackupFolderRow row) =>
+        row.messageKind is null
+            ? row.name
+            : Strings.Resolve(new uniffi.fauna_core.LocalizedText(row.name, new Dictionary<string, string>()));
 
     /// The visible <c>snapshot-item</c> line (§ *Row content contract*): formatted
     /// created-at, file count and formatted size, plus a non-<c>Active</c>
@@ -404,6 +476,7 @@ public partial class BackupsViewModel : ViewModelBase
     private void ApplyPrunePreview(PrunePreview? preview)
     {
         PrunePreviewLines.Clear();
+        PrunePreviewVerdict = "";
         if (preview is null)
         {
             HasPrunePreview = false;
@@ -440,6 +513,7 @@ public partial class BackupsViewModel : ViewModelBase
                 }
                 break;
         }
+        PrunePreviewVerdict = PrunePreviewLines.Count > 0 ? PrunePreviewLines[0] : "";
         PruneExecutable = executable;
     }
 
@@ -500,6 +574,75 @@ public partial class BackupsViewModel : ViewModelBase
         }
     }
 
+    /// The restore panel follows the machine's opened detail: shown for a folder
+    /// snapshot, hidden for a kind entry's or none, and reset (lines cleared, any
+    /// run in flight disowned) when a different snapshot opens. The typed
+    /// destination stays — it is the user's, not the snapshot's.
+    private void ApplySnapshotRestore(SnapshotDetail? detail)
+    {
+        SnapshotRestoreVisible = detail is { messageKind: null };
+        var id = detail?.snapshotId;
+        if (_snapshotRestoreFor == id) return;
+        _snapshotRestoreFor = id;
+        _snapshotRestoreEpoch++;
+        SnapshotRestoreRunning = false;
+        SnapshotRestoreProgressText = null;
+        SnapshotRestoreResultText = null;
+    }
+
+    /// <summary><c>snapshot-restore-button</c> (backup-restore.md § 4. Restore:
+    /// Full Snapshot): restore every file of the open snapshot into the typed
+    /// destination through the free FFI fn over the shared
+    /// <c>restore_snapshot_into_dir</c>. The destination resolves through the
+    /// shared rule tui and linux use (absolute, or <c>~/</c> for home); the
+    /// outcome is worded by the shared <c>snapshot_restore_result_text</c>. Every
+    /// outcome — done, partial, a failure before the walk, a refused destination —
+    /// lands in <c>snapshot-restore-result</c>, never <c>error-message</c>
+    /// (ui/backups.md § Whole-snapshot restore → <i>Outcome</i>).</summary>
+    [RelayCommand]
+    private async Task RestoreSnapshotAsync()
+    {
+        if (_snapshotRestoreFor is not { } snapshotId || !CanRestoreSnapshot) return;
+        var typed = SnapshotRestoreDestination.Trim();
+        if (FaunaFfiMethods.ResolveSnapshotRestoreDestination(typed) is not { } destination)
+        {
+            SnapshotRestoreResultText = Strings.Get("backups/snapshot_restore_destination_not_absolute")
+                .Replace("{path}", typed);
+            return;
+        }
+
+        var epoch = _snapshotRestoreEpoch;
+        SnapshotRestoreRunning = true;
+        SnapshotRestoreResultText = null;
+        SnapshotRestoreProgressText = Strings.Get("backups/snapshot_restore_progress")
+            .Replace("{id}", snapshotId.ToString())
+            .Replace("{path}", destination);
+        string line;
+        try
+        {
+            var summary = await _nest.RestoreSnapshotToDirAsync(_deviceId, (ulong)snapshotId, destination);
+            line = SnapshotRestoreLine(summary, destination);
+        }
+        catch (Exception ex)
+        {
+            line = Strings.Get("backups/snapshot_restore_failed")
+                .Replace("{message}", ex is FfiException.General g ? g.msg : ex.Message);
+        }
+        // Another snapshot opened meanwhile: the panel is that one's now.
+        if (epoch != _snapshotRestoreEpoch) return;
+        SnapshotRestoreRunning = false;
+        SnapshotRestoreProgressText = null;
+        SnapshotRestoreResultText = line;
+    }
+
+    /// The finished restore's result line, worded by the shared
+    /// <c>snapshot_restore_result_text</c> (the one tui, linux and macOS call);
+    /// only the byte-size rendering is app glue.
+    internal static string SnapshotRestoreLine(FfiRestoreSummary summary, string path) =>
+        Strings.Resolve(FaunaFfiMethods.SnapshotRestoreResultText(
+            summary.filesRestored, ValueFormat.ByteSize(summary.bytesWritten), path,
+            summary.unverified));
+
     /// <summary><c>snapshot-create-button</c> — take a manual snapshot of the
     /// selected set. The machine's create seam has NO <c>tags</c> parameter at all
     /// (a structural ruling, § *Create*), which is what retired windows'
@@ -507,7 +650,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// manual snapshots exempted them from the user's own retention forever.
     /// Nothing here can regress it — there is no argument to pass.</summary>
     [RelayCommand]
-    private Task CreateSnapshotAsync() => DispatchAsync(m => m.CreateSnapshot());
+    private Task CreateSnapshotAsync() => MutateAsync(m => m.CreateSnapshot());
 
     /// <summary>The <c>backup-folder-selector</c> gesture. The machine clears the
     /// session-local check result and any standing prune preview — both are scoped
@@ -519,7 +662,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// row comes back as <c>DeletionPending</c>. The confirm is client glue and
     /// lives on the page.</summary>
     [RelayCommand]
-    private Task DeleteSnapshotAsync(long id) => DispatchAsync(m => m.DeleteSnapshot(id));
+    private Task DeleteSnapshotAsync(long id) => MutateAsync(m => m.DeleteSnapshot(id));
 
     /// <summary><c>snapshot-undelete-button[i]</c> — recover a soft-deleted
     /// snapshot before its <c>purge_after</c> (§ *Soft-deleted rows*, id
@@ -528,7 +671,7 @@ public partial class BackupsViewModel : ViewModelBase
     /// other row regardless, so the render guard IS the affordance rule (mirrors
     /// android/web/linux, none of which confirm this gesture either).</summary>
     [RelayCommand]
-    private Task UndeleteSnapshotAsync(long id) => DispatchAsync(m => m.UndeleteSnapshot(id));
+    private Task UndeleteSnapshotAsync(long id) => MutateAsync(m => m.UndeleteSnapshot(id));
 
     /// <summary><c>snapshot-prune-button</c> — the PREVIEW half: a dry run of the
     /// set's own resting retention policy. It never carries a client-chosen policy
@@ -540,7 +683,7 @@ public partial class BackupsViewModel : ViewModelBase
 
     /// <summary>Execute the previewed prune. A call with no preview standing is a
     /// machine-side no-op, which is what makes preview-first structural.</summary>
-    public Task PruneExecuteAsync() => DispatchAsync(m => m.PruneExecute());
+    public Task PruneExecuteAsync() => MutateAsync(m => m.PruneExecute());
 
     /// <summary>Dismiss a standing prune preview without executing it.</summary>
     public void CancelPrunePreview()
@@ -574,6 +717,20 @@ public partial class BackupsViewModel : ViewModelBase
             Apply();
             if (string.IsNullOrEmpty(ErrorMessage)) ShowError(ex);
         }
+    }
+
+    /// <see cref="DispatchAsync"/> for a gesture that changes which snapshots
+    /// exist (create, delete, undelete, prune execute; the immediate delete
+    /// re-reads the same way), then re-read <c>restore-snapshot-select</c>: a kind
+    /// entry's snapshot restores from that picker, so one just taken is listed
+    /// there without a page re-entry (§ Snapshot-list shape → *Kind entries*).
+    /// The machine owns the snapshot list; the picker is this page's own read, so
+    /// the gesture site re-reads it.
+    private async Task MutateAsync(Func<IBackupsMachine, Task> gesture)
+    {
+        if (_machine is null) return;
+        await DispatchAsync(gesture);
+        await RereadRestoreSnapshotsAsync();
     }
 
     /// Epoch seconds → the shared fixed local "YYYY-MM-DD HH:MM" render
@@ -644,6 +801,7 @@ public partial class BackupsViewModel : ViewModelBase
     {
         using var op = DestinationOp();
         ErrorMessage = null;
+        DestinationsLoadRefused = false;
         try
         {
             RepopulateDestinations(await _nest.BackupDestinationsListAsync());
@@ -655,9 +813,16 @@ public partial class BackupsViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
+            DestinationsLoadRefused = FirstListingRefusal.Of(ex) is not null;
             ShowError(ex);
         }
     }
+
+    /// <summary>True while the last destination-list load was refused by the
+    /// first-listing gate: the page shows the reason on <c>error-message</c> and
+    /// paints no empty state, since an empty list would read as the account's own
+    /// (<c>account-client-lifecycle.md</c> § The first listing, clause (4)).</summary>
+    public bool DestinationsLoadRefused { get; private set; }
 
     /// <summary>Enroll a destination (<c>backup_destination_add</c>): resolve
     /// identity + verify reachability, then persist. Blank <paramref name="name"/>
@@ -1005,9 +1170,13 @@ public partial class BackupsViewModel : ViewModelBase
     // ── Restore after losing the nest (re-seed) ─────────────────────────
     // ui/backups.md § Restore after losing the nest; the ceremony is
     // backup-destinations.md § Re-seed. Where the gesture paints is the shared
-    // backup_reseed_rows; the ceremony, its wait and its re-enrollment are the
-    // agent's FFI face (macOS makes the same call). This only paints the result,
-    // as linux's render_reseed and FaunaKit's applyReseed do.
+    // backup_reseed_rows; which leg a pressed row's confirm runs is the shared
+    // backup_reseed_runs_pull_back. From this device's copy, the ceremony, its
+    // wait and its re-enrollment are the agent's FFI face (macOS makes the same
+    // call); from a surviving nest's copy, the nest-held pull-back is the shared
+    // host run in this process (client-device-custodian.md § The nest-held
+    // pull-back). This only paints the result, as linux's render_reseed and
+    // FaunaKit's applyReseed do.
 
     /// <summary><c>backup-destination-reseed-result</c>'s text — the running
     /// line while the ceremony runs, then the shared result lines. <c>null</c>
@@ -1024,15 +1193,52 @@ public partial class BackupsViewModel : ViewModelBase
     /// <c>backup-destination-status-row</c>. The shared <c>backup_reseed_rows</c>
     /// decides (the <c>reseed_sources</c> filter linux and tui apply) over state
     /// this VM already caches — the raw list and the orphaned verdict — so a
-    /// render path costs no round trip. No agent ⇒ no store ⇒ no row.</summary>
-    private IReadOnlyList<string?> ReseedRows =>
-        _agentChannel?.Invoke() is null
-            ? Array.Empty<string?>()
-            : FaunaFfiMethods.BackupReseedRows(
-                _destinationViews.ToArray(), _deviceId, OrphanedStoreText is not null,
-                // The nest-held pull-back is not wired on windows yet: no button on
-                // a nest-kind row until its confirm runs BackupPullBackFromDestination.
-                false);
+    /// render path costs no round trip. No agent ⇒ no store, so this device
+    /// claims no row and holds no orphaned copy (the question web asks: no device
+    /// id, no orphaned store) — but a nest row still paints, since its pull-back
+    /// runs in the app.</summary>
+    private IReadOnlyList<string?> ReseedRows
+    {
+        get
+        {
+            var hostsStore = _agentChannel?.Invoke() is not null;
+            return FaunaFfiMethods.BackupReseedRows(
+                _destinationViews.ToArray(),
+                hostsStore ? _deviceId : "",
+                hostsStore && OrphanedStoreText is not null,
+                // windows hosts the nest-held pull-back: ReseedAsync runs it on a
+                // nest-kind row's confirm.
+                true);
+        }
+    }
+
+    /// <summary>The label of the nest whose copy <paramref name="source"/>'s
+    /// confirm pulls back, or <c>null</c> when that confirm runs the custodian
+    /// ceremony (this device's own row, or the orphaned store's: no source). The
+    /// shared <c>backup_reseed_runs_pull_back</c> decides, never the row's kind
+    /// re-read here.</summary>
+    private string? PullBackLabel(string? source)
+    {
+        if (source is null
+            || !FaunaFfiMethods.BackupReseedRunsPullBack(_destinationViews.ToArray(), source))
+            return null;
+        return Destinations.FirstOrDefault(d => d.Id == source)?.Label ?? source;
+    }
+
+    /// <summary><c>backup-destination-reseed-confirm-modal</c>'s title for the
+    /// pressed row (<paramref name="source"/>: its destination id, or <c>null</c>
+    /// for the orphaned store's): a pull-back's names the nest whose copy it
+    /// pulls back; the custodian's keeps this device's wording.</summary>
+    public string ReseedConfirmTitle(string? source) =>
+        PullBackLabel(source) is { } name
+            ? Strings.Format("backups/backup_reseed_pull_back_confirm_title", name)
+            : Strings.Get("backups/backup_reseed_confirm_title");
+
+    /// <summary>The confirm's body, chosen as <see cref="ReseedConfirmTitle"/> is.</summary>
+    public string ReseedConfirmBody(string? source) =>
+        PullBackLabel(source) is { } name
+            ? Strings.Format("backups/backup_reseed_pull_back_confirm_body", name)
+            : Strings.Get("backups/backup_reseed_confirm_body");
 
     /// <summary>Does the orphaned-store row carry the restore button?</summary>
     public bool ReseedOnOrphanedStore => ReseedRows.Contains(null);
@@ -1040,17 +1246,21 @@ public partial class BackupsViewModel : ViewModelBase
     /// <summary>Does this destination row carry the restore button?</summary>
     public bool ReseedOnRow(string destinationId) => ReseedRows.Contains(destinationId);
 
-    /// <summary>The confirmed restore (<c>backup-destination-reseed-confirm-button</c>).
+    /// <summary>The confirmed restore (<c>backup-destination-reseed-confirm-button</c>)
+    /// for the pressed row — <paramref name="source"/> its destination id, or
+    /// <c>null</c> for the orphaned store's. A surviving nest's row pulls back
+    /// from that nest in this process; every other runs the agent's ceremony.
     /// Returns whether it ended with nothing left to say — a verdict and a landed
-    /// re-enrollment. A stop (the agent's own, or a fault reaching it) renders on
+    /// re-enrollment. A stop (the leg's own, or a fault reaching it) renders on
     /// <c>error-message</c> inside <c>backup_reseed_failed</c> and leaves the result
     /// view absent: nothing was made live, and re-running resumes.</summary>
-    public async Task<bool> ReseedAsync()
+    public async Task<bool> ReseedAsync(string? source = null)
     {
         if (ReseedRunning) return false;
         ErrorMessage = null;
+        var pulledFrom = PullBackLabel(source);
         var channel = _agentChannel?.Invoke();
-        if (channel is null)
+        if (pulledFrom is null && channel is null)
         {
             // Convention 11: a command this app cannot honour fails loudly.
             SetError(Strings.Get("backups/backup_reseed_no_agent"));
@@ -1062,7 +1272,9 @@ public partial class BackupsViewModel : ViewModelBase
         FfiReseedResult result;
         try
         {
-            result = await _nest.ReseedCustodianStoreAsync(channel, _deviceId);
+            result = pulledFrom is not null
+                ? await _nest.PullBackFromDestinationAsync(_deviceId, source!)
+                : await _nest.ReseedCustodianStoreAsync(channel!, _deviceId);
         }
         catch (Exception ex)
         {
@@ -1086,8 +1298,11 @@ public partial class BackupsViewModel : ViewModelBase
         ReseedResultText = string.Join("\n", result.@resultLines.Select(Strings.ResolveNested));
         if (result.@reenrollError is { } reenroll)
         {
-            // The data IS back; the result says so, and this says what did not happen.
-            SetError(Strings.Format("backups/backup_reseed_reenroll_failed", reenroll));
+            // The data IS back; the result says so, and this says what did not
+            // happen — a pull-back's naming the nest it pulled from.
+            SetError(pulledFrom is not null
+                ? Strings.Format("backups/backup_reseed_pull_back_reenroll_failed", pulledFrom, reenroll)
+                : Strings.Format("backups/backup_reseed_reenroll_failed", reenroll));
             return false;
         }
         // Nothing left to say: re-list, so the re-enrolled row appears and the
@@ -1190,9 +1405,24 @@ public partial class BackupsViewModel : ViewModelBase
     /// before the user acts). Deliberately a SEPARATE call from
     /// <see cref="RefreshStatusesAsync"/> (linux's <c>refresh_audit</c> shape): a
     /// slow/unreachable destination must not block the primary status-row read.
-    /// Run from <see cref="LoadDestinationsAsync"/> + after every add/edit/remove,
-    /// and from <c>backup_audit_run_now</c> (TestAgent) to force a re-pass.</summary>
+    /// Run from <see cref="LoadDestinationsAsync"/> + after every add/edit/remove;
+    /// <c>backup_audit_run_now</c> (TestAgent) forces a re-pass through
+    /// <see cref="RunAuditPassAsync"/>, which throws instead.</summary>
     public async Task RefreshAuditAsync()
+    {
+        try
+        {
+            await RunAuditPassAsync();
+        }
+        catch
+        {
+            // Degrade to the prior state; no scary error before the user acts.
+        }
+    }
+
+    /// The pass itself, its failure thrown: <see cref="RefreshAuditAsync"/> swallows
+    /// it for the page, and the e2e forced pass lets it reach TestAgent.
+    private async Task RunAuditPassAsync()
     {
         if (Destinations.Count == 0 || string.IsNullOrEmpty(_auditStatePath))
         {
@@ -1200,17 +1430,10 @@ public partial class BackupsViewModel : ViewModelBase
             AuditAlerts.Clear();
             return;
         }
-        try
-        {
-            var rows = await _nest.BackupAuditRunPassAsync(
-                _auditStatePath, _syncStateDir, await ReadOwnCustodianAsync());
-            _auditRows = rows.ToDictionary(r => r.destinationId);
-            RebuildAuditAlerts();
-        }
-        catch
-        {
-            // Degrade to the prior state; no scary error before the user acts.
-        }
+        var rows = await _nest.BackupAuditRunPassAsync(
+            _auditStatePath, _syncStateDir, await ReadOwnCustodianAsync());
+        _auditRows = rows.ToDictionary(r => r.destinationId);
+        RebuildAuditAlerts();
     }
 
     /// Rebuild <see cref="AuditAlerts"/> from <c>_auditRows</c> PLUS a
@@ -1337,6 +1560,14 @@ public partial class BackupsViewModel : ViewModelBase
     /// is a process-wide FFI static that nothing auto-resets — the caller (the e2e
     /// test) is responsible for zeroing it back when done.
     ///
+    /// <para>Convention 11: the command must not ack a pass that did not run. Every
+    /// navigation builds a fresh page and view model, so the command can land
+    /// before the page's own destination read has painted anything; the list is
+    /// then read here, since the pass's zero-destination gate would otherwise skip
+    /// it. And the pass's own failure is thrown rather than degraded to the prior
+    /// state as the page's refresh does, so TestAgent stamps it on the error
+    /// element — as it does a pass with no actor-scoped audit state.</para>
+    ///
     /// <para>Compile-gated (convention 15). The FFI seam it calls is exported only
     /// under `test-helpers` (`fauna-ffi/src/backup_destinations.rs` — see its own
     /// cfg), so in a production flavor this method does not compile at all: it was
@@ -1350,8 +1581,18 @@ public partial class BackupsViewModel : ViewModelBase
 #if DEBUG || FAUNA_E2E_AGENT
     public async Task RunAuditNowAsync(long nowOffsetSecs)
     {
+        if (string.IsNullOrEmpty(_auditStatePath))
+        {
+            throw new InvalidOperationException(
+                "backup_audit_run_now: no actor-scoped audit state path, so no pass can run");
+        }
         FaunaFfiMethods.SetBackupAuditClockOffsetSecs(nowOffsetSecs);
-        await RefreshAuditAsync();
+        if (Destinations.Count == 0)
+        {
+            using var op = DestinationOp();
+            RepopulateDestinations(await _nest.BackupDestinationsListAsync());
+        }
+        await RunAuditPassAsync();
     }
 #endif
 
@@ -1415,8 +1656,54 @@ public partial class BackupsViewModel : ViewModelBase
     [ObservableProperty] private string _restoreConfirmInput = "";
 
     /// <c>restore-confirm-button</c> enabled state: a snapshot selected AND the
-    /// typed id matches it AND no restore in flight.
+    /// typed id matches it AND its kind's checkbox is ticked AND no restore in
+    /// flight.
     [ObservableProperty] private bool _restoreConfirmEnabled;
+
+    /// The <c>restore-kind-checkbox</c> set in paint order: <c>(wire message kind,
+    /// label resource key)</c>, the five kinds the nest restores, in
+    /// <c>fauna_backups_machine::KIND_ENTRIES</c> order (<c>backups.md</c> § Restore
+    /// from backup destination) — the same five-row table web, android and FaunaKit
+    /// carry over their own localized strings (the Rust-direct apps read
+    /// <c>fauna_client_snapshots::RESTORE_KINDS</c>). The token is never shown.
+    public static IReadOnlyList<(string Token, string LabelKey)> RestoreKinds { get; } = new[]
+    {
+        ("mail", "backups/restore_kinds_mail"),
+        ("calendar", "backups/restore_kinds_calendar"),
+        ("card", "backups/restore_kinds_contacts"),
+        ("post", "backups/restore_kinds_posts"),
+        ("conv", "backups/restore_kinds_conversations"),
+    };
+
+    /// Each <see cref="RestoreKinds"/> checkbox's ticked state (all ticked on
+    /// open, like every other app).
+    private readonly bool[] _restoreKindTicked = RestoreKinds.Select(_ => true).ToArray();
+
+    /// Whether the restore-kind checkbox at <paramref name="index"/> is ticked.
+    public bool IsRestoreKindTicked(int index) => _restoreKindTicked[index];
+
+    /// Tick or untick the restore-kind checkbox at <paramref name="index"/>; a
+    /// picked snapshot of an unticked kind does not arm the confirm button.
+    public void SetRestoreKindTicked(int index, bool ticked)
+    {
+        _restoreKindTicked[index] = ticked;
+        RecomputeRestoreEnabled();
+    }
+
+    private static int RestoreKindIndex(string? token)
+    {
+        for (var i = 0; i < RestoreKinds.Count; i++)
+            if (RestoreKinds[i].Token == token) return i;
+        return -1;
+    }
+
+    /// Whether the picked snapshot's kind box is ticked; a kind with no box is not
+    /// the checkboxes' to refuse (mirrors web's <c>selectedKindTicked</c>).
+    private bool SelectedKindTicked()
+    {
+        var i = RestoreKindIndex(SelectedRestoreSnapshot?.Kind);
+        return i < 0 || _restoreKindTicked[i];
+    }
 
     /// True while a restore is dispatching (disables the confirm button).
     [ObservableProperty] private bool _restoreInProgress;
@@ -1438,6 +1725,7 @@ public partial class BackupsViewModel : ViewModelBase
             SelectedRestoreSnapshot is not null
             && !string.IsNullOrEmpty(RestoreConfirmInput)
             && RestoreConfirmInput == SelectedRestoreSnapshot.Id.ToString()
+            && SelectedKindTicked()
             && !RestoreInProgress;
     }
 
@@ -1449,16 +1737,12 @@ public partial class BackupsViewModel : ViewModelBase
         ErrorMessage = null;
         await LoadRestoreHistoryAsync();
 
-        // Local snapshot picker (the wired restore source).
+        // Local snapshot picker (the wired restore source). Auto-select the first
+        // so the friction bar has a target (the picker defaults to the listed
+        // snapshot; mirrors android/linux).
         try
         {
-            var snaps = await _nest.MessageKindSnapshotListAsync();
-            RestoreSnapshots.Clear();
-            foreach (var s in snaps)
-                RestoreSnapshots.Add(new RestoreSnapshotOption(s.id, SnapshotLabel(s)));
-            // Auto-select the first so the friction bar has a target (the picker
-            // defaults to the listed snapshot; mirrors android/linux).
-            SelectedRestoreSnapshot = RestoreSnapshots.Count > 0 ? RestoreSnapshots[0] : null;
+            FillRestoreSnapshots(await _nest.MessageKindSnapshotListAsync(), keep: null);
         }
         catch (Exception ex)
         {
@@ -1475,6 +1759,47 @@ public partial class BackupsViewModel : ViewModelBase
         {
             HasDestinations = false;
         }
+    }
+
+    /// <summary>Raised after <see cref="RestoreSnapshots"/> was re-read under a
+    /// mutating snapshot gesture: the page re-points its picker at
+    /// <see cref="SelectedRestoreSnapshot"/>, which the refill may have moved.</summary>
+    public event Action? RestoreSnapshotsReread;
+
+    /// Re-read the local-snapshot picker after a gesture that changed which
+    /// snapshots exist (<see cref="MutateAsync"/>). The user's pick stays while it
+    /// is still listed, else falls back to the first, as on page entry. A failed
+    /// read keeps what the picker already paints and raises nothing — the gesture
+    /// itself succeeded, and the page's next whole read reports a real fault.
+    private async Task RereadRestoreSnapshotsAsync()
+    {
+        IReadOnlyList<FfiSnapshotSummary> snaps;
+        try
+        {
+            snaps = await _nest.MessageKindSnapshotListAsync();
+        }
+        catch
+        {
+            return;
+        }
+        FillRestoreSnapshots(snaps, keep: SelectedRestoreSnapshot?.Id);
+        RestoreSnapshotsReread?.Invoke();
+    }
+
+    /// Repopulate <see cref="RestoreSnapshots"/> and select the snapshot
+    /// <paramref name="keep"/> names, else the first listed one.
+    private void FillRestoreSnapshots(IReadOnlyList<FfiSnapshotSummary> snaps, long? keep)
+    {
+        RestoreSnapshots.Clear();
+        foreach (var s in snaps)
+            RestoreSnapshots.Add(new RestoreSnapshotOption(s.id, SnapshotLabel(s), s.messageKind));
+        // The refill holds new instances, and the picker matches its selection by
+        // instance; a record equal to the old pick would be skipped as no change,
+        // leaving the selection on an instance the list no longer holds. Clear
+        // first so the assignment below always lands.
+        SelectedRestoreSnapshot = null;
+        SelectedRestoreSnapshot = RestoreSnapshots.FirstOrDefault(o => o.Id == keep)
+            ?? RestoreSnapshots.FirstOrDefault();
     }
 
     /// Load (or reload) just the restore-history rows + their forensic divergence.
@@ -1564,10 +1889,15 @@ public partial class BackupsViewModel : ViewModelBase
         }
     }
 
-    /// "{kind} (#{id})" via the shared `snapshotRestoreOptionLabel` — matches
-    /// linux/android/tui/apple, which consume the same logic.
-    private static string SnapshotLabel(FfiSnapshotSummary s) =>
-        FaunaFfiMethods.SnapshotRestoreOptionLabel(s.messageKind, s.id);
+    /// "{kind} (#{id})" via the shared `snapshotRestoreOptionLabel`, the kind named
+    /// by its checkbox label (`card` → "Contacts"), the raw token only for a kind
+    /// with no box — matches linux/android/tui/apple/web.
+    private static string SnapshotLabel(FfiSnapshotSummary s)
+    {
+        var i = RestoreKindIndex(s.messageKind);
+        var kind = i < 0 ? s.messageKind : Strings.Get(RestoreKinds[i].LabelKey);
+        return FaunaFfiMethods.SnapshotRestoreOptionLabel(kind, s.id);
+    }
 
     /// "{collection} · {mua} · client modseq {client} / server modseq {server} ·
     /// ~{lost} writes lost"; mua None → "(unknown)" (backups.md § Restore divergence).
@@ -1658,6 +1988,7 @@ public partial class BackupsViewModel : ViewModelBase
         await DispatchAsync(m => m.DeleteSnapshotImmediate(
             target, ImmediateDeleteConfirmInput, ImmediateDeleteAcknowledgeInput));
         CloseImmediateDeleteIfLanded(target);
+        await RereadRestoreSnapshotsAsync();
     }
 
     /// Close the friction-bar modal once the row it targets has actually left the

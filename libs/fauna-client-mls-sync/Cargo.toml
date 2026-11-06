@@ -66,7 +66,7 @@ tokio = { version = "1", default-features = false, features = ["time", "rt", "sy
 # `fauna-log`'s ring, and thence every app's Settings -> Logs page), so its test
 # asserts it through a real subscriber filtered at `info` -- the filter the ring
 # itself runs. Native-only: the crate's wasm arm has no such suite.
-tracing-subscriber = { workspace = true }
+fauna-test-tracing = { path = "../fauna-test-tracing" }
 
 [dev-dependencies]
 # `ProviderReplica::unexaminable_for_test` — the snapshot shape the seating

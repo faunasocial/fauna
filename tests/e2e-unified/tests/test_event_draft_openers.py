@@ -150,18 +150,23 @@ def test_a_half_written_event_is_still_in_the_form_each_time_it_is_opened_again(
 # account switch closes the compose dialog the departing session left open
 # (`views/events/drafts.rs::retire_open_form` — the previous test's dialog used to
 # stand across this test's login and take its typing). android has the button,
-# awaiting an A2-lane emulator run; windows, macos and ios follow on their own
-# platforms.
+# awaiting an A2-lane emulator run; macos and ios joined 2026-10-23 (shared
+# `EventsVM.discardCompose`); windows has the button (`EventsPage` DiscardEventButton)
+# and joins once the day-cell double-click leg runs green on a box whose automation
+# session is attached (that leg needs physical SendInput, win.md § SendInput).
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 def test_a_day_cell_start_a_created_and_a_discarded_event_leave_the_next_form_blank(
     app, request, nest_instance
 ):
     """Outcome 12, all three halves (``events.md`` § Persistence: "A successful
     create, or an explicit discard, clears the rail"): a day-cell start opens an
     empty form at that day, the form after a created event is blank, and the form
-    after a discarded event (``event-form-discard``) is blank. tui and web so far;
-    the other columns join through their discard-control lift."""
+    after a discarded event (``event-form-discard``) is blank. Columns
+    join through their discard-control lift (see the marks)."""
     _fresh_account_with_calendar(app, request, nest_instance)
     ev = app.events
     driver = app.driver

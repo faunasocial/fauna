@@ -78,6 +78,23 @@ struct AdminShellView: View {
     /// path), so it is omitted here. The Nest page's Factory Reset re-onboard
     /// touches App-owned onboarding state, so the shared view delegates it via the
     /// `onFactoryReset` closure wired by `FaunaApp` through `appState.onFactoryReset`.
+    /// The Nest page. The Retire section's entry (`admin-nest-retire-button`) is
+    /// compiled out of the Fauna Kids build with the rest of nest setup.
+    private var adminNest: AdminNestView {
+        #if FAUNA_KIDS
+        AdminNestView(
+            reloadToken: appState.navGeneration,
+            onFactoryReset: { claimCode in appState.onFactoryReset?(claimCode) }
+        )
+        #else
+        AdminNestView(
+            reloadToken: appState.navGeneration,
+            onFactoryReset: { claimCode in appState.onFactoryReset?(claimCode) },
+            onRetire: { appState.onRetire?() }
+        )
+        #endif
+    }
+
     @ViewBuilder
     private func pageView(_ page: AdminPage) -> some View {
         switch page {
@@ -92,14 +109,16 @@ struct AdminShellView: View {
                 .navigationTitle(page.label)
                 .navigationBarTitleDisplayMode(.inline)
         case .nest:
-            AdminNestView(reloadToken: appState.navGeneration) { claimCode in
-                appState.onFactoryReset?(claimCode)
-            }
+            adminNest
             .navigationTitle(page.label)
             .navigationBarTitleDisplayMode(.inline)
         #if !FAUNA_KIDS
         case .mail:
             AdminMailView(reloadToken: appState.navGeneration)
+                .navigationTitle(page.label)
+                .navigationBarTitleDisplayMode(.inline)
+        case .mailReports:
+            AdminMailReportsView(reloadToken: appState.navGeneration)
                 .navigationTitle(page.label)
                 .navigationBarTitleDisplayMode(.inline)
         case .calendar:
@@ -139,7 +158,10 @@ struct AdminShellView: View {
             // The nest's `fauna_log` ring over `fauna.admin.logs` — same shared
             // `LogsView` as the client Logs page (observability.md § Surfaces).
             LogsView(
-                source: .admin(load: { try await client?.api.adminClient().logs() ?? [] }),
+                source: .admin(
+                    load: { try await client?.api.adminClient().logs() ?? [] },
+                    audit: { try await client?.api.adminClient().auditLog() }
+                ),
                 headingId: Ids.adminLogsHeading
             )
             .navigationTitle(page.label)

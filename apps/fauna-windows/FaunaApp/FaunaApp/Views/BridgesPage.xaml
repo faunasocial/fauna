@@ -29,9 +29,46 @@
                 <DataTemplate x:DataType="models:BridgeInfo">
                     <controls:BridgeCard Bridge="{x:Bind}" ActionClick="BridgeAction_Click"
                                          SettingChanged="BridgeSetting_Changed"
-                                         SourceAskClick="BridgeSourceAsk_Click" />
+                                         SourceAskClick="BridgeSourceAsk_Click"
+                                         FollowRequestAnswer="BridgeFollowRequest_Answer"
+                                         FollowAdd="BridgeFollow_Add"
+                                         FollowRemove="BridgeFollow_Remove" />
                 </DataTemplate>
             </ListView.ItemTemplate>
+            <!-- The admin's hosted plugins (bridges.md § Hosted plugins on this page), after
+                 the bridges, as on tui (`bridges.rs::plugin_elements`). Collapsed (pruned from
+                 UIA) unless the admin gate passes. Rows are built in code-behind (RenderPlugins):
+                 each `bridge-plugin-item` is a Grid root with a non-empty Name, its leaves
+                 scoped inside it. -->
+            <ListView.Footer>
+                <StackPanel>
+                    <!-- Every account's plugin settings cards (third-party.md § The principal
+                         model → Hosted principals), after the bridges: one more `bridge-card`
+                         per installed plugin, its `bridge-action-button` Connect/Disconnect
+                         carrying `client_id` + `bound`, its settings through the one settings
+                         renderer (BridgeSettingRows). Built in code-behind (RenderPluginCards),
+                         as on tui (`bridges.rs::plugin_card_elements`). -->
+                    <StackPanel x:Name="PluginCardsHost" />
+                    <TextBlock x:Name="PluginBindOpenedText" Opacity="0.7" TextWrapping="Wrap"
+                               Margin="12,4,0,0" Visibility="Collapsed" />
+                    <StackPanel x:Name="PluginsSection" Spacing="8" Margin="0,16,0,0"
+                                Visibility="Collapsed" MaxWidth="700" HorizontalAlignment="Left">
+                        <TextBlock x:Name="PluginsHeading" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock x:Name="PluginsEmpty" Opacity="0.7" Visibility="Collapsed" />
+                        <StackPanel x:Name="PluginsHost" Spacing="8" />
+                        <TextBox x:Name="PluginInstallUrlBox"
+                                 AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgePluginInstallUrl}"
+                                 TextChanged="PluginInstallUrl_TextChanged" />
+                        <Button x:Name="PluginInstallButton"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgePluginInstallSubmit}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                IsEnabled="False"
+                                Click="PluginInstall_Click" />
+                        <TextBlock x:Name="PluginInstallOpenedText" Opacity="0.7" TextWrapping="Wrap"
+                                   Visibility="Collapsed" />
+                    </StackPanel>
+                </StackPanel>
+            </ListView.Footer>
         </ListView>
 
         <ProgressRing Grid.Row="1" x:Name="LoadingRing"

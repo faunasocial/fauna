@@ -77,6 +77,7 @@ public sealed partial class EventsPage : Page
         EventEndBox.PlaceholderText = "YYYY-MM-DDTHH:MM";
         EventLocationBox.PlaceholderText = S.Get("events/location_placeholder");
         CreateEventButton.Content = S.Get("common/create");
+        DiscardEventButton.Content = S.Get("events/discard_event");
         CalendarImportFileBox.PlaceholderText = S.Get("media/choose_file");
         CalendarImportBrowseButton.Content = S.Get("devices/sync_locations/browse");
         CalendarImportButton.Content = S.Get("events/import_ics");
@@ -124,13 +125,6 @@ public sealed partial class EventsPage : Page
             _page.EventDescriptionBox.Text = draft.description;
             _page.EventLocationBox.Text = draft.location;
         });
-
-        public bool HasAuthoredText() => RunOnUiThread(() =>
-            !string.IsNullOrEmpty(_page.EventSummaryBox.Text)
-            || !string.IsNullOrEmpty(_page.EventStartBox.Text)
-            || !string.IsNullOrEmpty(_page.EventEndBox.Text)
-            || !string.IsNullOrEmpty(_page.EventDescriptionBox.Text)
-            || !string.IsNullOrEmpty(_page.EventLocationBox.Text));
 
         /// <summary>Run <paramref name="func"/> on this page's UI thread, blocking the
         /// caller until it completes — a synchronous WinUI cross-thread bridge for a
@@ -253,9 +247,7 @@ public sealed partial class EventsPage : Page
         if (_viewModel.CalendarRows.Count > 0)
             CalendarList.Visibility = Visibility.Visible;
         RenderCalendarFileControls();
-        AppDataSnapshot.SetEvents(_viewModel.Events.Select(e =>
-            new AppDataSnapshot.EventSnapshot(e.Id, e.Summary,
-                e.Start.ToString("o"), e.End.ToString("o"), e.RsvpStatus)));
+        AppDataSnapshot.SetEvents(_viewModel.Events);
         StartPoll();
 
         // Refused scheduling changes (events.md § Refused scheduling changes): read
@@ -270,8 +262,11 @@ public sealed partial class EventsPage : Page
         _viewModel.WatchStore(() => Manager);
     }
 
-    private ConversationsManager Manager =>
-        _clients?.ConvSession?.Manager() ?? ConversationsManagerHost.Instance;
+    /// <summary>Null once the handed-over session is retired (an actor change landed
+    /// before the frame took this page away) — see
+    /// <see cref="ConversationsManagerHost.ManagerFor"/>.</summary>
+    private ConversationsManager? Manager =>
+        ConversationsManagerHost.ManagerFor(_clients?.ConvSession, "calendar refused changes");
 
     /// <summary>Paint the refused-change list: absent entirely (Collapsed) when
     /// empty, so the everyday page is unchanged.</summary>
@@ -341,11 +336,9 @@ public sealed partial class EventsPage : Page
         else if (_viewModel.ViewMode == FfiCalendarViewMode.Week) BuildWeekGrid();
         else if (_viewModel.ViewMode == FfiCalendarViewMode.Day) BuildDayTimeline();
 
-        // Refresh the e2e snapshot off the now-current Events (same projection as
-        // Page_Loaded) so the state protocol sees the externally-added event.
-        AppDataSnapshot.SetEvents(_viewModel.Events.Select(ev =>
-            new AppDataSnapshot.EventSnapshot(ev.Id, ev.Summary,
-                ev.Start.ToString("o"), ev.End.ToString("o"), ev.RsvpStatus)));
+        // Refresh the e2e snapshot off the now-current Events (as Page_Loaded does)
+        // so the state protocol sees the externally-added event.
+        AppDataSnapshot.SetEvents(_viewModel.Events);
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -603,6 +596,19 @@ public sealed partial class EventsPage : Page
         EventCreationPanel.Visibility =
             EventCreationPanel.Visibility == Visibility.Visible
                 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // `event-form-discard` — the explicit discard (events.md § Persistence): blank the
+    // five fields, clear the draft rail, close. A plain close/leave keeps the draft.
+    private void DiscardEvent_Click(object sender, RoutedEventArgs e)
+    {
+        EventSummaryBox.Text = "";
+        EventStartBox.Text = "";
+        EventEndBox.Text = "";
+        EventDescriptionBox.Text = "";
+        EventLocationBox.Text = "";
+        _ = App.EventDrafts?.ClearAsync();
+        EventCreationPanel.Visibility = Visibility.Collapsed;
     }
 
     private async void CreateEventInline_Click(object sender, RoutedEventArgs e)

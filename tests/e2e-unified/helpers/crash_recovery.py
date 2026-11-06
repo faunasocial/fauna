@@ -51,9 +51,9 @@ CRASH_NEST_RUST_LOG = "info,fauna_nest=debug"
 # The dispatch-receipt beacon (dispatch_core.rs). `kind=` is the WS-RPC kind.
 DISPATCH_BEACON = "ws-rpc dispatch received"
 
-# The fixed e2e device id a `session` patch carries — now owned by
-# `helpers.e2e_session` (re-exported here for this module's existing callers).
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID  # noqa: E402
+# The per-app e2e login device id a `session` patch carries — owned by
+# `helpers.e2e_session`.
+from helpers.e2e_session import e2e_login_device_id  # noqa: E402
 
 
 # tracing's fmt layer writes ANSI color codes even into the nest's log FILE;
@@ -282,7 +282,7 @@ def inject_admin_session(app, nest_url: str, admin_secret_hex: str, *,
             "authenticated": True,
             "node_url": nest_url,
             "secret_hex": admin_secret_hex,
-            "device_id": E2E_LOGIN_DEVICE_ID,
+            "device_id": e2e_login_device_id(app),
             # Matches the "admin" handle convention used elsewhere for an injected
             # admin session (e.g. test_account_switcher_*.py). A real admin who has
             # used the app normally always has a cached display handle by the time

@@ -117,9 +117,22 @@ public static class Strings
         var template = resolved == slashed ? msg.@key : resolved;
         if (msg.@args is null || msg.@args.Count == 0) return template;
 
-        var sb = new System.Text.StringBuilder(template);
-        foreach (var (name, value) in msg.@args) sb.Replace("{" + name + "}", value);
-        return sb.ToString();
+        // One shared single-pass fill: an arg holding `{other}` is data, never expanded.
+        return uniffi.fauna_ffi.FaunaFfiMethods.FillPlaceholders(template, msg.@args);
+    }
+
+    /// <summary>
+    /// A shared-Rust <see cref="uniffi.fauna_core.ComposedText"/> (an i18n key
+    /// plus args, with <c>nested</c> texts that fill args): every nested entry is resolved
+    /// FIRST and put in the args under its name (it wins over a plain arg of the same name),
+    /// then the outer template resolves. The C# twin of android's <c>resolveComposed</c> and
+    /// web's <c>resolveComposed</c>.
+    /// </summary>
+    internal static string Resolve(uniffi.fauna_core.ComposedText composed)
+    {
+        var args = new Dictionary<string, string>(composed.@text.@args ?? new Dictionary<string, string>());
+        foreach (var (name, nested) in composed.@nested) args[name] = Resolve(nested);
+        return Resolve(composed.@text with { @args = args });
     }
 
     /// <summary>
@@ -143,15 +156,14 @@ public static class Strings
         var template = resolved == slashed ? msg.@key : resolved;
         if (msg.@args is null || msg.@args.Count == 0) return template;
 
-        var sb = new System.Text.StringBuilder(template);
+        var looked = new Dictionary<string, string>();
         foreach (var (name, value) in msg.@args)
         {
             var argSlashed = value.Replace('.', '/');
             var argResolved = Get(argSlashed);
-            var argValue = argResolved == argSlashed ? value : argResolved;
-            sb.Replace("{" + name + "}", argValue);
+            looked[name] = argResolved == argSlashed ? value : argResolved;
         }
-        return sb.ToString();
+        return uniffi.fauna_ffi.FaunaFfiMethods.FillPlaceholders(template, looked);
     }
 
     /// <summary>
@@ -197,6 +209,24 @@ public static class Strings
             ["limit"] = Resolve(magnitude),
         };
         return Resolve(note with { @args = args });
+    }
+
+    /// <summary>
+    /// The `mail-settings-mailbox-quota` readout, fully composed — the C# twin of
+    /// shared Rust <c>mail_quota_text</c> (mirrors apple
+    /// <c>ValueFormat.mailQuotaText</c>). The two sizes are localized magnitudes, so
+    /// they are resolved FIRST and substituted into the sentence's
+    /// <c>{used}</c>/<c>{limit}</c> holes (the <see cref="CellValueText"/> two-level
+    /// shape); the message counts are already plain args.
+    /// </summary>
+    internal static string MailQuotaText(uniffi.fauna_client_mail_settings.MailQuotaDisplay display)
+    {
+        var args = new Dictionary<string, string>(display.@label.@args)
+        {
+            ["used"] = Resolve(display.@used),
+            ["limit"] = Resolve(display.@limit),
+        };
+        return Resolve(display.@label with { @args = args });
     }
 
     /// <summary>

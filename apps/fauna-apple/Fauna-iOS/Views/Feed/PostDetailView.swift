@@ -11,11 +11,15 @@ struct PostDetailView: View {
     /// The owner of the private-overlay projection the author's name is read
     /// through (`contacts.md` § The private overlay).
     @Environment(ConversationsVM.self) private var conversationsVM
+    /// The author line's door (`post-author`'s detail twin) navigates through it.
+    @Environment(AppState.self) private var appState
 
     /// The reply-compose target — mirrors `PostCardView.replyingTo` /
     /// macOS's `PostDetailSheet.replyingTo`.
     @State private var replyingTo: PostSummary?
     @Environment(\.dismiss) private var dismiss
+    /// The Bluesky thread page, presented over this detail (`FeedThreadView`).
+    @State private var showThread = false
 
     private var livePost: PostSummary { vm.livePost(for: post) }
 
@@ -23,6 +27,8 @@ struct PostDetailView: View {
         Group {
             if let reference = livePost.legalTakedownRef {
                 legalTakedownContent(reference)
+            } else if let reason = livePost.adminBlockReason, adminBlockInPlace(livePost.document) {
+                adminBlockContent(reason)
             } else {
                 // The region content plane's arm (region-blocking.md § Where it
                 // composes) — shared with macOS `PostDetailSheet`.
@@ -63,6 +69,13 @@ struct PostDetailView: View {
                 _ = await vm.resolveQuotedPost(qid)
             }
         }
+        // The remote author's byline (`ui/feed.md` § The read model): the card's
+        // identical guarded driver line — the label changes nowhere.
+        .task(id: livePost.homeNestUrl != nil && livePost.authorDisplay == nil) {
+            if livePost.homeNestUrl != nil && livePost.authorDisplay == nil {
+                await vm.resolveAuthorFace(post.postId)
+            }
+        }
         // Fire-once resolve, guarded on `tips == nil` — mirrors the list
         // card's identical `.task` in `PostCardView`.
         #if !FAUNA_EXCISE_PAYMENTS
@@ -92,6 +105,9 @@ struct PostDetailView: View {
         .sheet(item: $replyingTo) { post in
             FeedReplyDialog(post: post, vm: vm)
         }
+        .sheet(isPresented: $showThread) {
+            FeedThreadView(vm: vm, postId: post.postId)
+        }
     }
 
     /// A post taken down under a legal obligation (`moderation.md` § Categories &
@@ -110,6 +126,19 @@ struct PostDetailView: View {
         }
     }
 
+    /// A post this nest's admin blocked, read by anyone but its author
+    /// (`takedown-and-block.md` § Admin block of a reported item): the body is
+    /// withheld, so the shared notice stands in the body position.
+    private func adminBlockContent(_ reason: String) -> some View {
+        ScrollView {
+            automationText(Ids.feedPostDetailBody, adminBlockNoticeText(reason))
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        }
+    }
+
     private var normalPostContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -119,7 +148,9 @@ struct PostDetailView: View {
                     // nickname, else the public name, else the canonical short id —
                     // the same string the list card paints (mirrors macOS
                     // `MacFeedDetailView`).
-                    automationText(Ids.feedPostDetailAuthor, conversationsVM.postAuthorLabel(post))
+                    PostAuthorLine(
+                        id: Ids.feedPostDetailAuthor, label: conversationsVM.postAuthorLabel(post),
+                        onOpen: { appState.openAuthorProfile(actorId: post.author, home: post.homeNestUrl) })
                         .font(.subheadline.monospaced())
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -137,9 +168,7 @@ struct PostDetailView: View {
                     // detail paints what the list card paints, off the same live snapshot, so a room
                     // labeler's verdict folded onto an opened post (room-restricted-posts.md outcome 21)
                     // reaches the detail it was opened in.
-                    if let label = primaryContentLabel(labels: livePost.labels) {
-                        ContentLabelBadge(category: label.category)
-                    }
+                    PostDetailContentLabelBadge(labels: livePost.labels)
                     Spacer()
                     Text(ValueFormat.relativeTime(thenMs: post.timestamp))
                         .font(.caption)
@@ -151,6 +180,11 @@ struct PostDetailView: View {
                     .font(.body)
                     .accessibilityIdentifier(Ids.feedPostDetailBody)
                     .automationValue(Ids.feedPostDetailBody, text: { renderDocumentToPlaintext(document: livePost.document) })
+
+                // The author's own read of a blocked post keeps the body; the notice paints beside it.
+                if let reason = livePost.adminBlockReason {
+                    AdminBlockNoticeLine(reason: reason)
+                }
 
                 // Per-card reveal when the body carries ≥1 still-blocked remote image (D3). Tapping
                 // dispatches to the manager, which re-emits with `revealed = true`; `livePost`
@@ -180,17 +214,19 @@ struct PostDetailView: View {
                 // mutually exclusive with the image branch above, same fold. A tap plays it in
                 // place off the shared `playback_source` (§ D6c → Inline playback).
                 if let hash = documentMediaVideoHash(livePost.document) {
-                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash, home: blobHome) })
+                    VideoThumbnailView(hash: hash, resolve: { await vm.videoPlayback(hash, home: blobHome) })
                 } else if let path = documentMediaProxiedVideoPath(livePost.document) {
-                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
-                    VideoThumbnailView(proxiedPath: path)
+                    // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path; a tap
+                    // plays it through the nest's media proxy on the shared ticket.
+                    VideoThumbnailView(proxiedPath: path, resolve: { await vm.proxiedVideoPlayback(path) })
                 }
 
                 // Quoted post — the document's folded `QuotedPost` block (render-model.md § D6).
                 if let quote = documentQuotedPost(livePost.document) {
                     QuotedPostCard(author: shortId(hex: quote.author), postBody: quote.body, verification: quote.verification,
                                authoringOrigin: quote.authoringOrigin,
-                               legalTakedownRef: quote.legalTakedownRef, notFound: quote.notFound)
+                               legalTakedownRef: quote.legalTakedownRef, notFound: quote.notFound,
+                               adminBlockReason: quote.adminBlockReason)
                 }
 
                 // Link previews — the document's folded `LinkPreview` blocks (render-model.md § D4).
@@ -225,6 +261,16 @@ struct PostDetailView: View {
                     onLike: { Task { await vm.likePost(postId: post.postId) } }
                 )
                 .padding(.top, 8)
+
+                // The same per-emoji reaction pills as the list card, off the
+                // re-read live snapshot (feed.md *Reaction posts count and paint*).
+                PostReactionPills(reactions: livePost.reactions) { emoji in
+                    Task { await vm.reactPost(postId: post.postId, emoji: emoji) }
+                }
+
+                // The Bluesky thread door (bridges.md § Bluesky-native thread view) —
+                // shown only for a post the shared `post_offers_thread_view` names.
+                FeedViewThreadButton(post: livePost) { showThread = true }
 
                 // The tip surface (monetization.md § Tips) — mirrors the list
                 // card (`PostCardView`), off the re-read live snapshot.

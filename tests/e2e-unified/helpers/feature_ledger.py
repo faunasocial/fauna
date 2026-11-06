@@ -49,8 +49,10 @@ than inline in the hooks:
   test observed. The writer still DECLINES — tallied and printed, never silent —
   in exactly three shapes, each of which would otherwise name no artifact or the
   wrong one: no booted container reported its identity; more than one distinct
-  artifact was observed (a record names exactly one); the image reports no commit
-  sha (a hand-built image). Owner of the class and the rulings:
+  BUILD was observed (a record names exactly one — and an artifact is a build,
+  the `(version, commit)` the container reported, so two image ids of one build
+  are one artifact: § The ledger, *One artifact is one build*); the image
+  reports no commit sha (a hand-built image). Owner of the class and the rulings:
   `feature-catalog.md` § The ledger; `testing.md` § Default app and nest mode,
   exclusion class (7).
 * **A record from a DIRTY tree says so** (§ The ledger, *Dirty trees*). `head_commit()`
@@ -114,6 +116,15 @@ _apps_this_test: set = set()
 #: empty for an item with no app parametrization. Set by conftest at setup.
 _param_apps_this_test: set = set()
 _skip_class: str | None = None
+#: Set by `app_surface._unbuilt` immediately before its `--strict-app` `pytest.fail`:
+#: the red that follows is a refused unbuilt surface, not a failed test body, and the
+#: per-report hook records it as `skipped`/`unbuilt` (§ The ledger, `outcome`).
+_strict_refusal: bool = False
+#: The surface-registry key the firing `require_surface` named, or `None`
+#: (§ The ledger, `surface`), and every key the test's calls reached, fired or not,
+#: in first-reached order (`surfaces`).
+_surface: str | None = None
+_surfaces_this_test: list = []
 #: Why this test's outcome cannot be attributed to the run's artifact, or `None`.
 #: Set per test by conftest from the fixture closure (`nest_surface.OWN_IMAGE_FIXTURES`).
 _own_artifact: str | None = None
@@ -183,6 +194,34 @@ def note_skip_class(kind: str) -> None:
     _skip_class = kind
 
 
+def note_strict_refusal() -> None:
+    """The unbuilt gate is about to FAIL the test under `--strict-app` (no body ran)."""
+    global _strict_refusal
+    _strict_refusal = True
+
+
+def strict_refusal_this_test() -> bool:
+    return _strict_refusal
+
+
+def note_surface(key: str, *, fired: bool = False) -> None:
+    """A `require_surface` call (or the `requires_surface` marker) reached `key`;
+    `fired` when it is the gate that skipped (convention 7, *The surface registry*)."""
+    global _surface
+    if key not in _surfaces_this_test:
+        _surfaces_this_test.append(key)
+    if fired:
+        _surface = key
+
+
+def surface_this_test() -> str | None:
+    return _surface
+
+
+def surfaces_this_test() -> list:
+    return list(_surfaces_this_test)
+
+
 def note_own_artifact(reason: str) -> None:
     """This test stands up its OWN nest artifact, so its record must name THAT.
 
@@ -202,10 +241,14 @@ def note_own_artifact(reason: str) -> None:
 
 
 def reset_test_state() -> None:
-    global _skip_class, _own_artifact, _own_artifact_tallied, _closure_this_test
+    global _skip_class, _own_artifact, _own_artifact_tallied, _closure_this_test, _surface
+    global _strict_refusal
     _apps_this_test.clear()
     _param_apps_this_test.clear()
     _skip_class = None
+    _strict_refusal = False
+    _surface = None
+    _surfaces_this_test.clear()
     _own_artifact = None
     _own_artifact_tallied = False
     _closure_this_test = frozenset()
@@ -321,21 +364,41 @@ def own_artifact_resolution() -> tuple:
     """`(provenance, "")` — the ONE artifact an own-artifact test observed — or
     `(None, why)` when the writer must decline.
 
+    The artifact a record names is a BUILD — the `(version, commit)` its
+    container reported, which is all the stamp `<version>-dev+<commit> docker`
+    can say — so every image id observed is folded by what it reported first
+    (`feature-catalog.md` § The ledger, *One artifact is one build*): the updater
+    bench republishes one saved image under several version labels, a new config
+    digest and image id over the very same binary, and a test it moves the nest
+    across sees two image ids of one build. The registry digest, which CAN tell
+    such images apart, survives the fold only when every image observed carries
+    the same one; otherwise it is `None`, as for a built-not-pulled image — no
+    single digest names what was observed, and the field never guesses.
+
     The three declines are the three shapes in which a record would name no
-    artifact, or the wrong one (`feature-catalog.md` § The ledger): no booted
-    container reported its identity (a fixture that never went through
-    `wait_for_health`); more than one distinct artifact was observed (a record
-    names exactly one, and picking would be a guess); the image reports no commit
-    sha (a hand-built image — `dev` / `unknown` — whose record could not say what
-    was built).
+    artifact, or the wrong one: no booted container reported its identity (a
+    fixture that never went through `wait_for_health`); more than one distinct
+    BUILD was observed (a record names exactly one, and picking would be a
+    guess); the image reports no commit sha (a hand-built image — `dev` /
+    `unknown` — whose record could not say what was built).
     """
     observed = artifacts_this_test()
     if not observed:
         return None, "no container it booted reported its identity through wait_for_health"
-    if len(observed) > 1:
-        return None, ("it observed {} distinct artifacts ({}) and a record names exactly one"
-                      .format(len(observed), ", ".join(sorted(observed))))
-    provenance = next(iter(observed.values()))
+    builds: dict = {}
+    for provenance in observed.values():
+        key = (provenance.get("version") or "", provenance.get("commit") or "")
+        builds.setdefault(key, []).append(provenance)
+    if len(builds) > 1:
+        names = sorted(f"{v or '?'}+{c[:8] if c else '?'}" for v, c in builds)
+        return None, ("it observed {} distinct builds ({}) and a record names exactly one"
+                      .format(len(builds), ", ".join(names)))
+    images = next(iter(builds.values()))
+    digests = {p.get("image_digest") for p in images}
+    provenance = dict(images[0])
+    if len(images) > 1:
+        provenance["image_id"] = None
+        provenance["image_digest"] = next(iter(digests)) if len(digests) == 1 else None
     commit = provenance.get("commit") or ""
     if not _SHA_RE.match(commit):
         return None, (f"its image reports commit={commit!r} — a build that names no "
@@ -496,7 +559,8 @@ def note_collected(slug: str, node_id: str) -> None:
 def record(app: str, slug: str, node_id: str, *, outcome: str, skip_class: str | None,
            version: str, commit: str, base: str | None, image_digest: str | None,
            nest_mode: str, record_stamp: str, dirty: bool,
-           today: str | None = None) -> None:
+           today: str | None = None, surface: str | None = None,
+           surfaces=()) -> None:
     """One observation. The provenance is the RECORD's — the run's for an ordinary
     test, the booted container's for an own-artifact one — which is why the stamp
     is passed per record rather than read from the run. `dirty` is the record's
@@ -504,13 +568,19 @@ def record(app: str, slug: str, node_id: str, *, outcome: str, skip_class: str |
     (the image is built; this checkout's edits are not in it). So is `base`: the
     merge-base of THIS record's commit with `origin/main` (*Rebased commits*), the
     run's HEAD's for an ordinary test and the image commit's for an own-artifact
-    one; `None` means unknown, and is written as `null` rather than dropped."""
+    one; `None` means unknown, and is written as `null` rather than dropped.
+
+    `surface` / `surfaces` are the surface-registry keys (§ The ledger): the key the
+    firing `require_surface` named, on a `skipped: unbuilt` record, and every key the
+    test's calls reached. Both are ADDITIVE — written only when there is one, so a
+    record of the pre-registry `skip_unbuilt` form, or of a test that reached no
+    registry gate, carries neither, exactly as a record written before them."""
     key = (app, slug, node_id)
     previous = _records.get(key)
     _seen.setdefault((app, slug), set()).add(node_id)
     if previous and _SEVERITY.get(previous["outcome"], 9) <= _SEVERITY.get(outcome, 9):
         return  # a worse (or equal) outcome already stands for this key this session
-    _records[key] = {
+    rec = {
         "outcome": outcome,
         "skip_class": skip_class,
         "stamp": record_stamp,
@@ -523,6 +593,11 @@ def record(app: str, slug: str, node_id: str, *, outcome: str, skip_class: str |
         "date": today or date.today().isoformat(),
         "platform": host_platform(),
     }
+    if surface and outcome == "skipped" and skip_class == UNBUILT:
+        rec["surface"] = surface
+    if surfaces:
+        rec["surfaces"] = list(surfaces)
+    _records[key] = rec
 
 
 def _catalog_pages(repo: Path = REPO):
@@ -553,14 +628,14 @@ def contract_surfaces(repo: Path = REPO) -> dict:
     be complete against the feature's `[app]` witnesses, never against its `[nest]`
     ones, which no app run records.
 
-    ⚠ `scan_app_marks` below AST-parses every test module in the tree, so this is
+    ⚠ `scan_marks` below AST-parses every test module in the tree, so this is
     seconds, not milliseconds — call it only when the per-column split is what you
     need. `known_slugs` used to, and did not (see its own note).
     """
     fc, pages = _catalog_pages(repo)
     if pages is None:
         return None
-    marks = fc.scan_app_marks(repo)
+    marks, _surfaces, platform_marks = fc.scan_marks(repo)
     return {p.slug: {
         "app": set(p.surface_tests("app")),
         NEST: set(p.surface_tests(NEST)),
@@ -569,6 +644,17 @@ def contract_surfaces(repo: Path = REPO) -> dict:
         # `app` set above is the union across all seven and stays for callers asking
         # about the contract rather than about a column.
         "app_by_column": {app: set(p.surface_tests("app", app, marks)) for app in fc.APPS},
+        # The per-(surface, platform) scopes and the legs they form (§ The ledger,
+        # *Stale records*, rulings (h) and (i)): a witness under `tests/platform/<os>/`
+        # or carrying `@pytest.mark.host_platform` runs on those OSes alone, so a
+        # platform's set is the citations whose host platforms include it, and the
+        # surface is complete once every leg holds a stamp. The flat sets above are
+        # the whole contract and stay for callers asking about it.
+        "nest_by_platform": fc.scope_by_platform(p, NEST),
+        "nest_legs": fc.legs(p, NEST),
+        "app_by_column_platform": {app: fc.scope_by_platform(p, app, marks, platform_marks)
+                                   for app in fc.APPS},
+        "app_legs": {app: fc.legs(p, app, marks, platform_marks) for app in fc.APPS},
     } for p in pages}
 
 
@@ -600,7 +686,39 @@ def _load(path: Path) -> dict:
         return {}
 
 
-def cell_complete(app: str, slug: str, surfaces: dict) -> bool:
+def _scope(app: str, slug: str, surfaces: dict, platform_: str) -> set:
+    """The set a cell of `app` (a column, or `nest`) is judged against on `platform_`.
+
+    Every surface is observed in LEGS, one per platform group (§ The ledger, *Stale
+    records*, rulings (h) and (i)): a run is judged against its own platform's set,
+    and a platform on no leg (its set a sibling's contains outright) has no entry, so
+    it stamps nothing. A payload without the per-platform split is a hand-built one:
+    the per-column set — or, without that either, the flat one — stands, exactly as
+    an unmarked test is applicable to every column. `contract_surfaces` always
+    provides both splits."""
+    entry = surfaces.get(slug) or {}
+    if app == NEST:
+        by_platform = entry.get("nest_by_platform")
+        if by_platform is not None:
+            return by_platform.get(platform_) or set()
+        return entry.get(NEST) or set()
+    by_platform = (entry.get("app_by_column_platform") or {}).get(app)
+    if by_platform is not None:
+        return by_platform.get(platform_) or set()
+    by_column = entry.get("app_by_column")
+    return (by_column.get(app) if by_column is not None else entry.get("app")) or set()
+
+
+def _legs(app: str, slug: str, surfaces: dict):
+    """The legs `fold_platform_cells` folds a cell of `app` over — `None` for a
+    payload built without them (every platform present folds)."""
+    entry = surfaces.get(slug) or {}
+    if app == NEST:
+        return entry.get("nest_legs")
+    return (entry.get("app_legs") or {}).get(app)
+
+
+def cell_complete(app: str, slug: str, surfaces: dict, borrowed=frozenset()) -> bool:
     """Did this run observe the feature's WHOLE tagged set for this column?
 
     Only such a run may re-stamp the cell (§ Cell semantics), so the cell's stamp is
@@ -614,16 +732,13 @@ def cell_complete(app: str, slug: str, surfaces: dict) -> bool:
     therefore made every such cell permanently unstampable in every mode, which is
     what this reading is here to stop; § The two surfaces is explicit that an app
     outcome "counts for that column only".
+
+    `borrowed` — the members an EARLIER run observed at this run's own clean stamp
+    on this platform (`borrowable`; § Cell semantics, *one artifact, several runs*):
+    they count as collected and observed, because the observation is of one
+    artifact whichever invocation made it.
     """
-    entry = surfaces.get(slug) or {}
-    if app == NEST:
-        scope = entry.get(NEST) or set()
-    else:
-        # A payload with no per-column split is one built without marker knowledge;
-        # its flat set is then the honest answer, exactly as an unmarked test is
-        # applicable to every column. `contract_surfaces` always provides the split.
-        by_column = entry.get("app_by_column")
-        scope = (by_column.get(app) if by_column is not None else entry.get("app")) or set()
+    scope = _scope(app, slug, surfaces, host_platform())
     if not scope:
         return False
     # The set is the CONTRACT's, never this run's — intersecting the two would make
@@ -631,21 +746,63 @@ def cell_complete(app: str, slug: str, surfaces: dict) -> bool:
     # the whole-set rule exists to stop. Two conditions, both explicit: the run
     # SELECTED the whole set, and it OBSERVED an outcome for each of them (an
     # environment skip records nothing, so it fails the second and leaves the stamp).
-    return (_collected.get(slug, set()) >= scope
-            and _seen.get((app, slug), set()) >= scope)
+    borrowed = set(borrowed)
+    return ((_collected.get(slug, set()) | borrowed) >= scope
+            and (_seen.get((app, slug), set()) | borrowed) >= scope)
 
 
-def fold_platform_cells(platforms: dict) -> dict:
+def borrowable(app: str, slug: str, tests: dict, run_records, surfaces: dict) -> dict:
+    """`{node id: record}` — the members of this column's set this run did NOT
+    observe, whose ledger record on this run's platform carries one of this run's
+    own CLEAN stamps (§ Cell semantics, *one artifact, several runs*, ruled
+    2026-11-01).
+
+    Some sets cannot be collected by one invocation: conftest refuses a selection
+    mixing a re-timed drafts witness with production-window ones, so drafts-survive
+    was unstampable on every column. Two runs of one clean stamp observed one
+    artifact — the stamp names commit, mode and cleanliness — so together they are
+    the complete observation the whole-set rule asks for. A dirty stamp never lends
+    or borrows (its commit is a lower bound; two dirty runs of one HEAD may have
+    seen different edits), nor does another platform's record, nor another stamp.
+    `tests` is the ledger entry's `tests` map, `run_records` this run's records for
+    the (app, slug)."""
+    run_records = list(run_records)
+    clean = {r["stamp"] for r in run_records if r.get("stamp") and not r.get("dirty")}
+    if not clean:
+        return {}
+    platform_ = run_records[0]["platform"]
+    scope = _scope(app, slug, surfaces, platform_)
+    seen = _seen.get((app, slug), set())
+    out = {}
+    for node in scope - seen:
+        rec = (tests.get(node) or {}).get(platform_)
+        if rec and not rec.get("dirty") and rec.get("stamp") in clean:
+            out[node] = rec
+    return out
+
+
+def fold_platform_cells(platforms: dict, legs=None) -> dict:
     """One platform's stamp collides with another's exactly like one test's did
     (feature-catalog.md § The ledger, *Platform keying*): the top-level `cell`
     fields are the OLDEST of every platform's own complete-observation stamp —
     the same "shows the oldest artifact" rule the app/nest halves already
     follow — with every platform's own record kept underneath, undisturbed.
 
+    `legs` — every file (§ The ledger, *Stale records*, rulings (h) and (i);
+    `features_catalog.legs`): the platform groups that must EACH hold a stamp
+    before the surface is a complete observation of the whole set. A leg with no
+    stamped platform leaves the top level with no stamp, date or base and
+    `complete: False` — every reader that keys on `stamp` then reads that half as
+    unstamped, exactly as a cell the prune emptied — while every platform's own
+    stamp stays underneath for the day the missing leg lands. `None` (a hand-built
+    payload) folds every platform present.
+
     Public because the ledger's second committer — the merge-gate check pass, which
     upserts harvested cell stamps onto another commit's ledger (feature-catalog.md
     § The ledger, *Check-pass observations*) — must re-fold them exactly as this
     writer does."""
+    if legs is not None and any(not (set(leg) & set(platforms)) for leg in legs):
+        return {"complete": False, "platforms": platforms}
     oldest = min(platforms.values(), key=lambda c: (c.get("date") or "9999-99-99", c.get("stamp") or ""))
     return {**oldest, "platforms": platforms}
 
@@ -683,10 +840,13 @@ def write(ledger_dir: Path = LEDGER, *, today: str | None = None,
             existing_tests = entry.setdefault("tests", {})
             for node_id, by_platform in tests.items():
                 existing_tests.setdefault(node_id, {}).update(by_platform)
-            if cell_complete(app, slug, surfaces):
+            own = [rec for by_platform in tests.values() for rec in by_platform.values()]
+            borrowed = borrowable(app, slug, existing_tests, own, surfaces)
+            if cell_complete(app, slug, surfaces, borrowed):
                 # This run's own records all share one platform (a run has one
-                # host), so flattening loses nothing about THIS observation.
-                flat = [rec for by_platform in tests.values() for rec in by_platform.values()]
+                # host), and so do the borrowed ones (`borrowable` reads only this
+                # platform's slot), so flattening loses nothing about THIS observation.
+                flat = own + list(borrowed.values())
                 cell_stamp = cell_stamp_for(flat, repo=repo)
                 if cell_stamp:
                     # The cell's `dirty` and `base` are those of the records whose
@@ -703,7 +863,7 @@ def write(ledger_dir: Path = LEDGER, *, today: str | None = None,
                         "dirty": any(bool(r.get("dirty")) for r in stamped),
                         "base": next(iter(bases)) if len(bases) == 1 else None,
                     }
-                    entry["cell"] = fold_platform_cells(platforms)
+                    entry["cell"] = fold_platform_cells(platforms, legs=_legs(app, slug, surfaces))
         payload = {"schema": 2, "app": app, "features": existing}
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         written.append(path)
@@ -721,23 +881,47 @@ def cell_stamp_for(records, repo: Path = REPO) -> str | None:
     shows the OLDEST artifact — the one whose commit is a strict ancestor of every
     other's — the same "older of its stamps" rule the app and nest halves already
     follow, so the cell's claim is the weakest one the observation supports. Two
-    artifacts at one commit (the image IS HEAD, under two modes), unrelated
-    commits, or a commit this checkout cannot see leave the cell alone: the
-    per-test lines carry their own stamps and the previous cell stamp stands.
+    stamps at that one commit (the image IS HEAD, under two modes) resolve the same
+    way, by `_weakest_first`. Unrelated commits, or a commit this checkout cannot
+    see, leave the cell alone: the per-test lines carry their own stamps and the
+    previous cell stamp stands.
     """
     by_stamp: dict = {}
     for rec in records:
         if rec.get("stamp"):
-            by_stamp[rec["stamp"]] = rec.get("commit") or ""
+            by_stamp.setdefault(rec["stamp"], []).append(rec)
     if len(by_stamp) == 1:
         return next(iter(by_stamp))
-    commits = list(by_stamp.values())
-    if len(set(commits)) != len(commits) or not all(_SHA_RE.match(c) for c in commits):
+    commits = {recs[0].get("commit") or "" for recs in by_stamp.values()}
+    if not all(_SHA_RE.match(c) for c in commits):
         return None
-    for cell_stamp, commit in by_stamp.items():
-        if all(_is_ancestor(commit, other, repo) for other in commits if other != commit):
-            return cell_stamp
-    return None
+    oldest = next((commit for commit in commits
+                   if all(_is_ancestor(commit, other, repo) for other in commits - {commit})),
+                  None)
+    if oldest is None:
+        return None
+    at_oldest = [(s, recs) for s, recs in by_stamp.items() if recs[0].get("commit") == oldest]
+    return min(at_oldest, key=_weakest_first)[0]
+
+
+def _weakest_first(item) -> tuple:
+    """Sort key over `(stamp, its records)` at one commit, the weakest claim first.
+
+    § Cell semantics. A dirty stamp comes first, because the cell's `dirty` is read
+    from the records carrying the chosen stamp and a clean choice would hide dirty
+    witnesses. Then the order of `nest_mode.MODES`, which runs from the box's own
+    binary to a deployed nest. Then a `-dev` stamp before a bare one, because a bare
+    stamp claims the released artifact and an own-image witness never saw it. The
+    stamp itself settles the rest, so a choice never depends on record order.
+    """
+    from helpers.nest_mode import MODES
+
+    cell_stamp, recs = item
+    mode = recs[0].get("nest_mode")
+    bare = cell_stamp == f"{recs[0].get('version')} {mode}"
+    return (not any(r.get("dirty") for r in recs),
+            MODES.index(mode) if mode in MODES else len(MODES),
+            bare, cell_stamp)
 
 
 def _is_ancestor(older: str, newer: str, repo: Path = REPO) -> bool:

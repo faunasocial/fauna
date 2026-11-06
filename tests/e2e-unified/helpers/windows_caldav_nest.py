@@ -11,7 +11,14 @@ Windows binaries:
     and headless-claim admin (handle ``test@127.0.0.1:<port>``). The nest is
     content-ready from first boot (no-modes retirement, ratified 2026-07-12 —
     every nest is sealed at rest unconditionally, so there is no longer a
-    storage-mode commit gating CalDAV).
+    storage-mode commit gating CalDAV). The spawned nest speaks plain HTTP
+    under the harness-wide ``FAUNA_INSECURE_DISABLE_TLS``; a ``serve_tls``
+    caller — the installed ``FaunaNest`` service always, which is TLS-only —
+    is dialled over ``https://``/``wss://`` with the nest's self-signed floor
+    pinned by SPKI per authority, the pin read off the nest's own
+    ``<data_dir>/acme/fullchain.pem`` (:func:`floor_cert_spki`) — the posture a
+    same-box app holds (``nest/common.md`` § Same-box reach), never
+    verification off.
   Stage B — enable CalDAV (``fauna.bridges.set_caldav_enabled``, Admin) and mint
     a KNOWN-password PLAIN credential for the claimed actor, all over WS-RPC +
     the test-only ``seal-helper`` (the client-side wrapped-blob seal a Fauna
@@ -24,12 +31,14 @@ Windows binaries:
     (the floor-cert seal target), write the operator-hatch with the
     ``caldav_listen_https`` / ``imap_listen_*`` binds, and spawn it. The MDA
     fetches nest's self-signed **floor** cert (no ``mail.<domain>`` cert) and
-    serves CalDAV/IMAP off it; MUAs connect with ``verify=False``.
+    serves CalDAV/IMAP off it; MUAs connect with ``verify=False`` — they stand
+    for third-party clients, which click through the floor by their own UX;
+    the no-verification-off rule above is the nest leg's.
 
 Returns a :class:`WindowsCaldavNest` (nest_url, caldav_base_url, imaps_port,
 auth_username, password) + ``cleanup()``. The install-gated variant
-(increment 3) reuses Stages B–D and swaps only the Stage-A startup (the MSI's
-SCM services instead of a standalone spawn).
+(increment 3) reuses Stages A–B against the installed service and leaves
+Stage C to it (the MSI's SCM services instead of a standalone spawn).
 
 Prior art ported here (domainless variant — see each step):
   - ``conftest.py::_spawn_mda_bridge`` — the MDA enroll/spawn seam (keyfile,
@@ -96,7 +105,7 @@ def _repo_root() -> Path:
     return Path(os.path.normpath(out))
 
 
-def nest_svc_exe() -> Path:
+def nest_svc_exe(*, plain_http: bool = True) -> Path:
     """The Windows FaunaNest service binary (release preferred, debug fallback).
 
     fauna-nest-service is a ROOT-workspace member (the nested apps/fauna-windows
@@ -109,17 +118,20 @@ def nest_svc_exe() -> Path:
     by design — they build both arches from one machine, so their explicit triple is
     load-bearing.
 
-    The exe must be the ``test-hooks`` FLAVOR. This leg dials the service over
-    plain ``http://`` (:func:`start_windows_caldav_nest` below), which only works
-    because ``desktop_serve::run_serve_loop`` honours ``FAUNA_INSECURE_DISABLE_TLS``
-    — and that escape is compiled out of the release flavor (convention 15: the
+    For a ``plain_http`` dial (the default) the exe must be the ``test-hooks``
+    FLAVOR. That leg dials the service over plain ``http://``
+    (:func:`start_windows_caldav_nest` below), which only works because
+    ``desktop_serve::run_serve_loop`` honours ``FAUNA_INSECURE_DISABLE_TLS`` —
+    and that escape is compiled out of the release flavor (convention 15: the
     compile-time exclusion is the outer security boundary). A release-flavor exe
     therefore serves HTTPS from the self-signed floor and every request here dies
     on a transport error naming nothing about features. Since this helper *finds* a
     pre-built exe rather than building one, a stale one from before the flavor split
     — or from a plain ``cargo build -p fauna-nest-service`` — is the likely case,
     so it is worth naming precisely. Checked by the escape's own strings-witness,
-    which is the same artifact property convention 15 pins on the release side.
+    which is the same artifact property convention 15 pins on the release side. A
+    ``serve_tls`` caller (``plain_http=False``) dials the floor as the shipped
+    service is dialled, so either flavor serves it.
     """
     root = _repo_root() / "target"
     triple = "aarch64-pc-windows-msvc"
@@ -131,7 +143,7 @@ def nest_svc_exe() -> Path:
                     root / profile / "fauna-nest-svc.exe"):
             if not exe.exists():
                 continue
-            if b"FAUNA_INSECURE_DISABLE_TLS" not in exe.read_bytes():
+            if plain_http and b"FAUNA_INSECURE_DISABLE_TLS" not in exe.read_bytes():
                 pytest.skip(
                     f"{exe} is the RELEASE flavor (no test-hooks) — it serves HTTPS "
                     f"and this leg dials http://. Rebuild with `{build_cmd}`"
@@ -212,14 +224,15 @@ def _wait_tcp_accept(port: int, deadline: float) -> bool:
 
 
 def _wait_for_file(path: Path, deadline: float, proc: subprocess.Popen | None,
-                   log_path: Path) -> str:
+                   nest_data_dir: Path) -> str:
     """Wait for `path` to appear (and be non-empty).
 
     When `proc` is a Popen we own (the standalone-spawn path) its early exit is a
     hard failure surfaced with the log. When `proc` is None (the installed nest —
     the `FaunaNest` SCM service owns the process, not us) we just poll until the
     deadline; the service's own failure actions / SCM state are the liveness
-    signal, not a Popen handle."""
+    signal, not a Popen handle. The log quoted is :func:`nest_log_path`'s,
+    resolved at failure time (the service's daily file may appear late)."""
     while time.monotonic() < deadline:
         try:
             txt = path.read_text().strip()
@@ -228,19 +241,26 @@ def _wait_for_file(path: Path, deadline: float, proc: subprocess.Popen | None,
         except OSError:
             pass
         if proc is not None and proc.poll() is not None:
+            log = nest_log_path(nest_data_dir)
             raise RuntimeError(
                 f"fauna-nest-svc exited early (rc={proc.returncode}) before writing "
-                f"{path.name}.\nlog:\n{_log_tail(log_path)}"
+                f"{path.name}.\nlog ({log}):\n{_log_tail(log)}"
             )
         time.sleep(0.2)
+    log = nest_log_path(nest_data_dir)
     raise TimeoutError(
-        f"{path} did not appear within the deadline.\nlog:\n{_log_tail(log_path)}"
+        f"{path} did not appear within the deadline.\nlog ({log}):\n{_log_tail(log)}"
     )
 
 
 def _wait_metrics_healthz(port: int, timeout: float = 30.0) -> None:
     """Poll the MDA `/healthz` (HTTP metrics port) until 200, like
-    `conftest._wait_for_mail_bridge_metrics`."""
+    `conftest._wait_for_mail_bridge_metrics`.
+
+    Plain ``http://`` on purpose: this is the MDA's own loopback metrics
+    listener (``metrics_bind_addr``), which the Go bridge serves without TLS by
+    design (``cmd/fauna-mail-bridge/main.go``, ``metricsSrv.ListenAndServe()``)
+    — not a nest leg, so the nest leg's pinned-TLS rule does not reach it."""
     import urllib.request
 
     deadline = time.monotonic() + timeout
@@ -263,6 +283,38 @@ def _log_tail(path: Path, n: int = 4000) -> str:
         return path.read_text(errors="replace")[-n:]
     except OSError:
         return f"(no {path.name})"
+
+
+def nest_log_path(nest_data_dir: Path) -> Path:
+    """The nest log a failure quotes: our own stdout capture
+    (``<data_dir>/nest-svc.log``) when this helper spawned the nest, else the
+    service's own daily-rolling ``fauna_log`` file — the newest under
+    ``<data_dir>/logs/`` (``fauna-nest-service`` ``main.rs``; under the SCM
+    stdout is discarded, so that file is the installed nest's only log)."""
+    data_dir = Path(nest_data_dir)
+    own = data_dir / "nest-svc.log"
+    if own.exists():
+        return own
+    logs = data_dir / "logs"
+    try:
+        files = [p for p in logs.iterdir() if p.is_file()]
+    except OSError:
+        return logs
+    return max(files, key=lambda p: p.stat().st_mtime) if files else logs
+
+
+def floor_cert_spki(nest_data_dir: Path) -> str:
+    """``sha256(SubjectPublicKeyInfo)`` hex of the self-signed floor a nest
+    serves, read off its own ``<data_dir>/acme/fullchain.pem`` — the pin a
+    same-box caller trusts it by (``nest/common.md`` § Same-box reach). The
+    nest writes the floor before its listener binds (``ensure_floor_present``),
+    so it is present once the nest accepts TCP."""
+    from cryptography import x509
+
+    from helpers.tls_spki import spki_sha256_hex
+
+    pem = (Path(nest_data_dir) / "acme" / "fullchain.pem").read_bytes()
+    return spki_sha256_hex(x509.load_pem_x509_certificate(pem))
 
 
 def _terminate(proc: subprocess.Popen | None) -> None:
@@ -302,15 +354,25 @@ def _spawn_logged(argv: list[str], log_path: Path, *, cwd: str | None = None,
     return proc
 
 
-def spawn_nest_svc(data_dir: Path, port: int) -> subprocess.Popen:
+def spawn_nest_svc(data_dir: Path, port: int, *, serve_tls: bool = False) -> subprocess.Popen:
     """Spawn the FaunaNest service in its non-disruptive ``--foreground`` mode
     (no SCM registration) on loopback ``port`` against ``data_dir``. The single
     nest-svc spawn path, shared by the floor-cert test and the serving engine.
     The caller owns teardown; the process is also atexit-tracked (port_util) so a
-    pytest crash can't leak it. Use :func:`terminate` to stop it."""
+    pytest crash can't leak it. Use :func:`terminate` to stop it.
+
+    ``serve_tls`` drops the harness-wide ``FAUNA_INSECURE_DISABLE_TLS`` for this
+    child alone (as ``helpers/ap_nest.py`` does), so it serves its self-signed
+    floor over TLS the way the installed service always does."""
+    env = None
+    if serve_tls:
+        env = os.environ.copy()
+        env.pop("FAUNA_INSECURE_DISABLE_TLS", None)
     return _spawn_logged(
-        [str(nest_svc_exe()), "--foreground", "--port", str(port), "--data-dir", str(data_dir)],
+        [str(nest_svc_exe(plain_http=not serve_tls)), "--foreground", "--port", str(port),
+         "--data-dir", str(data_dir)],
         Path(data_dir) / "nest-svc.log",
+        env=env,
     )
 
 
@@ -329,10 +391,11 @@ class ProvisionedNest:
     the MDA-serving seam, so a failure localizes."""
 
     def __init__(self, *, nest_proc, port, nest_url, data_dir, db_path, admin,
-                 actor_id, auth_username, password, log_path, locator):
+                 actor_id, auth_username, password, log_path, locator,
+                 floor_spki=None):
         self.nest_proc = nest_proc
         self.port = port
-        self.nest_url = nest_url
+        self.nest_url = nest_url         # http:// (spawned) or https:// (serve_tls)
         self.data_dir = data_dir
         self.db_path = db_path
         self.admin = admin               # claim_admin dict (signing_key, token, ...)
@@ -341,13 +404,24 @@ class ProvisionedNest:
         self.password = password
         self.log_path = log_path
         self.locator = locator           # "127.0.0.1:<port>"
+        # The floor SPKI `locator` is pinned to while this nest stands (serve_tls
+        # only); every WS-RPC client dialling `nest_url` meanwhile rides the pin.
+        self.floor_spki = floor_spki
 
     def cleanup(self) -> None:
-        _terminate(self.nest_proc)
+        """Stop a nest this helper spawned (the installed SCM nest is the test's
+        to uninstall) and drop the authority's pin — a port outlives its nest."""
+        from common.auth import unpin_nest_spki
+
+        try:
+            _terminate(self.nest_proc)
+        finally:
+            if self.floor_spki is not None:
+                unpin_nest_spki(self.locator)
 
 
 def provision_windows_caldav_nest(
-    nest_data_dir: Path, *, password: str = DEFAULT_MUA_PASSWORD,
+    nest_data_dir: Path, *, password: str = DEFAULT_MUA_PASSWORD, serve_tls: bool = False,
 ) -> ProvisionedNest:
     """Stage A + B against a freshly-spawned **standalone** nest-svc on an
     ephemeral loopback port: spawn ``fauna-nest-svc.exe --foreground``, then
@@ -355,14 +429,17 @@ def provision_windows_caldav_nest(
     :func:`provision_caldav_on_running_nest`. The non-disruptive inner-loop path
     (temp data dir, ephemeral port). The install-gated e2e takes the *other*
     entry — it points :func:`provision_caldav_on_running_nest` at the already
-    -running ``FaunaNest`` SCM service instead of spawning one."""
+    -running ``FaunaNest`` SCM service instead of spawning one. ``serve_tls``
+    rehearses that entry's nest leg here: the spawned nest serves its floor over
+    TLS and is dialled pinned, as the installed one is."""
     nest_data_dir = Path(nest_data_dir)
     nest_data_dir.mkdir(parents=True, exist_ok=True)
     port = find_free_port()
-    nest_proc = spawn_nest_svc(nest_data_dir, port)
+    nest_proc = spawn_nest_svc(nest_data_dir, port, serve_tls=serve_tls)
     # provision_caldav_on_running_nest owns nest_proc teardown on any failure.
     return provision_caldav_on_running_nest(
         port=port, nest_data_dir=nest_data_dir, nest_proc=nest_proc, password=password,
+        serve_tls=serve_tls,
     )
 
 
@@ -372,6 +449,7 @@ def provision_caldav_on_running_nest(
     nest_data_dir: Path,
     nest_proc: subprocess.Popen | None = None,
     password: str = DEFAULT_MUA_PASSWORD,
+    serve_tls: bool = False,
     claim_timeout: float = 45.0,
     tcp_timeout: float = 30.0,
 ) -> ProvisionedNest:
@@ -383,10 +461,19 @@ def provision_caldav_on_running_nest(
     - :func:`provision_windows_caldav_nest` — spawns its own ``fauna-nest-svc.exe``
       and passes the ``nest_proc`` (so ``ProvisionedNest.cleanup`` reaps it).
     - the install-gated e2e — the MSI's ``FaunaNest`` SCM service is the nest, so
-      ``nest_proc=None`` (the SCM owns the process; ``cleanup`` is a no-op and the
-      test uninstalls the MSI for teardown). The same ``ensure_claim_code_at``
-      seed fires on the service ``start()`` path, so ``<nest_data_dir>/claim-code``
-      is present either way.
+      ``nest_proc=None`` (the SCM owns the process; ``cleanup`` only drops the
+      pin and the test uninstalls the MSI for teardown). The same
+      ``ensure_claim_code_at`` seed fires on the service ``start()`` path, so
+      ``<nest_data_dir>/claim-code`` is present either way. That service is
+      TLS-only, so it passes ``serve_tls=True`` and the fixed same-box loopback
+      ``port`` 3000 (``nest/common.md`` § Same-box reach).
+
+    ``serve_tls``: the nest serves its self-signed floor, so every leg here —
+    the claim, the WS-RPC admin calls, the credential mint — rides
+    ``https://``/``wss://`` with ``127.0.0.1:<port>`` pinned to the floor's SPKI
+    as the nest's own ``acme/fullchain.pem`` names it (:func:`floor_cert_spki`;
+    ``common/auth.py`` § SPKI pins per authority). A leaf that disagrees is
+    refused before the upgrade; there is no verification-off path to the nest.
 
     Domainless: claims the BARE handle ``test`` (``validate_handle`` allows only
     ``[a-z0-9-]``, rejecting an ``@domain`` / ``:port`` suffix), enables CalDAV,
@@ -394,14 +481,14 @@ def provision_caldav_on_running_nest(
     NO account alias / per-domain cert — any-locator login resolves the
     bare handle and the MDA serves the self-signed floor cert.
     """
-    from common.auth import claim_admin
+    from common.auth import claim_admin, pin_nest_spki, unpin_nest_spki
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from helpers.caldav_onboarding import _auth_username
 
     nest_data_dir = Path(nest_data_dir)
-    nest_url = f"http://127.0.0.1:{port}"
+    nest_url = f"{'https' if serve_tls else 'http'}://127.0.0.1:{port}"
     locator = f"127.0.0.1:{port}"
-    log_path = nest_data_dir / "nest-svc.log"
+    floor_spki = None
 
     try:
         # The nest writes its claim code to <data_dir>/claim-code via
@@ -409,12 +496,17 @@ def provision_caldav_on_running_nest(
         # reconcile may regenerate, so we read rather than pre-seed.
         claim_code = _wait_for_file(
             nest_data_dir / "claim-code", time.monotonic() + claim_timeout,
-            nest_proc, log_path,
+            nest_proc, nest_data_dir,
         )
         if not _wait_tcp_accept(port, time.monotonic() + tcp_timeout):
             raise TimeoutError(
-                f"nest never accepted TCP on {port}.\nlog:\n{_log_tail(log_path)}"
+                f"nest never accepted TCP on {port}.\n"
+                f"log ({nest_log_path(nest_data_dir)}):\n"
+                f"{_log_tail(nest_log_path(nest_data_dir))}"
             )
+        if serve_tls:
+            floor_spki = floor_cert_spki(nest_data_dir)
+            pin_nest_spki(locator, floor_spki)
         # A domainless nest: the handle is the BARE local part — `validate_handle`
         # (`bins/fauna-nest/src/registration.rs`) allows only `[a-z0-9-]`, so an
         # `@domain` / `:port` suffix is rejected (`fauna.auth.invalid_request`).
@@ -424,7 +516,7 @@ def provision_caldav_on_running_nest(
         # Any-locator login then resolves the bare local part `test` → this actor
         # (caldav-server.md § Authentication — any-locator local login).
         handle = HANDLE_LOCAL
-        admin = claim_admin(port, claim_code, handle=handle)
+        admin = claim_admin(port, claim_code, base_url=nest_url, handle=handle)
         admin_sk = admin["signing_key"]
         actor_id = bytes(admin_sk.verify_key)
 
@@ -465,12 +557,15 @@ def provision_caldav_on_running_nest(
         return ProvisionedNest(
             nest_proc=nest_proc, port=port, nest_url=nest_url, data_dir=nest_data_dir,
             db_path=str(nest_data_dir / "nest.db"), admin=admin, actor_id=actor_id,
-            auth_username=auth_username, password=password, log_path=log_path,
-            locator=locator,
+            auth_username=auth_username, password=password,
+            log_path=nest_log_path(nest_data_dir), locator=locator,
+            floor_spki=floor_spki,
         )
     except BaseException:
         # Only reap a process we own — the installed SCM nest (nest_proc=None) must
         # outlive a provisioning failure so the test can diagnose / uninstall it.
+        if floor_spki is not None:
+            unpin_nest_spki(locator)
         if nest_proc is not None:
             _terminate(nest_proc)
         raise

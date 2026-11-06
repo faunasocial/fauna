@@ -84,6 +84,31 @@ internal static class DeploymentSeedCustody
         return ReadLocalRecoverableBoxes(ownerSecret);
     }
 
+    /// <summary>
+    /// The self-hosted recovery line for one box (box-recovery.md § Recovery UI
+    /// (step 4); § The plane-era recovery floor, <i>(b) The reads</i>): the shared
+    /// Rust render over this device's own store joined with a cold read from the
+    /// nest at <paramref name="nestUrl"/> when one is given and answers, never
+    /// either-or. A dead nest, or no URL, still resolves from the device's own
+    /// store — the case a surviving device recovers a lost box from. <c>null</c>
+    /// when no custodied seed matches, or the read failed. Never throws.
+    /// </summary>
+    internal static async Task<string?> ResolveSelfhostedCommandAsync(
+        string? nestUrl, byte[] ownerSecret, string nestActorId)
+    {
+        try
+        {
+            return await FaunaFfiMethods.RecoverSelfhostedCommandPreLogin(
+                ownerSecret, nestActorId, string.IsNullOrEmpty(nestUrl) ? null : nestUrl);
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("DeploymentSeedCustody",
+                $"self-hosted recovery command: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>The device's own store read (<c>DeploymentSeedsLocal</c>), never throwing.</summary>
     internal static FfiDeploymentSeedEntry[] ReadLocalRecoverableBoxes(byte[] ownerSecret)
     {

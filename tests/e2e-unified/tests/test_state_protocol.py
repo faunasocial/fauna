@@ -25,7 +25,14 @@ class TestStateProtocol:
         assert "nav" in state
 
     def test_set_session_state(self, app, nest_instance, test_user, web_api_url):
-        """Setting session state should authenticate the app."""
+        """Setting session state should authenticate the app.
+
+        The patch carries the account's REAL handle: a signed-in app keeps its
+        handle current from the session mint's identity watch
+        (`transport-trust.md` § Post-auth surfacing, channel 3), so a made-up
+        handle is overwritten by the nest's confirmed one as soon as the mint
+        answers — asserting the made-up one would race that watch.
+        """
         secret_hex = test_user["signing_key"].encode().hex()
         node_url = web_api_url if app.driver.is_web() else nest_instance["url"]
         app.driver.set_state({
@@ -33,14 +40,17 @@ class TestStateProtocol:
                 "authenticated": True,
                 "node_url": node_url,
                 "secret_hex": secret_hex,
-                "handle": "protocol-test",
+                "handle": test_user["handle"],
                 "actor_id": test_user["actor_id_hex"],
                 "device_id": "test-device-protocol",
             },
         })
         state = app.driver.get_state()
         assert state["session"]["authenticated"] is True
-        assert state["session"]["handle"] == "protocol-test"
+        assert state["session"]["handle"] == test_user["handle"], (
+            f"session handle {state['session']['handle']!r} is not the account's "
+            f"{test_user['handle']!r}"
+        )
 
     def test_navigate_via_state(self, app):
         """Setting nav state should change the current view."""
@@ -63,7 +73,7 @@ class TestStateProtocol:
                 "authenticated": True,
                 "node_url": node_url,
                 "secret_hex": secret_hex,
-                "handle": "round-trip",
+                "handle": test_user["handle"],
                 "actor_id": test_user["actor_id_hex"],
                 "device_id": "test-device-rt",
             },

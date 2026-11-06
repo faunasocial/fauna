@@ -395,7 +395,7 @@ func (m *propPatchInterceptor) handleCollectionPropPatch(
 		for i := range recognizedProps {
 			recognizedProps[i].Apply(&meta)
 		}
-		sealed, err := SealCollectionMetadata(meta, sess.MLSPubkey(), sess.MlkemEk())
+		sealed, err := SealCollectionMetadata(meta, sess.CalendarPubkey(), sess.CalendarMlkemEk())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("caldav: seal metadata: %v", err), http.StatusInternalServerError)
 			return

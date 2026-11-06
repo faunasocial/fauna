@@ -148,3 +148,24 @@ func TestWithNoRelaysTheAnnouncerIsInert(t *testing.T) {
 	ann.Notify() // never blocks
 	ann.Notify()
 }
+
+// A relay that answers a redirect must not steer the announcer to another
+// address: the 3xx counts as a refusal and the target is never dialled
+// (deployment-threat-model.md concern 2, outbound dials follow no redirect).
+func TestARedirectingRelayIsRefusedAndNeverFollowed(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		target, targetSrv := newFakeRelay(t, http.StatusOK)
+		redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, targetSrv.URL+r.URL.Path, status)
+		}))
+		t.Cleanup(redirector.Close)
+
+		ann := New("pds.example.com", []string{redirector.URL}, nil, nil)
+		if err := ann.announce(context.Background(), redirector.URL); err == nil {
+			t.Fatalf("status %d: announce succeeded through a redirect, want a refusal", status)
+		}
+		if n := target.count(); n != 0 {
+			t.Fatalf("status %d: redirect target was dialled %d time(s), want 0", status, n)
+		}
+	}
+}

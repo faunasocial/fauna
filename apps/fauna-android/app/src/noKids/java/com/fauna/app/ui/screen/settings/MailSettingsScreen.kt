@@ -425,7 +425,7 @@ fun MailSettingsContent(
                     ) { Text(stringResource(R.string.settings_mail_add_credential)) }
                     OutlinedButton(
                         onClick = { showRotate = true },
-                        enabled = credentials.isNotEmpty(),
+                        enabled = credentials.isNotEmpty() && pendingRotation == null,
                         modifier = Modifier.testTag(Ids.MAIL_SETTINGS_ROTATE_KEYS_BUTTON),
                     ) { Text(stringResource(R.string.settings_mail_rotate_keys)) }
                 }
@@ -480,7 +480,9 @@ fun MailSettingsContent(
                         checked = servingEnabled,
                         onCheckedChange = onSetServingEnabled,
                         enabled = serveHereGate.enabled,
-                        modifier = Modifier.testTag(Ids.MAIL_SETTINGS_SERVE_HERE_TOGGLE),
+                        modifier = Modifier
+                            .testTag(Ids.MAIL_SETTINGS_SERVE_HERE_TOGGLE)
+                            .semantics { stateDescription = if (servingEnabled) "on" else "off" },
                     )
                 }
 
@@ -708,7 +710,10 @@ private fun AccountSwitchRow(
             checked = checked,
             onCheckedChange = { onToggle() },
             enabled = enabled,
-            modifier = Modifier.testTag(testTag),
+            // Painted `on`/`off` as the enable toggle above does, so the shared
+            // action layer's `toggle_state` reads the same word on every app
+            // (the native checked state would answer `true`/`false`).
+            modifier = Modifier.testTag(testTag).semantics { stateDescription = if (checked) "on" else "off" },
         )
     }
 }

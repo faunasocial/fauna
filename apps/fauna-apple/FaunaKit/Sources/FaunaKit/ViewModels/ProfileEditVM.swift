@@ -45,9 +45,22 @@ public final class ProfileEditVM {
     private var bannerStagedData: Data?
     public private(set) var bannerCleared = false
 
+    /// `profile-edit-audience-toggle`'s current value (`true` = open to other
+    /// nests): the base's own audience until pressed, then the press. Painted from
+    /// the shared own-form projection (`FfiProfileDisplay.audienceEveryone`).
+    public private(set) var audienceEveryone = false
+    /// A press of the audience toggle — `nil` while untouched, so an untouched
+    /// save re-signs the base's own audience (the builder's trailing optional).
+    /// A press made before the edit base lands survives it unless it equals the
+    /// base (mirrors tui's `EditBase` fold).
+    private var audiencePress: Bool?
+
     /// The stored profile bytes the edit started from (`nil` = first publish); the
     /// non-display fields ride through `buildEditedProfile`'s read-modify-write.
     private var baseBody: Data?
+    /// The owner's last identity-signed row the base was read with
+    /// (`FfiProfileEditBase.lastDirectBody`) — handed back to the builder.
+    private var baseLastDirectBody: Data?
     private var api: APIClient?
 
     public init() {}
@@ -58,14 +71,18 @@ public final class ProfileEditVM {
     public func open(api: APIClient, actorId: String) async {
         self.api = api
         errorMessage = nil
+        audiencePress = nil
+        var baseAudience = false
         do {
-            let body = try await api.loadProfileEditBase()
-            baseBody = body
-            if let body {
-                let display = try api.decodeProfile(body: body)
+            let base = try await api.loadProfileEditBase()
+            baseBody = base?.body
+            baseLastDirectBody = base?.lastDirectBody
+            if let base {
+                let display = try api.decodeOwnProfile(base: base)
                 displayName = display.displayName ?? ""
                 bio = display.bio ?? ""
                 links = display.links
+                baseAudience = display.audienceEveryone
             } else {
                 displayName = ""
                 bio = ""
@@ -74,10 +91,15 @@ public final class ProfileEditVM {
         } catch {
             // read/decode failure → first publish: start blank.
             baseBody = nil
+            baseLastDirectBody = nil
             displayName = ""
             bio = ""
             links = []
         }
+        // The base has landed: a press made while it was in flight survives
+        // unless it equals the base.
+        if audiencePress == baseAudience { audiencePress = nil }
+        audienceEveryone = audiencePress ?? baseAudience
         avatarStagedPath = nil
         avatarStagedData = nil
         avatarCleared = false
@@ -90,6 +112,14 @@ public final class ProfileEditVM {
     public func cancel() {
         isOpen = false
         errorMessage = nil
+    }
+
+    /// `profile-edit-audience-toggle` — open the profile to other nests (`true`) or
+    /// keep it on this one (`false`). Rides the save as the builder's trailing
+    /// optional.
+    public func setAudienceEveryone(_ on: Bool) {
+        audiencePress = on
+        audienceEveryone = on
     }
 
     public func addLink() {
@@ -145,11 +175,13 @@ public final class ProfileEditVM {
                 stagedData: bannerStagedData, cleared: bannerCleared, api: api)
             let body = try api.buildEditedProfileWithImages(
                 baseBody: baseBody,
+                lastDirectBody: baseLastDirectBody,
                 displayName: optTrimmed(displayName),
                 bio: optTrimmed(bio),
                 links: cleanLinks,
                 avatar: avatar,
-                banner: banner)
+                banner: banner,
+                audienceEveryone: audiencePress)
             try await api.profileSet(body: body)
             errorMessage = nil
             isOpen = false

@@ -958,7 +958,18 @@ pub(crate) async fn materialize_segment_set(
     // commit deletes it, the target is mid-flip: an interruption anywhere below
     // — the dispatcher's deadline abort, a nest crash — is completed by the
     // owner's retry, whatever arrived in between. A retry re-puts the marker
-    // with its own run's ids and keeps the gesture's time.
+    // with its own run's ids and keeps the gesture's time. A first run starts
+    // with no deleted-collection notes: only a door under a standing marker
+    // writes one, so any found here outlived a marker and describe no flip.
+    if !mid_flip {
+        let conn = state.db.conn().await;
+        conn.execute(
+            "DELETE FROM materialize_deleted_collections WHERE actor_id = ?1 AND kind = ?2",
+            rusqlite::params![scope.as_slice(), kind],
+        )
+        .context("clear deleted-collection notes no marker stands behind")
+        .map_err(MaterializeRefusal::Integrity)?;
+    }
     state
         .db
         .materialize_in_flight_put(
@@ -1249,6 +1260,12 @@ pub(crate) async fn materialize_segment_set(
         )
         .context("retire the in-flight marker")
         .map_err(MaterializeRefusal::Integrity)?;
+        tx.execute(
+            "DELETE FROM materialize_deleted_collections WHERE actor_id = ?1 AND kind = ?2",
+            rusqlite::params![scope.as_slice(), kind],
+        )
+        .context("retire the marker's deleted-collection notes")
+        .map_err(MaterializeRefusal::Integrity)?;
         tx.commit()
             .context("commit the materialize transaction")
             .map_err(MaterializeRefusal::Integrity)?;
@@ -1409,6 +1426,7 @@ impl KindArm {
                 collection_id: "calendar_id",
                 items: "bridge_caldav_events",
                 item_id: "event_id",
+                expunged: "bridge_caldav_expunged",
             }),
             Self::Card => Some(DavTables {
                 kind: "card",
@@ -1416,6 +1434,7 @@ impl KindArm {
                 collection_id: "addressbook_id",
                 items: "bridge_carddav_cards",
                 item_id: "card_id",
+                expunged: "bridge_carddav_expunged",
             }),
             Self::Mail | Self::Post => None,
         }
@@ -1433,6 +1452,8 @@ struct DavTables {
     /// The placed items' table and its content-record id column.
     items: &'static str,
     item_id: &'static str,
+    /// The deletion tombstones' table (keyed by the same collection column).
+    expunged: &'static str,
 }
 
 /// A corpus's journal, staged and judged fresh, for whichever kind it is.
@@ -2067,7 +2088,11 @@ fn restate_mail_rows(
 /// Mail's [`write_corpus_mailboxes`] rule over a DAV kind's own counters: one
 /// small transaction, the corpus's metadata, and `highestmodseq`/`ctag` raised
 /// to the corpus's, never lowered — a retry over arrivals finds them already
-/// advanced past it. The prune floor is raised to the corpus's and never
+/// advanced past it. On a retry a row whose counter is already past the
+/// corpus's keeps its metadata: a door changed the collection since the first
+/// run's write, and that change is the later one. A collection a
+/// door deleted while the flip was torn (the marker's deleted-collection notes) is
+/// not written at all: the deletion is the later act. The prune floor is raised to the corpus's and never
 /// lowered either; the commit's re-statement carries it on. Both DAV put doors mint the next change number from this
 /// row (and refuse a PUT into a collection that has none), so from here on an
 /// arrival is numbered above every change the corpus holds.
@@ -2085,7 +2110,14 @@ async fn write_corpus_collections(
     let tx = conn
         .unchecked_transaction()
         .context("begin the corpus containers write")?;
+    let deleted =
+        crate::db::materialize_in_flight::deleted_collections_in_flight(&tx, scope, t.kind)?;
     for (id, c) in &fold.collections {
+        if deleted.contains(id) {
+            // A door deleted this collection while the flip was torn: the
+            // corpus's version of it is not written back.
+            continue;
+        }
         let counter = i64::try_from(c.highestmodseq).unwrap_or(i64::MAX);
         let floor = i64::try_from(c.pruned_modseq).unwrap_or(i64::MAX);
         tx.execute(
@@ -2095,7 +2127,9 @@ async fn write_corpus_collections(
                      pruned_modseq)
                  VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
                  ON CONFLICT(actor_id, {col}) DO UPDATE SET
-                    encrypted_metadata = excluded.encrypted_metadata,
+                    encrypted_metadata = CASE WHEN highestmodseq > excluded.highestmodseq
+                                              THEN encrypted_metadata
+                                              ELSE excluded.encrypted_metadata END,
                     ctag               = MAX(ctag, excluded.ctag),
                     highestmodseq      = MAX(highestmodseq, excluded.highestmodseq),
                     pruned_modseq      = MAX(pruned_modseq, excluded.pruned_modseq)",
@@ -2344,32 +2378,159 @@ fn dav_version_record(
     }
 }
 
-/// Raise the door's change counter for one collection to at least `floor`,
-/// so a number the re-filing takes is never minted again by a PUT.
-async fn floor_dav_counter(
+/// Take the next change number of one collection from its door's own counter,
+/// in one step: at least `floor`, and one past whatever a door minted since
+/// `floor` was worked out — so a number the re-filing takes is never minted
+/// again by a PUT, nor one a PUT already took. A collection the
+/// target holds no row for has no door to race; it takes `floor` as it stands.
+async fn take_dav_change_number(
     state: &Arc<AppState>,
     scope: &[u8; 32],
     arm: KindArm,
     collection: &[u8; 32],
     floor: u64,
-) -> Result<(), MaterializeRefusal> {
-    let floor = i64::try_from(floor).unwrap_or(i64::MAX);
-    match arm {
+) -> Result<u64, MaterializeRefusal> {
+    let wanted = i64::try_from(floor).unwrap_or(i64::MAX);
+    let taken = match arm {
         KindArm::Calendar => {
             state
                 .db
-                .floor_bridge_caldav_calendar_counter(scope, collection, floor)
+                .take_bridge_caldav_calendar_change_number(scope, collection, wanted)
                 .await
         }
         _ => {
             state
                 .db
-                .floor_bridge_carddav_addressbook_counter(scope, collection, floor)
+                .take_bridge_carddav_addressbook_change_number(scope, collection, wanted)
                 .await
         }
     }
-    .context("floor the collection's change counter")
-    .map_err(MaterializeRefusal::Integrity)
+    .context("take the collection's next change number")
+    .map_err(MaterializeRefusal::Integrity)?;
+    Ok(taken.map_or(floor, |n| n.max(0) as u64))
+}
+
+/// A collection's metadata change, as `arm`'s journal records it.
+fn dav_metadata_update(
+    arm: KindArm,
+    id: [u8; 32],
+    encrypted_metadata: Vec<u8>,
+    modseq: u64,
+) -> DavRecord {
+    use fauna_calendar::segments::placement::CalPlacementRecord;
+    use fauna_contacts::segments::placement::CardPlacementRecord;
+    match arm {
+        KindArm::Calendar => DavRecord::Cal(CalPlacementRecord::UpdateCalendarMetadata {
+            calendar_id: id,
+            encrypted_metadata,
+            modseq,
+        }),
+        _ => DavRecord::Card(CardPlacementRecord::UpdateAddressbookMetadata {
+            addressbook_id: id,
+            encrypted_metadata,
+            modseq,
+        }),
+    }
+}
+
+/// **Re-file the collections a door created or renamed since the gesture**
+/// into the adopted journal — the containers' half of
+/// [`refile_dav_arrivals`].
+///
+/// The target was empty at the gesture and the containers write puts only the
+/// corpus's collections in it, so a collection row the adopted journal does not
+/// hold is one a door created since: it is provisioned in the journal with the
+/// metadata its row holds, whether or not an item sits in it yet — the commit
+/// re-states the collections from the journal, so one the journal lacks would
+/// be dropped. A row whose metadata differs from the journal's and whose
+/// counter is past it was renamed by a door since; the rename is journaled
+/// under the counter the door left (the door's own record went to the journal
+/// the corpus's superseded). Idempotent: a retry finds both in the journal.
+async fn refile_dav_collections(
+    state: &Arc<AppState>,
+    scope: &[u8; 32],
+    arm: KindArm,
+    t: DavTables,
+) -> Result<(), MaterializeRefusal> {
+    let integrity = MaterializeRefusal::Integrity;
+    let held: Vec<(Vec<u8>, Vec<u8>, i64)> = {
+        let conn = state.db.conn().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {col}, encrypted_metadata, highestmodseq FROM {coll}
+                 WHERE actor_id = ?1 ORDER BY {col}",
+                col = t.collection_id,
+                coll = t.collections,
+            ))
+            .context("prepare the held collections read")
+            .map_err(integrity)?;
+        stmt.query_map(rusqlite::params![scope.as_slice()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .context("read the held collections")
+        .map_err(integrity)?
+        .collect::<Result<Vec<_>, _>>()
+        .context("collect the held collections")
+        .map_err(integrity)?
+    };
+    // A collection a door deleted while the flip was torn first leaves the
+    // adopted journal: the corpus's version is what the adoption put back, and
+    // the door's own `DeleteAddressbook` went to the journal it superseded. The removal cascades the collection's items and tombstones
+    // out of the fold, so the commit's re-statement serves none of them. A
+    // row a door made again under the same id since is a new collection, and
+    // the loop below provisions it like any other. Only the address book has a
+    // delete door, so only the contacts arm has notes to honour.
+    let deleted = state
+        .db
+        .materialize_deleted_collections(scope, t.kind)
+        .await
+        .map_err(integrity)?;
+    if !deleted.is_empty() {
+        let fold = current_fold(state, scope, arm).await?.dav_fold();
+        for id in deleted {
+            if !fold.collections.contains_key(&id) {
+                continue;
+            }
+            let record = match arm {
+                KindArm::Card => DavRecord::Card(
+                    fauna_contacts::segments::placement::CardPlacementRecord::DeleteAddressbook {
+                        addressbook_id: id,
+                    },
+                ),
+                _ => {
+                    return Err(integrity(anyhow::anyhow!(
+                        "a `{}` collection was noted deleted mid-flip, but only an address \
+                         book has a delete door",
+                        t.kind
+                    )));
+                }
+            };
+            dav_journal(state, scope, record).await?;
+        }
+    }
+    if held.is_empty() {
+        return Ok(());
+    }
+    let fold = current_fold(state, scope, arm).await?.dav_fold();
+    for (id, metadata, counter) in held {
+        let id = blob32(id, "collection id").map_err(integrity)?;
+        let counter = counter.max(0) as u64;
+        match fold.collections.get(&id) {
+            None => {
+                dav_journal(state, scope, dav_provision(arm, id, metadata)).await?;
+            }
+            Some(c) if c.encrypted_metadata != metadata && counter > c.highestmodseq => {
+                dav_journal(
+                    state,
+                    scope,
+                    dav_metadata_update(arm, id, metadata, counter),
+                )
+                .await?;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// **Re-file the calendar or contacts items that arrived since the gesture
@@ -2398,9 +2559,13 @@ async fn floor_dav_counter(
 ///   number and ETag it was served with — or, for an arrival numbered before
 ///   the containers landed, the collection's next number.
 ///
-/// A number taken here raises the door's counter first, so no PUT mints it
-/// again. Tombstones a door wrote since the gesture are not re-filed, as mail's
-/// are not.
+/// A number taken here is taken from the door's own counter in one step
+/// ([`take_dav_change_number`]), so no PUT mints it too. A collection a door
+/// created or renamed since the gesture is re-filed first, whether or not an
+/// arrival sits in it ([`refile_dav_collections`]). Tombstones a door wrote
+/// since the gesture are not re-filed, as mail's are not: the commit raises
+/// the collection's prune floor over each one it drops ([`restate_dav_rows`]),
+/// so a client that saw the deleted item is told to resync.
 async fn refile_dav_arrivals(
     state: &Arc<AppState>,
     scope: &[u8; 32],
@@ -2411,6 +2576,7 @@ async fn refile_dav_arrivals(
     let t = arm
         .dav_tables()
         .ok_or_else(|| integrity(anyhow::anyhow!("only a DAV kind re-files DAV arrivals")))?;
+    refile_dav_collections(state, scope, arm, t).await?;
     let arrivals = read_dav_arrivals(state, scope, t, corpus_ids)
         .await
         .map_err(integrity)?;
@@ -2445,7 +2611,8 @@ async fn refile_dav_arrivals(
             };
             if !arrival_stands {
                 if held.modseq() <= a.modseq {
-                    floor_dav_counter(state, scope, arm, &a.collection, next).await?;
+                    let next =
+                        take_dav_change_number(state, scope, arm, &a.collection, next).await?;
                     let etag = crate::db::bridge_dav_common::format_etag(next as i64);
                     dav_journal(
                         state,
@@ -2470,7 +2637,7 @@ async fn refile_dav_arrivals(
         let (modseq, etag) = if a.modseq > counter {
             (a.modseq, a.etag)
         } else {
-            floor_dav_counter(state, scope, arm, &a.collection, next).await?;
+            let next = take_dav_change_number(state, scope, arm, &a.collection, next).await?;
             (next, crate::db::bridge_dav_common::format_etag(next as i64))
         };
         let version = DavVersion::Placed {
@@ -2535,7 +2702,9 @@ struct HeldDavCollection {
 ///
 /// Each held collection's counters are carried, never lowered: a change number
 /// the target handed out is never handed out again. Its prune floor is carried
-/// the same way, since the expunge log is replaced by the fold's tombstones.
+/// the same way, since the expunge log is replaced by the fold's tombstones —
+/// and raised over every held tombstone the fold does not carry, so a client
+/// whose token predates that deletion resyncs rather than never hearing of it.
 fn restate_dav_rows(
     tx: &rusqlite::Transaction<'_>,
     state: &Arc<AppState>,
@@ -2627,6 +2796,43 @@ fn restate_dav_rows(
         .collect::<Result<Vec<_>, _>>()
         .context("read the held collection rows")?;
     drop(stmt);
+
+    // The tombstones a door wrote since the gesture that the fold does not
+    // carry — no version of their resource at or above their change number —
+    // are dropped with the expunge log below. A client whose token falls before
+    // one would never hear of that deletion, so its collection's prune floor is
+    // raised to it: such a client is told to resync.
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {col}, uid_hash, modseq FROM {expunged} WHERE actor_id = ?1",
+        col = t.collection_id,
+        expunged = t.expunged,
+    ))?;
+    let held_tombstones = stmt
+        .query_map(rusqlite::params![scope.as_slice()], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the held tombstones")?;
+    drop(stmt);
+    let mut dropped_floor: HashMap<Vec<u8>, i64> = HashMap::new();
+    for (col, uid, modseq) in held_tombstones {
+        let resource = (
+            blob32(col.clone(), "collection id")?,
+            blob32(uid, "uid hash")?,
+        );
+        let carried = dav
+            .resources
+            .get(&resource)
+            .is_some_and(|v| i64::try_from(v.modseq()).unwrap_or(i64::MAX) >= modseq);
+        if !carried {
+            let floor = dropped_floor.entry(col).or_insert(0);
+            *floor = (*floor).max(modseq);
+        }
+    }
 
     // Decide every held row against the fold.
     let mut carried: Vec<HeldDavRow> = Vec::new();
@@ -2758,6 +2964,7 @@ fn restate_dav_rows(
                 c.highestmodseq,
                 c.ctag,
                 c.pruned_modseq
+                    .max(dropped_floor.get(&c.id).copied().unwrap_or(0))
             ],
         )
         .context("keep the change counters the target handed out")?;
@@ -3121,6 +3328,7 @@ pub(crate) async fn materialize_folder_set(
             crate::change_signature::CarriedSignature {
                 signature: Some(&carried.signature[..]),
                 signer_key: Some(signer_key),
+                deposited_by: None,
             },
             // The owner's own connection to the nest that holds their grants:
             // a delegated signer resolves by reference, exactly as the record

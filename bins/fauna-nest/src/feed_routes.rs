@@ -69,6 +69,22 @@ fn search_to_filter(search: &str) -> Option<FilterRule> {
     }
 }
 
+/// `search_to_filter`'s twin for a read's `sources` field (`feed-read-model.md`
+/// § The read model → *The author read*): each token through
+/// `fauna_core::source::normalize` into one `FilterRule::Source`. A token the
+/// normalizer refuses is the caller's bad request; an empty list narrows
+/// nothing.
+fn sources_to_filter(sources: &[String]) -> Result<Option<FilterRule>, ApiError> {
+    let protocols = sources
+        .iter()
+        .map(|t| {
+            fauna_core::source::normalize(t)
+                .ok_or_else(|| ApiError::bad_request(format!("invalid source token: {t:?}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((!protocols.is_empty()).then_some(FilterRule::Source { protocols }))
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Shared `*_core` fns — the bodies behind both the (deprecated) HTTP twins
 // and the `fauna.feed.*` WS-RPC handlers (`feed_handlers.rs`), part of the
@@ -115,6 +131,9 @@ pub(crate) struct FeedPostOut {
     pub viewer_repost_id: Option<Vec<u8>>,
     /// The viewer's like-toggle state → `FeedPostItem.viewer_liked`.
     pub viewer_liked: bool,
+    /// The per-emoji reaction tally (filled by the viewer-state augment on
+    /// the local paths only) → `FeedPostItem.reactions`.
+    pub reactions: Vec<fauna_protocol::feed::PostReactionGroup>,
     /// Composite score as the raw `f64` from `query_feed_scored` (only the
     /// score branch populates it). The WS handler scales it to micro-units.
     pub score: Option<f64>,
@@ -170,6 +189,7 @@ impl From<&crate::db::FeedPostRow> for FeedPostOut {
             reposted_gated_room: p.reposted_gated_room.clone(),
             viewer_repost_id: p.viewer_repost_id.clone(),
             viewer_liked: p.viewer_liked,
+            reactions: p.reactions.clone(),
             score: p.score,
             gated_tier: p.gated_tier.clone(),
             gated_room: p.gated_room.clone(),
@@ -795,19 +815,30 @@ pub(crate) async fn query_local_feed_core(
 /// `created_at` keyset cursor. Every moderation flag binds; an off-box reader
 /// is additionally held to the public predicate (`FeedAudience::OffBox`),
 /// while the account on its own box lists a gated envelope as the local feed
-/// lists it.
+/// lists it. `search` and `sources` narrow it as MANDATORY constraints, the
+/// local read's `search` fold and its `sources_to_filter` twin.
 pub(crate) async fn query_author_feed_core(
     state: &Arc<AppState>,
     reader: FeedReader,
     author: [u8; 32],
     cursor: Option<i64>,
     limit: Option<i64>,
+    search: Option<&str>,
+    sources: Option<&[String]>,
 ) -> Result<FeedPostsOut, ApiError> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
     let mut mandatory: Vec<FilterRule> = Vec::new();
     ensure_spam_filter(&[], &mut mandatory);
     if let Some(caller) = reader.account() {
         push_viewer_block(&caller, &mut mandatory);
+    }
+    if let Some(search) = search
+        && let Some(filter) = search_to_filter(search)
+    {
+        mandatory.push(filter);
+    }
+    if let Some(filter) = sources_to_filter(sources.unwrap_or_default())? {
+        mandatory.push(filter);
     }
     let audience = if reader.off_box() {
         crate::db::feeds::FeedAudience::OffBox
@@ -1099,7 +1130,7 @@ pub(crate) async fn query_feed_core(
 }
 
 /// Fill the per-viewer pair on queried rows for the connection actor —
-/// best-effort, mirroring `interact_routes::counts_after_act`'s stance: the
+/// best-effort, mirroring `interact_routes::post_counts_best_effort`'s stance: the
 /// viewer state is a display nicety, so a read failure serves the feed
 /// without it (defaults = the pre-repost rendering) rather than failing a
 /// query that already succeeded. The federated `remote_query_feed` path
@@ -1937,7 +1968,7 @@ mod tests {
         let read = |reader: FeedReader| {
             let state = state.clone();
             async move {
-                query_author_feed_core(&state, reader, author, None, Some(10))
+                query_author_feed_core(&state, reader, author, None, Some(10), None, None)
                     .await
                     .ok()
                     .expect("author read")
@@ -2222,10 +2253,18 @@ mod tests {
             );
         }
 
-        let out = query_author_feed_core(&state, FeedReader::Principal, alice_id, None, Some(10))
-            .await
-            .ok()
-            .expect("author read");
+        let out = query_author_feed_core(
+            &state,
+            FeedReader::Principal,
+            alice_id,
+            None,
+            Some(10),
+            None,
+            None,
+        )
+        .await
+        .ok()
+        .expect("author read");
         assert_eq!(
             out.posts[0]
                 .author_display
@@ -2267,6 +2306,7 @@ mod tests {
             reposted_gated_room: None,
             viewer_repost_id: None,
             viewer_liked: false,
+            reactions: Vec::new(),
             score: None,
             gated_tier: None,
             gated_room: None,

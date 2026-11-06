@@ -134,6 +134,71 @@ def test_web_sign_out_erases_the_account_registry(nest_instance, spa_url):
         driver.teardown()
 
 
+@pytest.mark.feature("factory-reset")
+def test_web_next_load_after_the_sign_in_is_wiped_starts_from_identity_choice(
+    app, request, nest_instance
+):
+    """Web's arm of case G (`test_onboarding_launch_routing_smoke.py`, NATIVE_ONLY
+    for the reason this module's docstring gives): once the app's own sign-in is
+    wiped, the next launch takes the routing table's "nothing stored" row — the
+    wizard at `identity_choice` — and never challenges the wiped identity back
+    in (`onboarding.md` § App-launch routing).
+
+    The wipe is the product's — web's reset of its own sign-in is the Settings
+    sign-out, the `StopReason::SignOut` teardown every native app's reset arm
+    runs — never the test agent's `reset`, whose own `fauna/` sweep would green
+    this on the harness. The next launch is a hard reload, the one browser
+    restart that keeps the origin's storage.
+    """
+    from conftest import _make_user
+
+    from helpers import enrollment
+
+    user = _make_user(nest_instance)
+    actor = user["actor_id_hex"]
+    driver = app.driver
+
+    enrollment.sign_in(app, request, nest_instance, user)
+    enrollment.await_enrollment(app, nest_instance["url"], user)
+    assert _ls(driver, f"fauna/{actor}/secret"), (
+        "precondition: the signed-in identity's secret must be stored — it is what "
+        "the next load would sign back in from if the wipe left it"
+    )
+    before = web_store.account_store_names(driver)
+    assert f"{ACCOUNT_STORE_ROOT}/{actor}" in before["indexeddb"], (
+        f"precondition: the account's store must exist in this origin; got {before}"
+    )
+
+    app.settings.sign_out()
+
+    survivors = _registry_keys(driver)
+    after = web_store.account_store_names(driver)
+    assert survivors == [] and not after["indexeddb"] and not after["opfs"], (
+        "the wipe must leave no credential slot and no account store behind, or the "
+        f"next load has an identity to hydrate: registry {survivors}, stores {after}"
+    )
+
+    driver.hard_reload()
+    driver.wait_for("create-identity-button", timeout=RECONCILE_S)
+    assert driver.is_visible("create-identity-button"), (
+        "after the sign-in is wiped the next launch must start from the beginning "
+        f"(identity_choice); error: {app.error_text()!r}"
+    )
+    # Not `session.authenticated`: with no identity it reads the agent's own
+    # `fauna_registered` flag (`web-bridge/agent.js`), which the harness's login
+    # set and only the agent's `logout` clears, never the product's sign-out.
+    # These fields read the product's identity store and registry.
+    session = driver.get_state("session")
+    assert session["secret_hex"] is None and session["actor_id"] is None, (
+        f"the next launch must not sign the wiped identity back in; session: "
+        f"actor {session['actor_id']!r}, "
+        f"fauna_registered {_ls(driver, 'fauna_registered')!r}"
+    )
+    assert _registry_keys(driver) == [], (
+        "the launch must not re-seed the wiped identity into the registry"
+    )
+
+
 # ── The account store and the enrollment ─────────────────────────────────────
 #
 # `account-scoping.md` § The scoping taxonomy → *Erasure follows scope*, the
@@ -173,7 +238,8 @@ def test_web_sign_out_retires_the_enrollment_and_erases_the_account_store(
     sign-out, the named row kept its principal, and the next sign-in read both
     writers `enrolled` — one stranded fleet member per cycle.
     """
-    from conftest import _E2E_LOGIN_DEVICE_ID, _make_user
+    from conftest import _make_user
+    from helpers.e2e_session import e2e_login_device_id
 
     from helpers import enrollment, fleet
     from helpers.waiting import wait_until
@@ -181,7 +247,7 @@ def test_web_sign_out_retires_the_enrollment_and_erases_the_account_store(
     nest_url = nest_instance["url"]
     user = _make_user(nest_instance)
     actor = user["actor_id_hex"]
-    named_row = _E2E_LOGIN_DEVICE_ID
+    named_row = e2e_login_device_id(app)
     driver = app.driver
 
     enrollment.sign_in(app, request, nest_instance, user)
@@ -623,4 +689,100 @@ def test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_
     line = app.error_text()
     assert "Signed out" not in (line or "") and "Not removed" not in (line or ""), (
         f"a clean re-sweep says nothing, but onboarding's error-message reads {line!r}"
+    )
+
+
+@pytest.mark.feature("account")
+def test_web_sign_out_residue_outlives_a_reload_and_a_clean_reload_says_nothing(
+    app, request, nest_instance, test_user
+):
+    """Web's twin of `test_sign_out.py::test_the_sign_out_residue_outlives_the_app`:
+    closing a tab is a load, so both arms are a reload. Store still held → the
+    load's silent re-sweep fails and the view comes back with its line; holder
+    gone → the load's re-sweep erases the store and the view never appears.
+
+    The holder lives in a SECOND tab, opened on the signed-out screen before the
+    sign-in, because a connection in the signing-out tab would die with its
+    reload and take the fault with it.
+    """
+    from conftest import _make_user
+    from i18n.strings import S
+
+    from helpers import enrollment
+    from helpers.waiting import wait_until
+
+    nest_url = nest_instance["url"]
+    user = _make_user(nest_instance)
+    actor = user["actor_id_hex"]
+    store = f"{ACCOUNT_STORE_ROOT}/{actor}"
+    driver = app.driver
+    holder = driver.open_same_context_tab()
+    expected = S.settings.sign_out_residue(count="1")
+
+    def await_line(what: str) -> None:
+        last: dict = {}
+
+        def reads():
+            last.clear()
+            last.update(line=app.onboarding.sign_out_residue_text())
+            return expected in (last["line"] or "")
+
+        wait_until(
+            reads,
+            RECONCILE_S,
+            interval=0.5,
+            diagnose=lambda: (
+                f"{what}: sign-out-residue-message must read {expected!r} but reads "
+                f"{last.get('line')!r}; error-message reads {app.error_text()!r}, the sign-out "
+                f"record reads {_ls(driver, SIGN_OUT_RECORD_KEY)!r} and the origin holds "
+                f"{web_store.account_store_names(driver)}."
+            ),
+        )
+
+    try:
+        enrollment.sign_in(app, request, nest_instance, user)
+        enrollment.await_enrollment(app, nest_url, user)
+        _hold_account_store(holder, store)
+
+        app.settings.sign_out()
+        await_line("after a sign-out whose store delete is blocked")
+
+        driver.hard_reload()
+        await_line("after a reload with the store still held")
+        record = json.loads(_ls(driver, SIGN_OUT_RECORD_KEY) or "null")
+        assert record == {"wipe_owed": False, "accounts": [actor]}, (
+            f"the held account must stay in the sign-out record; it reads {record!r}"
+        )
+    finally:
+        _release_account_store(holder)
+        holder.teardown()
+
+    driver.hard_reload()
+    driver.wait_for("create-identity-button", timeout=RECONCILE_S)
+    after: dict = {}
+
+    def finished():
+        after.clear()
+        after.update(
+            stores=web_store.account_store_names(driver),
+            record=_ls(driver, SIGN_OUT_RECORD_KEY),
+        )
+        return (
+            not after["stores"]["indexeddb"]
+            and not after["stores"]["opfs"]
+            and after["record"] is None
+        )
+
+    wait_until(
+        finished,
+        RECONCILE_S,
+        interval=0.5,
+        diagnose=lambda: (
+            "with the holder gone, the next load must finish the erase — no account "
+            f"store, no record — but the origin reads {after}."
+        ),
+    )
+    assert not app.onboarding.sign_out_residue_showing(), (
+        "a clean re-sweep says nothing, but the residue view reads "
+        f"{app.onboarding.sign_out_residue_text()!r}"
     )

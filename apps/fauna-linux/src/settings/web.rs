@@ -163,10 +163,14 @@ pub fn build_web_page() -> (gtk::Box, Rc<dyn Fn()>) {
     let group = adw::PreferencesGroup::builder().title(WS::TITLE).build();
     page.add(&group);
 
-    // Subdomain opt-in toggle (default OFF).
+    // Subdomain opt-in toggle (default OFF), painted disabled until the
+    // nest-confirmed view is in — an early flip would be dropped silently
+    // (parity with tui's `.enabled(view.is_some())`). The page's intent is
+    // set BEFORE the offline-gate declaration so the gate records it.
     let toggle = adw::SwitchRow::builder().active(false).build();
     toggle.set_title(WS::SUBDOMAIN_TOGGLE_LABEL);
     toggle.set_subtitle(WS::SUBDOMAIN_TOGGLE_SUBTITLE);
+    set_toggle_hydrated(&toggle, false);
     set_test_id(&toggle, ids::WEB_SETTINGS_SUBDOMAIN_TOGGLE);
     crate::offline_gate::declare_wire_kind(&toggle, "fauna.web.set_subdomain_enabled");
     group.add(&toggle);
@@ -291,6 +295,13 @@ pub fn build_web_page() -> (gtk::Box, Rc<dyn Fn()>) {
     )
 }
 
+/// The subdomain toggle's hydrate gate: enabled only once a nest-confirmed
+/// view is in (`hydrated`), so an early click is refused loudly instead of
+/// being dropped (lift of `tui:3796`).
+fn set_toggle_hydrated(toggle: &adw::SwitchRow, hydrated: bool) {
+    toggle.set_sensitive(hydrated);
+}
+
 fn wire(w: WebWidgets) -> Rc<dyn Fn()> {
     let client = match crate::settings::get_client() {
         Some(c) => c,
@@ -316,15 +327,20 @@ fn wire(w: WebWidgets) -> Rc<dyn Fn()> {
         });
     }
 
-    hydrate(&ctx);
     let ctx_refresh = Rc::clone(&ctx);
     Rc::new(move || hydrate(&ctx_refresh))
 }
 
 /// Read the full `web-settings` page (retrying the opt-in flag while the WS
-/// comes up after login) and render both surfaces from one answer. Runs both
-/// at page construction and on every re-visit (the settings shell's
-/// on-visible hook), since the Published-posts list is observer-free.
+/// comes up after login) and render both surfaces from one answer. Runs on
+/// every visit (the settings shell's on-visible hook), since the
+/// Published-posts list is observer-free — never at page construction: the
+/// shell builds every page at sign-in, and the read includes the nest's
+/// serving domain (`fauna.nest.info`, read live because a domain claimed
+/// mid-session re-points it), which a sign-in nobody asked to open this page
+/// for must not spend the actor's discovery budget on (`transport-trust.md`
+/// § Transport trust → *The nest's self-description is read once per
+/// connection*).
 fn hydrate(ctx: &Rc<WebCtx>) {
     let web = Arc::clone(&ctx.web);
     let ctx_render = Rc::clone(ctx);
@@ -451,6 +467,9 @@ fn render(ctx: &Rc<WebCtx>, res: Result<WebPageRead, String>) {
     // uniform read idiom: driver.get_attr(id, "state")). Non-optimistic — set
     // only from a nest-confirmed snapshot, so it doubles as the round-trip proof.
     set_test_attr(&w.toggle, "state", if snap_enabled { "on" } else { "off" });
+    // Interactive only off a nest-confirmed view; an errored read leaves it
+    // disabled, as tui does.
+    set_toggle_hydrated(&w.toggle, res.is_ok());
 
     // URL row: the live URL (whether on or off — it's where the site would
     // serve), else the disabled reason.
@@ -738,6 +757,22 @@ pub(crate) fn seed_cache_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The subdomain toggle reads disabled until the nest-confirmed view is
+    /// in, and enabled after (`tui:3796` lift).
+    #[test]
+    fn subdomain_toggle_is_disabled_until_hydrated() {
+        crate::testid::run_on_gtk_thread(|| {
+            let toggle = adw::SwitchRow::builder().active(false).build();
+            set_toggle_hydrated(&toggle, false);
+            assert!(
+                !toggle.is_sensitive(),
+                "pre-hydrate toggle must be disabled"
+            );
+            set_toggle_hydrated(&toggle, true);
+            assert!(toggle.is_sensitive(), "hydrated toggle must be enabled");
+        });
+    }
 
     #[test]
     fn page_builds_without_client() {

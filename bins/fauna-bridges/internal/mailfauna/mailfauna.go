@@ -873,18 +873,70 @@ const mlkem768EncapsKeyLen = 1184
 // "PQ silently off" regression stays observable rather than degrading silently
 // fleet-wide.
 func EncryptToRecipientHybrid(plaintext, recipientPubkey, mlkemEk []byte) ([]byte, error) {
+	return sealHybrid(plaintext, recipientPubkey, mlkemEk, faunaFfi.SealToRecipientXwing, faunaFfi.SealToRecipient)
+}
+
+// RecordKind names the kind of owner record an envelope carries — mail,
+// calendar or card (`owner-key-material.md` § Path B-sibling-5 → *AEAD and
+// envelope*). The kind selects the envelope tag and its AAD together, and the
+// nest refuses a record of the wrong kind on each kind's write path.
+type RecordKind = faunaFfi.FfiRecordKind
+
+const (
+	// RecordKindMail: inbound mail and its index hints (`mail-record`).
+	RecordKindMail RecordKind = faunaFfi.FfiRecordKindMail
+	// RecordKindCalendar: CalDAV bodies, sidecars, calendar metadata, placed
+	// invitations (`calendar-record`), sealed to the calendar key.
+	RecordKindCalendar RecordKind = faunaFfi.FfiRecordKindCalendar
+	// RecordKindCard: CardDAV bodies, sidecars, address-book metadata
+	// (`card-record`), sealed to the card key.
+	RecordKindCard RecordKind = faunaFfi.FfiRecordKindCard
+)
+
+// SealRecordHybrid is EncryptToRecipientHybrid for a record of any kind: it
+// seals `plaintext` as a `kind` envelope to `recipientPubkey` (the kind's own
+// key — the calendar key for a calendar record, the card key for a card), X-Wing
+// when `mlkemEk` pairs with it, with the same PQ-4b degrade.
+func SealRecordHybrid(kind RecordKind, plaintext, recipientPubkey, mlkemEk []byte) ([]byte, error) {
+	return sealHybrid(plaintext, recipientPubkey, mlkemEk,
+		func(pt, xwingPubkey []byte) ([]byte, error) {
+			return faunaFfi.SealRecordToRecipientXwing(kind, pt, xwingPubkey)
+		},
+		func(pt, pubkey []byte) ([]byte, error) {
+			return faunaFfi.SealRecordToRecipient(kind, pt, pubkey)
+		})
+}
+
+// SealRecordIndexHint seals a calendar or card record's canonical-token index
+// hint — the rule the nest's own invitation placement applies
+// (`owner-key-material.md` § Path B-sibling-5 → *Protects*): with an index key
+// registered (`indexPubkey` non-nil) the hint seals to it as it always has, a
+// classical `mail-record` (the index key's own kind; no ML-KEM half is
+// published for it); without one it seals to the record's own kind key as a
+// `kind` record, X-Wing like the body.
+func SealRecordIndexHint(kind RecordKind, tokens, indexPubkey, kindPubkey, kindMlkemEk []byte) ([]byte, error) {
+	if indexPubkey != nil {
+		return SealRecordHybrid(RecordKindMail, tokens, indexPubkey, nil)
+	}
+	return SealRecordHybrid(kind, tokens, kindPubkey, kindMlkemEk)
+}
+
+// sealHybrid is the one suite decision EncryptToRecipientHybrid documents:
+// X-Wing to `mlkemEk ∥ recipientPubkey` when the ek is present, classical
+// otherwise or on an X-Wing seal error (PQ-4b, warn-logged).
+func sealHybrid(plaintext, recipientPubkey, mlkemEk []byte, xwing, classical func(pt, pubkey []byte) ([]byte, error)) ([]byte, error) {
 	if len(mlkemEk) == mlkem768EncapsKeyLen {
 		xwingPubkey := make([]byte, 0, mlkem768EncapsKeyLen+len(recipientPubkey))
 		xwingPubkey = append(xwingPubkey, mlkemEk...)
 		xwingPubkey = append(xwingPubkey, recipientPubkey...)
-		sealed, err := faunaFfi.SealToRecipientXwing(plaintext, xwingPubkey)
+		sealed, err := xwing(plaintext, xwingPubkey)
 		if err == nil {
 			return sealed, nil
 		}
 		slog.Warn("X-Wing seal failed; degrading to classical X25519 seal (PQ-4b)",
 			"error", err)
 	}
-	return faunaFfi.SealToRecipient(plaintext, recipientPubkey)
+	return classical(plaintext, recipientPubkey)
 }
 
 // IndexHintMlkemEk returns the ML-KEM ek to use for the X-Wing index-hint seal:
@@ -964,6 +1016,26 @@ func NewEpochAwareMailRecordOpener(cap *MLSCapability, snapshotPlaintext []byte)
 	}
 	return opener, nil
 }
+
+// NewRecordOpener builds a CalDAV / CardDAV session's opener from `cap` (the
+// AUTH'd session's MlsCapability) and the already-decrypted snapshot plaintext:
+// it opens every record kind the MSEK reaches, dispatching on the envelope
+// kind — mail through the snapshot's leaf keypairs, calendar and card through
+// their per-kind rings (current generation from the MSEK, grace from the
+// snapshot's grace roots), a record under the wrong kind's key under nothing
+// (`owner-key-material.md` § Path B-sibling-5 → *Snapshot carriage*). No
+// mail-epoch chain: DAV content is never epoch-sealed.
+func NewRecordOpener(cap *MLSCapability, snapshotPlaintext []byte) (*MailRecordOpener, error) {
+	opener, err := cap.NewRecordOpener(snapshotPlaintext)
+	if err != nil {
+		return nil, fmt.Errorf("NewRecordOpener: %w", err)
+	}
+	return opener, nil
+}
+
+// DavSealPubkeys are the public halves of the calendar and card keypairs an
+// MSEK derives — what a DAV session seals its writes to.
+type DavSealPubkeys = faunaFfi.DavSealPubkeys
 
 // IsSealedMailRecord reports whether `stored` is a sealed MailRecordEnvelope
 // (strict canonical DAG-CBOR, kind "mail-record") — as opposed to raw

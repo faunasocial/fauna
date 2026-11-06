@@ -12,8 +12,7 @@
 //! cross-process contract. This module only adapts the two genuinely
 //! platform-specific hooks across the UniFFI boundary via `with_foreign` traits:
 //! how to *spawn* the agent ([`FfiAgentSpawner`], a `launchctl` kick /
-//! LaunchAgent self-install on macOS), where the app's current *bearer* comes
-//! from ([`FfiProvisioningBearerSource`]) — plus the optional agent-up edge
+//! LaunchAgent self-install on macOS) — plus the optional agent-up edge
 //! observer ([`FfiAgentReachabilityObserver`], the folder-UI reconcile re-fire
 //! cue).
 //!
@@ -39,12 +38,14 @@ use std::sync::{Arc, Mutex};
 
 use fauna_client::NestClient;
 use fauna_client_sync::agent::{
-    AgentCapabilityInputs, AgentSpawner, BindingState, LocationBindingsModel,
+    AgentBearerSource, AgentCapabilityInputs, AgentSpawner, BindingState, LocationBindingsModel,
     ProvisioningBearerSource, ReachabilityObserver, SyncAgentProvisioner,
     signed_out_onboarding_reconcile as shared_signed_out_onboarding_reconcile,
 };
 #[cfg(feature = "test-helpers")]
 use fauna_client_sync::agent_spawner::ChildSpawner;
+#[cfg(target_os = "macos")]
+use fauna_client_sync::agent_spawner::LaunchdAgentSpawner;
 #[cfg(windows)]
 use fauna_client_sync::agent_spawner::WindowsDetachedSpawner;
 use fauna_ipc::sync::BearerToken;
@@ -135,8 +136,7 @@ impl FfiAgentSpawner for FfiChildAgentSpawner {
 /// [`WindowsDetachedSpawner`], exported so the C# app can name it without
 /// owning any spawn code of its own.
 ///
-/// It is the counterpart of macOS's Swift `LaunchdSyncAgentSpawner` — but where
-/// launchd bootstrapping genuinely belongs on the Swift side, windows' whole
+/// It is the counterpart of [`FfiLaunchdAgentSpawner`] on macOS: windows' whole
 /// resolution (`AGENT_BIN_ENV` pin → `<exe-dir>` → `<exe-dir>\..` →
 /// `%ProgramFiles%\Fauna`), its harness-isolation argv and its
 /// `CREATE_NO_WINDOW` flag were **already lifted into shared Rust** by the
@@ -179,10 +179,63 @@ impl FfiAgentSpawner for FfiWindowsDetachedSpawner {
     }
 }
 
-/// Swift-provided source of the app's **current nest bearer**, read fresh each
-/// convergence tick and pushed to the agent (`RefreshBearer`). Mirrors the File
-/// Provider host's [`crate::FfiBearerProvider`]: a fast local read the identity app
-/// keeps current. An empty token ⇒ not authenticated (the tick then skips).
+/// The **production macOS** spawner: the shared [`LaunchdAgentSpawner`]
+/// (`sync-agent.md` § Packaging + lifecycle), exported so the macOS app names
+/// it instead of owning a launchd writer of its own.
+///
+/// The app's Swift `LaunchdSyncAgentSpawner` used to write the per-user
+/// `social.fauna.sync-agent` plist itself, on the reasoning that launchd
+/// bootstrapping belonged on the Swift side. It does not: the plist is ONE file
+/// per user and fauna-tui on a mac installed from the archive alone must write
+/// it too (*A tui-only mac*), so two writers with two target resolutions would
+/// rewrite — and re-bootstrap — each other's job whenever both apps run. One
+/// shared Rust writer with one resolution order is what keeps the file stable
+/// whichever app wrote last (priority #2; the windows precedent above).
+///
+/// **Gated on `target_vendor = "apple"`, not `target_os = "macos"`**: the
+/// generated Swift is one flat module shared by every apple slice (module docs
+/// above), so the symbol must exist on iOS/watchOS too — inert there, since no
+/// agent runs on a phone. Not `test-helpers`-gated, like the windows twin: this
+/// is the production path, and the harness pin it honours is compiled out of a
+/// release build inside `fauna_client_sync::agent_spawner`.
+#[cfg(target_vendor = "apple")]
+#[derive(uniffi::Object)]
+pub struct FfiLaunchdAgentSpawner {
+    #[cfg(target_os = "macos")]
+    inner: LaunchdAgentSpawner,
+}
+
+#[cfg(target_vendor = "apple")]
+#[uniffi::export]
+impl FfiLaunchdAgentSpawner {
+    /// Construct the macOS production spawner (production mode — the app's e2e
+    /// launches use `FfiChildAgentSpawner` instead).
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            #[cfg(target_os = "macos")]
+            inner: LaunchdAgentSpawner::new(false),
+        })
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+#[uniffi::export]
+impl FfiAgentSpawner for FfiLaunchdAgentSpawner {
+    fn spawn_agent(&self) {
+        #[cfg(target_os = "macos")]
+        AgentSpawner::spawn_agent(&self.inner);
+    }
+}
+
+/// **Legacy** app-provided source of the app's current nest bearer, read each
+/// convergence tick and pushed to the agent (`RefreshBearer`). An empty token ⇒
+/// not authenticated (the tick then skips). The provisioner's default, taken
+/// when no source is handed in, is the session client's own bearer cache
+/// ([`AgentBearerSource`], the hook tui and linux use), which re-mints on a
+/// `401`; a source that caches its token app-side re-pushes a bearer the nest
+/// stopped accepting after a restart, and the agent's control plane never
+/// returns. Kept only while windows still hands one in.
 #[uniffi::export(with_foreign)]
 pub trait FfiProvisioningBearerSource: Send + Sync {
     /// The bearer the app currently holds for this actor's nest connection.
@@ -229,6 +282,84 @@ pub struct FfiAgentLocation {
     /// shared-set row when this is `true` (`file-sync.md` § Multi-writer
     /// shared sets — D4).
     pub access_revoked: bool,
+    /// `LocationInfo::total_bytes` — every tracked file's recorded size,
+    /// placeholders included: the denominator of the row's on-this-device line
+    /// (`on-demand-files.md` § The free-up-space gesture where the OS offers
+    /// none). The four fields below are mirrored onto the bindings model's row
+    /// by [`FfiLocationBindingsModel::reconcile`] and
+    /// [`FfiLocationBindingsModel::fold_parks`]; defaulted, so a caller that
+    /// builds a row keeps compiling.
+    #[uniffi(default = 0)]
+    pub total_bytes: u64,
+    /// `LocationInfo::on_device_bytes` — of [`Self::total_bytes`], the bytes on
+    /// this device; `None` for an always-resident binding.
+    #[uniffi(default = None)]
+    pub on_device_bytes: Option<u64>,
+    /// `LocationInfo::free_space` — the latest *Free up space* sweep of this
+    /// location in the agent's lifetime; `None` until one has run.
+    #[uniffi(default = None)]
+    pub free_space: Option<FfiFreeSpaceRun>,
+    /// `LocationInfo::on_demand_mount_error` — the on-demand root runs without
+    /// its placeholder surface (the verb is withheld then).
+    #[uniffi(default = None)]
+    pub on_demand_mount_error: Option<String>,
+}
+
+/// One *Free up space* sweep's outcome — the FFI face of
+/// `fauna_ipc::sync::FreeSpaceRun` ([`FfiAgentLocation::free_space`]).
+#[derive(uniffi::Record, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfiFreeSpaceRun {
+    /// The sweep is still walking the location.
+    pub running: bool,
+    pub freed_files: u64,
+    pub freed_bytes: u64,
+    /// Files kept because this device may hold the only copy.
+    pub kept_unsynced: u64,
+    /// Files kept because the user keeps them on this device.
+    pub kept_pinned: u64,
+}
+
+impl From<fauna_ipc::sync::FreeSpaceRun> for FfiFreeSpaceRun {
+    fn from(r: fauna_ipc::sync::FreeSpaceRun) -> Self {
+        Self {
+            running: r.running,
+            freed_files: r.freed_files,
+            freed_bytes: r.freed_bytes,
+            kept_unsynced: r.kept_unsynced,
+            kept_pinned: r.kept_pinned,
+        }
+    }
+}
+
+impl From<FfiFreeSpaceRun> for fauna_ipc::sync::FreeSpaceRun {
+    fn from(r: FfiFreeSpaceRun) -> Self {
+        Self {
+            running: r.running,
+            freed_files: r.freed_files,
+            freed_bytes: r.freed_bytes,
+            kept_unsynced: r.kept_unsynced,
+            kept_pinned: r.kept_pinned,
+        }
+    }
+}
+
+/// How one bound row renders its *Free up space* verb
+/// ([`FfiLocationBindingsModel::free_space_verb`]) — the shared
+/// `fauna_client_sync::agent::FreeSpaceVerb`, its three texts already resolved
+/// through the shared string table, as linux and tui resolve them. Every
+/// number behind them is the agent's reading: the verb is never optimistic.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiFreeSpaceVerb {
+    /// A sweep is walking the location now — `folder-location-free-space-button`'s
+    /// `state` attr reads `running`, else `idle`.
+    pub running: bool,
+    /// The button's label.
+    pub button_label: String,
+    /// `folder-location-on-device` — how much of the location is on this device.
+    pub on_device_line: String,
+    /// `folder-location-free-space-result` — the latest sweep's outcome; `None`
+    /// (render no line) until one has run.
+    pub result_line: Option<String>,
 }
 
 /// The `sync-agent-status` health state (`sync-agent.md` § Local agent health) —
@@ -344,6 +475,14 @@ pub struct FfiBindingRow {
     /// can share).
     pub folder_id: String,
     pub state: FfiBindingState,
+    /// The binding's sync mode (`"always"` / `"on-demand"`) — the shared model's
+    /// agent-mirrored `BindingRow::mode`, mirrored on every
+    /// [`FfiLocationBindingsModel::reconcile`]; a row the agent has not reported
+    /// yet carries `fauna_ipc::sync::fresh_binding_mode()`, the mode the agent will
+    /// give it. The `folder-location-mode-toggle[i]` switch reads it here, so no
+    /// app keeps a per-path copy (`ui/folders.md`; `on-demand-files.md` § *The
+    /// choice is the user's*).
+    pub mode: String,
     /// The owner revoked this binding's write grant, so the agent parked it —
     /// render `folder-access-revoked-warning` rather than letting the folder go
     /// quiet (`file-sync.md` § Multi-writer shared sets — D4).
@@ -486,6 +625,7 @@ impl FfiLocationBindingsModel {
                 folder: r.folder,
                 folder_id: r.folder_id,
                 state: r.state.into(),
+                mode: r.mode,
                 access_revoked: r.access_revoked,
                 deletes_held: r.deletes_held,
                 deletes_skipped_unreadable: r.deletes_skipped_unreadable,
@@ -578,13 +718,35 @@ impl FfiLocationBindingsModel {
     pub fn fold_parks(&self, agent_rows: Vec<FfiAgentLocation>) {
         self.lock().fold_parks(&agent_location_rows(agent_rows));
     }
+
+    /// How the bound row at `path` renders its *Free up space* verb, or `None`
+    /// to render none — the ONE rule every app shares
+    /// (`LocationBindingsModel::free_space_verb`, `on-demand-files.md` § The
+    /// free-up-space gesture where the OS offers none): present exactly while
+    /// the row renders its mode switch, is on-demand and its placeholder
+    /// surface stands. The readings are the agent's, mirrored by
+    /// [`Self::reconcile`] and [`Self::fold_parks`]; the texts are resolved
+    /// here through the shared string table, as linux and tui resolve them.
+    pub fn free_space_verb(&self, path: String) -> Option<FfiFreeSpaceVerb> {
+        let model = self.lock();
+        let row = model.rendered().into_iter().find(|r| r.path == path)?;
+        let verb = model.free_space_verb(&row)?;
+        let lookup = fauna_i18n::strings::lookup;
+        Some(FfiFreeSpaceVerb {
+            running: verb.running,
+            button_label: verb.button_label(lookup),
+            on_device_line: verb.on_device_line(lookup),
+            result_line: verb.result_line(lookup),
+        })
+    }
 }
 
-/// The FFI agent rows as the wire `LocationInfo` the shared model reads. Only
-/// `path`/`folder`/`folder_id`/`access_revoked` are read by the reconcile and
-/// the park fold; the rest of the wire row is irrelevant here, so it is built
-/// off `Default` (the struct derives one precisely so additive growth cannot
-/// break a hand-listed construction — `LocationInfo`'s own note).
+/// The FFI agent rows as the wire `LocationInfo` the shared model reads: what
+/// the reconcile and the park fold read — the binding, its park, its mount
+/// failure and the free-up-space readings. The rest of the wire row is
+/// irrelevant here, so it is built off `Default` (the struct derives one
+/// precisely so additive growth cannot break a hand-listed construction —
+/// `LocationInfo`'s own note).
 fn agent_location_rows(agent_rows: Vec<FfiAgentLocation>) -> Vec<fauna_ipc::sync::LocationInfo> {
     agent_rows
         .into_iter()
@@ -594,9 +756,39 @@ fn agent_location_rows(agent_rows: Vec<FfiAgentLocation>) -> Vec<fauna_ipc::sync
             folder_id: r.folder_id,
             mode: r.mode,
             access_revoked: r.access_revoked,
+            total_bytes: r.total_bytes,
+            on_device_bytes: r.on_device_bytes,
+            free_space: r.free_space.map(Into::into),
+            on_demand_mount_error: r.on_demand_mount_error,
             ..Default::default()
         })
         .collect()
+}
+
+/// The review rows' read, apart from the main block because
+/// [`crate::ConflictSummary`] comes with the `folders` feature.
+#[cfg(feature = "folders")]
+#[uniffi::export]
+impl FfiLocationBindingsModel {
+    /// The group set `folder_id`'s review rows as last read, each through the
+    /// shared mapping (`ConflictSummary::of_retained`). `set_label` is the set's
+    /// label on the page. A row's `id` is what
+    /// [`FfiSyncAgentProvisioner::restore_retained_version`] takes, keyed by
+    /// this same `folder_id`; the nest's *use the other version* does not know
+    /// these rows.
+    pub fn set_review_rows(
+        &self,
+        folder_id: String,
+        set_label: String,
+    ) -> Vec<crate::ConflictSummary> {
+        self.lock()
+            .set_conflicts()
+            .get(&folder_id)
+            .into_iter()
+            .flatten()
+            .map(|row| crate::ConflictSummary::of_retained(&set_label, row))
+            .collect()
+    }
 }
 
 impl FfiLocationBindingsModel {
@@ -618,15 +810,33 @@ impl AgentSpawner for SpawnerAdapter {
     }
 }
 
-/// Adapter: the shared [`ProvisioningBearerSource`] hook over the Swift-provided
-/// [`FfiProvisioningBearerSource`] (a fast synchronous property read app-side).
-struct BearerAdapter(Arc<dyn FfiProvisioningBearerSource>);
+/// The provisioner's bearer hook: the session client's own bearer cache — the
+/// shared [`AgentBearerSource`] tui and linux push from, and the default — or,
+/// while an app still hands one in, an app-provided [`FfiProvisioningBearerSource`].
+///
+/// The default exists because the app-provided read was the defect: FaunaKit's
+/// hook returned a token cached at sign-in, so after a nest restart the app
+/// re-pushed a bearer the nest no longer accepted on every tick, overwriting
+/// each one the agent's renewal loop minted on its `401` — the agent's control
+/// plane never came back (`p2p.md` § Same-account nest-down folder transfer,
+/// the macOS native pair, 2026-11-03). The client's cache re-mints on that
+/// `401`, so the next tick pushes a bearer the nest accepts.
+enum BearerAdapter {
+    Session(AgentBearerSource),
+    App(Arc<dyn FfiProvisioningBearerSource>),
+}
 
 impl ProvisioningBearerSource for BearerAdapter {
     fn current_bearer(&self) -> impl Future<Output = Option<BearerToken>> + Send {
-        let source = Arc::clone(&self.0);
+        let (session, app) = match self {
+            Self::Session(s) => (Some(AgentBearerSource(Arc::clone(&s.0))), None),
+            Self::App(a) => (None, Some(Arc::clone(a))),
+        };
         async move {
-            let b = source.current_bearer();
+            if let Some(session) = session {
+                return session.current_bearer().await;
+            }
+            let b = app?.current_bearer();
             if b.token.is_empty() {
                 None
             } else {
@@ -714,10 +924,14 @@ impl FfiSyncAgentProvisioner {
         device_id: String,
         device_label: String,
         spawner: Arc<dyn FfiAgentSpawner>,
-        bearer_source: Arc<dyn FfiProvisioningBearerSource>,
+        bearer_source: Option<Arc<dyn FfiProvisioningBearerSource>>,
         reachability_observer: Option<Arc<dyn FfiAgentReachabilityObserver>>,
     ) -> Result<Arc<Self>, FfiError> {
         let nest_url = nest.nest_url();
+        let bearer = match bearer_source {
+            Some(app) => BearerAdapter::App(app),
+            None => BearerAdapter::Session(AgentBearerSource(nest.auth().bearer())),
+        };
         let predecessor_keys_by_actor =
             accounts.map_or_else(Vec::new, |a| a.paired_predecessor_keys(&identity_secret));
         let inner = SyncAgentProvisioner::new(
@@ -738,9 +952,12 @@ impl FfiSyncAgentProvisioner {
                 device_id,
                 device_label,
                 nest_url,
+                // The registry's per-actor slot supplies the reach hint of
+                // each push; no registry, no hint.
+                reach_registry: accounts.map(|a| a.registry().clone()),
             },
             Arc::new(SpawnerAdapter(spawner)),
-            Arc::new(BearerAdapter(bearer_source)),
+            Arc::new(bearer),
             reachability_observer
                 .map(|o| Arc::new(ReachabilityAdapter(o)) as Arc<dyn ReachabilityObserver>),
         )?;
@@ -861,6 +1078,17 @@ impl FfiSyncAgentProvisioner {
         Ok(self.inner.set_location_sync_mode(path, mode).await?)
     }
 
+    /// *Free up space* for the bound on-demand location at `path`
+    /// (`FreeLocationSpace`) — the press behind `folder-location-free-space-button`,
+    /// sent only for a row [`FfiLocationBindingsModel::free_space_verb`] offers
+    /// it on. Answers once the agent has accepted the sweep; the outcome is
+    /// re-read off [`Self::list_locations`] (the reconcile after the press, then
+    /// the status tick's [`FfiLocationBindingsModel::fold_parks`]), never
+    /// assumed. An `Err` is the agent's refusal, for the page's error line.
+    pub async fn free_location_space(&self, path: String) -> Result<(), FfiError> {
+        Ok(self.inner.free_location_space(path).await?)
+    }
+
     /// Every hosted engine's mass-delete-floor hold (`ListEngines`, narrowed) —
     /// the input to [`FfiLocationBindingsModel::fold_engine_holds`], and the
     /// only channel by which an app learns a bound folder emptied
@@ -907,6 +1135,29 @@ impl FfiSyncAgentProvisioner {
         })
     }
 
+    /// Re-read the review list of every group set `model` holds a binding to
+    /// and fold the readings in; `true` when what the page shows moved. Call it
+    /// on the app's agent-status tick: the fold records a row inside the agent,
+    /// so no gesture here produces it (`group-set.md` § Build design — the group
+    /// set, decision 9). A read the agent cannot answer folds nothing.
+    pub async fn refresh_set_conflicts(&self, model: Arc<FfiLocationBindingsModel>) -> bool {
+        self.inner.refresh_set_conflicts(&model.inner).await
+    }
+
+    /// The review list's *use the other version* on the group set `folder_id`'s
+    /// row `conflict_id`. An `Err` is the refusal to show the user: the row
+    /// stands and nothing was written.
+    pub async fn restore_retained_version(
+        &self,
+        folder_id: String,
+        conflict_id: i64,
+    ) -> Result<(), FfiError> {
+        Ok(self
+            .inner
+            .restore_retained_version(folder_id, conflict_id)
+            .await?)
+    }
+
     /// The agent's current sync folders (`ListLocations`) — the truth the
     /// Settings → Sync bindings UI renders post-cutover (the in-app one-shot-only
     /// host has no resident bindings to list).
@@ -922,6 +1173,10 @@ impl FfiSyncAgentProvisioner {
                 folder_id: f.folder_id,
                 mode: f.mode,
                 access_revoked: f.access_revoked,
+                total_bytes: f.total_bytes,
+                on_device_bytes: f.on_device_bytes,
+                free_space: f.free_space.map(Into::into),
+                on_demand_mount_error: f.on_demand_mount_error,
             })
             .collect())
     }
@@ -1160,7 +1415,7 @@ pub struct FfiCustodianPassReport {
 
 /// Run ONE custodian pull pass on this device's hosted replica and report what
 /// it did (`CustodianRunPassNow`) — the windows/desktop twin of linux's
-/// (`apps/fauna-linux/src/main.rs`'s `custodian_pull_run_now` arm) and tui's
+/// (`apps/fauna-linux/src/lib.rs`'s `custodian_pull_run_now` arm) and tui's
 /// (`apps/fauna-tui/src/automation.rs`) direct `SyncAgentProvisioner` calls,
 /// and the seam the windows `custodian_pull_run_now` TestAgent command drives.
 /// It is the causal barrier the tier_3 enroll→pull→check-in→status proof rests
@@ -1458,7 +1713,123 @@ mod tests {
             folder_id: Some("ref:photos".into()),
             mode: "always".into(),
             access_revoked: parked,
+            total_bytes: 0,
+            on_device_bytes: None,
+            free_space: None,
+            on_demand_mount_error: None,
         }
+    }
+
+    /// An on-demand agent row of 300 recorded bytes, `on_device` of them here,
+    /// whose latest sweep is `run`.
+    fn on_demand_row(on_device: u64, run: Option<FfiFreeSpaceRun>) -> FfiAgentLocation {
+        FfiAgentLocation {
+            mode: "on-demand".into(),
+            total_bytes: 300,
+            on_device_bytes: Some(on_device),
+            free_space: run,
+            ..agent_row(false)
+        }
+    }
+
+    /// The rendered row carries the binding's mode — the shared model's
+    /// agent-mirrored `BindingRow::mode`, an optimistic add at the platform's
+    /// fresh-binding default — so an app reads the mode off the row and keeps no
+    /// per-path copy of its own (`ui/folders.md`, `folder-location-mode-toggle[i]`;
+    /// `on-demand-files.md` § *The choice is the user's*).
+    #[test]
+    fn rendered_rows_carry_the_agent_mirrored_mode() {
+        let model = FfiLocationBindingsModel::new();
+        model.add(
+            "/Users/a/Shared".into(),
+            "photos".into(),
+            "ref:photos".into(),
+        );
+        assert_eq!(
+            model.rendered()[0].mode,
+            fauna_ipc::sync::fresh_binding_mode(),
+            "a row the agent has not reported yet renders the mode the agent will give it"
+        );
+
+        model.reconcile(vec![agent_row(false)]);
+        assert_eq!(model.rendered()[0].mode, "always");
+
+        model.reconcile(vec![on_demand_row(0, None)]);
+        assert_eq!(model.rendered()[0].mode, "on-demand");
+    }
+
+    /// The FFI face of the free-up-space verb (`on-demand-files.md` § The
+    /// free-up-space gesture where the OS offers none): the agent's readings
+    /// cross on `FfiAgentLocation`, reach the shared row through the reconcile
+    /// and the status tick's fold, and come back as the texts the shared
+    /// `FreeSpaceVerb` resolves — the same strings linux and tui paint. Only on
+    /// a host whose agent has a placeholder surface (windows, linux): macOS
+    /// renders no switch and so no verb.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn free_space_verb_carries_the_agents_readings_across_the_ffi() {
+        use fauna_client_sync::agent::FreeSpaceVerb;
+        let lookup = fauna_i18n::strings::lookup;
+        let path = "/Users/a/Shared".to_string();
+        let model = FfiLocationBindingsModel::new();
+
+        model.reconcile(vec![agent_row(false)]);
+        assert_eq!(
+            model.free_space_verb(path.clone()),
+            None,
+            "an always-resident row keeps every byte: no verb"
+        );
+
+        model.reconcile(vec![on_demand_row(100, None)]);
+        let shared = FreeSpaceVerb {
+            running: false,
+            on_device_bytes: 100,
+            total_bytes: 300,
+            latest: None,
+        };
+        assert_eq!(
+            model.free_space_verb(path.clone()),
+            Some(FfiFreeSpaceVerb {
+                running: false,
+                button_label: shared.button_label(lookup),
+                on_device_line: shared.on_device_line(lookup),
+                result_line: None,
+            }),
+            "the on-demand row offers the verb, reading the agent's bytes"
+        );
+
+        // A sweep moves the readings with no gesture: the status tick's fold.
+        let run = FfiFreeSpaceRun {
+            running: false,
+            freed_files: 1,
+            freed_bytes: 100,
+            kept_unsynced: 0,
+            kept_pinned: 1,
+        };
+        model.fold_parks(vec![on_demand_row(0, Some(run))]);
+        let shared = FreeSpaceVerb {
+            running: false,
+            on_device_bytes: 0,
+            total_bytes: 300,
+            latest: Some(run.into()),
+        };
+        let verb = model.free_space_verb(path.clone()).expect("still offered");
+        assert_eq!(verb.on_device_line, shared.on_device_line(lookup));
+        assert_eq!(verb.result_line, shared.result_line(lookup));
+        assert!(
+            verb.result_line.is_some_and(|line| line.contains('1')),
+            "the outcome line is resolved, not a key"
+        );
+
+        let mut unmounted = on_demand_row(0, None);
+        unmounted.on_demand_mount_error = Some("mount-failed".into());
+        model.fold_parks(vec![unmounted]);
+        assert_eq!(
+            model.free_space_verb(path),
+            None,
+            "a root without its placeholder surface offers no verb"
+        );
+        assert_eq!(model.free_space_verb("/elsewhere".into()), None);
     }
 
     /// The FFI face of the park watch (`file-sync.md` § Multi-writer shared
@@ -1482,6 +1853,36 @@ mod tests {
         assert!(
             !model.rendered()[0].access_revoked,
             "a re-bind's un-park must clear it"
+        );
+    }
+
+    /// A group set's review rows reach the page through the shared mapping, so
+    /// a winning delete still offers the button, and they stay under their set.
+    #[cfg(feature = "folders")]
+    #[test]
+    fn set_review_rows_map_one_sets_rows_through_the_shared_summary() {
+        let model = FfiLocationBindingsModel::new();
+        let row = fauna_core::sync::RetainedConflict {
+            id: 7,
+            path: "notes.txt".to_string(),
+            ..Default::default()
+        };
+        let mut readings = fauna_client_sync::agent::SetConflicts::new();
+        readings.insert("group:aa".to_string(), vec![row]);
+        assert!(model.lock().fold_set_conflicts(readings));
+
+        let rows = model.set_review_rows("group:aa".to_string(), "Holiday".to_string());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 7);
+        assert!(rows[0].has_other_version, "the winner here is a delete");
+        assert_eq!(rows[0].winning_manifest_hash, None);
+        assert!(rows[0].file_info.starts_with("Holiday: notes.txt"));
+
+        assert!(
+            model
+                .set_review_rows("group:bb".to_string(), "Other".to_string())
+                .is_empty(),
+            "another set's rows must not appear under this one"
         );
     }
 

@@ -6,7 +6,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
-import com.fauna.app.core.feed.PlaybackPeaks
 import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.cueSampleIntervalMs
@@ -35,9 +34,9 @@ import uniffi.fauna_feed.PostSummary
  * moved one layer down; this is what is left.)*
  *
  * Playback progress comes from the inline player ([FeedPostVideo]): a media
- * row's `mediaPlayedPm` is what [PlaybackPeaks.take] hands over for its post
- * (the peak since the last sample), so a video played to the end derives the
- * media watch-complete.
+ * player notes its progress on the tracker (`notePlayed`), which holds the per-post
+ * peak itself, so the rows pass `mediaPlayedPm = null` and a video played to the end
+ * derives the media watch-complete.
  */
 
 /**
@@ -115,7 +114,7 @@ class CueCapture internal constructor(
                 // probe's (it holds the row rather than flushing it).
                 height = item.size.toDouble(),
                 isMedia = isMedia,
-                mediaPlayedPm = if (isMedia) PlaybackPeaks.take(postId) else null,
+                mediaPlayedPm = null,
             )
         }
         return tracker.sample(

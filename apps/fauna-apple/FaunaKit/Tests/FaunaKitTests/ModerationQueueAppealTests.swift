@@ -43,6 +43,29 @@ struct ModerationQueueAppealTests {
         #expect(vm.appealReason.isEmpty)
     }
 
+    @Test("a withheld-badge handoff opens the draft on the named appealable row")
+    func pendingAppealOpensNamedRow() {
+        let vm = ModerationQueueVM()
+        vm.seedForTest(rows: [serverRow, otherRow])
+        PendingAppealStore.set("content-2")
+        vm.openPendingAppeal()
+        #expect(vm.appealContentId == "content-2")
+        // One-shot: a second consume finds nothing.
+        #expect(PendingAppealStore.consume() == nil)
+    }
+
+    @Test("a handoff naming a row the queue lacks, or a local detection, opens nothing")
+    func pendingAppealNeedsAnAppealableRow() {
+        let vm = ModerationQueueVM()
+        vm.seedForTest(rows: [serverRow, localRow])
+        PendingAppealStore.set("gone")
+        vm.openPendingAppeal()
+        #expect(!vm.appealOpen)
+        PendingAppealStore.set("content-3")
+        vm.openPendingAppeal()
+        #expect(!vm.appealOpen)
+    }
+
     @Test("cancel drops the draft and the status")
     func cancelClosesTheForm() {
         let vm = ModerationQueueVM()

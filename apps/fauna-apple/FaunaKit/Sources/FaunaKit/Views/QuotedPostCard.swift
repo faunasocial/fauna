@@ -27,16 +27,23 @@ public struct QuotedPostCard: View {
     /// `RenderBlock::QuotedPost::not_found`; the card paints "Post not found" in
     /// place of the author row and body.
     public let notFound: Bool
+    /// Set when this nest's admin blocked the quoted post after a report
+    /// (`takedown-and-block.md` § Admin block of a reported item). An empty body
+    /// (a viewer other than the author) paints the notice in place; the author's
+    /// kept body paints it beside.
+    public let adminBlockReason: String?
 
     public init(author: String, postBody: String, verification: VerificationStatus,
                 authoringOrigin: AuthoringOriginStatus = .unknown,
-                legalTakedownRef: String? = nil, notFound: Bool = false) {
+                legalTakedownRef: String? = nil, notFound: Bool = false,
+                adminBlockReason: String? = nil) {
         self.author = author
         self.postBody = postBody
         self.verification = verification
         self.authoringOrigin = authoringOrigin
         self.legalTakedownRef = legalTakedownRef
         self.notFound = notFound
+        self.adminBlockReason = adminBlockReason
     }
 
     /// The one line a quote with nothing to show paints in place of author + body:
@@ -46,13 +53,18 @@ public struct QuotedPostCard: View {
         if let reference = legalTakedownRef {
             return renderLocalizedText(legalTakedownTombstone(reference: reference))
         }
+        if let reason = adminBlockReason, postBody.isEmpty {
+            return adminBlockNoticeText(reason)
+        }
         return notFound ? L.feed.post.postNotFound : nil
     }
 
     /// What the embed paints, as the in-process driver reads it back
     /// (`quoted-post`'s text) — the placeholder line, or the author and body.
     private var paintedText: String {
-        placeholder ?? "\(author)\n\(postBody)"
+        if let placeholder { return placeholder }
+        if let reason = adminBlockReason { return "\(author)\n\(postBody)\n\(adminBlockNoticeText(reason))" }
+        return "\(author)\n\(postBody)"
     }
 
     public var body: some View {
@@ -84,6 +96,10 @@ public struct QuotedPostCard: View {
                 Text(postBody)
                     .font(.caption)
                     .lineLimit(3)
+                // The author's own kept body: the notice right beside it.
+                if let reason = adminBlockReason {
+                    AdminBlockNoticeLine(reason: reason)
+                }
             }
         }
         .padding(10)

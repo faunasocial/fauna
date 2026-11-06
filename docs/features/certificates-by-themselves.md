@@ -60,13 +60,13 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| windows | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| macos | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| ios | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| android | ✅ full | 0.1.2-dev+b3cb40c5 docker |
-| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| windows | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| macos | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -77,7 +77,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_dane_tlsa_cert_coupling.py::test_dane_tlsa_floor_present_then_trusted_withdraws` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mta_sts_serving.py::test_mta_sts_never_enforces_on_the_floor_or_inside_the_window` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_acme_ip_bridge_host_published.py::test_host_published_address_orders_and_serves_the_ip_bridge` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_cert_nudge_reminder.py::test_the_admin_is_reminded_once_a_day_and_only_once_told` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_cert_nudge_reminder.py::test_the_admin_is_reminded_once_a_day_and_only_once_told` | nest (linux): passed, nest (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_acme_http01_pebble_issuance.py::test_real_acme_issuance_flips_floor_to_trusted` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_domainless_add_domain_acme_serves_mail.py::test_a_self_signed_stopgap_heals_to_trusted_and_reaches_mail_and_calendar_without_restart` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/platform/docker/test_acme_http01_pebble_issuance.py::test_failed_issuance_stays_paced_across_a_restart_and_picks_up_the_fix` | nest (linux): passed |

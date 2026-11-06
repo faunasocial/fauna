@@ -115,6 +115,39 @@ impl EventDrafts {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Whether this record holds anything the **user** authored — the predicate
+    /// [`Self::fill`] consults before a resting draft may replace a live one.
+    /// Whitespace alone is not authorship.
+    pub fn has_user_input(&self) -> bool {
+        [
+            &self.summary,
+            &self.dtstart,
+            &self.dtend,
+            &self.description,
+            &self.location,
+        ]
+        .iter()
+        .any(|field| !field.trim().is_empty())
+    }
+
+    /// The events rail's FILL rule (`events.md` § Persistence, *A restore
+    /// FILLS*), applied by every app's glue to its live draft when the launch
+    /// restore lands: `self` (the live draft) takes `restored` only when the
+    /// user has not authored into it, and then whole — never a field-by-field
+    /// merge of two different events. Returns whether it took it.
+    ///
+    /// The launch load retries a read lost to the transport for minutes
+    /// (`fauna_client_drafts::DraftsSync::load`), so a restore can land
+    /// after the user has started an event; the form being typed into is
+    /// strictly the newer of the two.
+    pub fn fill(&mut self, restored: EventDrafts) -> bool {
+        if restored.is_empty() || self.has_user_input() {
+            return false;
+        }
+        *self = restored;
+        true
+    }
 }
 
 /// Build the canonical events-rail record from the composer's five inputs and
@@ -257,6 +290,55 @@ mod tests {
     #[test]
     fn a_draft_with_a_summary_is_not_empty() {
         assert!(!sample().is_empty());
+    }
+
+    /// A restore FILLS (`events.md` § Persistence): the launch load retries a
+    /// read lost to the transport for minutes, so it can land after the user
+    /// has started an event — and the form they are typing into wins, every
+    /// field of it, never a field-by-field merge of two different events.
+    #[test]
+    fn a_late_restore_never_overwrites_a_typed_draft() {
+        let mut live = EventDrafts {
+            location: "typed meanwhile".into(),
+            ..EventDrafts::default()
+        };
+        assert!(!live.fill(sample()), "the live draft must win");
+        assert_eq!(
+            live,
+            EventDrafts {
+                location: "typed meanwhile".into(),
+                ..EventDrafts::default()
+            },
+        );
+    }
+
+    /// The other half of FILL: a form the user has not authored into — blank,
+    /// or whitespace only — takes the resting draft, which is what carries an
+    /// event begun on another device onto this one.
+    #[test]
+    fn a_late_restore_still_fills_an_untouched_draft() {
+        let mut blank = EventDrafts::default();
+        assert!(blank.fill(sample()));
+        assert_eq!(blank, sample());
+
+        let mut whitespace = EventDrafts {
+            summary: "  ".into(),
+            ..EventDrafts::default()
+        };
+        assert!(whitespace.fill(sample()));
+        assert_eq!(whitespace, sample());
+    }
+
+    /// An empty resting record is no draft at all: it never replaces a live
+    /// one, even one that is itself only whitespace.
+    #[test]
+    fn an_empty_restore_takes_nothing() {
+        let mut whitespace = EventDrafts {
+            summary: " ".into(),
+            ..EventDrafts::default()
+        };
+        assert!(!whitespace.fill(EventDrafts::default()));
+        assert_eq!(whitespace.summary, " ");
     }
 
     /// Additive-everywhere evolution (`version-compatibility.md`): a blob a

@@ -79,6 +79,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 LEAVE_BUDGET_S = MESSAGE_BUDGET_S + MEMBERSHIP_BUDGET_S

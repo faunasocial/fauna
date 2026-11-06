@@ -100,6 +100,16 @@ struct ContactsView: View {
                                 }
                             }
                             CopyButton(Ids.contactActorIdCopyBtn, text: result.actorId)
+                            // Open the found actor's Profile, carrying the lookup's nest
+                            // URL as its home (`contacts.md` § Layout & flow region 3).
+                            Button(L.contacts.findUser.openProfile) {
+                                openProfile(result.actorId, home: vm.findNestUrl)
+                            }
+                            .controlSize(.small)
+                            .accessibilityIdentifier(Ids.contactActorIdOpenProfileButton)
+                            .automationActivate(Ids.contactActorIdOpenProfileButton) {
+                                openProfile(result.actorId, home: vm.findNestUrl)
+                            }
                             Spacer()
                             Button(L.contacts.knock) {
                                 Task { await vm.addContact(actorId: result.actorId) }
@@ -154,6 +164,7 @@ struct ContactsView: View {
                                         .font(.caption)
                                         .lineLimit(2)
                                 }
+                                KnockGuardianPendingLabel(visible: vm.knocksAwaitGuardian)
                                 HStack(spacing: 8) {
                                     Button(L.common.accept) {
                                         Task { await vm.acceptKnock(peerId: knock.sender) }
@@ -237,6 +248,16 @@ struct ContactsView: View {
                                                 .foregroundStyle(.secondary)
                                                 .lineLimit(1)
                                         }
+#if !FAUNA_KIDS
+                                        // Phase two's archive-link question / linked line
+                                        // (archive-import.md § Linking and merging, ruling 8):
+                                        // state and words are shared, painted by the one
+                                        // FaunaKit view both Contacts lists embed.
+                                        if let links = client?.archiveLinks {
+                                            ContactArchiveLinkAffordances(
+                                                store: links, peerId: contact.peerId, contactName: row.name)
+                                        }
+#endif
                                     }
                                     Button {
                                         Pasteboard.copy(contact.peerId)
@@ -287,7 +308,7 @@ struct ContactsView: View {
                                     }
                                 }
                                 .contentShape(Rectangle())
-                                .onTapGesture { openProfile(contact.peerId) }
+                                .onTapGesture { openProfile(contact.peerId, home: contact.homeNestUrl) }
                                 .accessibilityElement(children: .contain)
                                 .accessibilityIdentifier(Ids.contactRow)
                                 // Presence anchor for the indexed contact row. Env-gated no-op.
@@ -296,7 +317,9 @@ struct ContactsView: View {
                                 // § Layout & flow → Another's profile). The driver
                                 // clicks the row by its full hex actor_id (mirrors
                                 // linux's row widget-name), so register that id.
-                                .automationActivate(contact.peerId) { openProfile(contact.peerId) }
+                                .automationActivate(contact.peerId) {
+                                    openProfile(contact.peerId, home: contact.homeNestUrl)
+                                }
                                 // Outermost: every registration above — the row's
                                 // own presence anchor included — records
                                 // `contact-row[i]`, so the row's secondary lines
@@ -341,7 +364,8 @@ struct ContactsView: View {
                     vm.reset()
                     return
                 }
-                vm.configure(api: client.api, actorId: actorId, familyStatus: appState.familyStatus)
+                vm.configure(api: client.api, actorId: actorId, familyStatus: appState.familyStatus,
+                    archiveLinks: client.archiveLinks)
                 await vm.refresh()
                 appState.lastContacts = vm.contacts
                 appState.lastKnocks = vm.knocks
@@ -387,8 +411,12 @@ struct ContactsView: View {
     /// Open another actor's profile (the canonical per-user detail surface —
     /// profile.md § Relationship to Contacts): switch to the More-tab profile
     /// destination carrying the peer's actor_id. Mirrors linux `open_profile`.
-    private func openProfile(_ actorId: String) {
+    ///
+    /// `home` is the door's carried home nest: a Find User result's `nest_url`, a
+    /// contact row's `ContactItem.home_nest_url`.
+    private func openProfile(_ actorId: String, home: String? = nil) {
         appState.profileActorId = actorId
+        appState.profileHome = home
         appState.selectedTab = "more"
         appState.moreSelectedView = "profile"
     }

@@ -150,6 +150,9 @@ async fn sign_in_and_assemble(
             attested_predecessors: Default::default(),
             peer_transport: None,
             store_container: inputs.store_container,
+            // No app is behind this runtime: it is stopped as soon as it is
+            // ready, so any row it had to create keeps the placeholder.
+            device_label: None,
         },
         Arc::clone(&client),
         &nest_url,

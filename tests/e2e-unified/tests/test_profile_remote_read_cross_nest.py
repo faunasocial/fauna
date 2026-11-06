@@ -56,11 +56,12 @@ from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture 
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui LEADS (`profile.md` § Implementation status today); the others
-    # join through the batched trickle-down, each with its own marker.
-    pytest.mark.tui,
-    pytest.mark.android,
-    pytest.mark.linux,
+    # windows, macos, ios and android open the real conversations rail at launch only
+    # under this marker (`launch_seat` → `enable_real_faunamls`).
+    pytest.mark.real_conversations,
+    # Every app: tui LEADS (`profile.md` § Implementation status today), and
+    # the apps still owing the read are declared by the registry markers on
+    # the test, which skip them before the two seats launch.
 ]
 
 READ_BUDGET_S = 30.0
@@ -132,10 +133,6 @@ def test_a_remote_actors_profile_shows_their_name_only_once_they_open_it(
     from the author's home, and paints their avatar, fetched from that home
     over the pinned plane."""
     author, reader = remote_profile_seats
-    author.app.profile.require_remote_profile_read_supported()
-    author.app.profile.require_avatar_banner_upload_supported()
-    reader.app.contacts.require_find_result_opens_profile()
-    reader.app.profile.require_header_pictures_supported()
     if not TEST_IMAGE.exists():
         pytest.skip(f"test fixture missing: {TEST_IMAGE}")
     away = cross_nest_foreign_ephemeral
@@ -198,8 +195,11 @@ def test_a_remote_actors_profile_shows_their_name_only_once_they_open_it(
     )
     assert theirs.error_text() == "", f"error-message={theirs.error_text()!r}"
     # The avatar's bytes come from the author's home, which serves the
-    # self-signed floor: they paint only because the relay reply stamped the
-    # home's identity and the plane graduated its pin against it.
+    # self-signed floor: on a native app they paint only because the relay reply
+    # stamped the home's identity and the plane graduated its pin against it. A
+    # browser holds no pin; the harness's `ignore_https_errors` lets web's
+    # direct fetch through, so on web this witnesses the home pick and the fetch
+    # (`transport-trust.md` § The post arm, *The witness splits the mile*).
     state = theirs.wait_for_picture_state("profile-avatar", "painted", READ_BUDGET_S)
     assert state == "painted", (
         "a relayed profile's avatar paints from a self-signed home over the "

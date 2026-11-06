@@ -1988,7 +1988,7 @@ async fn author_read(
                 author: hex::encode(author),
                 cursor,
                 limit,
-                extra: Default::default(),
+                ..Default::default()
             }),
         )
         .await
@@ -2182,12 +2182,336 @@ async fn the_author_read_cursor_pages() {
         "fauna.feed.author.posts",
         encode(&FeedAuthorPostsRequest {
             author: "not-hex".into(),
-            cursor: None,
-            limit: None,
-            extra: Default::default(),
+            ..Default::default()
         }),
     )
     .await
     .expect_err("a malformed author is refused");
     assert_eq!(err.code, "fauna.feed.invalid_params");
+}
+
+/// Flow (`docs/goal/architecture/feed-read-model.md` § The read model → *The
+/// author read*, its `search` / `sources` fields; caller: `feed.md` § State &
+/// data shape → *The imported-posts selection*): the author reads their own
+/// posts with `sources: ["facebook"]` → `sources_to_filter` folds a mandatory
+/// `FilterRule::Source` → only the Facebook-origin post lists; `search` narrows
+/// the same read by body; a token `source::normalize` refuses is a bad
+/// request; no `sources` lists both.
+#[tokio::test]
+async fn the_author_read_narrows_by_origin_platform_and_search() {
+    let (router, state) = router_with_db_only().await;
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let author_id = author_bytes(&author);
+    let viewer = author_id;
+    let native = ingest_by(&state.db, &author, "a native beach post", 1_700_001, None).await;
+    let imported = {
+        let post = fauna_core::data::Post {
+            author: author.actor_id(),
+            created_at: fauna_core::data::Timestamp(1_700_002),
+            body: fauna_core::data::PostBody::Text {
+                content: "an imported beach post".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: Some(fauna_core::data::PostOrigin {
+                platform: "facebook".into(),
+                url: None,
+            }),
+        };
+        let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+        let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+        let bytes = fauna_core::encoding::sign_and_pack(&author, &post).unwrap();
+        state.db.put_post(&digest, &bytes, None).await.unwrap();
+        digest
+    };
+    let imported_too = {
+        let post = fauna_core::data::Post {
+            author: author.actor_id(),
+            created_at: fauna_core::data::Timestamp(1_700_003),
+            body: fauna_core::data::PostBody::Text {
+                content: "an imported mountain post".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: Some(fauna_core::data::PostOrigin {
+                platform: "facebook".into(),
+                url: None,
+            }),
+        };
+        let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+        let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+        let bytes = fauna_core::encoding::sign_and_pack(&author, &post).unwrap();
+        state.db.put_post(&digest, &bytes, None).await.unwrap();
+        digest
+    };
+    let narrowed = |search: Option<&str>, sources: Option<Vec<&str>>| FeedAuthorPostsRequest {
+        author: hex::encode(author_id),
+        search: search.map(str::to_string),
+        sources: sources.map(|s| s.into_iter().map(str::to_string).collect()),
+        ..Default::default()
+    };
+    let read = |req: FeedAuthorPostsRequest| {
+        let (router, state) = (&router, state.clone());
+        async move {
+            dispatch(
+                router,
+                state,
+                viewer,
+                "fauna.feed.author.posts",
+                encode(&req),
+            )
+            .await
+        }
+    };
+
+    let facebook: FeedAuthorPostsReply =
+        decode(&read(narrowed(None, Some(vec!["facebook"]))).await.unwrap()).unwrap();
+    assert_eq!(
+        ids(&facebook),
+        vec![hex::encode(imported_too), hex::encode(imported)],
+        "only the Facebook-origin posts"
+    );
+    let searched: FeedAuthorPostsReply = decode(
+        &read(narrowed(Some("beach"), Some(vec!["facebook"])))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ids(&searched),
+        vec![hex::encode(imported)],
+        "search narrows too"
+    );
+    let everything: FeedAuthorPostsReply =
+        decode(&read(narrowed(None, None)).await.unwrap()).unwrap();
+    assert_eq!(
+        ids(&everything),
+        vec![
+            hex::encode(imported_too),
+            hex::encode(imported),
+            hex::encode(native)
+        ],
+        "no sources narrows nothing"
+    );
+    let empty: FeedAuthorPostsReply =
+        decode(&read(narrowed(None, Some(vec![]))).await.unwrap()).unwrap();
+    assert_eq!(ids(&empty).len(), 3, "an empty list narrows nothing");
+    let err = read(narrowed(None, Some(vec!["fauna, bluesky"])))
+        .await
+        .expect_err("a token the normalizer refuses is a bad request");
+    assert_eq!(err.code, "fauna.feed.invalid_params");
+}
+
+// ── reaction posts count and paint ─────────────────────────────
+
+/// Flow (`docs/goal/ui/feed.md` § Layout & flow → *Reaction posts count and
+/// paint*, rulings 1, 2 and 5): an `Upvote` post and a `React` post land
+/// through `fauna.posts.create` → the create funnel records the `Upvote` as a
+/// like on the door's per-actor key and `write_post_index` mints the
+/// actor-keyed `react` link → `fauna.feed.local.posts` serves the target's
+/// `like_count = 1`, `viewer_liked` for the upvoter, and the per-emoji
+/// `reactions` tally with `viewer_react_id` for the reactor only → a door
+/// `like` by the same actor dedupes and its post-act `counts` fold the tally →
+/// the door's `unlike` withdraws the carrying `Upvote` post and the count
+/// drops once.
+#[tokio::test]
+async fn reaction_posts_count_as_a_like_and_a_per_emoji_tally() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db));
+    let mut b = RpcRouter::builder();
+    feed_handlers::register_feed_handlers(&mut b);
+    fauna_nest::posts_handlers::register_posts_handlers(&mut b);
+    let router = b.build();
+
+    async fn create(
+        router: &RpcRouter,
+        state: &Arc<AppState>,
+        kp: &fauna_core::identity::ActorKeypair,
+        created_at: u64,
+        references: Vec<fauna_core::data::Reference>,
+    ) -> String {
+        let post = fauna_core::data::Post {
+            author: kp.actor_id(),
+            created_at: fauna_core::data::Timestamp(created_at),
+            body: fauna_core::data::PostBody::Text {
+                content: if references.is_empty() {
+                    "the reacted-to post".into()
+                } else {
+                    String::new()
+                },
+                facets: vec![],
+            },
+            references,
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let bytes = fauna_core::encoding::sign_and_pack(kp, &post).unwrap();
+        let reply: fauna_protocol::posts::PostCreateReply = decode(
+            &dispatch(
+                router,
+                state.clone(),
+                kp.actor_id().0,
+                "fauna.posts.create",
+                encode(&fauna_protocol::posts::PostCreateRequest {
+                    body: serde_bytes::ByteBuf::from(bytes),
+                    extra: std::collections::BTreeMap::new(),
+                }),
+            )
+            .await
+            .expect("the native door admits the post"),
+        )
+        .unwrap();
+        reply.post_id
+    }
+
+    let author_kp = fauna_core::identity::ActorKeypair::generate();
+    let fan_kp = fauna_core::identity::ActorKeypair::generate();
+    let fan = fan_kp.actor_id().0;
+    let target = create(&router, &state, &author_kp, 1_700_001, vec![]).await;
+    let target_cid =
+        fauna_core::data::PostId::from_digest_dag_cbor(fauna_core::hex32::decode(&target).unwrap());
+    let upvote = create(
+        &router,
+        &state,
+        &fan_kp,
+        1_700_002,
+        vec![fauna_core::data::Reference::Upvote {
+            post_id: target_cid,
+        }],
+    )
+    .await;
+    let react = create(
+        &router,
+        &state,
+        &fan_kp,
+        1_700_003,
+        vec![fauna_core::data::Reference::React {
+            post_id: target_cid,
+            emoji: "❤️".into(),
+        }],
+    )
+    .await;
+
+    let target_row = |actor: [u8; 32]| {
+        let router = &router;
+        let state = state.clone();
+        let target = target.clone();
+        async move {
+            let reply: FeedLocalPostsReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    actor,
+                    "fauna.feed.local.posts",
+                    encode(&FeedLocalPostsRequest {
+                        cursor: None,
+                        limit: Some(50),
+                        search: None,
+                        extra: std::collections::BTreeMap::new(),
+                    }),
+                )
+                .await
+                .expect("local.posts ok"),
+            )
+            .unwrap();
+            reply
+                .posts
+                .into_iter()
+                .find(|p| p.post_id == target)
+                .expect("the target appears in the local feed")
+        }
+    };
+    let heart = |viewer_react_id: Option<String>| {
+        vec![fauna_protocol::feed::PostReactionGroup {
+            emoji: "❤️".into(),
+            count: 1,
+            viewer_react_id,
+            ..Default::default()
+        }]
+    };
+
+    let row = target_row(fan).await;
+    assert_eq!(row.like_count, 1, "the Upvote post is a like");
+    assert!(
+        row.viewer_liked,
+        "one key answers viewer_liked for both carriers"
+    );
+    assert_eq!(
+        row.reactions,
+        heart(Some(react.clone())),
+        "the React post is a tally, the reactor's own post id its delete argument"
+    );
+    let other = target_row([77u8; 32]).await;
+    assert_eq!(other.like_count, 1);
+    assert!(!other.viewer_liked);
+    assert_eq!(
+        other.reactions,
+        heart(None),
+        "no viewer_react_id for another viewer"
+    );
+
+    let interact = |action: &'static str| {
+        let router = &router;
+        let state = state.clone();
+        let target = target.clone();
+        async move {
+            let reply: fauna_protocol::posts::PostInteractReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    fan,
+                    "fauna.posts.interact",
+                    encode(&fauna_protocol::posts::PostInteractRequest {
+                        post_id: target,
+                        action: action.into(),
+                        body: None,
+                        media: None,
+                        extra: std::collections::BTreeMap::new(),
+                    }),
+                )
+                .await
+                .expect("interact ok"),
+            )
+            .unwrap();
+            reply.counts.expect("a native target carries its counts")
+        }
+    };
+
+    // A door like by the same actor dedupes on the one key.
+    let counts = interact("like").await;
+    assert_eq!(counts.like_count, 1, "a door like and an Upvote count once");
+    assert_eq!(
+        counts.reactions,
+        heart(Some(react.clone())),
+        "the post-act tally folds"
+    );
+
+    // The door's unlike withdraws the carrying Upvote post; the count drops once.
+    let counts = interact("unlike").await;
+    assert_eq!(counts.like_count, 0);
+    assert!(!target_row(fan).await.viewer_liked);
+    let gone = dispatch(
+        &router,
+        state.clone(),
+        fan,
+        "fauna.posts.get",
+        encode(&fauna_protocol::posts::PostGetRequest {
+            post_id: upvote,
+            extra: std::collections::BTreeMap::new(),
+        }),
+    )
+    .await;
+    assert!(
+        gone.is_err(),
+        "the withdrawn Upvote post is no longer served"
+    );
+    assert_eq!(target_row(fan).await.reactions, heart(Some(react)));
 }

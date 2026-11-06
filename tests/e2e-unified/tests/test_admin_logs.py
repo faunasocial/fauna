@@ -24,7 +24,6 @@ import pytest
 
 from actions.logs import parse_row
 from helpers import budgets
-from helpers.app_surface import skip_unbuilt
 from helpers.log_plane import LogPlaneHelper, helper_event
 from helpers.waiting import wait_until
 
@@ -41,14 +40,59 @@ def _reopen_logs(app) -> None:
     )
 
 
-def _rows_once(app, predicate, what: str):
-    """Poll the page's rows until `predicate(rows)` holds; return the rows."""
+#: Seconds between re-entries of the Logs page while a `refetch` wait holds.
+_REFETCH_EVERY_S = 3.0
+
+
+def _rows_once(app, predicate, what: str, *, refetch: bool = False):
+    """Poll the page's rows until `predicate(rows)` holds; return the rows.
+
+    The page fetches the nest's ring once, on entry: a line the nest admitted
+    after that fetch is never shown until the page is entered again. A wait for
+    planted lines therefore passes `refetch=True`, which re-enters the page every
+    `_REFETCH_EVERY_S` while they are missing — waiting on the ring holding them,
+    not on the one fetch having caught them (convention 14). A read that raises
+    while the page rebuilds its rows is an observation, asked again."""
+    state = {"fetched": time.monotonic(), "fetches": 1, "last": None, "raised": None}
+
+    def _poll():
+        try:
+            rows = app.logs.rows()
+        except (RuntimeError, TimeoutError) as e:
+            state["raised"] = f"{type(e).__name__}: {str(e)[:160]}"
+            return None
+        state["last"] = rows
+        if rows and predicate(rows):
+            return rows
+        if refetch and time.monotonic() - state["fetched"] >= _REFETCH_EVERY_S:
+            _reopen_logs(app)
+            state["fetched"] = time.monotonic()
+            state["fetches"] += 1
+        return None
+
     return wait_until(
-        lambda: (rows := app.logs.rows()) and predicate(rows) and rows,
-        budgets.RPC_ROUNDTRIP_S,
-        diagnose=lambda: f"{what}; rows: {app.logs.rows()[:40]!r} "
+        _poll,
+        budgets.RPC_ROUNDTRIP_S * (3 if refetch else 1),
+        diagnose=lambda: f"{what}; rows: {(state['last'] or [])[:40]!r} after "
+        f"{state['fetches']} fetch(es); last read raised: {state['raised']!r}; "
         f"error: {app.error_text()!r}",
     )
+
+
+def _settled_rows(app, predicate, what: str):
+    """The rows once two reads in a row agree and satisfy `predicate`: a reply to
+    an earlier fetch still in flight re-renders the page, and a snapshot taken
+    across it would compare against rows the page no longer shows."""
+    prev: dict = {"rows": None}
+
+    def same_twice(rows):
+        if not predicate(rows):
+            return False
+        stable = rows == prev["rows"]
+        prev["rows"] = rows
+        return stable
+
+    return _rows_once(app, same_twice, what)
 
 
 def _index(rows, target: str) -> int:
@@ -99,6 +143,21 @@ def test_admin_logs_level_filter_narrows(admin_app):
     assert n_all > 0, "expected captured nest log entries to filter"
 
     app.logs.set_level("Error")
+    # Wait until the narrowing has painted (every shown row is an ERROR; an empty
+    # view is vacuously narrowed) before counting: a count read straight after the
+    # click can still be the All view's, which proves nothing (convention 14).
+    shown: list = []
+
+    def narrowed() -> bool:
+        try:
+            shown[:] = app.logs.rows()
+        except (RuntimeError, TimeoutError):
+            return False
+        return all(r[0] == "ERROR" for r in shown)
+
+    wait_until(narrowed, budgets.UI_SETTLE_S, diagnose=lambda: (
+        f"after choosing Error every row should read ERROR; levels seen: "
+        f"{sorted({r[0] for r in shown})!r} across {len(shown)} rows"))
     n_err = app.logs.entry_count()
     assert n_err <= n_all, (
         f"Error-only view ({n_err}) must be a subset of All ({n_all})"
@@ -143,6 +202,7 @@ def test_admin_logs_lists_the_newest_activity_first(admin_app, planted_bridges):
         app,
         lambda rows: {older.target, newer.target} <= {r[2] for r in rows},
         "both planted helper lines should be listed",
+        refetch=True,
     )
     assert _index(rows, newer.target) < _index(rows, older.target), (
         f"the newer line {newer.target} must be listed above the older "
@@ -185,6 +245,7 @@ def test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines(admin_app, p
         and _nest_line(rows, first.bridge_id) is not None
         and _nest_line(rows, second.bridge_id) is not None,
         "the helper's event and both nest-own enrollment lines should be listed",
+        refetch=True,
     )
     i_event = _index(rows, event.target)
     level, _, target, message = rows[i_event]
@@ -216,6 +277,7 @@ def test_admin_logs_severity_filter_shows_only_that_severity(admin_app, planted_
         app,
         lambda rows: {info.target, error.target} <= {r[2] for r in rows},
         "both planted lines should be listed before filtering",
+        refetch=True,
     )
 
     app.logs.set_level("Error")
@@ -240,15 +302,6 @@ def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, plante
     the clipboard — under a filter, the filtered lines and not the whole ring.
     The clipboard is read where the OS (or, for tui, the terminal) holds it."""
     app = admin_app
-    try:
-        app.driver.get_clipboard_text()
-    except NotImplementedError:
-        skip_unbuilt(
-            app.driver,
-            surface="the driver's clipboard reader (get_clipboard_text)",
-            detail="this app's driver cannot read the clipboard yet",
-            tracked="tests/e2e-unified/drivers/base.py get_clipboard_text",
-        )
     info, error = helper_event("info"), helper_event("error")
     LogPlaneHelper(planted_bridges).plant_events(info, error)
 
@@ -257,29 +310,37 @@ def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, plante
         app,
         lambda rows: {info.target, error.target} <= {r[2] for r in rows},
         "both planted lines should be listed before copying",
+        refetch=True,
     )
     app.logs.set_level("Error")
-    shown = _rows_once(
+    shown = _settled_rows(
         app,
         lambda rows: all(r[0] == "ERROR" for r in rows) and error.target in {r[2] for r in rows},
         "the Error view should list only errors, the planted one among them",
     )
 
     app.logs.copy()
+    clip: dict = {"text": None, "raised": None}
 
     def _copied():
-        text = app.driver.get_clipboard_text() or ""
-        lines = [r for r in map(parse_row, text.splitlines()) if r]
+        try:
+            clip["text"] = app.driver.get_clipboard_text() or ""
+        except RuntimeError as e:  # the clipboard's owner is still changing hands
+            clip["raised"] = str(e)[:200]
+            return None
+        lines = [r for r in map(parse_row, clip["text"].splitlines()) if r]
         return lines if error.target in {r[2] for r in lines} else None
 
     copied = wait_until(
         _copied,
         budgets.UI_SETTLE_S,
-        diagnose=lambda: f"clipboard: {app.driver.get_clipboard_text()!r}",
+        diagnose=lambda: f"clipboard: {clip['text']!r}; last read raised: {clip['raised']!r}",
     )
+    after = app.logs.rows()
+    page_now = "still shows the same rows" if after == shown else f"now shows {after!r}"
     assert copied == shown, (
         "the clipboard should hold exactly the lines shown, in the page's order: "
-        f"shown={shown!r} copied={copied!r}"
+        f"shown={shown!r} copied={copied!r}; the page {page_now}"
     )
     assert info.target not in {r[2] for r in copied}, (
         f"the filtered-out info line {info.target} reached the clipboard: {copied!r}"

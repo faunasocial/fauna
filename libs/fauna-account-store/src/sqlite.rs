@@ -1737,6 +1737,45 @@ impl StoreBackend for SqliteBackend {
         Ok(InsertOutcome::Inserted)
     }
 
+    async fn group_state_cache_put(&self, entry: &StateEntry) -> Result<InsertOutcome> {
+        let tx = self.write_tx().context("group_state_cache_put tx")?;
+        let stored = self
+            .group_state_get(&entry.scope, &entry.kind, &entry.key)
+            .await?;
+        if entry_moved(stored.map(|e| e.entry_version), entry.entry_version) {
+            return Ok(InsertOutcome::EntryMoved);
+        }
+        let (value, sealed) = self.value_for_write(
+            &group_aad(&entry.scope, &entry.kind, &entry.key),
+            &entry.value,
+        )?;
+        self.conn
+            .execute(
+                "INSERT INTO group_entries
+                     (scope, kind, key, value, merge_meta, entry_version, tombstone, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (scope, kind, key) DO UPDATE SET
+                     value = excluded.value,
+                     merge_meta = excluded.merge_meta,
+                     entry_version = excluded.entry_version,
+                     tombstone = excluded.tombstone,
+                     sealed = excluded.sealed",
+                params![
+                    entry.scope,
+                    entry.kind,
+                    entry.key,
+                    value,
+                    entry.merge_meta,
+                    i64::try_from(entry.entry_version).context("entry_version exceeds i64")?,
+                    entry.tombstone,
+                    sealed,
+                ],
+            )
+            .context("group entry cache upsert")?;
+        tx.commit().context("group_state_cache_put commit")?;
+        Ok(InsertOutcome::Inserted)
+    }
+
     async fn group_state_get(
         &self,
         scope: &str,

@@ -785,6 +785,9 @@ pub async fn compact_bucket(
                 // every part's reaper grace on each compaction pass (0 = unknown after a
                 // failed clock read, which stays NULL = not reapable).
                 stored_at: floor.stored_at,
+                // And the report-hash — the floor is authoritative; dropping it
+                // would take a compacted message out of report aggregation.
+                report_hash: floor.report_hash.clone(),
             })
         },
         |tx, new_segment, new_records| {

@@ -66,7 +66,6 @@ def follow_across_nests(follower: Seat, author: Seat, home: dict, away: dict) ->
 
     # ── The door: Find User across nests → the author's profile ──────────
     contacts = follower.app.contacts
-    contacts.require_find_result_opens_profile()
     contacts.navigate()
     contacts.find_by_handle(author_address)
     wait_for(

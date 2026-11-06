@@ -8,7 +8,7 @@ import SwiftUI
 /// **The element is the player host** (render-model.md § D6c → *Inline playback*): idle it is
 /// the play glyph + the hash as text (no poster frame exists to paint — `MediaItem.thumbnail`/
 /// `dimensions` are `None` from every writer, deliberately); a tap asks `resolve` what plays —
-/// the shared `FeedManager::playback_source` decision, turned into a URL by the view model —
+/// the shared `FeedManager::playback_source` decision, turned into a `VideoPlaybackMedia` by the view model —
 /// and swaps the glyph for the system `VideoPlayer` in the same slot. Never autoplay: the tap
 /// is what spends the bytes. The player's own error view is the error UI — no new element.
 ///
@@ -18,22 +18,36 @@ import SwiftUI
 public struct VideoThumbnailView: View {
     /// The element's text: a blob video's hash, or a bridged video's nest-relative path.
     public let text: String
-    private let resolve: (() async -> URL?)?
+    private let resolve: (() async -> VideoPlaybackMedia?)?
+    /// Each position the player reports with its duration, in seconds — the feed card's
+    /// hand-off to the engagement-cue capture (`FfiCueTracker.notePlayed`); absent off the feed.
+    private let onPlayed: ((Double, Double) -> Void)?
+    /// Whether the player is engaged — the sibling hand-off (`FfiCueTracker.notePlaying`).
+    private let onPlaying: ((Bool) -> Void)?
     @State private var playback = InlineVideoPlayer()
 
-    /// - Parameter resolve: the playable URL for this video, `nil` when nothing plays. Absent →
+    /// - Parameter resolve: what plays for this video, `nil` when nothing plays. Absent →
     ///   the thumbnail stays inert (no host wired the projection).
-    public init(hash: String, resolve: (() async -> URL?)? = nil) {
+    public init(hash: String, resolve: (() async -> VideoPlaybackMedia?)? = nil,
+                onPlayed: ((Double, Double) -> Void)? = nil,
+                onPlaying: ((Bool) -> Void)? = nil) {
         self.text = hash
         self.resolve = resolve
+        self.onPlayed = onPlayed
+        self.onPlaying = onPlaying
     }
 
     /// A bridged post's `ProxiedVideo` (render-model.md § D6c → *Proxied video*): the glyph + the
-    /// opaque nest-relative `path` as text. Never fetched or parsed, and inert until this view
-    /// plays the ticketed `Url` the shared `playback_source` now answers for it.
-    public init(proxiedPath: String) {
+    /// opaque nest-relative `path` as text, never parsed. A tap plays the ticketed `Url` the shared
+    /// `playback_source` answers for it (§ D6c → *Inline playback*, answer 1) — `resolve` is the
+    /// view model's turn of that answer into what the player opens; absent, the thumbnail stays inert.
+    public init(proxiedPath: String, resolve: (() async -> VideoPlaybackMedia?)? = nil,
+                onPlayed: ((Double, Double) -> Void)? = nil,
+                onPlaying: ((Bool) -> Void)? = nil) {
         self.text = proxiedPath
-        self.resolve = nil
+        self.resolve = resolve
+        self.onPlayed = onPlayed
+        self.onPlaying = onPlaying
     }
 
     public var body: some View {
@@ -81,6 +95,8 @@ public struct VideoThumbnailView: View {
 
     private func activate() {
         guard let resolve else { return }
+        playback.onProgress = onPlayed
+        playback.onPlaying = onPlaying
         playback.activate(resolve: resolve)
     }
 }

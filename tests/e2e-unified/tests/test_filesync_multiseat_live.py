@@ -1185,10 +1185,9 @@ def _nest_listing(app) -> tuple[set[str] | None, bool]:
 
 def _folder_index(b, set_name: str | None = None) -> int | None:
     wanted = SET_NAME if set_name is None else set_name
-    for i in range(b.folder_count()):
-        if wanted in b.folder_title(i):
-            return i
-    return None
+    # `folder_index` reads the list through the one bounded reader, which starts
+    # again when linux rebuilds the list under the read (`LookupError`).
+    return b.folder_index(wanted)
 
 
 # The budget a SINGLE Folders mount gets to populate its row list before a read
@@ -1255,16 +1254,9 @@ def _rendered_folder_titles(b) -> list[str]:
     Defensive by design: a row counted but unreadable is reported as such rather
     than raising out of the diagnosis it exists to produce."""
     try:
-        n = b.folder_count()
+        return b.folder_titles(budget=0.0)
     except Exception as exc:  # noqa: BLE001 — diagnosis must never raise
-        return [f"<row count unreadable: {exc!r}>"]
-    out: list[str] = []
-    for i in range(n):
-        try:
-            out.append(b.folder_title(i))
-        except Exception as exc:  # noqa: BLE001
-            out.append(f"<row {i} unreadable: {exc!r}>")
-    return out
+        return [f"<rows unreadable: {exc!r}>"]
 
 
 def _diagnose_missing_set_row(app, b, seat: str, waited_s: float | None) -> str:
@@ -1392,7 +1384,7 @@ def _adopt_or_create_set(app, b, seat: str, set_name: str | None = None) -> None
     # The two-seat path diagnoses against what THIS seat can see. The tri-machine
     # diagnosis above reads the live shared set through the Media UI, which would
     # be a read of the wrong set entirely here.
-    rendered = [b.folder_title(i) for i in range(b.folder_count())]
+    rendered = b.folder_titles()
     pytest.fail(
         f"[{seat}] folder {wanted!r} never appeared in this seat's Folders "
         f"row list within {ASSEMBLY_WINDOW:.0f}s. The set is created before any "
@@ -1446,7 +1438,9 @@ def _bind_folder(app, b, seat: str, folder: Path, set_name: str | None = None) -
             )
     app.driver.type_text("folder-location-path-input", str(folder))
     app.driver.click("folder-location-add-button")
-    deadline = time.monotonic() + 30
+    # The same ceiling as the expand above, which a green run never pays: a loaded
+    # box keeps the app's UI thread busy past 30 s (55 s on one find, windows).
+    deadline = time.monotonic() + max(60.0, WINDOW / 4)
     while time.monotonic() < deadline:
         if app.driver.count("folder-location-row") >= 1:
             return

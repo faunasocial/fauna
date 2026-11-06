@@ -59,6 +59,7 @@ case), open its row in Settings → Folders, and set how your nest should keep i
   shows how long it stays recoverable — so the month of regret-room below is
   visible on the row, not just a promise in this guide.
 - **Restore** a single file straight back — open a snapshot, find the file in its list, press the download button next to it, and pick where to save it — or, on a computer, restore a whole snapshot into a folder you choose (the terminal app takes the folder's path); phones and the web app have no folder tree to write a whole snapshot into, so there you download files one at a time. When it finishes, the page tells you how many files it wrote and where, names any file it could not restore, and says everything else was written. Either way the files are decrypted on your device as they land. If a download cannot go ahead, the page says why rather than looking like it worked.
+- **Mail, calendar, contacts and posts, too.** Where you pick a folder on the Backups page, Mail, Calendar, Contacts, Posts and Conversations follow your folders. Pick one and press **Create Snapshot** to take a snapshot of it now. A mail, calendar, contacts or posts snapshot shows up straight away under **Restore from a local snapshot**, further down the same page, where you pick it and restore it. Conversations can be snapshotted too, but no app restores a conversation yet.
 
 ### Deleting backups is deliberately hard
 
@@ -299,7 +300,7 @@ nest restarted, and new mail arrived before you ran it again: the restore
 finishes, and the new mail stays in the folder it arrived in, beside the mail
 that came back.
 
-One honest note on today's state. A destination receives your mail, calendar, contacts and posts, and any folder you attach to it — a photo library included; conversations are not copied to a destination yet. A restore brings back what the copy holds. (Snapshots on your own nest cover your files and photos; this note is about the *off-site* copy.)
+One honest note on today's state. A destination receives your mail, calendar, contacts and posts, and any folder you attach to it — a photo library included; conversations are not copied to a destination yet. A restore brings back what the copy holds. (Snapshots on your own nest cover your files and photos, and your mail, calendar, contacts and posts; this note is about the *off-site* copy.)
 
 ## The key that matters more than the backup
 
@@ -325,7 +326,7 @@ There is deliberately no back door here: no "forgot password" flow, no support d
 | Friend-hosted storage (storage-only guest + quota; unreadable by the host, apart from a folder you have made public) | **Available** |
 | Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts, and any folder you attached, back onto the nest, the mail into the folders it was in |
 | Restore onto your rebuilt nest from a copy held by a nest you back up to | **Available**: **Restore my data to this nest** on that nest's row brings the copy back |
-| Snapshot coverage on your own nest: files/photos | **Available**; mail, calendar, contacts, posts and conversations **not yet** |
+| Snapshot coverage on your own nest | Files and photos, mail, calendar, contacts and posts **available** — your nest takes a snapshot of your mail, calendar, contacts and posts on its own, at most once an hour and only when something has changed, you can take one yourself at any time, and you can pick one under **Restore from a local snapshot** on the Backups page and restore it; conversations are snapshotted too, but no app restores them yet |
 | Destination mirroring, by data type | Mail, calendar, contacts, posts and any folder you attach (photos included) **available**; conversations **not yet** |
 | One of your own devices as a destination | **Available** on computers and phones — a device enrolled as a destination pulls and keeps a real copy, encrypted apart from a folder you have made public (a web browser cannot hold one) |
 | S3-compatible destinations | **Planned** |

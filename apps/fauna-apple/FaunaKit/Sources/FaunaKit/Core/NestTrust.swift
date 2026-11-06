@@ -36,12 +36,27 @@ public enum NestTrust {
     /// retired by the compat-remnant sweep — `version-compatibility.md`
     /// § Dimension 2, program 4.)
     public static func installPinStore() {
-        // E2E launches keep the per-process path: the app-group container is
+        // E2E launches never touch the app-group container: it is
         // machine-global state a test launch must never touch (testing.md
-        // § point 10) — on macOS `perProcessDir` is the user-domain
-        // home, i.e. the production PRIMARY inside the launch's relocated
-        // `HOME`, minus the container replica no e2e extension reads.
-        guard !FaunaE2E.isActive, let shared = sharedTrustDir() else {
+        // § point 10), so no replica is kept. On macOS the writer store is the
+        // production PRIMARY (`installScopedTrustHome()`, inside the launch's
+        // relocated `HOME`) — the very dir the app's private sync agent reads
+        // (no `--data-dir`), so one install reads one store. iOS e2e keeps its
+        // own sandbox dir (`perProcessDir`).
+        if FaunaE2E.isActive {
+            #if os(macOS)
+                do {
+                    install_nest_identity_pin_store(try e2eTrustDir())
+                } catch {
+                    logMessage(level: .error, target: "fauna.trust",
+                               message: "no install-scoped trust home; pins stay in memory: \(error)")
+                }
+            #else
+                install_nest_identity_pin_store(perProcessDir.path)
+            #endif
+            return
+        }
+        guard let shared = sharedTrustDir() else {
             install_nest_identity_pin_store(perProcessDir.path)
             return
         }
@@ -88,9 +103,19 @@ public enum NestTrust {
         FileProviderCredentialStore.containerURL()?.appendingPathComponent("trust", isDirectory: true)
     }
 
+    #if os(macOS)
+        /// The macOS e2e launch's writer store home: the shared-Rust
+        /// install-scoped trust home (`<HOME>/Library/Application Support/Fauna/trust`
+        /// under the launch's relocated `HOME`), the dir its sync agent reads.
+        static func e2eTrustDir() throws -> String {
+            try installScopedTrustHome()
+        }
+    #endif
+
     /// The per-process store dir (application-support `Fauna/`, the dir the MLS
-    /// store also uses) — the e2e-launch store home, and the fallback when the
-    /// app-group container is unreachable.
+    /// store also uses) — the iOS e2e-launch store home, and the fallback when
+    /// the app-group container is unreachable. On macOS e2e it is NOT the pin
+    /// store home (see `e2eTrustDir()`).
     static var perProcessDir: URL {
         applicationSupportDirectory().appendingPathComponent("Fauna")
     }

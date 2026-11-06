@@ -21,6 +21,7 @@
 //! forward the ceiling has no `copy` row left to make room for is refused, and
 //! the MTA keeps the mail (local fallback, or a `451`).
 
+use super::outbound::InboundVerdictsSnapshot;
 use super::{CacheDb, now_epoch_secs};
 use anyhow::{Context, Result};
 use fauna_protocol::bridge_routing::ForwardCopyMode;
@@ -61,6 +62,9 @@ pub struct NewForwardQueueEntry<'a> {
     /// Whether the original also rests in the mailbox (`Copy`) or this row is
     /// its only copy (`Redirect`) — carried onto the outbound row at promotion.
     pub copy_mode: ForwardCopyMode,
+    /// The source message's inbound SPF/DMARC verdicts, carried onto the
+    /// outbound row at promotion for the forwarder NDR's backscatter check.
+    pub inbound_verdicts: InboundVerdictsSnapshot,
 }
 
 /// A parked forward, read back for promotion into `outbound_mail_queue`.
@@ -76,6 +80,7 @@ pub struct ForwardQueueRow {
     pub raw_message: Vec<u8>,
     /// `None` = unknown (parked before the column existed).
     pub copy_mode: Option<ForwardCopyMode>,
+    pub inbound_verdicts: InboundVerdictsSnapshot,
 }
 
 /// The result of parking a forward: the new row id if it was kept, plus any
@@ -130,8 +135,9 @@ impl CacheDb {
         tx.execute(
             "INSERT INTO forward_queue
                 (actor_id, queued_at, source_message_id, original_sender,
-                 destination_address, rule_id_or_forward_all, raw_message, copy_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 destination_address, rule_id_or_forward_all, raw_message, copy_mode,
+                 inbound_spf, inbound_dmarc, inbound_dmarc_pol)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 entry.actor_id.as_slice(),
                 now,
@@ -141,6 +147,9 @@ impl CacheDb {
                 entry.rule_id_or_forward_all,
                 entry.raw_message,
                 copy_mode_sql(entry.copy_mode),
+                entry.inbound_verdicts.spf,
+                entry.inbound_verdicts.dmarc,
+                entry.inbound_verdicts.dmarc_policy,
             ],
         )
         .context("enqueue_forward_queue insert")?;
@@ -205,11 +214,41 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, actor_id, queued_at, source_message_id, original_sender,
-                    destination_address, rule_id_or_forward_all, raw_message, copy_mode
+                    destination_address, rule_id_or_forward_all, raw_message, copy_mode,
+                    inbound_spf, inbound_dmarc, inbound_dmarc_pol
              FROM forward_queue WHERE actor_id = ?1 ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(
             rusqlite::params![actor_id.as_slice(), limit],
+            row_to_forward_queue,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The oldest `limit` parked forwards of `actor_id` whose
+    /// `rule_id_or_forward_all` is `rule` — the rows `promote_due_forwards`
+    /// may still promote while the actor's mail is off (an admin external
+    /// forwarder's, `mail-credentials.md` § Trigger taxonomy, Disable-mail).
+    pub async fn fetch_forward_queue_oldest_of_rule(
+        &self,
+        actor_id: &[u8; 32],
+        rule: &str,
+        limit: u32,
+    ) -> Result<Vec<ForwardQueueRow>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, actor_id, queued_at, source_message_id, original_sender,
+                    destination_address, rule_id_or_forward_all, raw_message, copy_mode,
+                    inbound_spf, inbound_dmarc, inbound_dmarc_pol
+             FROM forward_queue WHERE actor_id = ?1 AND rule_id_or_forward_all = ?2
+             ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![actor_id.as_slice(), rule, limit],
             row_to_forward_queue,
         )?;
         let mut out = Vec::new();
@@ -265,6 +304,11 @@ fn row_to_forward_queue(row: &rusqlite::Row<'_>) -> rusqlite::Result<ForwardQueu
         rule_id_or_forward_all: row.get(6)?,
         raw_message: row.get(7)?,
         copy_mode: copy_mode_from_sql(row.get::<_, Option<String>>(8)?.as_deref()),
+        inbound_verdicts: InboundVerdictsSnapshot {
+            spf: row.get(9)?,
+            dmarc: row.get(10)?,
+            dmarc_policy: row.get(11)?,
+        },
     })
 }
 
@@ -287,6 +331,7 @@ mod tests {
             rule_id_or_forward_all: "forward-all",
             raw_message: body,
             copy_mode: ForwardCopyMode::Copy,
+            inbound_verdicts: Default::default(),
         }
     }
 

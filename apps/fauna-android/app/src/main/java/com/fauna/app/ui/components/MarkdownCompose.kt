@@ -103,17 +103,29 @@ private fun utf8Len(codePoint: Int): Int = when {
  * `String` index (Compose's offset unit). Decoration offsets always fall on a char boundary,
  * so this lands exactly; clamps to the string length defensively.
  */
-internal fun utf8ByteToUtf16Index(text: String, byteOffset: Int): Int {
-    if (byteOffset <= 0) return 0
-    var bytes = 0
-    var i = 0
-    while (i < text.length) {
-        if (bytes >= byteOffset) break
-        val cp = text.codePointAt(i)
-        bytes += utf8Len(cp)
-        i += Character.charCount(cp)
+internal fun utf8ByteToUtf16Index(text: String, byteOffset: Int): Int =
+    Utf8ToUtf16Cursor(text).indexAt(byteOffset)
+
+/**
+ * Forward-only [utf8ByteToUtf16Index] for an ascending offset list: each lookup resumes from the
+ * previous one, so a pass over N offsets costs one walk of the text instead of N. A lower offset
+ * than the last restarts from the head, so any order stays correct (just not linear). Mirrors
+ * windows' `Utf8ToUtf16Cursor` (`ComposeMarkdownDecorator.cs`).
+ */
+internal class Utf8ToUtf16Cursor(private val text: String) {
+    private var bytes = 0
+    private var i = 0
+
+    fun indexAt(byteOffset: Int): Int {
+        if (byteOffset <= 0) return 0
+        if (byteOffset < bytes) { bytes = 0; i = 0 }
+        while (i < text.length && bytes < byteOffset) {
+            val cp = text.codePointAt(i)
+            bytes += utf8Len(cp)
+            i += Character.charCount(cp)
+        }
+        return i
     }
-    return i
 }
 
 /**
@@ -190,11 +202,12 @@ private val QuoteIndent = ParagraphStyle(textIndent = TextIndent(firstLine = 12.
  * [QuoteIndent] covers. The end stops before the line's `\n`, so two quoted lines give two
  * paragraphs that touch but never overlap.
  */
-internal fun quoteLineRanges(text: String, decorations: List<MarkdownDecoration>): List<Pair<Int, Int>> =
-    decorations
+internal fun quoteLineRanges(text: String, decorations: List<MarkdownDecoration>): List<Pair<Int, Int>> {
+    val cursor = Utf8ToUtf16Cursor(text)
+    return decorations
         .filter { it.kind == "blockquote" }
         .map { d ->
-            val s = utf8ByteToUtf16Index(text, d.start)
+            val s = cursor.indexAt(d.start)
             val lineStart = if (s == 0) 0 else text.lastIndexOf('\n', s - 1) + 1
             val lineEnd = text.indexOf('\n', s).let { if (it < 0) text.length else it }
             lineStart to lineEnd
@@ -202,6 +215,7 @@ internal fun quoteLineRanges(text: String, decorations: List<MarkdownDecoration>
         .filter { (s, e) -> s < e }
         .distinct()
         .sortedBy { it.first }
+}
 
 /**
  * One run of the styling the compose field APPLIED — its text and the looks it sets against
@@ -288,9 +302,10 @@ fun buildComposeDecoration(
     append(text)
     if (decorations.isEmpty()) return@buildAnnotatedString
     val dimStarts = dimRanges.map { it.start }.toHashSet()
+    val cursor = Utf8ToUtf16Cursor(text)
     for (d in decorations) {
-        val s = utf8ByteToUtf16Index(text, d.start)
-        val e = utf8ByteToUtf16Index(text, d.end)
+        val s = cursor.indexAt(d.start)
+        val e = cursor.indexAt(d.end)
         if (s >= e || e > text.length) continue
         val style = contentStyle(d.kind, d.level, linkColor, codeBackground)
         if (style != null) {
@@ -388,15 +403,16 @@ internal fun buildHiddenComposeDecoration(
     markerColor: Color,
     codeBackground: Color,
 ): HiddenComposeResult {
+    val hideCursor = Utf8ToUtf16Cursor(text)
     val hideRangesUtf16 = plan.hide
-        .map { utf8ByteToUtf16Index(text, it.start) until utf8ByteToUtf16Index(text, it.end) }
+        .map { hideCursor.indexAt(it.start) until hideCursor.indexAt(it.end) }
         .filter { !it.isEmpty() }
         .sortedBy { it.first }
     val mapping = ConcealingOffsetMapping(hideRangesUtf16, text.length)
 
-    val dimRangesUtf16 = plan.dim.map {
-        utf8ByteToUtf16Index(text, it.start) to utf8ByteToUtf16Index(text, it.end)
-    }
+    val dimCursor = Utf8ToUtf16Cursor(text)
+    val dimRangesUtf16 = plan.dim.map { dimCursor.indexAt(it.start) to dimCursor.indexAt(it.end) }
+    val decorationCursor = Utf8ToUtf16Cursor(text)
 
     val annotated = buildAnnotatedString {
         var cursor = 0
@@ -407,8 +423,8 @@ internal fun buildHiddenComposeDecoration(
         if (cursor < text.length) append(text, cursor, text.length)
 
         for (d in decorations) {
-            val s = utf8ByteToUtf16Index(text, d.start)
-            val e = utf8ByteToUtf16Index(text, d.end)
+            val s = decorationCursor.indexAt(d.start)
+            val e = decorationCursor.indexAt(d.end)
             if (s >= e || e > text.length) continue
             val style = contentStyle(d.kind, d.level, linkColor, codeBackground)
             if (style != null) {

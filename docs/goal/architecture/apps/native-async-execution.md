@@ -289,6 +289,31 @@ ones back to the kernel before the work and reads which are present after it.
   synchronous export is invisible to that grep, which is exactly how this one
   hid.
 
+- **A synchronous setter that starts fire-and-forget work no longer depends
+  on its caller's runtime — `fauna-onboarding-machine`, FIXED 2026-10-24.** This is the same class, but it failed
+  silently and did not panic. `select_vps_location` (a location change
+  re-lists the VPS offers, `provisioning/registry.md` § Server offers follow
+  the location) and entering `vps_config` (the update-channel probe) spawned
+  their work only when `Handle::try_current()` succeeded. A UniFFI shell calls
+  these setters from its UI thread, where no runtime exists, so on macOS, iOS,
+  windows and android nothing was spawned: the radios kept the first
+  location's offers. linux escaped only because it awaits the refresh itself.
+  The remedy differs from `custody_drive`'s because no caller awaits the work:
+  the setter stays synchronous (a picker binding), and its result arrives
+  through the observer. So `fauna_onboarding_machine::background::spawn_background`
+  always spawns on the crate's own process-lived current-thread runtime,
+  driven by one thread with the default ~2 MB stack — never the caller's,
+  even when it has one: linux calls the machine from a runtime built for that
+  one call and dropped on return (`async_helper::run_on_tokio`), which cancelled
+  the joining nest-rules read spawned from a handle check (2026-10-26). That
+  runtime lives for the whole process, so the
+  machine's shared HTTP client never pools a connection whose runtime has
+  gone. Pinned by `vps_offers_follow_location::a_location_change_re_lists_for_a_caller_with_no_runtime`
+  and `background::tests::work_outlives_a_callers_short_lived_runtime`.
+  Witnessed through the picker on macOS and iOS (2026-10-24) and windows
+  (2026-11-04, with no C# change) by `test_vps_config.py::test_vps_server_types_follow_the_location`
+  and the OVH journey; android has not run them yet.
+
 - **C#'s poll loop no longer captures the caller's context — LANDED 2026-09-06**
 **.** All three awaits in the generated
   UniFFI async layer carry `ConfigureAwait(false)` (`templates/Async.cs` ×2,

@@ -39,33 +39,30 @@ struct FeedSplitView: View {
         // secret and the client together, so the guard below still has both.
         .task(id: appState.session.secretHex) {
             guard let client, let secret = appState.session.secretHex else { return }
-            await vm.configure(api: client.api, secretHex: secret)
+            await vm.configure(api: client.api, secretHex: secret, deviceIdHex: client.deviceId)
             await vm.loadFeeds()
-            // Re-pull the CURRENT selection (or auto-select the first feed if
-            // none) every time this page becomes visible — the feed has no poll
-            // backstop, so a nav back must re-fetch (mirrors linux's
-            // `connect_map` re-pull on visibility). Un-gating this from a
-            // `selectedFeedId == nil` check is what lets a mute set elsewhere in
-            // Settings reach the sealed scorers on return: `vm` is the
-            // persistent app-root FeedVM, so `selectedFeedId` survives across
-            // this view's remounts and the old nil-only guard skipped every
+            // Re-pull the CURRENT selection (Local if none) every time this page
+            // becomes visible — the feed has no poll backstop, so a nav back must
+            // re-fetch (mirrors linux's `connect_map` re-pull on visibility).
+            // Un-gating this from a `selectedFeedId == nil` check is what lets a
+            // mute set elsewhere in Settings reach the sealed scorers on return:
+            // `vm` is the persistent app-root FeedVM, so `selectedFeedId` survives
+            // across this view's remounts and the old nil-only guard skipped every
             // re-entry after the first. `trendingSelected` is checked FIRST —
             // selecting Trending also clears `selectedFeedId` (shared Rust), so
             // without this branch a remount would silently kick the user off
-            // Trending back to their first custom feed (same class of bug
-            // `rehydrate()` already fixes for reconnect).
+            // Trending back to Local (same class of bug `rehydrate()` already
+            // fixes for reconnect).
             if vm.trendingSelected {
                 await vm.selectTrendingFeed()
             } else if let current = vm.selectedFeedId {
                 await vm.selectFeed(current)
-            } else if let first = vm.feeds.first {
-                await vm.selectFeed(first.feedId)
             } else {
-                // No custom feed and not on Trending → load the nest's Local
-                // timeline (mirrors linux/web's `select_feed(None)`). Without this
-                // a fresh nest with no saved feeds shows an empty feed, so a post a
-                // just-logged-in actor is entitled to (e.g. a subscriber's gated
-                // post) never appears until they build a custom feed.
+                // Nothing selected and not on Trending → load the nest's Local
+                // timeline (ui/feed.md § Persistence; mirrors linux/web's
+                // `select_feed(None)`). Never `vm.feeds.first`: the nest lists the
+                // newest feed first, so that opened a ruled feed the user only
+                // just built and hid every post it did not match.
                 await vm.selectLocalFeed()
             }
         }

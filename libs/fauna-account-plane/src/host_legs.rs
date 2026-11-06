@@ -100,6 +100,29 @@ pub enum Presence {
     Degraded(String),
 }
 
+impl<H> From<fauna_account_store::lock_outcome::LockOutcome<H>> for ElectionOutcome<H> {
+    fn from(outcome: fauna_account_store::lock_outcome::LockOutcome<H>) -> Self {
+        use fauna_account_store::lock_outcome::LockOutcome;
+        match outcome {
+            LockOutcome::Held(held) => Self::Held(held),
+            LockOutcome::Refused => Self::Refused,
+            LockOutcome::Degraded(e) => Self::Degraded(e.to_string()),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<fauna_account_store::locks::AgentPresence> for Presence {
+    fn from(presence: fauna_account_store::locks::AgentPresence) -> Self {
+        use fauna_account_store::locks::AgentPresence;
+        match presence {
+            AgentPresence::Present => Self::Present,
+            AgentPresence::Absent => Self::Absent,
+            AgentPresence::Degraded(e) => Self::Degraded(e.to_string()),
+        }
+    }
+}
+
 /// The engine-singleton election, as the host runs it: a **try**, never a
 /// wait, kernel-arbitrated (or lock-manager-arbitrated) so a crashed holder
 /// releases on its own. Natively `EngineLock::try_acquire(&store_dir)`; on
@@ -384,6 +407,12 @@ pub enum CustodianRestoreOutcome {
     /// different nest than the one that answered (bound (c)): the rows stand,
     /// each verified by its in-seal writer signature; the user is told.
     IdentityMismatch { expected: [u8; 32], got: [u8; 32] },
+    /// The rows landed, but a custody row on record for this address could
+    /// not be checked: the connection's bound identity was unreadable, so
+    /// whether the nest that answered is the one the row names is unknown
+    /// (bound (c) — the outcome is stated, never a plain *Restored*). The
+    /// rows stand, each verified by its in-seal writer signature.
+    IdentityUnchecked,
 }
 
 impl CustodianRestoreOutcome {
@@ -391,7 +420,7 @@ impl CustodianRestoreOutcome {
     /// for every app (`ui/nests.md` § Trust facet — restore from a custodian
     /// nest owns the copy). A revoked grant reads as the address-refused
     /// state with its own reason: both never dialed, and the surface names
-    /// six states.
+    /// seven states.
     pub fn notice(&self) -> String {
         self.notice_parts()
             .iter()
@@ -407,7 +436,10 @@ impl CustodianRestoreOutcome {
     pub fn closes_form(&self) -> bool {
         matches!(
             self,
-            Self::Restored { .. } | Self::NothingNew | Self::IdentityMismatch { .. }
+            Self::Restored { .. }
+                | Self::NothingNew
+                | Self::IdentityMismatch { .. }
+                | Self::IdentityUnchecked
         )
     }
 
@@ -446,6 +478,7 @@ impl CustodianRestoreOutcome {
             }
             Self::NothingNew => vec![L::key("nests.custody_restore_nothing_new")],
             Self::IdentityMismatch { .. } => vec![L::key("nests.custody_restore_mismatch")],
+            Self::IdentityUnchecked => vec![L::key("nests.custody_restore_unchecked")],
         }
     }
 }
@@ -454,7 +487,7 @@ impl CustodianRestoreOutcome {
 mod custodian_restore_notice_tests {
     use super::CustodianRestoreOutcome as O;
 
-    /// Six states, six texts — never collapsed; the sealed count stands
+    /// Seven states, seven texts — never collapsed; the sealed count stands
     /// beside the restored count and only when there is one.
     #[test]
     fn every_outcome_reads_its_own_notice() {
@@ -481,12 +514,13 @@ mod custodian_restore_notice_tests {
                 got: [2; 32],
             }
             .notice(),
+            O::IdentityUnchecked.notice(),
         ];
         let distinct: std::collections::BTreeSet<_> = notices.iter().collect();
         assert_eq!(distinct.len(), notices.len(), "{notices:#?}");
         assert!(notices[0].contains("empty host"));
         assert!(notices[3].contains('3') && !notices[3].contains("sealed"));
-        assert!(notices[4].contains('3') && notices[4].contains("2 came back sealed"));
+        assert!(notices[4].contains('3') && notices[4].contains("2 came back still encrypted"));
         // The not-admitted copy names all three causes.
         for cause in ["wrong", "down", "nothing for this account"] {
             assert!(notices[2].contains(cause), "{}", notices[2]);
@@ -514,6 +548,7 @@ mod custodian_restore_notice_tests {
             }
             .closes_form()
         );
+        assert!(O::IdentityUnchecked.closes_form());
         assert!(!O::NotAdmitted.closes_form());
         assert!(!O::Revoked.closes_form());
         assert!(!O::AddressRefused { reason: "x".into() }.closes_form());
@@ -536,6 +571,7 @@ mod custodian_restore_notice_tests {
                 expected: [1; 32],
                 got: [2; 32],
             },
+            O::IdentityUnchecked,
         ];
         for outcome in outcomes {
             for part in outcome.notice_parts() {

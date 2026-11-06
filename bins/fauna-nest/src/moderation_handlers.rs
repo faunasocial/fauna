@@ -425,9 +425,10 @@ async fn conversation_legal_takedown(
     // The reply still echoes the caller's own spelling.
     let content_id_hex = hex::encode(record_id);
 
-    // The message must exist as a conv record (also yields the channel for the
-    // audit context). Absent → not_found (nothing to withhold).
-    let (channel, _current_ref) = state
+    // The message must exist as a conv record. Absent → not_found (nothing to
+    // withhold). The order names the content, not a channel: the transaction
+    // withholds every copy and audits each channel holding one (2026-11-03).
+    state
         .db
         .conv_record_scope_and_takedown(&record_cid)
         .await
@@ -436,7 +437,6 @@ async fn conversation_legal_takedown(
             internal("storage error")
         })?
         .ok_or_else(|| not_found("conversation message not found"))?;
-    let channel_hex = hex::encode(channel);
     let admin_hex = hex::encode(actor_id);
     let now_us = fauna_core::data::Timestamp::now_or_zero().as_i64();
 
@@ -452,10 +452,12 @@ async fn conversation_legal_takedown(
                 &content_id_hex,
                 None,
                 actor_id.as_slice(),
-                &format!(
-                    "admin={admin_hex} channel={channel_hex} kind=conversation reason={}",
-                    req.legal_reference
-                ),
+                &|channel_hex: &str| {
+                    format!(
+                        "admin={admin_hex} channel={channel_hex} kind=conversation reason={}",
+                        req.legal_reference
+                    )
+                },
                 now_us,
             )
             .await
@@ -491,10 +493,12 @@ async fn conversation_legal_takedown(
             &content_id_hex,
             Some(&req.legal_reference),
             actor_id.as_slice(),
-            &format!(
-                "admin={admin_hex} channel={channel_hex} kind=conversation reference={}",
-                req.legal_reference
-            ),
+            &|channel_hex: &str| {
+                format!(
+                    "admin={admin_hex} channel={channel_hex} kind=conversation reference={}",
+                    req.legal_reference
+                )
+            },
             now_us,
         )
         .await
@@ -978,17 +982,37 @@ async fn admin_block_target(
                 invalid_params("the reported message's record id is not a 32-byte hex id")
             })?;
             let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
-            state
-                .db
-                .conv_record_scope_and_takedown(&record_cid)
-                .await
-                .map_err(|e| {
-                    tracing::error!("conv_record_scope_and_takedown error: {e}");
-                    internal("storage error")
-                })?
-                .ok_or_else(|| not_found("this nest holds no such conversation message"))?;
+            // One cid can name copies in several channels (the channel is not
+            // in a conv record's hash), so the block keys on the channel the
+            // report names — that copy, and only it (2026-11-03). A report whose
+            // channel is absent or unreadable blocks every copy, the
+            // takedown's rule.
+            let channel = report
+                .subject_channel
+                .as_deref()
+                .and_then(|c| fauna_core::hex32::decode(c).ok());
+            let held = match &channel {
+                Some(channel) => state.db.conv_record_in_scope(channel, &record_cid).await,
+                None => state
+                    .db
+                    .conv_record_scope_and_takedown(&record_cid)
+                    .await
+                    .map(|r| r.is_some()),
+            }
+            .map_err(|e| {
+                tracing::error!("conversation block lookup error: {e}");
+                internal("storage error")
+            })?;
+            if !held {
+                return Err(not_found(
+                    "this nest holds no such conversation message in the reported channel",
+                ));
+            }
             Ok((
-                AdminBlockTarget::Conversation { record_cid },
+                AdminBlockTarget::Conversation {
+                    record_cid,
+                    channel,
+                },
                 hex::encode(record_id),
                 "conversation",
             ))

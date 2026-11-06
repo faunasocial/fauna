@@ -209,11 +209,17 @@ def await_session_actor(driver, actor_id, *, budget_s, what="the switch"):
 
     The cross-app observable for **"this identity reached a WORKING session"**,
     as opposed to "a row for it was written". Every app publishes
-    ``session.{authenticated,actor_id}`` at one depth, and no app sets them
-    without its launch machine having reached ``Online`` — which costs a real
-    silent-challenge round trip against the nest. So this asserts a live
-    connection with no second probe, and it stays honest on an app whose UI
-    would happily render a stale shell for the *previous* identity.
+    ``session.{authenticated,actor_id}`` at one depth, and no app publishes
+    ``authenticated`` true without its launch machine having reached ``Online``
+    — which costs a real silent-challenge round trip against the nest. Five
+    apps mount their shell only at ``Online``; the two that mount it from cache
+    first — web (localStorage) and iOS (its optimistic entry, which sets
+    ``actor_id`` off the stored session before the verdict) — publish the
+    stricter verified-on-this-load fact instead (`e2e-conventions.md`
+    § convention 11, the web refinement). So this asserts a live connection
+    with no second probe, returns only after the launch graduation's records
+    (the nest-identity pin) exist, and stays honest on an app whose UI would
+    happily render a stale shell for the *previous* identity.
 
     Built 2026-08-14 for the account-append journeys, whose registry-only
     assertions left "Add account → you land in a working session as the new
@@ -663,6 +669,52 @@ def mls_folded_commits(driver, channel_hex):
     return count if isinstance(count, int) else None
 
 
+# Every chat channel the app has bound a thread to, a sorted list of channel hex
+# ids. One key at one depth on every app — ``fauna_e2e_agent::
+# MLS_BOUND_CHANNELS_KEY`` owns the contract.
+MLS_BOUND_CHANNELS_KEY = "mls_bound_channels"
+
+
+def mls_bound_channels(driver):
+    """Read the chat channels this app has bound a thread to.
+
+    Returns a ``list`` of channel hex ids (``[]`` before any is bound), or
+    ``None`` if the app does not publish the key — a refusal, not an empty
+    list, for ``mls_folded_commits``'s reason.
+    """
+    value = driver.get_state(MLS_BOUND_CHANNELS_KEY)
+    return value if isinstance(value, list) else None
+
+
+def await_channel_bound(driver, channel_hex, *, budget_s, who="this device"):
+    """Wait until this app has bound ``channel_hex`` — the restore witness for a
+    second device of the account, which binds every channel it restores from the
+    replica at launch.
+
+    The thread list cannot carry this wait: a direct thread born from a Welcome
+    and holding no message yet is bound but listed on no rail
+    (``archive-import.md`` § Linking and merging (phase two), ruling 1).
+    """
+    if mls_bound_channels(driver) is None:
+        raise AssertionError(
+            f"{type(driver).__name__} does not publish "
+            f"'{MLS_BOUND_CHANNELS_KEY}' — the bound-channels restore witness. "
+            "Implement it on the app (see "
+            "`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`; the JSON shape is shared, "
+            "so the app leg is a one-line read of "
+            "`state_json::mls_bound_channels_json_for_session`) rather than "
+            "waiting on the thread list, which never shows a Welcome-only 1:1."
+        )
+    wait_until(
+        lambda: channel_hex in (mls_bound_channels(driver) or []),
+        budget_s,
+        diagnose=lambda: (
+            f"{who} never bound channel {channel_hex}; its bound channels: "
+            f"{mls_bound_channels(driver)!r}"
+        ),
+    )
+
+
 def await_folded_commit_after(
     driver, channel_hex, baseline, *, budget_s, what="the peer's commit"
 ):
@@ -820,6 +872,39 @@ def await_receive_cycle_after(driver, baseline, *, budget_s, what="the arrival")
 # ``conv_receive_cycles`` twin for the account runtime.
 # ``fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY`` / ``ACCOUNT_PUMP_NOW`` own both
 # contracts (counting: ``fauna_sync_engine::account_runtime::PumpCycles``).
+#: The first-listing gate's refusal as a page shows it
+#: (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+#: listing*, clause (4); `NotReadyReason::NotListed`'s text).
+FIRST_LISTING_REFUSAL = "the account store is not ready yet"
+
+
+def retry_through_first_listing(gesture, done, error_text, *, settle, reopen, diagnose):
+    """Make ``gesture`` until ``done()``, repeating it only when the page says
+    the first-listing gate refused it.
+
+    A fresh sign-in on an account with a large fleet scope can outlast the gate's
+    30 s bound, and the goal is that the refused gesture "fails with the same
+    reason and can be retried". So the retry is the user's own, ``reopen`` taking
+    the page back first; any other outcome fails as it always did, through
+    ``diagnose``. Measured 2026-10-31: a whole-suite sweep's mail enables and
+    backup enrollments, refused once and never retried. Latency-independent
+    (convention 14): a green run pays one gesture, and the budget only bounds a
+    scope that never lists."""
+    deadline = time.monotonic() + budgets.ACCOUNT_RUNTIME_ASSEMBLY_S
+    while True:
+        gesture()
+        wait_until(
+            lambda: done() or FIRST_LISTING_REFUSAL in (error_text() or ""),
+            settle,
+            diagnose=diagnose,
+        )
+        if done():
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"still refused at the budget's end: {diagnose()}")
+        reopen()
+
+
 ACCOUNT_PUMP_CYCLES_KEY = "account_pump_cycles"
 ACCOUNT_PUMP_NOW = "account_pump_now"
 
@@ -902,18 +987,12 @@ def account_runtime_role_or_skip(driver):
     needed the identical answer."""
     role = account_pump_role(driver)
     if role is None:
-        from helpers.app_surface import skip_unbuilt
-
-        skip_unbuilt(
-            driver,
-            surface="account_pump_cycles / account_pump_now",
-            detail=(
-                "this app hosts no W3 account-store runtime yet, so it "
-                "publishes neither the pump's completion barrier nor its "
-                "run-one-pass-now poke. The lift is one more consumer of "
-                "libs/fauna-client-account-runtime (tui and linux have it)"
-            ),
-            tracked="",
+        raise AssertionError(
+            "this app publishes neither `account_pump_cycles` nor "
+            "`account_pump_now` — the account-store runtime's completion barrier "
+            "and its run-one-pass-now poke. Every app hosts that runtime, so a "
+            "missing leg is a regression, not unbuilt debt (convention 7, *The "
+            "surface registry*: a probed property is an assertion)"
         )
     return role
 
@@ -1656,8 +1735,15 @@ def describe_photo_backup_funnel(driver):
     if funnel is None:
         return ("the app publishes no `photo_backup` funnel, so why the pass "
                 "uploaded nothing cannot be read from here")
-    counts = ", ".join(f"{k}={funnel[k]}" for k in PHOTO_BACKUP_COUNTERS)
+    # Android publishes a SUBSET (no assets_seen / already_synced / export_failed /
+    # ingest_failed legs — convention 11: an absent field is not zero), so read
+    # what is there and never index a leg the app does not have.
+    counts = ", ".join(f"{k}={funnel[k]}" for k in (*PHOTO_BACKUP_COUNTERS, "pending")
+                       if k in funnel)
     auth = funnel.get("authorization")
+    if "assets_seen" not in funnel:
+        return (f"pass funnel (subset): {counts}; the app has no PhotoKit-style "
+                "legs, so which step lost the photo cannot be read from here")
     verdict = _photo_backup_verdict(funnel, auth)
     return f"pass funnel: authorization={auth!r}, {counts} -> {verdict}"
 

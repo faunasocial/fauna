@@ -65,13 +65,13 @@ Stamped 2026-09-19 at acb58fddf3.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+acde58f9 standalone |
+| linux | ✅ full | 0.1.5-dev+cbd813be standalone |
 | windows | ✅ full | 0.1.3-dev+b00cb884 standalone |
 | macos | ✅ full | |
 | ios | — absent | |
 | android | — absent | |
-| tui | ✅ full | 0.1.2-dev+831d48ef live |
+| tui | ✅ full | 0.1.5 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -83,26 +83,26 @@ Stamped 2026-09-19 at acb58fddf3.
 | 2 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_bound_launch_for_another_account_coexists_as_that_account` | linux (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_for_another_account_coexists_as_that_account` | windows (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_instances_on_different_accounts_run_concurrently` | macos (macos): passed |
-| 2 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_for_another_account_coexists_as_that_account` | tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_for_another_account_coexists_as_that_account` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_second_tab_switch_does_not_drag_the_first_tab_along` | web (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_second_plain_launch_renders_chooser_and_pick_completes_as_that_account` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_raises_a_bound_sibling` | linux (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_second_plain_launch_renders_chooser_and_pick_completes_as_that_account` | windows (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_raises_a_bound_sibling_over_the_per_account_channel` | windows (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_second_plain_launch_renders_chooser_and_pick_completes_as_that_account` | tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_second_plain_launch_renders_chooser_and_pick_completes_as_that_account` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_launching_the_bundle_again_lands_on_the_running_instance` | macos (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_others` | web (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_bound_launch_onto_the_served_account_coexists` | linux (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_bound_launch_onto_the_served_account_coexists` | macos (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_engine_role_election_web.py::test_a_second_tab_on_one_account_runs_no_second_mls_engine` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_engine_role_election_web.py::test_a_second_tab_on_one_account_runs_no_second_mls_engine` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_bound_launch_onto_the_served_account_coexists` | linux (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_bound_launch_onto_the_served_account_coexists` | macos (macos): passed |
-| 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally` | tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally` | tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_onto_an_instance_that_has_gone_starts_normally` | linux (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally` | windows (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_account` | macos (macos): passed |

@@ -24,18 +24,10 @@ public struct PrivacySettingsView: View {
     /// it (the documented "pass app-state side-effects via `init`" seam).
     private let onInboxModeChanged: ((String) -> Void)?
 
-    // Email-filter draft form state.
-    @State private var filterName = ""
-    @State private var filterRuleType = "SenderIs"
-    @State private var filterRuleValue = ""
-    /// The whole action-inputs struct, not just the kind tag: a Forward's
-    /// destination and copy mode and a Reject's reason ride in it, so an edit
-    /// of any action round-trips through the shared encoder unchanged.
-    @State private var filterAction = Self.blankActionInputs(kind: "Allow")
-
-    private static func blankActionInputs(kind: String) -> FfiFilterActionInputs {
-        FfiFilterActionInputs(kind: kind, rejectReason: "", forwardAddress: "", keepLocalCopy: true)
-    }
+    // Email-filter draft form state: the whole draft (rule inputs, action inputs,
+    // order, `continue`), so an edit of any filter round-trips through the shared
+    // encoders unchanged.
+    @State private var draft = EmailFilterDraft()
 
     public init(onInboxModeChanged: ((String) -> Void)? = nil) {
         self.onInboxModeChanged = onInboxModeChanged
@@ -106,8 +98,10 @@ public struct PrivacySettingsView: View {
                                 .padding(.vertical, 2)
                                 .background(.secondary.opacity(0.15))
                                 .clipShape(Capsule())
-                            if emailFilterIsEditableFor(rules: filter.rules, action: filter.action,
-                                                        actionKinds: EmailFilterOptions.actions.map(\.tag)) {
+                            // The full form's gate: it covers every condition and
+                            // action this form collects (`...For` is the narrower
+                            // single-value-condition form's gate).
+                            if emailFilterIsEditable(rules: filter.rules, action: filter.action) {
                                 Button {
                                     Task { await beginEdit(filter.id) }
                                 } label: {
@@ -166,11 +160,11 @@ public struct PrivacySettingsView: View {
                             .automationActivate(Ids.addFilterBtn) { vm.showFilterForm = true }
                     } else {
                         VStack(spacing: 8) {
-                            TextField(L.settings.filterName, text: $filterName)
+                            TextField(L.settings.filterName, text: $draft.name)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier(Ids.filterNameInput)
-                                .automationField(Ids.filterNameInput, text: $filterName)
-                            Picker(L.settings.ruleType, selection: $filterRuleType) {
+                                .automationField(Ids.filterNameInput, text: $draft.name)
+                            Picker(L.settings.ruleType, selection: $draft.rule.kind) {
                                 // Each option carries its stable key as the
                                 // accessibilityIdentifier (the bridge `select(id,value)`
                                 // matches the opened menu item by id, not the localized
@@ -185,66 +179,99 @@ public struct PrivacySettingsView: View {
                             .accessibilityIdentifier(Ids.filterRuleType)
                             // Picker: read the current tag + select by tag (the wire
                             // value is the stable key, e.g. "SenderIs", = the binding).
-                            .automationSelect(Ids.filterRuleType, value: { filterRuleType }) { filterRuleType = $0 }
-                            TextField(L.settings.ruleValue, text: $filterRuleValue)
+                            .automationSelect(Ids.filterRuleType, value: { draft.rule.kind }) { draft.rule.kind = $0 }
+                            TextField(L.settings.ruleValue, text: $draft.rule.value)
                                 .textFieldStyle(.roundedBorder)
                                 #if os(iOS)
                                 .textInputAutocapitalization(.never)
                                 #endif
                                 .accessibilityIdentifier(Ids.filterRuleValue)
-                                .automationField(Ids.filterRuleValue, text: $filterRuleValue)
-                            Picker(L.settings.privacyPage.action, selection: $filterAction.kind) {
+                                .automationField(Ids.filterRuleValue, text: $draft.rule.value)
+                            // The two conditions with a second input (`email-filters.md`
+                            // § Email filter rules): a header's value beside its name,
+                            // and a spam score.
+                            if draft.rule.kind == "HeaderContains" {
+                                filterField(L.settings.privacyPage.headerValue, $draft.rule.headerValue,
+                                            Ids.filterRuleHeaderValue)
+                            } else if draft.rule.kind == "SpamScoreAtLeast" {
+                                filterField(L.settings.privacyPage.spamScore, $draft.rule.spamScore,
+                                            Ids.filterRuleSpamScore)
+                            }
+                            Picker(L.settings.privacyPage.action, selection: $draft.action.kind) {
                                 ForEach(EmailFilterOptions.actions, id: \.tag) {
                                     Text($0.label).tag($0.tag).accessibilityIdentifier($0.tag)
                                 }
                             }
                             .accessibilityIdentifier(Ids.filterActionSelect)
                             // Picker: read the current tag + select by tag.
-                            .automationSelect(Ids.filterActionSelect, value: { filterAction.kind }) { filterAction.kind = $0 }
-                            // The Forward inputs — shown only while the action reads
-                            // Forward (settings.md § Where logic lives → *Email filter
-                            // create-dialog encoding*); the destination is validated by
-                            // the shared encoder on submit, not here.
-                            if filterAction.kind == "Forward" {
-                                TextField(L.settings.privacyPage.forwardAddress,
-                                          text: $filterAction.forwardAddress)
-                                    .textFieldStyle(.roundedBorder)
-                                    #if os(iOS)
-                                    .textInputAutocapitalization(.never)
-                                    .keyboardType(.emailAddress)
-                                    #endif
-                                    .accessibilityIdentifier(Ids.filterForwardAddress)
-                                    .automationField(Ids.filterForwardAddress,
-                                                     text: $filterAction.forwardAddress)
+                            .automationSelect(Ids.filterActionSelect, value: { draft.action.kind }) { draft.action.kind = $0 }
+                            // Each action's own inputs, shown only while it is the
+                            // selected action (settings.md § Where logic lives → *Email
+                            // filter create-dialog encoding*); every value is validated
+                            // by the shared encoder on submit, not here.
+                            switch draft.action.kind {
+                            case "Forward":
+                                filterField(L.settings.privacyPage.forwardAddress,
+                                            $draft.action.forwardAddress, Ids.filterForwardAddress,
+                                            email: true)
                                 Toggle(L.settings.privacyPage.keepLocalCopy,
-                                       isOn: $filterAction.keepLocalCopy)
+                                       isOn: $draft.action.keepLocalCopy)
                                     .accessibilityIdentifier(Ids.filterKeepLocalCopy)
                                     // Toggle: activate flips the same bound state a tap
                                     // would; value backs the `state` read ("on"/"off").
                                     .automationActivate(Ids.filterKeepLocalCopy,
-                                                        value: { filterAction.keepLocalCopy ? "on" : "off" }) {
-                                        filterAction.keepLocalCopy.toggle()
+                                                        value: { draft.action.keepLocalCopy ? "on" : "off" }) {
+                                        draft.action.keepLocalCopy.toggle()
                                     }
+                            case "FileInto":
+                                filterField(L.settings.privacyPage.fileIntoMailbox,
+                                            $draft.action.fileIntoMailbox, Ids.filterFileIntoMailbox)
+                            case "AddLabel":
+                                filterField(L.settings.privacyPage.addLabel,
+                                            $draft.action.label, Ids.filterAddLabel)
+                            case "AutoReply":
+                                filterField(L.settings.privacyPage.autoReplySubject,
+                                            $draft.action.autoReplySubject, Ids.filterAutoReplySubject)
+                                filterField(L.settings.privacyPage.autoReplyBody,
+                                            $draft.action.autoReplyBody, Ids.filterAutoReplyBody)
+                                filterField(L.settings.privacyPage.autoReplyIntervalHours,
+                                            $draft.action.autoReplyIntervalHours,
+                                            Ids.filterAutoReplyIntervalHours)
+                            default:
+                                EmptyView()
                             }
+                            // The rule's place in the order and its `continue` flag
+                            // (`email-filters.md` § Email filter rules: rules run in
+                            // order, the first match wins unless it is marked to keep
+                            // going).
+                            filterField(L.settings.privacyPage.priority, $draft.priority,
+                                        Ids.filterPriorityInput)
+                            Toggle(L.settings.privacyPage.continueMatching,
+                                   isOn: $draft.continueOnMatch)
+                                .accessibilityIdentifier(Ids.filterContinueToggle)
+                                .automationActivate(Ids.filterContinueToggle,
+                                                    value: { draft.continueOnMatch ? "on" : "off" }) {
+                                    draft.continueOnMatch.toggle()
+                                }
                             HStack {
                                 if vm.editingFilterId != nil {
                                     Button(L.common.save) { submitFilter() }
-                                    .disabled(filterName.isEmpty || filterRuleValue.isEmpty || vm.creatingFilter)
+                                    .disabled(!canSubmitFilter)
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
                                     .accessibilityIdentifier(Ids.saveFilter)
                                     .automationActivate(Ids.saveFilter,
-                                                        isEnabled: { !filterName.isEmpty && !filterRuleValue.isEmpty && !vm.creatingFilter }) {
+                                                        isEnabled: { canSubmitFilter }) {
                                         submitFilter()
                                     }
                                 } else {
                                     Button(L.common.create) { submitFilter() }
-                                    .disabled(filterName.isEmpty || filterRuleValue.isEmpty || vm.creatingFilter)
+                                    .disabled(!canSubmitFilter)
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
                                     .accessibilityIdentifier(Ids.createFilter)
                                     .automationActivate(Ids.createFilter,
-                                                        isEnabled: { !filterName.isEmpty && !filterRuleValue.isEmpty && !vm.creatingFilter }) {
+                                                        isEnabled: { canSubmitFilter }) {
                                         submitFilter()
                                     }
                                 }
@@ -281,6 +308,29 @@ public struct PrivacySettingsView: View {
         }
     }
 
+    /// Whether the draft names its filter and fills the condition's own input: a
+    /// spam-score condition reads the score field, every other the value field.
+    /// The shared encoder still validates what was typed.
+    private var canSubmitFilter: Bool {
+        let conditionFilled = draft.rule.kind == "SpamScoreAtLeast"
+            ? !draft.rule.spamScore.isEmpty
+            : !draft.rule.value.isEmpty
+        return !draft.name.isEmpty && conditionFilled && !vm.creatingFilter
+    }
+
+    /// One labelled text input of the filter form, registered under `id`.
+    private func filterField(_ label: String, _ text: Binding<String>, _ id: String,
+                             email: Bool = false) -> some View {
+        TextField(label, text: text)
+            .textFieldStyle(.roundedBorder)
+            #if os(iOS)
+            .textInputAutocapitalization(.never)
+            .keyboardType(email ? .emailAddress : .default)
+            #endif
+            .accessibilityIdentifier(id)
+            .automationField(id, text: text)
+    }
+
     /// Submit the email-filter draft — create or update depending on
     /// `vm.editingFilterId`, the same shared form either way. Extracted so
     /// each mode's Button and its `automationActivate` sibling invoke the
@@ -288,24 +338,21 @@ public struct PrivacySettingsView: View {
     private func submitFilter() {
         Task {
             if let id = vm.editingFilterId {
-                await vm.updateFilter(id: id, name: filterName, ruleType: filterRuleType,
-                                      ruleValue: filterRuleValue, action: filterAction)
+                await vm.updateFilter(id: id, draft)
             } else {
-                await vm.createFilter(name: filterName, ruleType: filterRuleType,
-                                      ruleValue: filterRuleValue, action: filterAction)
+                await vm.createFilter(draft)
             }
-            filterName = ""
-            filterRuleValue = ""
-            filterAction = Self.blankActionInputs(kind: filterAction.kind)
+            // Keep the kinds selected; clear what was typed.
+            draft = EmailFilterDraft(
+                rule: FfiFilterRuleInputs(kind: draft.rule.kind, value: ""),
+                action: FfiFilterActionInputs(kind: draft.action.kind, rejectReason: "",
+                                              forwardAddress: "", keepLocalCopy: true))
         }
     }
 
     /// Open the shared form pre-populated for editing `id` (`filter-edit`).
     private func beginEdit(_ id: Int64) async {
-        guard let draft = await vm.beginEditFilter(id: id) else { return }
-        filterName = draft.name
-        filterRuleType = draft.ruleType
-        filterRuleValue = draft.ruleValue
-        filterAction = draft.action
+        guard let loaded = await vm.beginEditFilter(id: id) else { return }
+        draft = loaded
     }
 }

@@ -177,6 +177,12 @@ pub struct FileVersionInfo {
     /// signature like any other (ruling (10)(e)). Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_retention: Option<bool>,
+    /// Hex writer key of the depositor of an adopted folder deposit
+    /// (`sync::SyncChange::deposited_by`) — a covered field of the owner's
+    /// statement, so it rides into [`Self::as_change_row`]; the version row's
+    /// author reads "<app> via <owner>" from it. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposited_by: Option<String>,
     /// The writer's signature over the version row's `SignedChange` (64 bytes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<ByteBuf>,
@@ -219,6 +225,7 @@ impl FileVersionInfo {
             derived_through: self.derived_through,
             is_resolution: self.is_resolution,
             is_retention: self.is_retention,
+            deposited_by: self.deposited_by.clone(),
             signature: self.signature.clone(),
             signer_key: self.signer_key.clone(),
             ..Default::default()

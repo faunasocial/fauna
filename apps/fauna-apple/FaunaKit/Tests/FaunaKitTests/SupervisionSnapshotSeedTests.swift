@@ -7,8 +7,8 @@ import Foundation
 // `ScreenTimeStore.seed` and `FamilyStatusStore.seed`, driven directly (no
 // live `APIClient` needed — the same reason `ContentPolicyStoreRefreshTests`
 // drives `merged` rather than `refresh`). The row's own success bar: load a
-// floor via a persisted snapshot, fail the read, assert `verdictFor` still
-// returns the floor's verdict — and each restore field mutation-graded
+// guardian policy via a persisted snapshot, fail the read, assert `verdictFor` still
+// returns the guardian policy's verdict — and each restore field mutation-graded
 // individually, since tui's reference leg once passed a happy-path pin while
 // silently dropping `content_notify` on the very same restore.
 
@@ -16,21 +16,17 @@ private func guardian(handle: String = "alex") -> FfiFamilyGuardianInfo {
     FfiFamilyGuardianInfo(actorId: Data(repeating: 0xAB, count: 32), handle: handle)
 }
 
-private func floor(nsfw: String = "block") -> FfiContentPolicy {
-    FfiContentPolicy(nsfw: nsfw, spam: "inherit", phishing: "inherit", commercial: "inherit")
-}
-
 private func flaggedNsfw() -> [ContentLabelEntry] {
     [ContentLabelEntry(category: "nsfw", confidencePerMille: 900)]
 }
 
 private func snapshot(
-    handle: String = "alex", nsfw: String = "block", notify: Bool = true,
+    handle: String = "alex", notify: Bool = true,
     dailyMinutes: UInt16? = nil
 ) -> FfiSupervisionSnapshot {
     FfiSupervisionSnapshot(
         supervisedBy: guardian(handle: handle),
-        contentPolicy: floor(nsfw: nsfw),
+        contentPolicy: nsfwBlockRule(),
         contentNotify: notify,
         screenTime: dailyMinutes.map { FfiScreenTimePolicy(windowStart: nil, windowEnd: nil, dailyMinutes: $0) })
 }
@@ -38,11 +34,11 @@ private func snapshot(
 // MARK: - ContentPolicyStore — the row's own success bar
 
 @MainActor
-@Test("clause 2: a snapshot-restored floor survives a nil-api refresh — verdictFor still enforces")
-func seededFloorSurvivesAFailedRefresh() async {
+@Test("clause 2: a snapshot-restored guardian policy survives a nil-api refresh — verdictFor still enforces")
+func seededGuardianPolicySurvivesAFailedRefresh() async {
     let store = ContentPolicyStore()
-    store.seed(from: snapshot(nsfw: "block", notify: true))
-    #expect(store.inputs.verdictFor(flaggedNsfw()) == "block", "sanity: the seed actually loaded the floor")
+    store.seed(from: snapshot(notify: true))
+    #expect(store.inputs.verdictFor(flaggedNsfw()) == "block", "sanity: the seed actually loaded the guardian policy")
 
     // `refresh(api: nil)` models "the read hasn't (yet) succeeded" — the
     // client not wired, or a session between teardown and re-establish; its
@@ -50,16 +46,16 @@ func seededFloorSurvivesAFailedRefresh() async {
     await store.refresh(api: nil)
 
     #expect(store.inputs.verdictFor(flaggedNsfw()) == "block",
-            "a failed/unwired read must not drop a snapshot-restored floor before the first live read lands")
+            "a failed/unwired read must not drop a snapshot-restored guardian policy before the first live read lands")
 }
 
-@Test("mutation grade: seed restores contentNotify independently of the floor")
+@Test("mutation grade: seed restores contentNotify independently of the guardian policy")
 @MainActor
-func seedRestoresContentNotifyNotJustTheFloor() {
+func seedRestoresContentNotifyNotJustTheGuardianPolicy() {
     let store = ContentPolicyStore()
-    store.seed(from: snapshot(nsfw: "block", notify: true))
+    store.seed(from: snapshot(notify: true))
 
-    #expect(store.inputs.contentPolicy == floor(nsfw: "block"), "the whole floor struct must round-trip, not just nsfw")
+    #expect(store.inputs.contentPolicy == nsfwBlockRule(), "the whole guardian policy must round-trip, not just its verdict")
     #expect(store.inputs.contentNotify,
             "contentNotify must be seeded too — a pin that only checks verdictFor cannot catch a mutant that drops this field (the tui 7th-mutant shape)")
 }
@@ -82,7 +78,7 @@ func seedNilClearsTheGuardianHalf() {
     store.seed(from: nil)
 
     #expect(store.inputs.contentPolicy == nil,
-            "seed(nil) — the account-switch / teardown case — must clear a previously-restored floor")
+            "seed(nil) — the account-switch / teardown case — must clear a previously-restored guardian policy")
     #expect(!store.inputs.contentNotify)
 }
 

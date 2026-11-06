@@ -70,69 +70,19 @@ fn an_inbound_message_in_a_thread_nobody_is_looking_at_is_unread() {
     assert_eq!(unread_of(&m, "alpha"), 2);
 }
 
-/// A manager whose only rail is the fauna-native one — the rail the launch
-/// floor still decides for while its read position is unknown
-/// (`conversation-read-state.md` § How the carriers meet the in-memory set).
-/// Mail never consults the floor; its flag decides (`mail_read_state_tests.rs`).
-fn native_manager() -> Arc<ConversationsManager> {
-    let m = ConversationsManager::new();
-    m.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
-    m.set_launch_floor_for_test(FLOOR_MS);
-    m
-}
-
-fn native_arrival(body: &str, timestamp_ms: i64) -> RailInboundMessage {
-    RailInboundMessage {
-        rail: Rail::FaunaMls,
-        subject: None,
-        ..mail("a@host.test", "", body, timestamp_ms)
-    }
-}
-
-fn only_unread(m: &ConversationsManager) -> u32 {
-    let snap = m.snapshot();
-    assert_eq!(snap.threads.len(), 1, "one native thread");
-    snap.threads[0].unread_count
-}
-
 #[test]
-fn what_the_launch_catch_up_replays_is_history_not_news() {
-    // The in-memory store is refilled from the nest at every launch; without
-    // this rule every native message the account has ever received would be
-    // unread again after each restart, until its read position arrives.
-    let m = native_manager();
-    m.ingest_inbound(native_arrival("old", FLOOR_MS - 1))
-        .unwrap();
-    assert_eq!(only_unread(&m), 0);
-    m.ingest_inbound(native_arrival("new", FLOOR_MS)).unwrap();
-    assert_eq!(only_unread(&m), 1);
-}
-
-#[test]
-fn a_live_arrival_its_sender_backdated_below_the_floor_is_history() {
-    // The declared residual of the position-unknown arm
-    // (`docs/goal/behavior/conversation-read-state.md` § How the carriers meet
-    // the in-memory set): on the native rails the stamp the floor compares is
-    // the sender's own claim, so a message that arrives live, mid-run, but
-    // was stamped before the floor reads as history. The message is not
-    // hidden — it is in its thread — only its unread count is withheld.
-    // The nest-assigned `seq` fill rule retires this; until then a change that
-    // makes it count must update that doc in the same commit.
-    let m = ConversationsManager::new();
-    m.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
-    m.set_launch_floor_for_test(FLOOR_MS);
-    let backdated = RailInboundMessage {
-        rail: Rail::FaunaMls,
-        subject: None,
-        ..mail("a@host.test", "", "backdated", FLOOR_MS - 60_000)
-    };
-    m.ingest_inbound(backdated).unwrap();
-    let snap = m.snapshot();
-    assert_eq!(snap.threads.len(), 1, "the live arrival is in its thread");
-    assert_eq!(
-        snap.threads[0].unread_count, 0,
-        "a sender-backdated stamp below the floor counts as history"
-    );
+fn before_positions_arrive_no_native_message_is_unread_and_the_delivery_fills_the_set() {
+    // The store is refilled from the nest at every launch; until the seam has
+    // delivered positions it cannot tell replayed history from news, so it
+    // reports nothing (`conversation-read-state.md` § How the carriers meet
+    // the in-memory set, position unknown) — and the first delivery recomputes
+    // the whole set from the nest-assigned `seq`, never a clock.
+    let m = manager();
+    let id = m.restore_channel_slice(&slice(vec![native(1, false), native(2, false)]));
+    assert_eq!(unread_in(&m, &id), 0, "position unknown: nothing native");
+    let generation = m.set_read_positions(Arc::new(RecordingSeam::default()));
+    m.apply_read_positions(generation, vec![(CHANNEL.into(), 1)]);
+    assert_eq!(unread_in(&m, &id), 1, "seq 2 — above the position");
 }
 
 #[test]
@@ -234,18 +184,17 @@ fn the_unread_order_puts_unread_threads_first_newest_first_within_each_group() {
 
 #[test]
 fn an_identity_change_carries_no_unread_state_across() {
-    let m = native_manager();
-    m.ingest_inbound(native_arrival("one", 2_000)).unwrap();
+    let m = manager();
+    let id = m.restore_channel_slice(&slice(vec![native(1, false)]));
+    let generation = m.set_read_positions(Arc::new(RecordingSeam::default()));
+    m.apply_read_positions(generation, vec![]);
+    assert_eq!(unread_in(&m, &id), 1);
     m.clear_for_identity_change();
-    m.set_launch_floor_for_test(FLOOR_MS);
-    m.ingest_inbound(native_arrival("old", FLOOR_MS - 1))
-        .unwrap();
-    assert_eq!(only_unread(&m), 0);
-    m.ingest_inbound(native_arrival("new", 2_000)).unwrap();
+    let id = m.restore_channel_slice(&slice(vec![native(1, false)]));
     assert_eq!(
-        only_unread(&m),
-        1,
-        "the next identity's own news still counts"
+        unread_in(&m, &id),
+        0,
+        "the next identity starts position-unknown, with nothing unread"
     );
 }
 
@@ -350,7 +299,7 @@ fn a_relaunch_given_a_position_below_the_newest_message_reports_exactly_those_ab
     assert_eq!(
         unread_in(&m, &id),
         0,
-        "position unknown: the replayed history meets the floor"
+        "position unknown: nothing native is unread"
     );
     let seam = Arc::new(RecordingSeam::default());
     let generation = m.set_read_positions(seam);
@@ -450,13 +399,15 @@ fn an_identity_change_retires_the_seam_and_refuses_its_deliveries() {
         !m.apply_read_positions(generation, vec![]),
         "the outgoing account's positions never land on the incoming one"
     );
-    // Back in the position-unknown arm: the floor decides again.
+    // Back in the position-unknown arm: nothing native is unread.
     let id = m.restore_channel_slice(&slice(vec![native(1, false)]));
     assert_eq!(unread_in(&m, &id), 0, "the replay is history again");
-    let mut live = native(2, false);
-    live.timestamp_ms = FLOOR_MS;
-    m.restore_channel_slice(&slice(vec![live]));
-    assert_eq!(unread_in(&m, &id), 1, "and this run's arrival is news");
+    m.restore_channel_slice(&slice(vec![native(2, false)]));
+    assert_eq!(
+        unread_in(&m, &id),
+        0,
+        "and so is a live arrival, until positions"
+    );
     m.select_thread(id);
     assert!(
         seam.0.lock().unwrap().is_empty(),
@@ -472,7 +423,9 @@ fn an_identity_change_retires_the_seam_and_refuses_its_deliveries() {
 /// the unread count takes — exactly once.
 #[test]
 fn a_live_arrival_stamped_below_its_threads_newest_banners_as_it_counts() {
-    let m = native_manager();
+    let m = manager();
+    let generation = m.set_read_positions(Arc::new(RecordingSeam::default()));
+    m.apply_read_positions(generation, vec![]);
     let tracker = MessageNotificationTracker::new();
     let tick = || {
         let snap = m.snapshot();
@@ -487,12 +440,74 @@ fn a_live_arrival_stamped_below_its_threads_newest_banners_as_it_counts() {
             snap.launch_floor_ms,
         )
     };
-    m.ingest_inbound(native_arrival("newest", FLOOR_MS + 5_000))
-        .unwrap();
+    let stamped = |seq: u64, ts: i64| {
+        let mut msg = native(seq, false);
+        msg.timestamp_ms = ts;
+        msg
+    };
+    let id = m.restore_channel_slice(&slice(vec![stamped(1, FLOOR_MS + 5_000)]));
     assert!(tick().is_empty(), "the first non-empty snapshot seeds");
-    m.ingest_inbound(native_arrival("behind", FLOOR_MS + 4_000))
-        .unwrap();
-    assert_eq!(only_unread(&m), 2, "the unread count takes the arrival");
+    m.restore_channel_slice(&slice(vec![stamped(2, FLOOR_MS + 4_000)]));
+    assert_eq!(unread_in(&m, &id), 2, "the unread count takes the arrival");
     assert_eq!(tick().len(), 1, "and the banner fires for it");
     assert!(tick().is_empty(), "exactly once");
+}
+
+/// The e2e inject seam's arrivals are news on every rail. A FaunaMls inject
+/// carries no channel position, so the carrier rule alone would never count
+/// it (`conversation-read-state.md` § How the carriers meet the in-memory
+/// set) — and a journey that watches unread rise, the banner's among them,
+/// would watch nothing. The seam says so itself; no clock decides it.
+#[test]
+fn an_injected_inbound_message_is_unread_on_the_native_rail_too() {
+    let m = manager();
+    m.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
+    let inject = |subject: &str, extra: serde_json::Value| {
+        let mut p = serde_json::json!({
+            "rail": "FaunaMls",
+            "sender": "peer",
+            "subject": subject,
+            "body": format!("{subject} arrived"),
+        });
+        p.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        m.inject_inbound_from_test_payload(p.as_object().unwrap())
+            .unwrap();
+    };
+    inject("plain", serde_json::json!({}));
+    inject(
+        "relabelled",
+        serde_json::json!({ "force_subject_change": "renamed" }),
+    );
+    let threads: Vec<(ThreadId, u32)> = m
+        .snapshot()
+        .threads
+        .iter()
+        .map(|t| (t.thread_id.clone(), t.unread_count))
+        .collect();
+    assert_eq!(threads.len(), 2, "two threads: {threads:?}");
+    assert!(
+        threads.iter().all(|(_, n)| *n == 1),
+        "every inject is unread: {threads:?}"
+    );
+
+    // The open thread still reads what arrives in it, and an own inject never counts.
+    let open = threads[0].0.clone();
+    let subject = m
+        .snapshot()
+        .threads
+        .iter()
+        .find(|t| t.thread_id == open)
+        .unwrap()
+        .label
+        .clone();
+    m.select_thread(open.clone());
+    inject(&subject, serde_json::json!({}));
+    inject(&subject, serde_json::json!({ "is_own": true }));
+    assert_eq!(
+        unread_in(&m, &open),
+        0,
+        "the open thread is read on arrival"
+    );
 }

@@ -16,10 +16,12 @@ nest state, on a real ``fauna-nest`` binary.
   an app reads as "this nest predates the choice", never a failed read.
 * A non-admin can neither read nor set it, and an unknown channel id is refused.
 
-``channel_head_version``: an e2e nest resolves it only against the harness
-registry ``FAUNA_E2E_UPDATE_REGISTRY_ORIGIN`` names (`helpers/oci_registry.py`).
-The two nests above name none, so their read leaves it absent — never reaching
-the real registry; ``updater_head_nest`` names one whose ``test`` tag carries version
+``channel_head_version``: a ``test-hooks`` nest resolves it only against the
+harness registry ``FAUNA_E2E_UPDATE_REGISTRY_ORIGIN`` names
+(`helpers/oci_registry.py`). The two nests above name none, so on a standalone
+run their read leaves it absent — never reaching the real registry; a release
+image has no such seam and reads the public registry, so a docker or live run
+asserts nothing about their head. ``updater_head_nest`` names one whose ``test`` tag carries version
 ``9.9.9``, and its read answers that, then answers without it once the registry
 has no head or is gone — the read never fails on the head.
 """
@@ -131,7 +133,9 @@ def test_the_seed_is_followed_until_the_admin_chooses_and_the_choice_survives_a_
     reply = _get(nest)
     assert reply["channel"] == "test", reply
     assert reply["running_version"] == health["version"], (reply, health)
-    assert reply.get("channel_head_version") is None, reply
+    # No word on `channel_head_version`: a release image reads the public
+    # registry, so the head is whatever that registry holds (or absent when
+    # unreachable). The test-hooks nest's absence is its own test, below.
 
     assert _set(nest, "dev")["ok"] is True
     assert _get(nest)["channel"] == "dev"
@@ -142,6 +146,20 @@ def test_the_seed_is_followed_until_the_admin_chooses_and_the_choice_survives_a_
         "the admin's row must win over the FAUNA_IMAGE_TAG=test seed after a restart"
     )
     assert _get(nest)["channel"] == "dev"
+
+
+@pytest.mark.feature("admin-nest")
+@pytest.mark.standalone_only
+def test_a_test_hooks_nest_naming_no_registry_reads_no_head(test_channel_nest):
+    """``standalone_only``: a ``test-hooks`` build reads the head only from the
+    harness registry ``FAUNA_E2E_UPDATE_REGISTRY_ORIGIN`` names, and this nest
+    names none — so the read leaves it absent and never reaches the real
+    registry. A release image (docker, live) has that seam compiled out and
+    reads the public registry, as a box should (`update_channel.rs::registry`).
+    Holds on whichever channel the module's other test left the nest."""
+    reply = _get(test_channel_nest)
+    assert reply.get("channel") in ("test", "dev"), reply
+    assert reply.get("channel_head_version") is None, reply
 
 
 @pytest.mark.feature("admin-nest")

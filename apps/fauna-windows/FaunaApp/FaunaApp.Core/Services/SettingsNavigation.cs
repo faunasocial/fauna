@@ -55,6 +55,11 @@ public static class SettingsNavigation
     // top-level "Peers" page, re-homed under Settings by the 2026-06-28
     // sync/folder UI unification. State-protocol id "devices".
     public const string Devices = "devices";
+    // Where the account is signed in right now (ui/sessions.md; ui.yaml § sessions),
+    // directly after Devices — "machines enrolled" beside "sign-ins live now"
+    // (ui/sessions.md § The ruling, item 1; settings.md § Navigation model).
+    // State-protocol id "sessions".
+    public const string Sessions = "sessions";
     // Folder control plane (Settings → Folders; folders.md, ui.yaml § folders) —
     // the create wizard, folder list + per-set config (selective sync, conflict policy),
     // candidate-model conflicts, and the desktop local-folder binding nested per set.
@@ -85,6 +90,11 @@ public static class SettingsNavigation
     // slot is directly after mail-export — the sibling mailbox-portability page —
     // mirroring the linux/web IA (apps/fauna-linux/src/views/settings_shell.rs).
     public const string MailImport = "mail-import";
+    // Import from other services — the export-archive wizard (archive-import.md § The
+    // wizard and its machine). Its rail slot is directly after Mail import, the tui
+    // lead's position. State-protocol id "archive-import"
+    // (actions/archive_import.py navigates {view:"settings",id:"archive-import"}).
+    public const string ArchiveImport = "archive-import";
     public const string MailLists = "mail-lists";
     public const string MailListMembers = "mail-list-members";
     public const string LinkedNests = "nests";
@@ -112,10 +122,10 @@ public static class SettingsNavigation
     public static readonly IReadOnlyList<string> SubPages = new[]
     {
         Status, Account, MemberReview, Privacy, MutedWords, Personalization, LabelerCatalog, General, Encryption, Web,
-        Subscriptions, Devices, Folders,
+        Subscriptions, Devices, Sessions, Folders,
         Nostr,
         Atproto,
-        Mail, MailAliases, MailSpam, MailExport, MailImport, MailLists, MailListMembers,
+        Mail, MailAliases, MailSpam, MailExport, MailImport, ArchiveImport, MailLists, MailListMembers,
         LinkedNests, TaskDelegation, ConnectedApps, Logs,
     };
 
@@ -138,6 +148,7 @@ public static class SettingsNavigation
         Web => Web,
         Subscriptions => Subscriptions,
         Devices => Devices,
+        Sessions => Sessions,
         Folders => Folders,
         Nostr => Nostr,
         Atproto => Atproto,
@@ -146,6 +157,7 @@ public static class SettingsNavigation
         MailSpam => MailSpam,
         MailExport => MailExport,
         MailImport => MailImport,
+        ArchiveImport => ArchiveImport,
         MailLists => MailLists,
         MailListMembers => MailListMembers,
         LinkedNests => LinkedNests,

@@ -29,12 +29,12 @@ public class AccountRegistryStoreTests
 
         public IReadOnlyDictionary<string, string> Rows => _rows;
 
-        public string? Get(string resource, string user) =>
+        public string? Get(string resource) =>
             _rows.TryGetValue(resource, out var v) ? v : null;
 
-        public void Set(string resource, string user, string value) => _rows[resource] = value;
+        public void Set(string resource, string value) => _rows[resource] = value;
 
-        public void Delete(string resource, string user) => _rows.Remove(resource);
+        public void Delete(string resource) => _rows.Remove(resource);
 
         /// <summary>Write a raw native row (the old single-identity shape).</summary>
         public void SeedNative(string resource, string value) => _rows[resource] = value;
@@ -49,7 +49,7 @@ public class AccountRegistryStoreTests
         return (new LogicalSecretStore(backend), backend);
     }
 
-    // ── The key map: the platform's whole contribution ──
+    // ── Verbatim keys: the platform's whole contribution is the backend ──
 
     /// <summary>
     /// Every logical key is stored verbatim — the same rule as linux's
@@ -61,9 +61,16 @@ public class AccountRegistryStoreTests
     [Fact]
     public void EveryLogicalKeyIsStoredVerbatim()
     {
-        Assert.Equal(("fauna/index", "fauna"), SecretKeyMap.Resolve("fauna/index"));
-        Assert.Equal(($"fauna/{SecretA}/secret", "fauna"), SecretKeyMap.Resolve($"fauna/{SecretA}/secret"));
-        Assert.Equal(("legacy/secret", "fauna"), SecretKeyMap.Resolve("legacy/secret"));
+        var (store, backend) = NewStore();
+        store.Set("fauna/index", "index-value");
+        store.Set($"fauna/{SecretA}/secret", "actor-value");
+        store.Set("legacy/secret", "legacy-value");
+
+        Assert.Equal("index-value", backend.Rows["fauna/index"]);
+        Assert.Equal("actor-value", backend.Rows[$"fauna/{SecretA}/secret"]);
+        Assert.Equal("legacy-value", backend.Rows["legacy/secret"]);
+        Assert.Equal(3, backend.Rows.Count);
+        Assert.Equal("index-value", store.Get("fauna/index"));
     }
 
     /// <summary>
@@ -150,6 +157,42 @@ public class AccountRegistryStoreTests
         Assert.Equal("https://a.example", persistence.LoadNestUrl());
         Assert.Null(persistence.LoadPendingInvite());
         Assert.Equal("ab".PadRight(64, '0'), registry.SessionMaterial(actor)?.deviceId);
+    }
+
+    /// <summary>
+    /// The relaunch leg of the persist→restore round trip: a quit and relaunch with
+    /// no <c>--reset</c> lands back in the app, never in onboarding
+    /// (<c>docs/goal/architecture/apps/windows.md</c> § App Lifecycle). The
+    /// <c>LoggedIn</c> one registry persisted is read back by a FRESH registry over
+    /// the same Credential Manager rows, as a new process reads them. The launch
+    /// machine then takes the saved identity's row, the silent challenge, and not
+    /// the wizard. The nest is a refused local port, so the challenge fails at once
+    /// as transient. The machine lands <c>Offline</c>, the app's offline shell; the
+    /// old "drops to onboarding" symptom would read <c>WizardAt</c>.
+    /// </summary>
+    [Fact]
+    public async Task ARelaunchOverThePersistedRowsTakesTheSavedIdentityNotTheWizard()
+    {
+        var (store, backend) = NewStore();
+        const string nestUrl = "http://127.0.0.1:1";
+        using (var first = new FfiAccountRegistry(store))
+        {
+            first.ConfirmIdentity(SecretA, false);
+            first.PersistLoggedIn(SecretA, nestUrl, "ab".PadRight(64, '0'), null);
+        }
+
+        using var relaunched = new FfiAccountRegistry(new LogicalSecretStore(backend));
+        var persistence = relaunched.LaunchPersistence();
+        Assert.Equal(SecretA, System.Convert.ToHexString(persistence.LoadIdentity()!).ToLowerInvariant());
+        Assert.Equal(nestUrl, persistence.LoadNestUrl());
+
+        var machine = new LaunchMachine(new NullLaunchObserver(), persistence);
+        await machine.Start();
+
+        var phase = machine.Snapshot().phase;
+        Assert.False(phase is LaunchPhase.WizardAt, $"a relaunch with a saved identity routed to the wizard: {phase}");
+        var offline = Assert.IsType<LaunchPhase.Offline>(phase);
+        Assert.True(offline.transient);
     }
 
     // ── Cleanup contract ──

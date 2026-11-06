@@ -76,6 +76,15 @@ _MODULE_OS = {
     # The terminal app's archive ships an `install.sh` for the two unix OSes;
     # on windows the zip is unpacked by hand (installers/tui.md).
     "test_tui_installed_product.py": ("linux", "darwin"),
+    # The Play-store install is driven from the dev VM that drives the android
+    # venue (Linux); the device is wherever the run's adb server is.
+    "test_android_store_install.py": ("linux",),
+    # The TestFlight install is driven from the mac the iPhone is paired with
+    # (`xcodebuild` and `devicectl` exist only on macOS).
+    "test_ios_store_install.py": ("darwin",),
+    # The Microsoft Store install: this user's package catalogue and the FlaUI
+    # bridge are both on the windows box itself.
+    "test_windows_store_install.py": ("win32",),
 }
 
 

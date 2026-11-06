@@ -1001,40 +1001,48 @@ fn list_handler() -> RpcHandler {
                         extra: Default::default(),
                     })
                     .collect()
-            } else if req.message_kind.as_deref() == Some("conv") {
-                // A conv row is keyed by its CHANNEL, not by the bearer, so the
-                // owner-implicit query below never sees one: the Conversations
-                // kind entry lists the rows of every channel the bearer belongs
-                // to (`ui/backups.md` § Snapshot-list shape → *Kind entries*) —
-                // the same membership read conv create and restore authorize on.
-                let mut rows = Vec::new();
-                for channel in state
-                    .db
-                    .list_actor_channels(&bearer)
-                    .await
-                    .map_err(internal)?
-                {
-                    rows.extend(
-                        state
-                            .db
-                            .list_message_kind_snapshots(&channel, Some("conv"), req.limit)
-                            .await
-                            .map_err(internal)?,
-                    );
-                }
-                rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.id)));
-                if req.limit > 0 {
-                    rows.truncate(req.limit as usize);
+            } else {
+                // Message-kind list. The bearer's WS-handshake actor scopes the
+                // owner-implicit query, but a conv row is keyed by its CHANNEL,
+                // so that query never sees one: a list for `conv`, and the
+                // kind-less list the restore picker reads, take the rows of
+                // every channel the bearer belongs to (`ui/backups.md`
+                // § Snapshot-list shape → *Kind entries*, § Restore from backup
+                // destination) — the same membership read conv create and
+                // restore authorize on.
+                let kind = req.message_kind.as_deref();
+                let mut rows = if kind == Some("conv") {
+                    Vec::new()
+                } else {
+                    state
+                        .db
+                        .list_message_kind_snapshots(&bearer, kind, req.limit)
+                        .await
+                        .map_err(internal)?
+                };
+                if matches!(kind, None | Some("conv")) {
+                    for channel in state
+                        .db
+                        .list_actor_channels(&bearer)
+                        .await
+                        .map_err(internal)?
+                    {
+                        rows.extend(
+                            state
+                                .db
+                                .list_message_kind_snapshots(&channel, Some("conv"), req.limit)
+                                .await
+                                .map_err(internal)?,
+                        );
+                    }
+                    rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.id)));
+                    let cap = match req.limit {
+                        0 => crate::db::snapshots::SNAPSHOT_LIST_DEFAULT_LIMIT,
+                        limit => limit,
+                    };
+                    rows.truncate(cap as usize);
                 }
                 rows
-            } else {
-                // Owner-implicit message-kind list (original behavior): the
-                // bearer's WS-handshake actor scopes the query.
-                state
-                    .db
-                    .list_message_kind_snapshots(&bearer, req.message_kind.as_deref(), req.limit)
-                    .await
-                    .map_err(internal)?
             };
             encode_reply(&SnapshotListReply {
                 rows,

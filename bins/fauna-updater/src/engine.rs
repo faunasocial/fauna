@@ -163,16 +163,50 @@ impl Engine for Bollard {
     }
 
     async fn get_archive(&self, id: &str, path: &str) -> Result<Vec<u8>> {
-        use futures_util::TryStreamExt;
         let opts = bollard::query_parameters::DownloadFromContainerOptionsBuilder::default()
             .path(path)
             .build();
-        let chunks: Vec<_> = self
-            .0
-            .download_from_container(id, Some(opts))
-            .try_collect()
-            .await?;
-        Ok(chunks.concat())
+        collect_capped(
+            self.0.download_from_container(id, Some(opts)),
+            fauna_provisioning::update_channel::report::REPORT_MAX_ARCHIVE_BYTES,
+        )
+        .await
+    }
+}
+
+/// Collect a byte stream, failing as soon as it passes `cap` bytes — the read
+/// is of a file a compromised nest container could grow without bound.
+async fn collect_capped<S, B, E>(stream: S, cap: usize) -> Result<Vec<u8>>
+where
+    S: futures_util::Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    use futures_util::TryStreamExt;
+    let mut stream = std::pin::pin!(stream);
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.try_next().await? {
+        let chunk = chunk.as_ref();
+        anyhow::ensure!(
+            out.len().saturating_add(chunk.len()) <= cap,
+            "the archive is over {cap} bytes"
+        );
+        out.extend_from_slice(chunk);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::collect_capped;
+    use futures_util::stream;
+
+    #[tokio::test]
+    async fn an_archive_past_the_cap_is_an_error_not_a_buffer() {
+        let chunks =
+            |n: usize| stream::iter((0..n).map(|_| Ok::<_, std::io::Error>(vec![0u8; 10])));
+        assert_eq!(collect_capped(chunks(3), 30).await.unwrap().len(), 30);
+        assert!(collect_capped(chunks(4), 30).await.is_err());
     }
 }
 

@@ -231,3 +231,67 @@ public class DevicesCustodyFacetTests
         Assert.True(facet.IsKeyless("kiosk"));
     }
 }
+
+/// <summary>
+/// <c>custody-held-restore-address</c> (ui/devices.md § Custody facet, the one
+/// addition): a NEST-form hold shows the accept's URL verbatim inside the
+/// hand-over copy; a device-form hold shows nothing.
+/// <para>[Collection("StringsGlobal")] because it installs a localizer carrying
+/// the copy — without one the template is its bare key and "the address is in
+/// the text" would prove nothing.</para>
+/// </summary>
+[Collection("StringsGlobal")]
+public class DevicesHeldRestoreAddressTests
+{
+    private static readonly byte[] Grant = Enumerable.Repeat((byte)7, 32).ToArray();
+
+    /// <summary>The hand-over copy, verbatim from en.yaml.</summary>
+    private sealed class FakeLocalizer : IStringLocalizer
+    {
+        public string Get(string key) => key == "devices/custody_held_restore_address"
+            ? "If they lose every device, they can restore from this nest at {address} — give them this address yourself."
+            : key;
+    }
+
+    public DevicesHeldRestoreAddressTests() => Strings.Initialize(new FakeLocalizer());
+
+    private static uniffi.fauna_core.LocalizedText Text(string key)
+        => new(key, new System.Collections.Generic.Dictionary<string, string>());
+
+    private static CustodyHeldRowView Held(string? custodianNestUrl) => new(
+        @grantId: Grant,
+        @owner: Enumerable.Repeat((byte)1, 32).ToArray(),
+        @scopes: new CustodyScopesView(@wholeAccount: true, @scopes: Array.Empty<string>()),
+        @retainedBytesCap: 1024,
+        @budgetDraft: Text("1 KB"),
+        @receipt: new CustodyReceiptRowView(
+            @statusLabel: Text("devices.custody_receipt_none"),
+            @attestedAtSecs: null,
+            @heldBytesLabel: Text("devices.custody_held_bytes"),
+            @held: Text("0 B"),
+            @cap: Text("1 KB"),
+            @degraded: false,
+            @heldBytes: null,
+            @attestedCap: null),
+        @stopped: false,
+        @custodianNestUrl: custodianNestUrl);
+
+    [Fact]
+    public void ANestFormHold_ShowsTheAcceptsAddressVerbatim_InsideTheHandOverCopy()
+    {
+        // A non-canonical spelling on purpose: the accept's URL is the fact,
+        // never a prettified one.
+        const string url = "https://Custodian.Example.test:443/";
+
+        var text = DevicesCustodyFacet.HeldRestoreAddressText(Held(url));
+
+        Assert.Equal(Strings.Format("devices/custody_held_restore_address", url), text);
+        Assert.Contains(url, text);
+    }
+
+    [Fact]
+    public void ADeviceFormHold_ShowsNoAddress()
+    {
+        Assert.Null(DevicesCustodyFacet.HeldRestoreAddressText(Held(null)));
+    }
+}

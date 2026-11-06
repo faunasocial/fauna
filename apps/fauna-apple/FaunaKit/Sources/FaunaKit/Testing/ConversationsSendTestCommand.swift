@@ -70,6 +70,11 @@ public enum ConversationsSendTestCommand {
         let recipient = command["recipient"] as? String ?? ""
         let body = command["body"] as? String ?? ""
         let m = vm.manager
+        // A NEW conversation with exactly `recipient`: discard any stashed
+        // new-thread draft first — `startNewConversation` keeps one by design, so
+        // an earlier test's seeded chip would otherwise ride into this send (tui's
+        // `e2e_resolve_send_new` has the full reason).
+        m.cancelNewConversation()
         m.startNewConversation()
         m.setNewThreadRecipientInput(text: recipient)
         await m.resolveRecipient()

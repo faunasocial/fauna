@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -139,3 +140,34 @@ def test_a_call_under_a_crashed_renderer_is_cut_loose_before_the_ceiling(bridge)
     # crashed page and is the one cut loose, so the page must come back.
     assert answer and answer[0][0] == 500, answer
     _assert_page_is_back(url, stderr, "crashed")
+
+
+@pytest.mark.parametrize("bridge", [_CRASH_CASE_CEILING_S], indirect=True)
+def test_a_crashed_renderer_is_reported_by_the_page_console_route(bridge):
+    """Convention 6's close rider, web leg: the driver reads `crashed` off
+    `/page/console` before each close (`drivers/web.py::_read_crash_before_close`).
+    Red-first witness with a real renderer killed under a real bridge; a
+    live page answers `crashed: false`, and a killed-then-relaunched page
+    clears it."""
+    url, _stderr, bridge_pid = bridge
+    module = _bridge_module()
+    assert _rpc(url, "GET", "/page/console")[1]["crashed"] is False
+    renderers = [
+        pid for pid in module._proc_tree(bridge_pid)
+        if (module._proc_stat(pid) or ("",))[0] == "renderer"
+    ]
+    assert renderers, "no renderer process under the bridge"
+    for pid in renderers:
+        os.kill(pid, signal.SIGKILL)
+    # Playwright delivers the `crash` event while a call is in flight; each
+    # console read pumps once, so ask until the event has arrived.
+    body = {}
+    for _ in range(50):
+        body = _rpc(url, "GET", "/page/console")[1]
+        if body.get("crashed"):
+            break
+        time.sleep(0.2)  # sleep-ok: polling for an event, bounded by the loop
+    assert body.get("crashed") is True, body
+    assert any("page crashed" in ln for ln in body["lines"]), body
+    _rpc(url, "POST", "/page/kill", {})
+    assert _rpc(url, "GET", "/page/console")[1]["crashed"] is False

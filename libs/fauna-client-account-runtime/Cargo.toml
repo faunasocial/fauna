@@ -97,10 +97,10 @@ serde_json = { workspace = true }
 # store's detached stand-in the assembly reads it through.
 fauna-client-accounts = { workspace = true }
 fauna-credential-store = { workspace = true }
-# The conversations oracle's door (`conversations_door`, unix): the custodian
+# The conversations oracle's door (`conversations_door`, unix and windows): the custodian
 # and its runtime account, the page's manager it performs through, the content
 # index it searches, and the door's future type.
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(any(unix, windows))'.dependencies]
 fauna-client-conversations-oracle = { path = "../fauna-client-conversations-oracle" }
 fauna-conversations = { path = "../fauna-conversations", default-features = false }
 fauna-client-search = { path = "../fauna-client-search" }

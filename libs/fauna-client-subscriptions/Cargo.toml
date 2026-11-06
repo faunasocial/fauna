@@ -47,6 +47,10 @@ hex = { workspace = true }
 # Wasm-clean like the rest of this crate (fauna-wasm already depends on it),
 # so it does not reopen the no-tokio contract the lift is careful to keep.
 tracing = { workspace = true }
+# The account port's thin transport (`port`): the forwarder a page chunk
+# wires and the `serve` the core chunk answers with
+# (account-client-lifecycle.md § The account port). No plane, no store.
+fauna-account-port = { workspace = true }
 # The period-key store seam (`period_keys::PeriodKeyStore`) — the
 # `fauna_client_config` store-seam split: `Send` futures natively,
 # `?Send` on wasm.
@@ -70,3 +74,5 @@ fauna-client-testkit = { path = "../fauna-client-testkit" }
 # wire-contract tests' `RecordingRequester` mock impl. No `derive` needed
 # (trait paths only); mirrors fauna-client-events / -snapshots / -sync.
 serde = { workspace = true }
+# The Loopback transport the port's round-trip tests cross.
+fauna-account-port = { workspace = true, features = ["test-helpers"] }

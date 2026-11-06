@@ -75,7 +75,7 @@ SEED_CALLS = frozenset({WRITER, "_seeded_environment", "_build_app_config"})
 #: App binaries started without a driver: (file, function) → what it starts.
 PROCESS_LAUNCHES = {
     (
-        "tests/e2e-unified/tests/platform/linux/test_desktop_join.py",
+        "tests/e2e-unified/tests/test_desktop_join.py",
         "desktop_app",
     ): "`subprocess.Popen` of the desktop binary",
     (
@@ -86,6 +86,15 @@ PROCESS_LAUNCHES = {
 
 #: Driver launches that carry no seed, and why: (file, function) → reason.
 UNSEEDED: dict[tuple[str, str], str] = {
+    (
+        "tests/e2e-unified/tests/test_box_recovery_two_nest.py",
+        "_SurvivingSeat.launch",
+    ): "the seat is built from an `h1_config` whose `environment` is already "
+    "seeded by `_seeded_environment` (T4 and T6 both); the seat only launches it",
+    (
+        "tests/e2e-unified/tests/test_box_recovery_two_nest.py",
+        "_SurvivingSeat.relaunch",
+    ): "relaunches the same seeded `h1_config` over the same store",
     (
         "tests/common/launch_harness.py",
         "NativeLaunchHarness.launch",
@@ -106,6 +115,65 @@ UNSEEDED: dict[tuple[str, str], str] = {
     ): "the instance guard refuses this launch: the process exits before any "
     "account runtime assembles, so there is no trust set to seed",
     (
+        "tests/e2e-unified/tests/test_app_death_at_close_forced_local.py",
+        "test_an_app_aborted_at_its_reset_fails_the_close_that_found_it",
+    ): "the app is aborted on purpose at its reset (`FAUNA_E2E_FAULT_AT_RESET=abort`) "
+    "with no nest named and no sealed write made: the subject is how the close "
+    "reads the death, so there is no trust set to seed",
+    (
+        "tests/e2e-unified/tests/test_app_death_at_close_forced_apple.py",
+        "test_an_app_crashed_at_its_reset_fails_the_close_that_found_it",
+    ): "the apple twin: the app traps on purpose at its reset "
+    "(`FAUNA_E2E_FAULT_AT_RESET=abort`) with no nest named and no sealed write "
+    "made: the subject is how the close reads the death, so there is no trust set "
+    "to seed",
+    (
+        "tests/e2e-unified/tests/test_app_death_at_close_forced_apple.py",
+        "test_a_clean_reset_and_close_record_nothing",
+    ): "the control of the apple twin: the same launch, reset and close with no "
+    "fault, no nest named and no sealed write made — the subject is that the close "
+    "records nothing, so there is no trust set to seed",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_local.py",
+        "test_the_app_start_broken_on_purpose_reads_faulted",
+    ):"the launch is faulted on purpose (`FAUNA_E2E_FAULT_AT_LAUNCH=exit`): the "
+    "process exits before any account runtime assembles and names no nest",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_local.py",
+        "test_the_app_blocked_on_purpose_reads_stalled_not_starved",
+    ): "the launch is blocked on purpose (`FAUNA_E2E_FAULT_AT_LAUNCH=block`): the "
+    "main thread parks before any account runtime assembles and no nest is named",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_local.py",
+        "test_the_apps_cpu_held_back_on_purpose_reads_starved",
+    ): "the launch is starved of CPU on purpose and never reaches ready: no "
+    "account runtime assembles and no nest is named",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_apple.py",
+        "test_the_app_start_broken_on_purpose_reads_faulted",
+    ): "the launch is faulted on purpose (`FAUNA_E2E_FAULT_AT_LAUNCH=exit`): the "
+    "process exits before any account runtime assembles and names no nest",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_apple.py",
+        "test_the_app_blocked_on_purpose_reads_stalled_not_starved",
+    ): "the launch is blocked on purpose (`FAUNA_E2E_FAULT_AT_LAUNCH=block`): the "
+    "main thread parks before any account runtime assembles and no nest is named",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_windows.py",
+        "test_the_app_blocked_on_purpose_reads_stalled_not_starved",
+    ): "the launch is blocked on purpose: the main thread parks before any account "
+    "runtime assembles and no nest is named",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_windows.py",
+        "test_the_app_start_broken_on_purpose_reads_faulted",
+    ): "the launch is faulted on purpose: the process exits before any account "
+    "runtime assembles and names no nest",
+    (
+        "tests/e2e-unified/tests/test_launch_timeout_forced_windows.py",
+        "test_the_apps_cpu_held_back_on_purpose_reads_starved",
+    ): "the launch is starved of CPU on purpose and never reaches ready: no "
+    "account runtime assembles and no nest is named",
+    (
         "tests/e2e-unified/helpers/photo_library_grant.py",
         "main",
     ): "names no nest: the human-run Photos grant launches the venue bundle only to "
@@ -115,6 +183,16 @@ UNSEEDED: dict[tuple[str, str], str] = {
         "AppSeatDriver.start",
     ): "launches the config `make_seat` built through `_build_app_config`; "
     "`test_an_app_sync_seat_builds_its_config_for_a_nest_with_a_port` pins the handle",
+    (
+        "tests/e2e-unified/helpers/sync_seats.py",
+        "DeviceSeatDriver.start",
+    ): "launches the config `make_seat`'s device-only arm built through the same "
+    "`_build_app_config(app_name, {url, port}, request)` as `AppSeatDriver`",
+    (
+        "tests/e2e-unified/tests/test_ui_thread_stall_stack_windows.py",
+        "_launch",
+    ): "names no nest: the windows app starts only to have its UI thread parked "
+    "and its bridge read; no account runtime is assembled and no nest is used",
     (
         "tests/e2e-unified/tests/test_driver_relaunch_pin.py",
         "_windows_launch_and_mint",
@@ -168,6 +246,16 @@ UNSEEDED: dict[tuple[str, str], str] = {
         "tests/e2e-unified/tests/test_private_secret_service.py",
         "test_the_driver_refuses_the_mode_without_a_caller_owned_bus",
     ): "the driver refuses `use_real_keyring` without a caller-owned bus before "
+    "any process starts — the launch raises, so there is no app and no nest to seed",
+    (
+        "tests/e2e-unified/tests/test_windows_driver_real_keyring.py",
+        "test_a_namespace_not_unique_to_the_launch_is_refused_before_anything_starts",
+    ): "a stubbed windows driver (tier_1) refuses the keyring namespace before "
+    "any process starts — the launch raises, so there is no app and no nest to seed",
+    (
+        "tests/e2e-unified/tests/test_windows_driver_real_keyring.py",
+        "test_a_file_store_input_beside_the_real_keyring_is_refused",
+    ): "a stubbed windows driver (tier_1) refuses the file-store input before "
     "any process starts — the launch raises, so there is no app and no nest to seed",
     (
         "tests/e2e-unified/tests/test_flaui_input_lock_windows.py",

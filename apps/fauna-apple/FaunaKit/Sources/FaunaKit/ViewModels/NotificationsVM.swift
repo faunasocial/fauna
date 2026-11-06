@@ -27,6 +27,10 @@ public final class NotificationsVM {
 
     private var api: APIClient?
     private var actorId: String?
+    /// The projection a fauna-native row's sender is named through
+    /// (`notifications.md` § Localized body → *The sender arg*); held so the
+    /// dismiss / clear refetches name the same way the page's own load does.
+    private var overlays: FfiContactOverlays?
 
     public init() {}
 
@@ -45,15 +49,17 @@ public final class NotificationsVM {
     public func reset() {
         api = nil
         actorId = nil
+        overlays = nil
         notifications = []
         unreadCount = 0
         errorMessage = nil
     }
 
-    public func configure(api: APIClient, actorId: String?) {
+    public func configure(api: APIClient, actorId: String?, overlays: FfiContactOverlays) {
         if let current = self.api, current !== api { reset() }
         self.api = api
         self.actorId = actorId
+        self.overlays = overlays
     }
 
     #if DEBUG
@@ -66,9 +72,9 @@ public final class NotificationsVM {
     #endif
 
     public func loadNotifications() async {
-        guard let api, let actorId else { return }
+        guard let api, let actorId, let overlays else { return }
         do {
-            let data = try await api.getNotifications(actorId: actorId)
+            let data = try await api.getNotifications(actorId: actorId, overlays: overlays)
             // The in-flight clause: cancelling is never sufficient — a read already
             // suspended for the outgoing account still returns and would still assign.
             guard self.api === api else { return }
@@ -87,9 +93,10 @@ public final class NotificationsVM {
     /// `client` is a no-op, matching `loadNotifications`'s own missing-`api`
     /// contract. Each page still mirrors the resulting `unreadCount` into its
     /// own (differently-typed) app state itself — this only dedups the fetch.
-    public func loadNotifications(client: FaunaClient?, actorId: String?) async {
+    public func loadNotifications(client: FaunaClient?, actorId: String?,
+                                  overlays: FfiContactOverlays) async {
         guard let client else { return }
-        configure(api: client.api, actorId: actorId)
+        configure(api: client.api, actorId: actorId, overlays: overlays)
         await loadNotifications()
     }
 
@@ -107,6 +114,44 @@ public final class NotificationsVM {
     public func revealMuted(_ item: NotificationItem) {
         Self.revealedMutedIds.insert(item.id)
         revealTick += 1
+    }
+
+    /// Whether this row's dismiss paints greyed — the shared
+    /// `notification_retained_for` decision (`notifications.md` § Retention
+    /// rule 2); the nest's `fauna.notifications.retained` refusal stays the
+    /// authority. A row whose id will not round-trip is not greyed.
+    public func isRetained(_ item: NotificationItem) -> Bool {
+        guard let ffi = item.ffiItem else { return false }
+        return notificationRetainedFor(item: ffi, nowMicros: Int64(Date().timeIntervalSince1970 * 1_000_000))
+    }
+
+    /// `notification-dismiss`: delete the row, then refetch the list and the
+    /// count. A retained refusal that still arrives lands on `errorMessage`.
+    public func dismiss(_ item: NotificationItem) async {
+        guard let api, let id = Int64(item.id) else { return }
+        do {
+            try await api.dismissNotification(id: id)
+            guard self.api === api else { return }
+            await loadNotifications()
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.http(error)
+        }
+    }
+
+    /// `notification-clear`: delete everything up to the newest created_at the
+    /// page has loaded (muted-collapsed rows included, § Muted words rule 4),
+    /// then refetch. Retained security notices stay listed.
+    public func clearAll() async {
+        guard let api, let newest = notifications.map(\.createdAt).max() else { return }
+        do {
+            try await api.clearNotifications(upTo: Int64(newest))
+            guard self.api === api else { return }
+            await loadNotifications()
+        } catch {
+            guard self.api === api else { return }
+            errorMessage = DisplayError.http(error)
+        }
     }
 
     public func markAllRead() async {

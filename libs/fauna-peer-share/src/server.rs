@@ -7,9 +7,11 @@
 //!
 //! A connection's serve set is **exactly** [`allowlisted_kinds`]:
 //! `fauna.peer.node_info` (the pre-witness probe), the admission exchange, the
-//! set change-log read, manifest fetch, the want-list chunk pull, and the
-//! three offline-share-initiation ceremony kinds ([`crate::ceremony`] — gated
-//! by their own actor-level pre-parse admission, not the verdict slot).
+//! set change-log read, manifest fetch, the want-list chunk pull, the three
+//! offline-share-initiation ceremony kinds ([`crate::ceremony`] — gated by
+//! their own actor-level pre-parse admission, not the verdict slot), and the
+//! group plane's feed — the account plane's own `fauna.sync.changes.list`,
+//! `state-entry` class, a `group:` scope only (§ *The group feed* below).
 //! Nothing else is mapped, so `PeerChannel::serve` answers every other kind
 //! `fauna.protocol.unknown_kind` — no config, capability-mint, admin or
 //! key-material kind exists here, and **content keys never ride this plane**
@@ -22,7 +24,11 @@
 //! Per connection there is one verdict slot. The admit exchange fills it
 //! through [`crate::admission::evaluate_share_witness`] (a claim + the
 //! evaluator's own roster consult); every data request then re-checks the set it
-//! names against that verdict with [`crate::admission::verdict_admits_set`].
+//! names against that verdict — [`crate::admission::verdict_admits_set`] for
+//! the folder family, [`crate::admission::verdict_admits_group`] for the group
+//! family, one helper trying them in that order (the two 32-byte id spaces are
+//! disjoint by derivation) — and then re-consults the LIVE roster of the
+//! family that admitted it.
 //! The two checks are deliberately separate: the connection is admitted to *a
 //! set of sets*, and a request naming one outside it is refused even on a live,
 //! admitted connection — which is also how eviction severs (the roster consult
@@ -35,6 +41,21 @@
 //! decided by [`crate::provenance::serves_held_row`]. The filter lives in this crate
 //! rather than behind the [`ShareStore`] seam on purpose: it is *policy*, so it
 //! is unit-testable without a store, and an impl cannot weaken it by accident.
+//!
+//! # The group feed (`p2p-shared-set-build.md` § Build design — the group set, decision 6)
+//!
+//! A group scope's path state is class-2 plane entries, sealed and each
+//! signed by its writer inside the seal, so its feed is the account plane's
+//! own: the request is a `fauna.sync.changes.list` naming
+//! `group:<scope-id-hex>` and a
+//! per-writer frontier, answered by the one
+//! [`fauna_peer_sync::store_serve::serve_changes_list`] core the same-account
+//! peer leg and the custodian nest already share — three serve sides, one
+//! page law. Every relay row the store holds for the scope is served, own and
+//! relayed alike: each carries its writer's in-seal signature, which is the
+//! provenance ruling's whole condition. Any other scope on this channel —
+//! the account's own planes above all — is refused loudly, never paged: this
+//! is the cross-user channel, and an account's own rows never cross it.
 //!
 //! # There is deliberately NO bind door here (rules 5 + 7)
 //!
@@ -52,6 +73,7 @@ use fauna_core::identity::ActorId;
 use fauna_peer_channel::{HandlerFactory, PeerHandlers, base_peer_handlers, from_value};
 use fauna_peer_sync::admission::{AdmissionVerdict, admitted_verdict};
 use fauna_peer_sync::quota::{MeteredPlane, QuotaConfig, QuotaLedger, metered_handler_factory};
+use fauna_protocol::account_state::ItemClass;
 use fauna_protocol::peer_share::{
     ERR_CEREMONY_NOT_EXPECTED, ERR_CEREMONY_REFUSED, ERR_NOT_ADMITTED, ERR_OVER_QUOTA,
     ERR_UNSUPPORTED, ERR_WITNESS_REFUSED, KIND_PEER_SHARE_ADMIT,
@@ -64,17 +86,22 @@ use fauna_protocol::peer_share::{
     PeerShareChunksPullReply, PeerShareChunksPullRequest, PeerShareManifest,
     PeerShareManifestsGetReply, PeerShareManifestsGetRequest, WITNESS_M2_MEMBERSHIP,
 };
+use fauna_protocol::scope::Scope;
+use fauna_protocol::sync::SyncChangesListRequest;
 use fauna_protocol::{RpcError, Value};
 use fauna_transport::EndpointKey;
 use serde_bytes::ByteBuf;
 
 use crate::admission::{
-    GroupRosterState, SetMembership, evaluate_share_witness, verdict_admits_set,
-    verdict_for_group_membership,
+    GroupRosterState, SetMembership, evaluate_share_witness, verdict_admits_group,
+    verdict_admits_set, verdict_for_group_membership,
 };
 use crate::ceremony::{CeremonyRefusal, CeremonyState};
 use crate::provenance::{LocalShareChange, serves_held_row};
 use fauna_peer_sync::admission::AdmittedScopes;
+use fauna_peer_sync::store_serve::{
+    ServeRefusal, ServeStoreHandle, changes_list_scope, serve_changes_list,
+};
 use fauna_protocol::peer_share::WITNESS_GROUP_MEMBERSHIP;
 
 /// Injected clock (epoch seconds) — quota windows never read the wall clock
@@ -93,7 +120,11 @@ pub use fauna_peer_sync::server::NowFn;
 /// (`crate::ceremony`): gated by the actor-level [`CeremonyState::admits`]
 /// pre-parse check instead of the verdict slot, and fail-closed
 /// ([`ERR_CEREMONY_NOT_EXPECTED`]) when no ceremony state is wired.
-pub const fn allowlisted_kinds() -> [&'static str; 8] {
+///
+/// [`KIND_SYNC_CHANGES_LIST`] is the group plane's feed (the module doc's
+/// § *The group feed*): admitted by the verdict slot's group family only, and
+/// fail-closed when no group feed is wired.
+pub const fn allowlisted_kinds() -> [&'static str; 9] {
     [
         fauna_protocol::peer::KIND_PEER_NODE_INFO,
         KIND_PEER_SHARE_ADMIT,
@@ -103,8 +134,14 @@ pub const fn allowlisted_kinds() -> [&'static str; 8] {
         KIND_PEER_SHARE_CEREMONY_OFFER,
         KIND_PEER_SHARE_CEREMONY_ACCEPT_POLL,
         KIND_PEER_SHARE_CEREMONY_DELIVER,
+        KIND_SYNC_CHANGES_LIST,
     ]
 }
+
+/// The account plane's feed kind, served here for a `group:` scope only. The
+/// wire string is the account plane's own (`GroupStatePlane::walk` requests
+/// it), so the share channel and every other feed of a scope cannot drift.
+pub const KIND_SYNC_CHANGES_LIST: &str = "fauna.sync.changes.list";
 
 /// Serve-page bounds, sized under the peer channel's 1 MiB frame — one home in
 /// `fauna-peer-sync`, read by both peer legs' servers so the pages cannot
@@ -315,6 +352,29 @@ pub struct ShareServer {
     /// nothing, exactly as the M2 roster answers `false` for a set it does
     /// not hold.
     group_roster: RwLock<Option<Arc<dyn GroupRosterState + Send + Sync>>>,
+    /// The group plane's feed — a serve handle over the account store, wired
+    /// via [`Self::set_group_feed`]. `None` (the default) refuses the feed
+    /// kind: a node that serves no group plane answers no page.
+    group_feed: RwLock<Option<ServeStoreHandle>>,
+}
+
+/// One group scope a carried witness admitted, and the roster entry id it
+/// verified as: `(scope id, entry id)`.
+type AdmittedEntry = ([u8; 32], [u8; 32]);
+
+/// One connection's admission state, minted fresh per connection
+/// ([`ShareServer::connection_handlers`]) — sides admit independently.
+#[derive(Default)]
+struct Connection {
+    /// The verdict slot: which sets and scopes the channel-proven actor is
+    /// admitted to, merged across admit exchanges.
+    verdict: Mutex<Option<AdmissionVerdict>>,
+    /// The group family's other half: the roster entry each admitted scope's
+    /// carried witness verified as, keyed by scope id. The verdict says
+    /// *which* scopes; this says *as whom*, which is what the per-request
+    /// [`GroupRosterState::is_entry_removed`] re-consult needs — the verdict
+    /// alone could never sever an open connection.
+    group_entries: Mutex<std::collections::HashMap<[u8; 32], [u8; 32]>>,
 }
 
 impl ShareServer {
@@ -333,6 +393,7 @@ impl ShareServer {
             own_claimed_sets: RwLock::new(Vec::new()),
             ceremony: RwLock::new(None),
             group_roster: RwLock::new(None),
+            group_feed: RwLock::new(None),
         }
     }
 
@@ -359,6 +420,22 @@ impl ShareServer {
         *self.group_roster.write().unwrap() = Some(state);
     }
 
+    /// Wire the group plane's feed: a serve handle over the account store
+    /// whose relay plane holds the group scopes' rows — the store the
+    /// [`GroupRosterState`] is read from. Without it the feed kind is refused,
+    /// admitted connection or not.
+    pub fn set_group_feed(&self, feed: ServeStoreHandle) {
+        *self.group_feed.write().unwrap() = Some(feed);
+    }
+
+    /// Let go of the group feed's serve handle, whoever else still holds this
+    /// server — the stop's release of that second store connection
+    /// (`account-scoping.md` § Erasure follows scope). A request in flight
+    /// keeps its own clone until it answers; the feed kind is refused after.
+    pub fn clear_group_feed(&self) {
+        *self.group_feed.write().unwrap() = None;
+    }
+
     /// The per-connection handler factory for `PeerNode::start_with` — the
     /// shared rule-8 door ([`metered_handler_factory`]) over this plane's
     /// serve set. Sides admit independently: the verdict slot lives in
@@ -371,19 +448,21 @@ impl ShareServer {
 
     /// The serve set for one connection — exactly [`allowlisted_kinds`].
     fn connection_handlers(self: &Arc<Self>, peer: EndpointKey) -> PeerHandlers {
-        let verdict: Arc<Mutex<Option<AdmissionVerdict>>> = Arc::new(Mutex::new(None));
+        let conn: Arc<Connection> = Arc::default();
 
         let admit_server = Arc::clone(self);
-        let admit_slot = Arc::clone(&verdict);
+        let admit_slot = Arc::clone(&conn);
         let changes_server = Arc::clone(self);
-        let changes_slot = Arc::clone(&verdict);
+        let changes_slot = Arc::clone(&conn);
         let manifests_server = Arc::clone(self);
-        let manifests_slot = Arc::clone(&verdict);
+        let manifests_slot = Arc::clone(&conn);
         let chunks_server = Arc::clone(self);
-        let chunks_slot = Arc::clone(&verdict);
+        let chunks_slot = Arc::clone(&conn);
         let offer_server = Arc::clone(self);
         let poll_server = Arc::clone(self);
         let deliver_server = Arc::clone(self);
+        let feed_server = Arc::clone(self);
+        let feed_slot = Arc::clone(&conn);
 
         base_peer_handlers(self.config.display_name.clone())
             .on(KIND_PEER_SHARE_ADMIT, move |req| {
@@ -417,6 +496,11 @@ impl ShareServer {
             .on(KIND_PEER_SHARE_CEREMONY_DELIVER, move |req| {
                 let server = Arc::clone(&deliver_server);
                 async move { server.handle_ceremony_frame(&peer, req.payload).await }
+            })
+            .on(KIND_SYNC_CHANGES_LIST, move |req| {
+                let server = Arc::clone(&feed_server);
+                let slot = Arc::clone(&feed_slot);
+                async move { server.handle_group_feed(&peer, &slot, req.payload).await }
             })
     }
 
@@ -483,26 +567,42 @@ impl ShareServer {
         })
     }
 
-    /// Meter one request, then read the connection's verdict and check it
-    /// admits the **named set**. Every data handler's preflight: the set is
-    /// named per request precisely so one admitted connection cannot reach a
-    /// set outside its verdict.
-    fn admitted_for_set(
+    /// Meter one request and read the connection's verdict — the half of every
+    /// data handler's preflight that runs **before** the request is parsed
+    /// (wormability rule 1, `p2p.md` § Wormability posture: admission before
+    /// parsing). [`Self::admits_named_set`] is the half that needs the parsed
+    /// request.
+    fn admitted_connection(
         &self,
         peer: &EndpointKey,
-        slot: &Mutex<Option<AdmissionVerdict>>,
-        set: &ByteBuf,
-    ) -> Result<[u8; 32], RpcError> {
+        conn: &Connection,
+    ) -> Result<AdmissionVerdict, RpcError> {
         let now = (self.config.now)();
-        let verdict = admitted_verdict(
+        admitted_verdict(
             peer,
-            slot,
+            &conn.verdict,
             &self.ledger,
             now,
             over_quota,
             || not_admitted("no admission verdict on this connection"),
             || not_admitted("the admission verdict has expired — re-present the claim"),
-        )?;
+        )
+    }
+
+    /// Check the connection's `verdict` admits the **named set** — in the
+    /// folder family, or (when `group` is true) in the group family, tried in
+    /// that order: the two 32-byte id spaces are disjoint by derivation, so
+    /// the order decides nothing but which live consult runs. The set is named
+    /// per request precisely so one admitted connection cannot reach a set
+    /// outside its verdict.
+    fn admits_named_set(
+        &self,
+        verdict: &AdmissionVerdict,
+        peer: &EndpointKey,
+        conn: &Connection,
+        group: bool,
+        set: &ByteBuf,
+    ) -> Result<[u8; 32], RpcError> {
         let set: [u8; 32] = set
             .as_ref()
             .try_into()
@@ -510,34 +610,64 @@ impl ShareServer {
         // The verdict is held for the channel-proven actor; check the set
         // through the share door (never `admits_scope`, whose account-equality
         // semantics are the account plane's — see `verdict_admits_set`).
-        if !verdict_admits_set(&verdict, peer.as_bytes(), &set) {
-            return Err(not_admitted("the verdict does not admit this set"));
+        if verdict_admits_set(verdict, peer.as_bytes(), &set) {
+            // The LIVE roster re-consult — finding: the verdict is
+            // a cache, and nothing else ever closes an open connection (both
+            // witness families mint `expires_at: None` by design; the slot's
+            // only write is the admit merge; the party who would re-present
+            // is the one being evicted). The twin already carries this line —
+            // `fauna_peer_sync::server::admitted_connection` re-consults its
+            // served registry so "a custody dropped from the registry severs
+            // here, at the next request, even on a live connection" — and
+            // this plane is the cross-user one, where eviction means a user
+            // stopped sharing a set with a person.
+            if !self.membership.is_member(&set, &ActorId(*peer.as_bytes())) {
+                return Err(not_admitted(
+                    "the roster no longer holds this membership for the named set",
+                ));
+            }
+            return Ok(set);
         }
-        // The LIVE roster re-consult — finding: the verdict is a
-        // cache, and nothing else ever closes an open connection (both
-        // witness families mint `expires_at: None` by design; the slot's only
-        // write is the admit merge; the party who would re-present is the one
-        // being evicted). The twin already carries this line —
-        // `fauna_peer_sync::server::admitted_connection` re-consults its
-        // served registry so "a custody dropped from the registry severs
-        // here, at the next request, even on a live connection" — and this
-        // plane is the cross-user one, where eviction means a user stopped
-        // sharing a set with a person. A future group-family data arm
-        // inherits the same duty against `GroupRosterState::is_entry_removed`
-        // (its seam doc says so); today every data arm is M2/folder-family
-        // and this consult is the whole answer.
-        if !self.membership.is_member(&set, &ActorId(*peer.as_bytes())) {
+        if group && verdict_admits_group(verdict, peer.as_bytes(), &set) {
+            self.group_entry_still_admitted(conn, &set)?;
+            return Ok(set);
+        }
+        Err(not_admitted("the verdict does not admit this set"))
+    }
+
+    /// The group family's live re-consult — the same duty the folder family's
+    /// M2 consult carries (finding, `verdict_admits_group`'s own
+    /// warning): the entry this connection's witness verified as must not be
+    /// superseded by a removal in this evaluator's roster frontier NOW, so a
+    /// member the authority removes is refused at its next request even on a
+    /// live connection. Fail-closed on every absence — no entry recorded for
+    /// the scope, no roster wired, or a roster that no longer holds the scope
+    /// (`GroupRosterState::is_entry_removed` answers `true` for it).
+    fn group_entry_still_admitted(
+        &self,
+        conn: &Connection,
+        scope_id: &[u8; 32],
+    ) -> Result<(), RpcError> {
+        let Some(entry) = conn.group_entries.lock().unwrap().get(scope_id).copied() else {
             return Err(not_admitted(
-                "the roster no longer holds this membership for the named set",
+                "no group witness admitted this scope on this connection",
+            ));
+        };
+        let Some(roster) = self.group_roster.read().unwrap().clone() else {
+            return Err(not_admitted("this node holds no group roster state"));
+        };
+        if roster.is_entry_removed(scope_id, &entry) {
+            return Err(not_admitted(
+                "the roster frontier now supersedes this connection's entry with a removal",
             ));
         }
-        Ok(set)
+        Ok(())
     }
 
     async fn handle_admit(
         &self,
         peer: &EndpointKey,
-        slot: &Mutex<Option<AdmissionVerdict>>,
+        conn: &Connection,
         payload: Value,
     ) -> Result<Value, RpcError> {
         let now = (self.config.now)();
@@ -552,7 +682,20 @@ impl ShareServer {
         // group kind is a carried CERTIFICATE, not a claim, so it takes its
         // own arm rather than the claim-list signature.
         let (verdict, admitted) = if req.witness_kind == WITNESS_GROUP_MEMBERSHIP {
-            self.evaluate_group_witnesses(&req.group_witnesses, peer)?
+            let (verdict, verified) = self.evaluate_group_witnesses(&req.group_witnesses, peer)?;
+            // Record as whom each scope was admitted — the per-request
+            // re-consult's key (`group_entry_still_admitted`). A later admit
+            // of the same scope replaces it: the newest verified entry is the
+            // one the member presents now.
+            let mut held = conn.group_entries.lock().unwrap();
+            let admitted = verified
+                .into_iter()
+                .map(|(scope, entry)| {
+                    held.insert(scope, entry);
+                    scope
+                })
+                .collect();
+            (verdict, admitted)
         } else {
             evaluate_share_witness(
                 &req.witness_kind,
@@ -565,7 +708,7 @@ impl ShareServer {
         // MERGE into the slot — one connection may hold both families (an M2
         // admit then a group admit widens the verdict, never clobbers it).
         {
-            let mut held = slot.lock().unwrap();
+            let mut held = conn.verdict.lock().unwrap();
             let merged = merge_verdicts(held.take(), verdict);
             *held = Some(merged);
         }
@@ -590,19 +733,20 @@ impl ShareServer {
     /// owns the order) and admit the verifying subset, degrading like the M2
     /// arm. Fail-closed when no [`GroupRosterState`] is wired, and refused
     /// outright when nothing verifies — an all-refused exchange must not
-    /// read as an empty admission.
+    /// read as an empty admission. Hands back each admitted scope with the
+    /// roster entry id its witness verified as.
     fn evaluate_group_witnesses(
         &self,
         witnesses: &[fauna_protocol::peer_share::PeerShareGroupWitness],
         peer: &EndpointKey,
-    ) -> Result<(AdmissionVerdict, Vec<[u8; 32]>), RpcError> {
+    ) -> Result<(AdmissionVerdict, Vec<AdmittedEntry>), RpcError> {
         let Some(state) = self.group_roster.read().unwrap().clone() else {
             return Err(witness_refused(
                 "this node holds no group roster state to evaluate against",
             ));
         };
         let mut scopes: Vec<String> = Vec::new();
-        let mut admitted: Vec<[u8; 32]> = Vec::new();
+        let mut admitted: Vec<AdmittedEntry> = Vec::new();
         let mut last_refusal: Option<String> = None;
         for witness in witnesses {
             let scope: [u8; 32] = witness
@@ -616,7 +760,7 @@ impl ShareServer {
                 state.as_ref(),
                 peer.as_bytes(),
             ) {
-                Ok((verdict, _entry_id)) => {
+                Ok((verdict, entry_id)) => {
                     if let AdmittedScopes::Named(named) = verdict.scopes {
                         for s in named {
                             if !scopes.contains(&s) {
@@ -624,8 +768,9 @@ impl ShareServer {
                             }
                         }
                     }
-                    if !admitted.contains(&scope) {
-                        admitted.push(scope);
+                    match admitted.iter_mut().find(|(s, _)| *s == scope) {
+                        Some(held) => held.1 = entry_id,
+                        None => admitted.push((scope, entry_id)),
                     }
                 }
                 Err(e) => last_refusal = Some(e.to_string()),
@@ -649,11 +794,15 @@ impl ShareServer {
     async fn handle_changes_list(
         &self,
         peer: &EndpointKey,
-        slot: &Mutex<Option<AdmissionVerdict>>,
+        conn: &Connection,
         payload: Value,
     ) -> Result<Value, RpcError> {
+        // Admission before parsing (wormability rule 1).
+        let verdict = self.admitted_connection(peer, conn)?;
         let req: PeerShareChangesListRequest = from_value(&payload)?;
-        let set = self.admitted_for_set(peer, slot, &req.set)?;
+        // The folder family only: a group set has no sequenced log, and its
+        // path state is served by the group feed (decision 1's refusal).
+        let set = self.admits_named_set(&verdict, peer, conn, false, &req.set)?;
         // Ask for one more than the page bound: if it comes back, there is
         // genuinely more, and `more` is a fact rather than a guess.
         let rows = self
@@ -672,6 +821,7 @@ impl ShareServer {
                 change: row.change,
                 sequenced: row.sequenced,
                 signer_cert: row.signer_cert,
+                group_base: None,
                 extra: Default::default(),
             })
             .collect();
@@ -685,11 +835,12 @@ impl ShareServer {
     async fn handle_manifests_get(
         &self,
         peer: &EndpointKey,
-        slot: &Mutex<Option<AdmissionVerdict>>,
+        conn: &Connection,
         payload: Value,
     ) -> Result<Value, RpcError> {
+        let verdict = self.admitted_connection(peer, conn)?;
         let req: PeerShareManifestsGetRequest = from_value(&payload)?;
-        let set = self.admitted_for_set(peer, slot, &req.set)?;
+        let set = self.admits_named_set(&verdict, peer, conn, true, &req.set)?;
         // One page of hashes per request: each is a store read, and the caller
         // is another user's set member. The share client asks for one at a time.
         if req.manifest_hashes.len() > MAX_ROWS_PER_PAGE as usize {
@@ -742,11 +893,12 @@ impl ShareServer {
     async fn handle_chunks_pull(
         &self,
         peer: &EndpointKey,
-        slot: &Mutex<Option<AdmissionVerdict>>,
+        conn: &Connection,
         payload: Value,
     ) -> Result<Value, RpcError> {
+        let verdict = self.admitted_connection(peer, conn)?;
         let req: PeerShareChunksPullRequest = from_value(&payload)?;
-        let set = self.admitted_for_set(peer, slot, &req.set)?;
+        let set = self.admits_named_set(&verdict, peer, conn, true, &req.set)?;
         let mut reply = PeerShareChunksPullReply::default();
         let mut budget = MAX_BODY_BYTES_PER_REPLY;
         for want in &req.wants {
@@ -810,6 +962,56 @@ impl ShareServer {
             }
         }
         to_value(&reply)
+    }
+
+    /// `fauna.sync.changes.list` on the share channel — one page of a group
+    /// scope's relay rows by the dialer's own per-writer frontier (the module
+    /// doc's § *The group feed*). The preflight runs in the door's order:
+    /// meter and verdict first (an unadmitted connection never reaches the
+    /// payload's scope), then the scope must be a `group:` one in the
+    /// `state-entry` class — anything else is refused loudly, the account's
+    /// own planes above all — then the group family must admit it and its
+    /// live roster still hold the connection's entry.
+    async fn handle_group_feed(
+        &self,
+        peer: &EndpointKey,
+        conn: &Connection,
+        payload: Value,
+    ) -> Result<Value, RpcError> {
+        let verdict = self.admitted_connection(peer, conn)?;
+        let req: SyncChangesListRequest = from_value(&payload)?;
+        let (item_class, scope) = changes_list_scope(&req).map_err(serve_refusal)?;
+        if item_class != ItemClass::StateEntry.as_wire() {
+            return Err(unsupported(
+                "the share channel serves a group scope's state-entry feed only",
+            ));
+        }
+        let Ok(Scope::Group(group)) = scope.parse::<Scope>() else {
+            return Err(unsupported(
+                "the share channel serves a group scope's feed only — an account's own \
+                 planes never cross it",
+            ));
+        };
+        let scope_id = *group.scope_id();
+        if !verdict_admits_group(&verdict, peer.as_bytes(), &scope_id) {
+            return Err(not_admitted("the verdict does not admit this group scope"));
+        }
+        self.group_entry_still_admitted(conn, &scope_id)?;
+        let Some(feed) = self.group_feed.read().unwrap().clone() else {
+            return Err(unsupported("this node serves no group plane"));
+        };
+        let reply = serve_changes_list(&feed, item_class, group.to_string(), &req)
+            .await
+            .map_err(serve_refusal)?;
+        to_value(&reply)
+    }
+}
+
+/// The shared serve core's typed refusal in this plane's vocabulary.
+fn serve_refusal(refusal: ServeRefusal) -> RpcError {
+    match refusal {
+        ServeRefusal::Unsupported(detail) => unsupported(detail),
+        ServeRefusal::Internal(e) => internal(e),
     }
 }
 
@@ -1014,8 +1216,8 @@ mod tests {
         decode_strict(&encode_canonical(&v).expect("encode")).expect("decode reply")
     }
 
-    fn slot() -> Mutex<Option<AdmissionVerdict>> {
-        Mutex::new(None)
+    fn slot() -> Connection {
+        Connection::default()
     }
 
     /// Admit `peer` for its claimed sets, returning the filled slot.
@@ -1023,7 +1225,7 @@ mod tests {
         server: &Arc<ShareServer>,
         peer: &EndpointKey,
         claimed: &[[u8; 32]],
-    ) -> Mutex<Option<AdmissionVerdict>> {
+    ) -> Connection {
         let s = slot();
         let req = PeerShareAdmitRequest {
             witness_kind: WITNESS_M2_MEMBERSHIP.to_string(),
@@ -1039,15 +1241,18 @@ mod tests {
     }
 
     /// Rule 3, asserted as the whole SET rather than a sample: the dispatcher
-    /// serves the probe, the admit exchange, the three data kinds and the
-    /// three ceremony kinds — and nothing whose name could carry config,
-    /// capability-mint, admin or key material.
+    /// serves the probe, the admit exchange, the three data kinds, the three
+    /// ceremony kinds and the group plane's feed — and nothing whose name
+    /// could carry config, capability-mint, admin or key material. The feed
+    /// is the one kind outside the `fauna.peer.share.` family: the account
+    /// plane's own feed kind, so the group walk pages every source alike.
     #[test]
-    fn the_allowlist_is_exactly_the_probe_the_admit_the_data_and_the_ceremony_kinds() {
+    fn the_allowlist_is_exactly_the_probe_the_admit_the_data_the_ceremony_and_the_feed_kinds() {
         let kinds = allowlisted_kinds();
-        assert_eq!(kinds.len(), 8);
+        assert_eq!(kinds.len(), 9);
         assert_eq!(kinds[0], fauna_protocol::peer::KIND_PEER_NODE_INFO);
-        let share: Vec<&str> = kinds[1..].to_vec();
+        assert_eq!(kinds[8], "fauna.sync.changes.list");
+        let share: Vec<&str> = kinds[1..8].to_vec();
         assert_eq!(
             share,
             vec![
@@ -1082,6 +1287,43 @@ mod tests {
             .await
             .expect_err("no verdict on this connection");
         assert_eq!(err.code, ERR_NOT_ADMITTED);
+    }
+
+    /// Wormability rule 1 (`p2p.md` § Wormability posture): admission before
+    /// parsing. A malformed request on an unadmitted connection meets the
+    /// admission refusal at every data door, never a decode error that says
+    /// the parser ran first.
+    #[tokio::test]
+    async fn every_data_door_refuses_an_unadmitted_peer_before_parsing_its_request() {
+        let server = server(FakeStore::default());
+        let peer = EndpointKey::from_bytes(STRANGER);
+        let malformed = || value_of(&("not", "a", "request"));
+        let refusals = [
+            (
+                "changes.list",
+                server
+                    .handle_changes_list(&peer, &slot(), malformed())
+                    .await,
+            ),
+            (
+                "manifests.get",
+                server
+                    .handle_manifests_get(&peer, &slot(), malformed())
+                    .await,
+            ),
+            (
+                "chunks.pull",
+                server.handle_chunks_pull(&peer, &slot(), malformed()).await,
+            ),
+        ];
+        for (door, outcome) in refusals {
+            let err = outcome.expect_err("an unadmitted peer is never served");
+            assert_eq!(
+                err.code, ERR_NOT_ADMITTED,
+                "{door}: an unadmitted peer's malformed request must meet the admission \
+                 refusal, not the parser: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1594,7 +1836,7 @@ mod tests {
 
         async fn pull(
             server: &Arc<ShareServer>,
-            slot: &Mutex<Option<AdmissionVerdict>>,
+            slot: &Connection,
             wants: Vec<PeerShareChunkWant>,
         ) -> PeerShareChunksPullReply {
             reply_as(
@@ -1810,7 +2052,7 @@ mod tests {
     // handler and the same per-connection verdict slot ────────────────────────
 
     use crate::admission::group_fixtures as gf;
-    use crate::admission::verdict_admits_group;
+    use crate::admission::{group_scope_string, verdict_admits_group};
     use fauna_protocol::peer_share::{PeerShareGroupWitness, WITNESS_GROUP_MEMBERSHIP};
 
     /// A server whose M2 roster vouches for the group MEMBER on SET_A (so the
@@ -1899,7 +2141,7 @@ mod tests {
             reply.admitted_sets,
             vec![ByteBuf::from(gf::scope_id().to_vec())]
         );
-        let verdict = s.lock().unwrap().clone().expect("slot filled");
+        let verdict = s.verdict.lock().unwrap().clone().expect("slot filled");
         assert!(verdict_admits_group(&verdict, &member_key, &gf::scope_id()));
         // Family separation: a group verdict never opens the FOLDER door for
         // the same 32 bytes — the scope-string families are disjoint.
@@ -1925,7 +2167,7 @@ mod tests {
             )
             .await
             .expect("the certificate admits");
-        let verdict = s.lock().unwrap().clone().expect("slot filled");
+        let verdict = s.verdict.lock().unwrap().clone().expect("slot filled");
         assert!(
             verdict_admits_set(&verdict, &member_key, &SET_A),
             "the earlier M2 admission survives the group exchange"
@@ -1975,5 +2217,165 @@ mod tests {
             .await
             .expect_err("the entry names a different actor");
         assert_eq!(err.code, ERR_WITNESS_REFUSED);
+    }
+
+    /// A connection the member's group witness admitted.
+    async fn group_admitted(server: &Arc<ShareServer>) -> (EndpointKey, Connection) {
+        let peer = EndpointKey::from_bytes(gf::proven(&gf::member()));
+        let s = slot();
+        server
+            .handle_admit(
+                &peer,
+                &s,
+                value_of(&group_admit_req(gf::carried(
+                    &gf::authority(),
+                    &gf::member(),
+                ))),
+            )
+            .await
+            .expect("the certificate admits");
+        (peer, s)
+    }
+
+    fn manifests_req(set: [u8; 32]) -> Value {
+        value_of(&PeerShareManifestsGetRequest {
+            set: ByteBuf::from(set.to_vec()),
+            manifest_hashes: vec![ByteBuf::from(vec![0x01; 32])],
+            extra: Default::default(),
+        })
+    }
+
+    /// Decision 6's admission helper: the byte doors admit the group family
+    /// for a scope the connection's witness admitted — and the LIVE roster is
+    /// re-consulted per request, so a removal the evaluator learns after the
+    /// admit severs the open connection at its very next request.
+    #[tokio::test]
+    async fn the_byte_doors_admit_the_group_family_until_the_roster_removes_the_entry() {
+        let server = group_server();
+        let (peer, s) = group_admitted(&server).await;
+        server
+            .handle_manifests_get(&peer, &s, manifests_req(gf::scope_id()))
+            .await
+            .expect("the group family reaches the manifest door");
+        server
+            .handle_chunks_pull(
+                &peer,
+                &s,
+                value_of(&PeerShareChunksPullRequest {
+                    set: ByteBuf::from(gf::scope_id().to_vec()),
+                    wants: Vec::new(),
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .expect("and the chunk door");
+
+        let entry = fauna_core::group_scope::roster_entry_id(&gf::core_for(&gf::member())).unwrap();
+        server.set_group_roster(Arc::new(gf::Evaluator {
+            removed: vec![entry],
+            ..gf::Evaluator::holding()
+        }));
+        let err = server
+            .handle_manifests_get(&peer, &s, manifests_req(gf::scope_id()))
+            .await
+            .expect_err("the removal reached the evaluator — the open connection is severed");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+
+        // A roster that no longer holds the scope at all refuses the same way.
+        server.set_group_roster(Arc::new(gf::Evaluator {
+            holds: false,
+            ..gf::Evaluator::holding()
+        }));
+        let err = server
+            .handle_manifests_get(&peer, &s, manifests_req(gf::scope_id()))
+            .await
+            .expect_err("a forgotten scope is a removed one");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+    }
+
+    /// Family separation at the doors: a group admission opens neither the
+    /// folder family's sequenced change log (decision 1's refusal — a group
+    /// set has no log) nor any other group scope's bytes.
+    #[tokio::test]
+    async fn a_group_admission_opens_no_change_log_and_no_other_scope() {
+        let server = group_server();
+        let (peer, s) = group_admitted(&server).await;
+        let err = server
+            .handle_changes_list(
+                &peer,
+                &s,
+                value_of(&PeerShareChangesListRequest {
+                    set: ByteBuf::from(gf::scope_id().to_vec()),
+                    since: 0,
+                    extra: Default::default(),
+                }),
+            )
+            .await
+            .expect_err("the change log is the folder family's only");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+        let err = server
+            .handle_manifests_get(&peer, &s, manifests_req([0x77; 32]))
+            .await
+            .expect_err("another scope's bytes stay shut");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+    }
+
+    fn feed_req(item_class: &str, scope: Option<String>) -> Value {
+        value_of(&SyncChangesListRequest {
+            item_class: Some(item_class.to_string()),
+            scope,
+            frontier: Some(Default::default()),
+            ..Default::default()
+        })
+    }
+
+    /// The feed's refusals, each loud and never an empty page (an empty page
+    /// reads as "converged" to a walk): no verdict; the account's own planes
+    /// (the default scope and the fleet scope); a class other than
+    /// `state-entry`; a scope the verdict does not admit; a scope admitted but
+    /// with no feed wired on this node.
+    #[tokio::test]
+    async fn the_group_feed_refuses_everything_but_an_admitted_group_scope() {
+        use fauna_protocol::account_state::ACCOUNT_STATE_FLEET_SCOPE;
+        let server = group_server();
+        let group_scope = group_scope_string(gf::scope_id());
+
+        let err = server
+            .handle_group_feed(
+                &EndpointKey::from_bytes(gf::proven(&gf::member())),
+                &slot(),
+                feed_req("state-entry", Some(group_scope.clone())),
+            )
+            .await
+            .expect_err("no verdict, no page");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+
+        let (peer, s) = group_admitted(&server).await;
+        for scope in [None, Some(ACCOUNT_STATE_FLEET_SCOPE.to_string())] {
+            let err = server
+                .handle_group_feed(&peer, &s, feed_req("state-entry", scope.clone()))
+                .await
+                .expect_err("an account's own planes never cross the share channel");
+            assert_eq!(err.code, ERR_UNSUPPORTED, "{scope:?}");
+        }
+        let err = server
+            .handle_group_feed(&peer, &s, feed_req("record-cid", Some(group_scope.clone())))
+            .await
+            .expect_err("the state-entry class only");
+        assert_eq!(err.code, ERR_UNSUPPORTED);
+        let err = server
+            .handle_group_feed(
+                &peer,
+                &s,
+                feed_req("state-entry", Some(group_scope_string([0x77; 32]))),
+            )
+            .await
+            .expect_err("a scope outside the verdict");
+        assert_eq!(err.code, ERR_NOT_ADMITTED);
+        let err = server
+            .handle_group_feed(&peer, &s, feed_req("state-entry", Some(group_scope)))
+            .await
+            .expect_err("admitted, but this node wires no group feed");
+        assert_eq!(err.code, ERR_UNSUPPORTED);
     }
 }

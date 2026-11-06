@@ -770,7 +770,10 @@ _CROSS_FILE_SEAMS = [
         "_drive_admin_claim_to_logged_in",
         "navigate_to_status",
     ),
-    ("tests.test_factory_reset_calendar_reclaim", "_login_admin_as_user", "set_state"),
+    # `test_factory_reset_calendar_reclaim._login_admin_as_user` is deliberately
+    # absent: it only delegates to `helpers.e2e_session.login_as` (pinned above),
+    # which relaunches before its own `set_state`; the helper has no `set_state`
+    # call of its own for this source-order check to anchor on.
 ]
 
 

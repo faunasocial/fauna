@@ -75,9 +75,12 @@ def lan_admin_app(request, app, spki_pinned_nest):
     return app
 
 
+@pytest.mark.ios
 @pytest.mark.linux
+@pytest.mark.macos
 @pytest.mark.tui
 @pytest.mark.web
+@pytest.mark.windows
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_an_admin_on_the_home_network_never_publishes_its_private_address(
     lan_admin_app, spki_pinned_nest

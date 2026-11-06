@@ -2,7 +2,8 @@ import SwiftUI
 
 /// identity_choice — the wizard's entry screen (`onboarding.md` § 1 Identity):
 /// create a fresh identity, import an existing one, restore one from a
-/// recovery phrase, or recover a lost box.
+/// recovery phrase, or recover a lost box — and, last, the signed-out lock
+/// door (`ui/sessions.md` § The signed-out door).
 ///
 /// Shared by macOS and iOS (priority #2, mirrors `TrustPromptView`) — this
 /// screen was independently implemented on each platform under two
@@ -112,6 +113,19 @@ public struct IdentityChoiceView: View {
             .accessibilityIdentifier(Ids.recoverLostBoxButton)
             .automationActivate(Ids.recoverLostBoxButton) {
                 vm.machine.beginRecoverLostBox()
+            }
+
+            // The signed-out lock door: lock an account for 24 hours from a
+            // device that is not signed in to it (`devices.md` § The signed-out
+            // door) — tui's and linux's order, last on the page.
+            Button(L.onboarding.identityChoice.emergencyLockoutEntry) {
+                vm.machine.beginEmergencyLockoutEntry()
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.large)
+            .accessibilityIdentifier(Ids.emergencyLockoutEntryButton)
+            .automationActivate(Ids.emergencyLockoutEntryButton) {
+                vm.machine.beginEmergencyLockoutEntry()
             }
         }
     }

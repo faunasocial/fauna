@@ -30,9 +30,14 @@ mod fuse_host;
 mod log_redaction_test;
 mod path_map;
 mod peer_files;
+// The e2e probe arm (`RequestMethod::ProbePeerLeg`), compiled out of release
+// artifacts with the verbs that reach it (convention 15).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+mod peer_probe;
 mod pin_reaction;
 mod pipe_server;
 mod push_arm;
+mod reach;
 mod renewal;
 mod service;
 mod share_target;
@@ -71,6 +76,14 @@ mod versions_tier3;
 // `fauna-nest`); see that module's docs.
 #[cfg(all(test, windows, feature = "tier3-nest"))]
 mod restore_byteplane_tier3;
+
+// Opt-in tier_3 harness: the `RestoreFileVersion` verb on an always-resident
+// root, end to end — the verb's own WS client to a REAL in-process nest, the
+// record, and the root's loop writing the restored bytes in over the copy
+// (`file-versions.md` § Restore, ordering 2's kept-copy branch). Same
+// `tier3-nest` gate as `versions_tier3`; see that module's docs.
+#[cfg(all(test, windows, feature = "tier3-nest"))]
+mod resident_restore_tier3;
 
 use clap::Parser;
 

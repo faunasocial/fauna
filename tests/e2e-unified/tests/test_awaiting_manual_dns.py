@@ -28,17 +28,9 @@ import json
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.budgets import UI_SETTLE_S
 
 pytestmark = pytest.mark.tier_2
-
-# `awaiting-dns-fallthrough-button` ("Use a different nest") landed on tui — the
-# lead app — 2026-09-25 (rule-A approved), then windows, then web, linux, android
-# and macOS/iOS — all seven apps now paint it. The
-# tuple stays until android has run this file green on its machine (macOS/iOS
-# ran green 2026-10-17); once it has, delete it with the two skip arms that read it.
-_FALLTHROUGH_BUTTON_APPS = ("tui", "windows", "web", "linux", "android", "macos", "ios")
 
 
 @pytest.mark.feature("set-up-a-nest-from-the-app")
@@ -56,13 +48,6 @@ def test_awaiting_manual_dns_surface_renders(app):
         assert app.driver.is_visible(eid), (
             f"'Almost ready' surface should render {eid}: "
             f"{app.driver.diagnose(eid)} error={app.error_text()!r}"
-        )
-    if app_name(app.driver) not in _FALLTHROUGH_BUTTON_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="awaiting-dns-fallthrough-button",
-            detail="the Almost-ready exit landed on tui (lead app) 2026-09-25",
-            tracked="onboarding-provisioning.md § \"Almost ready\" surface → Exit",
         )
     assert app.driver.is_visible("awaiting-dns-fallthrough-button"), (
         "'Almost ready' surface should render awaiting-dns-fallthrough-button: "
@@ -101,13 +86,6 @@ def test_awaiting_manual_dns_fallthrough_lands_on_handle_entry(app):
     (``seed_identity`` then the awaiting seeder): the landing is "a different nest,
     same self", so an identity-less machine has nowhere to land but the start.
     """
-    if app_name(app.driver) not in _FALLTHROUGH_BUTTON_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="awaiting-dns-fallthrough-button",
-            detail="the Almost-ready exit landed on tui (lead app) 2026-09-25",
-            tracked="onboarding-provisioning.md § \"Almost ready\" surface → Exit",
-        )
     app.driver.call_machine_method(
         "seed_identity", json.dumps(app.onboarding._IMPORT_KEY_FOR_HANDLE_TESTS)
     )

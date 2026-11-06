@@ -567,6 +567,18 @@ pub struct SetupStatusReply {
     pub tls_active: bool,
     /// Whether email is enabled (HTTP `email.enabled`).
     pub email_enabled: bool,
+    /// Whether the deployment serves CalDAV — the `caldav_enabled` toggle,
+    /// an unset row following `email_enabled` (the projection `fetch_config`
+    /// serves the bridge; `caldav-server.md` § Independent enablement). Every
+    /// client reads it with `carddav_enabled` and `email_enabled` to offer the
+    /// calendar-only credential (`mail-credentials.md` § Trigger taxonomy).
+    /// Anonymous like `email_enabled`: the listener is already discoverable
+    /// (the SRV records, the `/.well-known` redirect).
+    #[serde(default)]
+    pub caldav_enabled: bool,
+    /// Whether the deployment serves CardDAV — as [`Self::caldav_enabled`].
+    #[serde(default)]
+    pub carddav_enabled: bool,
     /// Whether any user exists yet (HTTP `admin.exists`).
     pub admin_exists: bool,
     /// Whether the admin claim code has been consumed.
@@ -1079,6 +1091,10 @@ mod tests {
             dns_configured: true,
             tls_active: true,
             email_enabled: false,
+            // Non-default (serde default `false`) — proves the DAV toggles
+            // ride the wire.
+            caldav_enabled: true,
+            carddav_enabled: true,
             admin_exists: true,
             claimed: true,
             // Proves the resolved NAT axis rides the wire so `nat_mode_choice`

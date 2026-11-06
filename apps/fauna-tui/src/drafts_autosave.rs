@@ -16,7 +16,7 @@
 use std::sync::{Arc, Weak};
 
 use fauna_client::NestClient;
-use fauna_client_drafts::{DraftsSync, autosave_debounce};
+use fauna_client_drafts::{DraftsSync, LEAVE_FLUSH_BUDGET, LaunchRestore, autosave_debounce};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// A manager that owns compose state which can be snapshotted for the shared
@@ -52,10 +52,9 @@ pub(crate) fn restore_on_launch<M: DraftsHost + Send + Sync + 'static>(
     ));
 }
 
-/// The body of [`restore_on_launch`], over any load. The identity epoch is read
-/// **here, synchronously, before the load is polled** — reading it after the
-/// load returns would take the incoming account's epoch and let the outgoing
-/// account's reply through.
+/// The body of [`restore_on_launch`], over any load: the shared
+/// [`fauna_client_drafts::restore_when_loaded`] (which reads the identity epoch
+/// before the load is polled) over this host, logged under `log_prefix`.
 pub(crate) fn restore_when_loaded<M, E>(
     manager: Arc<M>,
     load: impl Future<Output = Result<Option<Vec<u8>>, E>> + Send + 'static,
@@ -65,22 +64,22 @@ where
     M: DraftsHost + Send + Sync + 'static,
     E: std::fmt::Display + Send,
 {
-    let epoch = manager.identity_epoch();
+    let host = Arc::clone(&manager);
+    let restore = fauna_client_drafts::restore_when_loaded(
+        move || manager.identity_epoch(),
+        load,
+        move |epoch, bytes| async move { host.restore_drafts_at(epoch, bytes).await },
+    );
     async move {
-        match load.await {
-            Ok(Some(bytes)) => {
-                tracing::info!("{log_prefix}: restored {} bytes", bytes.len());
-                manager.restore_drafts_at(epoch, bytes).await;
+        match restore.await {
+            LaunchRestore::Restored(len) => tracing::info!("{log_prefix}: restored {len} bytes"),
+            LaunchRestore::FirstRun => {
+                tracing::debug!("{log_prefix}: none persisted yet (first run)")
             }
-            Ok(None) => tracing::debug!("{log_prefix}: none persisted yet (first run)"),
-            Err(e) => tracing::warn!("{log_prefix}: load failed: {e}"),
+            LaunchRestore::Failed(e) => tracing::warn!("{log_prefix}: load failed: {e}"),
         }
     }
 }
-
-/// How long one rail's leave-flush may take before the door goes on without
-/// it: a slow or unreachable nest must not hang quitting or signing out.
-pub(crate) const LEAVE_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The leave-door flush of every drafts rail (`reserved-folders.md` § The
 /// leave-flush promise): each rail's current compose, saved now, bypassing the

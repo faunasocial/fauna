@@ -575,6 +575,7 @@ def _wait_on_nest(read, predicate, what: str, budget_s: float = 20.0):
 @pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.windows
+@pytest.mark.ios
 @pytest.mark.feature("community-labelers")
 def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscribing_withdraws_it(
     app, labeler_grant_nest, run_seal_helper
@@ -601,13 +602,10 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
 
     Every app builds the grant-wired catalog machine (§ Implementation status
     today, leg 5); android skips at the action layer (its e2e is
-    emulator-gated fleet-wide). macos and windows are journey-proven. ios is
-    wired but not yet journey-proven on its own machine, so its mark lands
-    with that verification rather than promising a witness nobody has run.
+    emulator-gated fleet-wide). macos, windows and ios are journey-proven.
     """
     import cbor2
 
-    app.nest_trust.require_mint_test_setup_supported()
     nest = labeler_grant_nest
     login_as_admin(app, nest, device_id="test-device-labeler-grant")
 
@@ -615,7 +613,7 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
     # derive from), an `mda` holder to seal to, a published mail labeler.
     app.mail_settings.navigate()
     app.mail_settings.ensure_mail_enabled()
-    holder_x25519 = seed_mda_holder(nest, bridge_id="labeler-grant-mda")
+    holder_x25519 = seed_mda_holder(nest, bridge_id="labeler-grant-mda").pubkey
     labeler_id = publish_wasm_labeler(
         run_seal_helper, nest, _CAT_WAT_PATH, content_kind="mail"
     )
@@ -634,7 +632,9 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
     assert cat.item_content_kind(index) == "mail"
     cat.subscribe(index)
     assert cat.wait_for_subscribed_state(index, subscribed=True), (
-        f"subscribe did not flip the row to subscribed; error={app.error_text()!r}"
+        f"subscribe did not flip the row to subscribed; error={app.error_text()!r}; "
+        f"nest subscription grant={_subscription_grant_id(nest, labeler_id)!r}; "
+        f"{cat.diagnose_toggle(index)}"
     )
     assert not app.has_error(), (
         "with mail enabled and a holder enrolled the mint owes no notice; "
@@ -681,7 +681,9 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
     assert index is not None
     cat.unsubscribe(index)
     assert cat.wait_for_subscribed_state(index, subscribed=False), (
-        f"unsubscribe did not flip the row back; error={app.error_text()!r}"
+        f"unsubscribe did not flip the row back; error={app.error_text()!r}; "
+        f"nest subscription grant={_subscription_grant_id(nest, labeler_id)!r}, "
+        f"grant rows={len(_owner_grant_rows(nest))}; {cat.diagnose_toggle(index)}"
     )
     assert not app.has_error(), f"unexpected error after unsubscribe: {app.error_text()!r}"
     _wait_on_nest(

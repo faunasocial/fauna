@@ -19,8 +19,8 @@ snapshot's ``viewer_liked`` / ``viewer_repost_id``) rather than a delay
 (convention 14): the second tap is only an undo once the first has landed.
 
 tier_3: a locally-built nest and the real app; the atproto network is a fake.
-tui first, the lead app; linux and web follow; the remaining apps gain their
-markers in the batched trickle-down.
+tui first, the lead app; linux, web, macos, ios and android follow; the remaining apps gain
+their markers in the batched trickle-down.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ pytestmark = [pytest.mark.tier_3]
 VERBS = {
     "like": ("like_post", "app.bsky.feed.like", lambda row: bool(row.get("viewer_liked"))),
     "repost": ("repost_post", "app.bsky.feed.repost",
-               lambda row: row.get("viewer_repost_id") is not None),
+               lambda row: bool(row.get("viewer_repost_id"))),
 }
 
 
@@ -64,6 +64,9 @@ def _wait(predicate, what: str, diag, timeout: float = 30.0):
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("verb", sorted(VERBS))
 def test_a_bluesky_like_or_repost_and_its_undo_reach_bluesky(

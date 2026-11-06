@@ -179,6 +179,11 @@ pub enum BindRefused {
     /// The account has not bound the plugin, so it has nothing to configure.
     #[error("this account has not connected the plugin")]
     NotBound,
+    /// The installed plugin's manifest is no longer the one the bind card
+    /// showed (the developer loop replaced it while the card was open): the
+    /// user connects again over the card the current manifest opens.
+    #[error("the plugin changed since its card opened; connect it again")]
+    Changed,
 }
 
 /// The key a bound account's settings rest under in the plugin's state scope
@@ -550,7 +555,7 @@ pub(crate) fn upsert_principal_in_tx(
                     .and_then(|w| <[u8; 32]>::try_from(w).ok())
                 && let Some(holder) = &old_holder
             {
-                end_content_write_grants_held_by(tx, actor_id, holder, &old_writer)?;
+                end_writer_grants_held_by(tx, actor_id, holder, &old_writer)?;
             }
             tx.execute(
                 "UPDATE third_party_principals
@@ -707,16 +712,17 @@ fn refuse_foreign_writer(
 }
 
 /// Delete every capability grant `actor_id` minted to `holder` that carries a
-/// `content.write` tuple licensing `old_writer` — what a replaced writer key
-/// ends: the tuple's factor names its writer
-/// (`fauna_core::grant_event::writer_factor`). Matching the factor, not the
+/// `content.write` or a `deposit` tuple licensing `old_writer` — what a
+/// replaced writer key ends: the tuple's factor names its writer
+/// (`fauna_core::grant_event::writer_factor`; `third-party-kinds.md` §
+/// Principal write authority, `folder-deposit.md` § The depositor signs). Matching the factor, not the
 /// class alone, spares the grant the same consent's approve already
 /// deposited for the NEW writer, and is the selector the owner's app records
 /// its `Revoke`s by (`view_model::grants_ended_by_key_replacement`). The
 /// declared scope rides the blob in the clear (the nest decodes the header
 /// of every grant it stores); a blob that does not decode is left for the
 /// owner's own revoke rather than guessed at.
-fn end_content_write_grants_held_by(
+fn end_writer_grants_held_by(
     tx: &rusqlite::Transaction<'_>,
     actor_id: &[u8; 32],
     holder: &[u8],
@@ -744,7 +750,7 @@ fn end_content_write_grants_held_by(
         // not opened yet names the old writer just the same)
         let writes = GrantBlob::from_canonical_bytes(&blob).is_ok_and(|b| {
             b.scope.iter().any(|t| {
-                t.class == ScopeTuple::CLASS_CONTENT_WRITE
+                (t.class == ScopeTuple::CLASS_CONTENT_WRITE || t.class == ScopeTuple::CLASS_DEPOSIT)
                     && t.factor.as_deref() == Some(old_factor.as_str())
             })
         });
@@ -753,7 +759,7 @@ fn end_content_write_grants_held_by(
                 "DELETE FROM capability_grants WHERE owner_actor_id = ?1 AND grant_id = ?2",
                 rusqlite::params![&actor_id[..], grant_id],
             )
-            .context("end content.write grant")?;
+            .context("end writer-licensing grant")?;
             ended = ended.saturating_add(1);
         }
     }
@@ -780,6 +786,12 @@ fn end_capability_grants_held_by(
 
 impl CacheDb {
     /// The account's principals, oldest first (`fauna.principals.list`).
+    /// `last_used_at` is the newest of the row's own ceremony stamp and the
+    /// rotation stamp of every grant family, live or ended, its client holds
+    /// — the nest's whole view of OAuth use, read here rather than written
+    /// onto the row at every refresh. The custodians' served acts are merged
+    /// by the roster handler from the oracle summary, whose tables may not
+    /// exist.
     pub async fn list_third_party_principals(
         &self,
         actor_id: &[u8; 32],
@@ -790,7 +802,11 @@ impl CacheDb {
         let mut stmt = conn
             .prepare(
                 "SELECT p.principal_id, p.client_id, p.holder_x25519, p.execution_form,
-                        p.declared_kinds, p.granted_scopes, p.created_at, p.last_used_at,
+                        p.declared_kinds, p.granted_scopes, p.created_at,
+                        NULLIF(MAX(IFNULL(p.last_used_at, 0),
+                                   IFNULL((SELECT MAX(g.last_used_at) FROM atproto_oauth_grants g
+                                            WHERE g.actor_id = p.actor_id
+                                              AND g.client_id = p.client_id), 0)), 0),
                         p.label, p.publisher_key, p.writer_ed25519,
                         p.declared_bridge, p.declared_service_auth,
                         p.declared_activitypub_peers,
@@ -1364,19 +1380,37 @@ impl CacheDb {
     /// → *Third-party event doors*): the row, not the session registry, since
     /// a remote server with no live session is exactly who the webhook is for.
     /// Each with its granted scopes, the reach the walk filters on.
+    ///
+    /// Only a row whose client still holds a LIVE grant family — not revoked,
+    /// not past `expires_at`, the roster's own `live_grants` predicate — whose
+    /// paired session row is unrevoked too, the family read every principal
+    /// call makes ([`CacheDb::is_oauth_session_live`], which a login-plane
+    /// suspension ends without touching the grant row): a server whose every
+    /// session the user ended, or whose tokens have all lapsed, has no reach
+    /// left to be told about, exactly as its next call would be refused.
     pub async fn list_event_webhooks(&self, actor_id: &[u8; 32]) -> Result<Vec<EventWebhook>> {
         let actor = *actor_id;
+        let now = now_epoch_millis();
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare_cached(
-                "SELECT principal_id, client_id, granted_scopes, events_uri
-                   FROM third_party_principals
-                  WHERE actor_id = ?1 AND events_uri IS NOT NULL
-                  ORDER BY created_at ASC, principal_id ASC",
+                "SELECT p.principal_id, p.client_id, p.granted_scopes, p.events_uri
+                   FROM third_party_principals p
+                  WHERE p.actor_id = ?1 AND p.events_uri IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM atproto_oauth_grants g
+                                 WHERE g.actor_id = p.actor_id
+                                   AND g.client_id = p.client_id
+                                   AND g.revoked_at IS NULL
+                                   AND (g.expires_at IS NULL OR g.expires_at > ?2)
+                                   AND EXISTS (SELECT 1 FROM atproto_sessions s
+                                                WHERE s.actor_id = g.actor_id
+                                                  AND s.session_id = g.grant_id
+                                                  AND s.revoked_at IS NULL))
+                  ORDER BY p.created_at ASC, p.principal_id ASC",
             )
             .context("prepare list event webhooks")?;
         let rows = stmt
-            .query_map(rusqlite::params![&actor[..]], |r| {
+            .query_map(rusqlite::params![&actor[..], now], |r| {
                 Ok(EventWebhook {
                     principal_id: r.get(0)?,
                     client_id: r.get(1)?,
@@ -1700,14 +1734,20 @@ impl CacheDb {
     /// the binding row's `principal_id`.
     ///
     /// `card_holder` is the holder key the approved card carried, to which
-    /// the approving app minted the account's grants before resolving.
+    /// the approving app minted the account's grants before resolving, and
+    /// `card_manifest` the manifest JWS it carried and the user was shown.
+    /// The holder key is minted per install, so it names the install the
+    /// card was opened on; the binding takes the card's manifest or nothing.
     ///
     /// # Errors
     /// [`BindRefused::NotInstalled`] when no plugin of `client_id` is
-    /// installed (it was uninstalled while the card was open) — no row is
-    /// written, and the capability grants the account minted to
-    /// `card_holder` end in the same transaction unless another of its rows
-    /// holds that key: they would be reach no roster row names.
+    /// installed, or the installed one holds another key than `card_holder`
+    /// (it was uninstalled while the card was open, and perhaps installed
+    /// again); [`BindRefused::Changed`] when the install's manifest is no
+    /// longer `card_manifest` (replaced in place while the card was open).
+    /// Either way no row is written, and the capability grants the account
+    /// minted to `card_holder` end in the same transaction unless another of
+    /// its rows holds that key: they would be reach no roster row names.
     pub async fn bind_account_to_plugin(
         &self,
         actor_id: &[u8; 32],
@@ -1715,41 +1755,62 @@ impl CacheDb {
         granted_scopes: &str,
         label: Option<&str>,
         card_holder: Option<&[u8; 32]>,
+        card_manifest: Option<&str>,
     ) -> Result<Vec<u8>> {
         let now = now_epoch_millis();
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction().context("begin bind plugin")?;
-        let install: Option<(Option<Vec<u8>>, String, Option<String>)> = tx
+        type Install = (Option<Vec<u8>>, Option<Vec<u8>>, String, Option<String>);
+        let install: Option<Install> = tx
             .query_row(
-                "SELECT p.publisher_key, p.declared_kinds, h.manifest_jws
+                "SELECT p.holder_x25519, p.publisher_key, p.declared_kinds, h.manifest_jws
                    FROM hosted_plugins h JOIN third_party_principals p
                      ON p.actor_id = ?1 AND p.principal_id = h.principal_id
                   WHERE h.client_id = ?2",
                 rusqlite::params![&NEST_OWNER_ACTOR[..], client_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()
             .context("read installed plugin to bind")?;
-        let Some((publisher_key, declared_kinds, jws)) = install else {
-            if let Some(holder) = card_holder {
-                let named: bool = tx
-                    .query_row(
-                        "SELECT EXISTS (SELECT 1 FROM third_party_principals
-                                         WHERE actor_id = ?1 AND holder_x25519 = ?2)",
-                        rusqlite::params![&actor_id[..], &holder[..]],
-                        |r| r.get(0),
-                    )
-                    .context("read holder key's row")?;
-                if !named {
-                    end_capability_grants_held_by(&tx, actor_id, holder)?;
-                    tx.commit().context("commit refused bind")?;
-                }
+        // The card names the install it was opened on by its holder key and
+        // the manifest by the JWS it showed; any other install refuses.
+        let checked = match install {
+            None => Err(BindRefused::NotInstalled),
+            Some((holder, ..))
+                if card_holder.is_some_and(|c| holder.as_deref() != Some(&c[..])) =>
+            {
+                Err(BindRefused::NotInstalled)
             }
-            return Err(anyhow!(BindRefused::NotInstalled));
+            Some((_, _, _, jws)) if card_manifest.is_some_and(|c| jws.as_deref() != Some(c)) => {
+                Err(BindRefused::Changed)
+            }
+            Some((_, publisher_key, declared_kinds, jws)) => {
+                Ok((publisher_key, declared_kinds, jws))
+            }
+        };
+        let (publisher_key, declared_kinds, jws) = match checked {
+            Ok(install) => install,
+            Err(refused) => {
+                if let Some(holder) = card_holder {
+                    let named: bool = tx
+                        .query_row(
+                            "SELECT EXISTS (SELECT 1 FROM third_party_principals
+                                         WHERE actor_id = ?1 AND holder_x25519 = ?2)",
+                            rusqlite::params![&actor_id[..], &holder[..]],
+                            |r| r.get(0),
+                        )
+                        .context("read holder key's row")?;
+                    if !named {
+                        end_capability_grants_held_by(&tx, actor_id, holder)?;
+                        tx.commit().context("commit refused bind")?;
+                    }
+                }
+                return Err(anyhow!(refused));
+            }
         };
         // The manifest the install verified, whole when the install kept its
-        // JWS (the same bytes the bind card carries); otherwise the members
-        // the install row holds.
+        // JWS — the bytes the card carried and showed, checked above;
+        // otherwise the members the install row holds.
         let verified = jws.as_deref().and_then(|jws| {
             let host = fauna_protocol::kind_manifest::client_id_host(client_id)?;
             fauna_protocol::kind_manifest::verify_manifest(jws, &host).ok()
@@ -2193,6 +2254,58 @@ mod tests {
         assert_eq!(db.list_third_party_principals(&BOB).await.unwrap().len(), 1);
     }
 
+    /// *Last used* moves with the app's use, not only its consents: a token
+    /// rotation stamps the grant, and the roster reads the newest stamp of
+    /// the principal's own and of every grant its client holds — an ended
+    /// family's last rotation included.
+    #[tokio::test]
+    async fn last_used_follows_the_principals_oauth_rotations() {
+        let db = CacheDb::open_in_memory().unwrap();
+        consent(&db, &ALICE, b"family-1", CLIENT, None)
+            .await
+            .unwrap();
+        // The ceremony long past, so a rotation now is strictly later.
+        db.conn
+            .lock()
+            .await
+            .execute(
+                "UPDATE third_party_principals SET last_used_at = 1 WHERE actor_id = ?1",
+                rusqlite::params![&ALICE[..]],
+            )
+            .unwrap();
+        assert_eq!(
+            db.list_third_party_principals(&ALICE).await.unwrap()[0].last_used_at,
+            Some(1)
+        );
+
+        let far = now_epoch_millis() + 1_000_000;
+        db.refresh_atproto_session(&ALICE, b"family-1", b"family-1", b"jti-2", far)
+            .await
+            .unwrap();
+        let rotated = db
+            .list_atproto_oauth_grants(&ALICE)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|g| g.grant_id == b"family-1")
+            .unwrap()
+            .last_used_at
+            .expect("the rotation stamps the grant");
+        assert!(rotated > 1);
+        assert_eq!(
+            db.list_third_party_principals(&ALICE).await.unwrap()[0].last_used_at,
+            Some(rotated)
+        );
+
+        // An ended family keeps its last use on the roster.
+        db.revoke_atproto_session(&ALICE, b"family-1")
+            .await
+            .unwrap();
+        let after = db.list_third_party_principals(&ALICE).await.unwrap();
+        assert_eq!(after[0].last_used_at, Some(rotated));
+        assert_eq!(after[0].live_grants, 0);
+    }
+
     #[tokio::test]
     async fn revoke_ends_every_family_every_capability_and_the_row() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -2481,7 +2594,7 @@ mod tests {
             .unwrap();
         let scopes = "fauna:records:rw:ext.plugin.example.*";
         let id = db
-            .bind_account_to_plugin(&ALICE, PLUGIN, scopes, Some("Matrix bridge"), None)
+            .bind_account_to_plugin(&ALICE, PLUGIN, scopes, Some("Matrix bridge"), None, None)
             .await
             .unwrap();
         let alice = db.list_third_party_principals(&ALICE).await.unwrap();
@@ -2508,7 +2621,7 @@ mod tests {
 
         // Twice is once: the same row, the latest scopes.
         let again = db
-            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", Some("Matrix bridge"), None)
+            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", Some("Matrix bridge"), None, None)
             .await
             .unwrap();
         assert_eq!(again, id);
@@ -2528,6 +2641,7 @@ mod tests {
                 "atproto",
                 None,
                 Some(&[0x22; 32]),
+                None,
             )
             .await
             .unwrap_err();
@@ -2546,6 +2660,128 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A bind card opened on one install and approved after the admin
+    /// uninstalled and installed the same document again binds nothing: the
+    /// holder key is minted per install, so the card's key no longer names
+    /// the install, and the grant the approving app minted to it ends with
+    /// the refusal — exactly as when the plugin is simply gone.
+    #[tokio::test]
+    async fn a_bind_card_of_an_earlier_install_binds_nothing() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let first = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        db.uninstall_hosted_plugin(&first).await.unwrap().unwrap();
+        db.mint_hosted_plugin(&HostedPluginMint {
+            publisher_key: Some([0xDD; 32]),
+            declared_kinds: vec!["ext.plugin.example.other".into()],
+            ..plugin_mint([0x22; 32])
+        })
+        .await
+        .unwrap();
+        db.put_capability_grant(&ALICE, &[3; 16], &[0x11; 32], NEVER, b"g")
+            .await
+            .unwrap();
+        let err = db
+            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, Some(&[0x11; 32]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<BindRefused>(),
+            Some(&BindRefused::NotInstalled)
+        );
+        assert!(
+            db.list_third_party_principals(&ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.get_capability_grant(&ALICE, &[3; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.list_hosted_plugins().await.unwrap()[0]
+                .bound_accounts
+                .is_empty()
+        );
+    }
+
+    /// A bind card whose manifest is no longer the install's — the developer
+    /// loop replaced the plugin in place while the card was open — binds
+    /// nothing either: the binding's members are the manifest the card
+    /// showed or none. A card carrying the install's current manifest binds.
+    #[tokio::test]
+    async fn a_bind_card_of_a_replaced_manifest_binds_nothing() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let id = db
+            .mint_hosted_plugin(&HostedPluginMint {
+                manifest_jws: Some("jws-shown".into()),
+                ..plugin_mint([0x11; 32])
+            })
+            .await
+            .unwrap();
+        assert!(
+            db.replace_hosted_plugin(
+                &id,
+                &HostedPluginMint {
+                    manifest_jws: Some("jws-replaced".into()),
+                    ..plugin_mint([0x11; 32])
+                },
+            )
+            .await
+            .unwrap()
+        );
+        db.put_capability_grant(&ALICE, &[4; 16], &[0x11; 32], NEVER, b"g")
+            .await
+            .unwrap();
+        let err = db
+            .bind_account_to_plugin(
+                &ALICE,
+                PLUGIN,
+                "atproto",
+                None,
+                Some(&[0x11; 32]),
+                Some("jws-shown"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<BindRefused>(),
+            Some(&BindRefused::Changed)
+        );
+        assert!(
+            db.list_third_party_principals(&ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.get_capability_grant(&ALICE, &[4; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        db.bind_account_to_plugin(
+            &ALICE,
+            PLUGIN,
+            "atproto",
+            None,
+            Some(&[0x11; 32]),
+            Some("jws-replaced"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.list_hosted_plugins().await.unwrap()[0].bound_accounts,
+            vec![ALICE]
         );
     }
 
@@ -2572,7 +2808,7 @@ mod tests {
         assert_eq!(db.plugin_state_get(&pid, &key).await.unwrap(), None);
 
         let binding = db
-            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, None)
+            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, None, None)
             .await
             .unwrap();
         db.put_plugin_account_settings(&ALICE, &pid, br#"{"room":"x"}"#)
@@ -3014,7 +3250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_writer_key_ends_only_the_grants_that_carry_content_write() {
+    async fn a_new_writer_key_ends_only_the_grants_that_license_the_old_writer() {
         use fauna_mls::wrapped_blob::ScopeTuple;
         let db = CacheDb::open_in_memory().unwrap();
         consent_as(&db, b"family-1", CLIENT, both(WRITER), None)
@@ -3025,7 +3261,16 @@ mod tests {
             ScopeTuple::content_write(KIND, &WRITER),
         ]);
         let reads = grant_blob(vec![ScopeTuple::ext_kind_read(KIND)]);
+        // A deposit grant names its writer too, and ends with it.
+        let deposits = grant_blob(vec![ScopeTuple::folder_deposit(17, &WRITER)]);
+        let new_deposits = grant_blob(vec![ScopeTuple::folder_deposit(17, &[0x58; 32])]);
         db.put_capability_grant(&ALICE, &[1; 16], &HOLDER, NEVER, &writes)
+            .await
+            .unwrap();
+        db.put_capability_grant(&ALICE, &[4; 16], &HOLDER, NEVER, &deposits)
+            .await
+            .unwrap();
+        db.put_capability_grant(&ALICE, &[5; 16], &HOLDER, NEVER, &new_deposits)
             .await
             .unwrap();
         db.put_capability_grant(&ALICE, &[2; 16], &HOLDER, NEVER, &reads)
@@ -3060,6 +3305,20 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the grant naming the old writer ends with it"
+        );
+        assert!(
+            db.get_capability_grant(&ALICE, &[4; 16])
+                .await
+                .unwrap()
+                .is_none(),
+            "the deposit grant naming the old writer ends with it"
+        );
+        assert!(
+            db.get_capability_grant(&ALICE, &[5; 16])
+                .await
+                .unwrap()
+                .is_some(),
+            "a deposit grant to the new writer survives"
         );
         assert!(
             db.get_capability_grant(&ALICE, &[2; 16])

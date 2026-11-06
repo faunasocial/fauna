@@ -39,7 +39,6 @@ import secrets
 import pytest
 
 from conftest import provision_foreign_handled_actor
-from helpers.app_surface import skip_unbuilt
 from helpers.federated_follow import CROSSING_BUDGET_S, feed_row, follow_across_nests
 from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture adopted by import
     Seat,
@@ -54,14 +53,20 @@ from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture 
 
 pytestmark = [
     pytest.mark.tier_3,
+    # windows, macos, ios and android open the real conversations rail at launch only
+    # under this marker (`launch_seat` → `enable_real_faunamls`).
+    pytest.mark.real_conversations,
     # tui LEADS (`feed.md` § Implementation status today); the others
     # join through the batched trickle-down, each with its own marker.
     pytest.mark.tui,
     pytest.mark.android,
+    pytest.mark.ios,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.web,
+    pytest.mark.windows,
 ]
 
-BUILT_APPS = frozenset({"tui", "android", "linux"})
 """The apps that build the remote author's byline; each joins with its marker above."""
 
 READ_BUDGET_S = 30.0
@@ -80,13 +85,6 @@ def byline_seats(cross_nest_foreign, cross_nest_foreign_ephemeral, room_app, req
     """``(opted, closed, follower)``: two fresh handled authors on
     ``cross_nest_foreign`` (their home), and the follower that
     ``cross_nest_foreign_ephemeral`` provisioned."""
-    if room_app not in BUILT_APPS:
-        skip_unbuilt(
-            room_app,
-            surface="the remote author's byline on a delivered post",
-            detail="tui leads the face resolve; the others follow in their trickle-down",
-            tracked="ui/feed.md § Implementation status today",
-        )
     home = cross_nest_foreign
     away = cross_nest_foreign_ephemeral
     app_path = seat_app_path(request, room_app)
@@ -157,8 +155,15 @@ def _card_and_detail_author(follower: Seat, word: str) -> tuple[str, str]:
     """What the card for ``word`` paints in ``post-author``, and what its
     detail dialog paints in ``feed-post-detail-author``."""
     feed = follower.app.feed
-    index = feed.post_index_by_text(word)
-    assert index >= 0, f"no card holds {word!r}"
+    # The follow ends on the author's Profile on an app whose follow starts from a
+    # page; the cards are read from the painted feed.
+    feed.navigate()
+    index = wait_for(
+        f"a card holding {word!r} painted on the feed",
+        lambda: feed.post_index_by_text(word),
+        lambda i: i >= 0,
+        READ_BUDGET_S,
+    )
     card = feed.post_author(index)
     feed.open_post_detail(index)
     detail = feed.post_detail_author()
@@ -173,7 +178,6 @@ def test_a_followed_remote_author_is_named_by_their_own_profile_only_once_they_s
     """The opted-in author's card and detail read their display name; the
     other author's read their id, and no error shows."""
     opted, closed, follower = byline_seats
-    opted.app.profile.require_remote_profile_read_supported()
     home = cross_nest_foreign
     away = cross_nest_foreign_ephemeral
     opted_name = f"Shown {secrets.token_hex(3)}"

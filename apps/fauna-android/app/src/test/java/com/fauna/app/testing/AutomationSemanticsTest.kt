@@ -60,6 +60,20 @@ class AutomationSemanticsTest {
     }
 
     @Test
+    fun selectedIsTheNodesLiveSelectedStateAsTrueFalseLiterals() {
+        // `dm-message-timestamp` sets `semantics { selected = … }` on every
+        // message, so `selected_message_index()` can tell "not selected" ("false")
+        // from "no such attribute" (null).
+        assertEquals("true", AutomationSemantics.attrValue(node().copy(isSelected = true), "selected"))
+        assertEquals("false", AutomationSemantics.attrValue(node(), "selected"))
+        // An explicitly painted value still wins, as for `state`.
+        assertEquals(
+            "painted",
+            AutomationSemantics.attrValue(node(stateDescription = "painted").copy(isSelected = true), "selected"),
+        )
+    }
+
+    @Test
     fun frameIsTheNodesGeometryNeverAPaintedValue() {
         // The day-timeline measurement reads `frame` as `"x,y,w,h"`; a painted
         // `stateDescription` must not answer for it.

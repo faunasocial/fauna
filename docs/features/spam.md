@@ -87,51 +87,51 @@ Stamped 2026-09-23 at 039e9619ca.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+b7384d11 standalone |
+| linux | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | windows | ✅ full | 0.1.2-dev+a945dfd3 standalone |
-| macos | ⚠ partial | 0.1.2-dev+94e7cd97 standalone |
-| ios | ⚠ partial | 0.1.2-dev+94e7cd97 standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+b7384d11 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7050b81c.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+b7384d11 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_page_reachable` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_history_renders_then_undo` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_reset_clears_history` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): skipped, ios (macos): skipped, tui (linux): failed |
-| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_contribute_toggle_round_trips` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_trains_sealed_model` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
-| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_writes_sealed_history_row_then_undo` | linux (linux): passed, windows (windows): error, tui (linux): failed |
-| 3 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_history_renders_then_undo` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_reset_clears_history` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_contribute_toggle_round_trips` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_trains_sealed_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_moderation_client_model_write.py::test_mark_as_spam_writes_sealed_history_row_then_undo` — requires `moderation-queue-second-real-engine` (test harness) (not built: web, windows, android) | linux (linux): passed, windows (windows): error, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_mail_client_spam_receive.py::test_client_scores_inbound_spam_to_junk` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_mail_spam.py::test_mail_spam_report_share_toggle_and_published_list` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | absent by design on web | — |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_refiles_trained_spam_to_junk` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_keeps_ham_in_inbox_and_watermarks` | nest (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_is_per_actor_isolated` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_refiles_trained_spam_to_junk` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_keeps_ham_in_inbox_and_watermarks` | nest (linux): passed, nest (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_is_per_actor_isolated` | nest (linux): passed, nest (macos): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_scored_before_visible.py::test_inbound_spam_scored_before_visible_via_select_poll` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 5 | nest | `tests/e2e-unified/tests/test_mail_scored_before_visible.py::test_idle_gate_scores_appended_spam_before_announce` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_mail_apply_spam_disposition.py::test_apply_spam_disposition_watermarks_and_moves_to_junk` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_mail_apply_spam_disposition.py::test_apply_spam_disposition_watermarks_and_moves_to_junk` | nest (linux): passed, nest (macos): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mda_junk_train_sealed.py::test_agent_side_junk_train_reseals_sealed_model_at_rest` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 6 | nest | `tests/e2e-unified/tests/test_mda_junk_train_sealed.py::test_untrained_recipient_junk_train_writes_a_sealed_model_from_empty` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_cold_start_inherits_baseline` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/test_mda_junk_train_sealed.py::test_untrained_recipient_junk_train_writes_a_sealed_model_from_empty` | nest (linux): passed, nest (macos): passed |
+| 7 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda.py::test_mda_imap_spam_scoring_cold_start_inherits_baseline` | nest (linux): passed, nest (macos): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_spam_baseline_drain.py::test_spam_baseline_drains_sealed_contributors_via_keyless_grant` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_history_rows_show_the_message_the_lesson_and_where_it_was_given` | web (linux): failed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_reset_confirm_says_it_cannot_be_undone` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed, nest (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_history_rows_show_the_message_the_lesson_and_where_it_was_given` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_reset_confirm_says_it_cannot_be_undone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_a_lesson_given_in_a_mail_app_is_in_the_history_next_time` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_a_lesson_given_in_a_mail_app_is_in_the_history_next_time` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_contributing_is_off_until_turned_on_and_is_a_revocable_grant` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_mark_as_spam_is_offered_on_received_messages_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_your_own_spam_threshold_sorts_your_mail` | web (linux): failed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_leaving_junk_in_a_mail_app_trains_not_spam` | nest (linux): passed, nest (windows): passed |
-| 17 | nest | `tests/e2e-unified/tests/api/test_mail_spam_history_retention.py::test_training_history_kept_a_month_then_lessons_stay_but_cannot_be_undone` | nest (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_only_an_explicit_mark_trains` | nest (linux): passed, nest (windows): passed |
-| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_marking_junk_and_moving_it_to_junk_is_one_lesson` | nest (linux): passed, nest (windows): passed |
-| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_a_message_moved_back_out_of_junk_stays_out` | nest (linux): passed, nest (windows): passed |
-| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_own_filter_does_not_sort_until_it_has_learned_enough` | nest (linux): passed, nest (windows): passed |
-| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_shared_rules_spam_goes_to_junk_untrained_never_refused` | nest (linux): passed |
-| 23 | nest | `tests/e2e-unified/tests/test_spam_baseline_withdrawal.py::test_departure_withdraws_the_served_baseline_at_once` | nest (linux): passed, nest (windows): passed |
-| 24 | nest | `tests/e2e-unified/tests/api/test_mail_spam_model_isolation.py::test_neither_another_user_nor_the_admin_reads_or_trains_a_users_model` | nest (linux): passed |
-| 25 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_mail_spam_controls.py::test_your_own_spam_threshold_sorts_your_mail` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_leaving_junk_in_a_mail_app_trains_not_spam` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_mail_spam_history_retention.py::test_training_history_kept_a_month_then_lessons_stay_but_cannot_be_undone` | nest (linux): passed, nest (macos): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_only_an_explicit_mark_trains` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_marking_junk_and_moving_it_to_junk_is_one_lesson` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_a_message_moved_back_out_of_junk_stays_out` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_spam_signals.py::test_own_filter_does_not_sort_until_it_has_learned_enough` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_filter_delivery.py::test_shared_rules_spam_goes_to_junk_untrained_never_refused` | nest (linux): passed, nest (macos): passed |
+| 23 | nest | `tests/e2e-unified/tests/test_spam_baseline_withdrawal.py::test_departure_withdraws_the_served_baseline_at_once` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
+| 24 | nest | `tests/e2e-unified/tests/api/test_mail_spam_model_isolation.py::test_neither_another_user_nor_the_admin_reads_or_trains_a_users_model` | nest (linux): passed, nest (macos): passed |
+| 25 | nest | `tests/e2e-unified/tests/api/test_report_sharing.py::test_report_sharing_k_gate_opt_in_transparency_and_opt_out` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

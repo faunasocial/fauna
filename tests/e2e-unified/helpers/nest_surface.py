@@ -382,8 +382,8 @@ LOCAL_NEST_FIXTURE_DISPOSITIONS = {
         "PREMISE: the other arm of the same benchmark, same subject",
     "restartable_mda_nest":
         "PREMISE: its consumers are the binary's own state — the DR-restore "
-        "tests seed an approved-MDA row into `nest.db` with `sqlite3` (the "
-        "`test_smtp_sort.py` premise), and the DAV at-rest walk reads the "
+        "tests seed an approved-MDA row into `nest.db` with `sqlite3` from the "
+        "host, and the DAV at-rest walk reads the "
         "nest's on-disk segments through the test-hooks content surface, which "
         "the `test_hooks` FACT holds out of every release image",
     "restartable_mta_nest":
@@ -488,6 +488,7 @@ FIXTURE_START_OPTIONS = {
     "atproto_localhost_nest": frozenset(),
     "restartable_mda_nest": frozenset(),
     "restartable_mta_nest": frozenset(),
+    "cert_badge_tls_nest": frozenset({"serve_tls"}),
     "certless_mta_nest": frozenset(),
     "contribute_nest": frozenset(),
     "crowded_nest": frozenset(),
@@ -510,9 +511,14 @@ FIXTURE_START_OPTIONS = {
     "domainless_nest": frozenset(),
     # The same domained/domainless pair for the issuer bridge.
     "domained_issuer_nest": frozenset({"claim_domain"}),
+    "consent_issuer_nest": frozenset({"claim_domain"}),
+    "oidc_issuer_nest": frozenset({"claim_domain"}),
     "domainless_issuer_nest": frozenset(),
-    "handled_nest": frozenset(),
+    "handled_nest": frozenset({"cors_origins"}),
     "labeler_grant_nest": frozenset(),
+    # The second nest the identity-succession refusal journey links the dedicated
+    # identity to (`test_identity_succession_refusal.py`): started with no knobs.
+    "linked_nest_b": frozenset(),
     "nest_instance": frozenset(),
     # The update-channel pair started with no image tag in the environment (a
     # nest the image does not run): the UI journey's passes no knob, the API
@@ -530,9 +536,13 @@ FIXTURE_START_OPTIONS = {
     # viewer page at its own `/share/<token>` (`test_share_links_private.py`).
     "share_viewer_nest": frozenset({"static_dir"}),
     "spki_pinned_nest": frozenset({"dial_host", "serve_tls"}),
+    # The two nests that serve the SPA build over TLS: the certificate-badge
+    # witness and the SPA-serving floor.
+    "cert_badge_served_nest": frozenset({"serve_tls", "static_dir"}),
+    "spa_serving_floor_nest": frozenset({"serve_tls", "static_dir"}),
     # Its publicly-trusted twin: the same LAN dial, plus a harness-CA leaf
     # written into the nest's own ACME dir (`test_nest_identity_pin_webpki.py`).
-    "webpki_lan_nest": frozenset({"dial_host", "serve_tls"}),
+    "webpki_lan_nest": frozenset({"cors_origins", "dial_host", "serve_tls"}),
     "stoppable_nest": frozenset(),
     "stoppable_home_nest": frozenset(),
     "family_succession_nest": frozenset(),
@@ -568,11 +578,14 @@ FIXTURE_START_OPTIONS = {
     "running_member_nest": frozenset(),
     "served_headers_site_nest": frozenset({"claim_domain"}),
     "spa_serving_nest": frozenset({"static_dir"}),
+    "spa_unclaimed_nest": frozenset({"static_dir", "unclaimed"}),
     "front_page_nest": frozenset(),
     "lifecycle_nest": frozenset(),
     "log_nest": frozenset(),
     "port_nest": frozenset(),
     "posture_nest": frozenset({"claim_domain"}),
+    "cap_nest": frozenset({"claim_domain"}),
+    "lockout_nest": frozenset(),
     "redaction_nest": frozenset(),
     "roster_nest": frozenset(),
     "tls_reset_nest": frozenset({"serve_tls"}),
@@ -585,6 +598,8 @@ FIXTURE_START_OPTIONS = {
     "family_succession_nest": frozenset(),
     "fronted_nest": frozenset(),
     "gated_nest": frozenset(),
+    # `gated_nest`'s shape for the sealed-video journey (`test_feed_video_playback.py`).
+    "sealed_video_nest": frozenset(),
     "grant_mint_nest": frozenset(),
     "head_nest": frozenset(),
     "member_nest": frozenset(),
@@ -607,7 +622,13 @@ FIXTURE_START_OPTIONS = {
     "no_scanner_nest": frozenset(),
     "overdue_nest": frozenset({"extra_env"}),
     "plugin_nest": frozenset({"extra_env"}),
-    "unclaimed_social_only_real_domain_nest": frozenset({"handle_domain_seed", "unclaimed"}),
+    # The release-check pair (`tests/api/test_release_check.py`): one points the
+    # nest's check at the per-test feed stub through `extra_env`, the other
+    # names no origin, as the session nest does.
+    "feed_nest": frozenset({"extra_env"}),
+    "no_feed_nest": frozenset(),
+    "unclaimed_social_only_real_domain_nest": frozenset({"cors_origins", "handle_domain_seed",
+                                                         "unclaimed"}),
     "scenario": frozenset(),
     "schema_skew_nest": frozenset({"unclaimed"}),
     "sell_nest": frozenset(),
@@ -621,6 +642,7 @@ FIXTURE_START_OPTIONS = {
     "subs_nest": frozenset(),
     "sync_register_nest": frozenset({"claim_domain"}),
     "trust_mint_nest": frozenset(),
+    "trust_keys_nest": frozenset(),
     "two_nests": frozenset(),
     "two_report_nests": frozenset(),
     "two_trend_nests": frozenset(),
@@ -641,6 +663,10 @@ FIXTURE_START_OPTIONS = {
     "scratch_nest": frozenset(),
     "two_admin_nest": frozenset(),
     "two_admin_dns_nest": frozenset(),
+    # The succession witnesses' linked pair and the nest-rules web-notice nest
+    # (`test_succession_linked_nests.py`, `test_nest_rules_web_notice.py`).
+    "linked_nests": frozenset(),
+    "rules_nest": frozenset({"claim_domain"}),
     # The updater witness's registry-redirect seams ride `extra_env`; renamed off
     # `head_nest`, which the skew modules' option-less nests already wear.
     "updater_head_nest": frozenset({"extra_env"}),
@@ -764,11 +790,14 @@ FIXTURE_START_OPTIONS = {
                                                "serve_tls"}),
     "report_origin_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "smoke_handled_nest": frozenset({"handle_domain_seed", "serve_tls"}),
+    # Its Store-build twin (`tests/artifact/test_windows_store_install.py`): the
+    # same loopback-authority TLS nest a Release build signs in to with no seed.
+    "store_nest": frozenset({"handle_domain_seed", "serve_tls"}),
     "empty_store_unclaimed_nest": frozenset({"handle_domain_seed", "serve_tls",
                                              "unclaimed"}),
     "unclaimed_mail_nest": frozenset({"handle_domain_seed", "serve_tls",
                                       "unclaimed"}),
-    "unclaimed_real_domain_nest": frozenset({"handle_domain_seed",
+    "unclaimed_real_domain_nest": frozenset({"cors_origins", "handle_domain_seed",
                                              "unclaimed"}),
 
     # The real-ambient-session category's one nest fixture (2026-09-02). Its
@@ -1161,11 +1190,13 @@ OWN_IMAGE_FIXTURES = frozenset({
     "linked_one_admin",
     "mail_serving_nest",
     "mounted_claim_nest",
+    "msgrate_nest",
     "mta_sts_nest",
     "ndr_sidecars",
     "nest_container",
     "outbound_nest",
     "perimeter_nest",
+    "provider_nest",
     "real_clamd_nest",
     "relay_nest",
     "relay_net",
@@ -1177,6 +1208,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "router_nest",
     "scanners",
     "self_signed_floor_nest",
+    "selfclaim_nest",
     "serving_atproto",
     "serving_nest",
     "shipped_nest",
@@ -1700,6 +1732,8 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.finalize_export_session",
     "fauna.bridges.finalize_import_session",
     "fauna.bridges.generate_disposable_alias",
+    # User-class (R1): the caller's own per-actor mail-off flag.
+    "fauna.bridges.get_actor_mail_enabled",
     "fauna.bridges.get_alias_policy",
     "fauna.bridges.get_caldav_port",
     "fauna.bridges.get_forward_all_to",
@@ -1782,6 +1816,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.revoke_wrapped_mls_blob",
     "fauna.bridges.revoke_wrapped_submission_token",
     "fauna.bridges.send_list_message",
+    "fauna.bridges.set_actor_mail_enabled",
     "fauna.bridges.set_baseline_contribution",
     "fauna.bridges.set_forward_all_to",
     "fauna.bridges.set_mail_serving_enabled",
@@ -2575,9 +2610,7 @@ def _verdicts(item, mode: nest_mode_mod.NestMode):
 
     # Class (6), for BOTH non-standalone modes: the route simply is not compiled
     # into a release artifact, so the test can only ever 404 there.
-    hook_routes = kind_reach.routes_reached_by(
-        kind_reach.test_function_name(item), TEST_HOOK_ROUTE_PREFIX
-    )
+    hook_routes = kind_reach.routes_reached_by_own_code(item, TEST_HOOK_ROUTE_PREFIX)
     if hook_routes:
         named = ", ".join(sorted(hook_routes)[:2])
         if len(hook_routes) > 2:

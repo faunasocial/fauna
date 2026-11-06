@@ -2,8 +2,8 @@
 witnessed end to end: the agent takes the role the app yields, and the app
 takes it back when the agent stops.
 
-`docs/goal/architecture/account-runtime.md` § Multi-instance concurrency →
-*The agent holds the role when present — the presence lock and the yield*,
+`docs/goal/architecture/account-runtime-roles.md` § Multi-instance concurrency
+→ *The agent holds the role when present — the presence lock and the yield*,
 parts (3)–(4), and that bullet's "Proofs the build owes".
 
 **What this catches that nothing else can.** The Rust tier pins each half on
@@ -16,11 +16,25 @@ the yield and never the nudge leaves the role unheld until the agent's own
 30 s-class tick; an agent whose `Shutdown` path leaked the presence lock would
 keep every app out for good. Both read green on every rig.
 
-Unix only by its observation path: the agent is a direct child under e2e
-(`agent_spawner::ChildSpawner`) whose stderr lands in this launch's `app.err`,
-and its control socket is per-launch (`sync_agent_socket`). An app with no
-co-located agent declares the absence; an app with one this witness cannot
-reach yet routes through `skip_unbuilt` (convention 7).
+**Two observation paths, one witness.** On unix the agent is a direct child
+under e2e (`agent_spawner::ChildSpawner`) whose stderr lands in this launch's
+`app.err`, and it answers on a per-launch control socket (`sync_agent_socket`).
+On windows — the windows app, and tui running there — the agent is spawned
+detached (`WindowsDetachedSpawner`, stderr null) and logs to its own file under
+the launch's pinned agent data dir, which `app_stderr_text()` stitches after the
+app's own log (`drivers/base.py::stitch_agent_log`); it answers on a per-launch
+named pipe (`sync_agent_pipe`). `helpers/sync_agent_endpoint.py` picks the
+launch's transport, so both read the same log lines and stop the agent through
+the same `Shutdown` verb. An app with no co-located agent declares the absence;
+an app the registry does not list for `handover-agent-seam` takes the
+surface-registry skip (convention 7).
+
+**The agent markers.** The macos app spawns its agent only for a run carrying
+`real_sync_agent` (and publishes `sync_agent_socket` only then), so the module
+carries it; `isolated_sync_agent` beside it keeps a windows run on its own
+pipe and agent data dir — never the box's per-SID agent, and the data dir is
+where the agent's log is read from. linux and tui on unix spawn their agent for
+every launch and ignore both.
 
 ⚠ Never assert a wall-clock delay here (convention 14): the measured yield →
 take is about 200 ms, but every wait below is a named budget + deadline poll on
@@ -32,8 +46,8 @@ from __future__ import annotations
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import app_name, declared_absence, skip_unbuilt
-from helpers.sync_agent_ipc_unix import shutdown_agent
+from helpers.app_surface import app_name, declared_absence, require_surface
+from helpers.sync_agent_endpoint import Endpoint, agent_endpoint, shutdown_agent
 from helpers.waiting import (
     account_pump_role,
     account_runtime_role_or_skip,
@@ -41,7 +55,11 @@ from helpers.waiting import (
     wait_until,
 )
 
-pytestmark = pytest.mark.tier_3
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.real_sync_agent,
+    pytest.mark.isolated_sync_agent,
+]
 
 # The agent's INFO line on the NUDGE path only (`pipe_server.rs`,
 # `handle_reconcile_account_runtime`): its own tick takes the role silently, so
@@ -66,12 +84,10 @@ NUDGE_LINE_S = 30
 TAKE_BACK_S = 120
 
 
-def _agent_socket_or_skip(driver) -> str:
-    """This launch's agent control socket, or the convention-7 skip that says
-    why this app cannot run the witness."""
-    socket_path = getattr(driver, "sync_agent_socket", None)
-    if socket_path:
-        return socket_path
+def _agent_endpoint_or_skip(driver) -> Endpoint:
+    """This launch's agent control endpoint — its unix socket or its windows
+    pipe — or the convention-7 skip that says why this app cannot run the
+    witness."""
     if app_name(driver) in ("web", "android", "ios"):
         declared_absence(
             driver,
@@ -82,25 +98,21 @@ def _agent_socket_or_skip(driver) -> str:
                 "presence lock free and the first-come election stands)"
             ),
         )
-    skip_unbuilt(
-        driver,
-        surface="the handover witness's agent seam (a per-launch agent control "
-        "socket the harness can send Shutdown to, and the agent's log in "
-        "app_stderr_text)",
-        detail=(
-            "the windows agent logs to its own file and serves a pipe "
-            "(windows_sync_agent.shutdown_agent is that half); tui on macOS "
-            "exposes no per-launch socket yet"
-        ),
-        tracked=(
-            "account-runtime.md § Implementation status today, the 2026-10-08 "
-            "entry"
-        ),
+    require_surface(driver, "handover-agent-seam")
+    endpoint = agent_endpoint(driver)
+    assert endpoint, (
+        "this launch published no sync-agent control endpoint (neither "
+        "`sync_agent_socket` nor `sync_agent_pipe`) on an app whose registry "
+        "entry lists `handover-agent-seam` — on windows, is the run's "
+        "`isolated_sync_agent` posture in force?"
     )
+    return endpoint
 
 
 def _role_diagnosis(driver) -> str:
-    """The role, and every handover line this launch logged — convention 6."""
+    """The role, and every handover line this launch logged — the app's own
+    and, on windows, its detached agent's after the stitch banner —
+    convention 6."""
     log = driver.app_stderr_text()
     lines = [
         line for line in log.splitlines()
@@ -108,7 +120,7 @@ def _role_diagnosis(driver) -> str:
         or "account pass nudge" in line or "the sync agent hosts this store" in line
     ]
     tail = "\n    ".join(lines[-20:]) or "(none)"
-    return f"role now {account_pump_role(driver)}; handover lines in app.err:\n    {tail}"
+    return f"role now {account_pump_role(driver)}; handover lines in the app's log:\n    {tail}"
 
 
 def _first_assembled_role(driver):
@@ -163,7 +175,7 @@ def test_the_agent_takes_the_engine_role_the_app_yields(logged_in_app):
     silently), or the agent's nudge arm no longer taking a free role.
     """
     driver = logged_in_app.driver
-    _agent_socket_or_skip(driver)
+    _agent_endpoint_or_skip(driver)
     account_runtime_role_or_skip(driver)
 
     # The log BEFORE the role: a (True, True) read then proves the yield (and
@@ -219,13 +231,13 @@ def test_the_app_takes_the_engine_role_back_when_the_agent_stops(logged_in_app):
     present (a leaked ``agent.lock``), or a non-holder that no longer re-tries.
     """
     driver = logged_in_app.driver
-    socket_path = _agent_socket_or_skip(driver)
+    endpoint = _agent_endpoint_or_skip(driver)
     account_runtime_role_or_skip(driver)
     _first_assembled_role(driver)
     _await_agent_holds(driver, what="before the agent is stopped")
 
     acquired_before = driver.app_stderr_text().count(APP_ACQUIRED)
-    stopped_pid = shutdown_agent(socket_path)
+    stopped_pid = shutdown_agent(endpoint)
 
     def took_back():
         poke_account_pump(driver)

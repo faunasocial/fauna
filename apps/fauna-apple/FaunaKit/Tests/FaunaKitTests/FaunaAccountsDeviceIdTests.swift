@@ -13,6 +13,7 @@ import Foundation
 /// Hermetic: `FAUNA_E2E_BRIDGE` forces `KeychainStore` into its in-memory mode, so
 /// no real Keychain is touched (same idiom as `KeychainSecretStoreTests`).
 @MainActor
+@Suite(.sharedKeychain)
 struct FaunaAccountsDeviceIdTests {
     /// 32 bytes of hex — the same fixture-secret shape `KeychainSecretStoreTests`
     /// and the shared crate's own tests use.

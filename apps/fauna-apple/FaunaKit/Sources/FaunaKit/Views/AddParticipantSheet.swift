@@ -41,7 +41,8 @@ public struct AddParticipantSheet: View {
                         _ = vm.acceptCurrentRecipientChip()
                     }
                 },
-                onAcceptSuggestion: { vm.acceptAddParticipantChip($0) }
+                onAcceptSuggestion: { i in Task { await vm.acceptSuggestion(i) } },
+                onRemoveChip: { vm.removeRecipientChip($0) }
             )
             HStack {
                 Spacer()

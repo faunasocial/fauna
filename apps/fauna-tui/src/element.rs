@@ -1756,9 +1756,23 @@ impl Element {
     /// `get_text`) reads exactly what the other six apps report, while paint
     /// walks the block tree for real emphasis, lists and code.
     pub fn document(id: impl Into<String>, doc: RenderDocument) -> Self {
+        let text = doc.to_plaintext();
+        Self::document_with_plaintext(id, doc, text)
+    }
+
+    /// [`Element::document`] with the document's plaintext already in hand —
+    /// for a caller that derived it once for other reads of the same message
+    /// (a policy verdict, the muted-word match), so a multi-megabyte body is
+    /// walked once per pass, not once per reader. `text` MUST be
+    /// `doc.to_plaintext()`.
+    pub fn document_with_plaintext(
+        id: impl Into<String>,
+        doc: RenderDocument,
+        text: String,
+    ) -> Self {
         Element {
             id: id.into(),
-            text: doc.to_plaintext(),
+            text,
             enabled: true,
             role: Role::Label,
             label: None,

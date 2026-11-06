@@ -18,7 +18,7 @@ use crate::{RELEASE_PUBLIC_KEY, UpdateConfig, UpdateStatus};
 pub async fn check(config: &UpdateConfig) -> Result<UpdateStatus> {
     let client = reqwest::Client::new();
     let current = Version::parse(config.current_version)?;
-    let latest = latest_release(&client, config.github_repo).await?;
+    let latest = latest_release(&client, &config.feed_origin).await?;
     Ok(status_for(&current, latest))
 }
 
@@ -42,7 +42,7 @@ pub async fn apply(config: &UpdateConfig) -> Result<UpdateStatus> {
 
     let info = match check_latest(
         &client,
-        config.github_repo,
+        &config.feed_origin,
         &current,
         config.artifact_prefix,
         env!("TARGET"),

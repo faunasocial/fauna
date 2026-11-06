@@ -409,22 +409,76 @@ pub fn small_spam_model(spam_text: &str, ham_text: &str, n: usize) -> fauna_mail
 #[cfg(test)]
 pub const FIXTURE_MSEK: [u8; 32] = [9u8; 32];
 
-/// Give `actor` a recipient seal key the way the provision door does: both
-/// halves, derived from `msek`, in one write through the production writer
-/// ([`CacheDb::put_actor_recipient_seal_key`]). Returns the X25519 public half.
+/// The three standing seal keys an app derives from `msek` and registers —
+/// mail, calendar and card (`owner-key-material.md` § Path B-sibling-5 / -6).
+#[cfg(test)]
+pub fn recipient_seal_keys_for(msek: &[u8; 32]) -> crate::db::bridge_routing::RecipientSealKeys {
+    use crate::db::bridge_routing::{RecipientSealKey, RecipientSealKeys};
+    use fauna_mls::wrapped_blob::{
+        DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair,
+        derive_recipient_dav_xwing_keypair, derive_recipient_hpke_keypair,
+        derive_recipient_xwing_keypair,
+    };
+    let dav = |kind: DavKind| {
+        let root = derive_dav_root(kind, msek);
+        RecipientSealKey {
+            mls_pubkey: derive_recipient_dav_hpke_keypair(kind, &root).1,
+            mlkem_ek: derive_recipient_dav_xwing_keypair(kind, &root)
+                .public
+                .mlkem_encaps_key()
+                .to_vec(),
+        }
+    };
+    RecipientSealKeys {
+        mail: RecipientSealKey {
+            mls_pubkey: derive_recipient_hpke_keypair(msek).1,
+            mlkem_ek: derive_recipient_xwing_keypair(msek)
+                .public
+                .mlkem_encaps_key()
+                .to_vec(),
+        },
+        calendar: dav(DavKind::Calendar),
+        card: dav(DavKind::Card),
+    }
+}
+
+/// A structurally valid sealed-record envelope of `kind` whose "ciphertext" is
+/// `label` — deterministic, so a fixture can compare stored bytes against the
+/// bytes it sent, and distinct labels stay distinct. It passes every per-kind
+/// put-path check (`SealedRecordBytes::verify_of_kind` reads only the plaintext
+/// shape) and opens with no key; a test that opens what it stored seals for
+/// real instead.
+#[cfg(test)]
+pub fn fixture_record(kind: fauna_mls::wrapped_blob::RecordKind, label: &[u8]) -> Vec<u8> {
+    use fauna_mls::wrapped_blob::{BLOB_FORMAT_VERSION, HpkeWire, KemSuite, MailRecordEnvelope};
+    MailRecordEnvelope {
+        version: BLOB_FORMAT_VERSION,
+        kind: kind.as_str().into(),
+        hpke: HpkeWire {
+            kem_suite: KemSuite::STANDARD,
+            enc: serde_bytes::ByteBuf::from(vec![0u8; 32]),
+            ciphertext: serde_bytes::ByteBuf::from(label.to_vec()),
+        },
+    }
+    .to_canonical_bytes()
+    .expect("canonical fixture record")
+}
+
+/// Give `actor` its recipient seal keys the way the provision door does: all
+/// three pairs, derived from `msek`, in one write through the production
+/// writer ([`CacheDb::put_actor_recipient_seal_keys`]). Returns the mail
+/// X25519 public half.
 ///
-/// The one fixture writer for `actor_mls_pubkeys` in the unit tests. The key
-/// is a real MSEK-derived pair, so a seal to it selects the X-Wing suite as it
-/// does for an app user, and [`open_recipient_record`] opens the result.
+/// The one fixture writer for `actor_mls_pubkeys` in the unit tests. The keys
+/// are real MSEK-derived pairs, so a seal to one selects the X-Wing suite as it
+/// does for an app user, and [`open_recipient_record`] opens a mail record.
 #[cfg(test)]
 pub async fn seed_recipient_seal_key(db: &CacheDb, actor: &[u8; 32], msek: &[u8; 32]) -> [u8; 32] {
-    use fauna_mls::wrapped_blob::{derive_recipient_hpke_keypair, derive_recipient_xwing_keypair};
-    let (_secret, pubkey) = derive_recipient_hpke_keypair(msek);
-    let xwing = derive_recipient_xwing_keypair(msek);
-    db.put_actor_recipient_seal_key(actor, &pubkey, xwing.public.mlkem_encaps_key())
+    let keys = recipient_seal_keys_for(msek);
+    db.put_actor_recipient_seal_keys(actor, &keys)
         .await
-        .expect("seed recipient seal key");
-    pubkey
+        .expect("seed recipient seal keys");
+    keys.mail.mls_pubkey
 }
 
 /// Open a record sealed to the recipient key [`seed_recipient_seal_key`] wrote

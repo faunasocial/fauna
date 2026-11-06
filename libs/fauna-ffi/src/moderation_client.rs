@@ -382,11 +382,7 @@ pub fn takedown_form_view(
     use fauna_client_moderation::takedown::{self, TakedownContentType, TakedownForm};
     let view = takedown::takedown_form_view(&TakedownForm {
         content_id,
-        content_type: if conversation {
-            TakedownContentType::Conversation
-        } else {
-            TakedownContentType::Post
-        },
+        content_type: TakedownContentType::from_conversation(conversation),
         legal_reference,
         restore,
     });

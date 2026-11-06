@@ -26,8 +26,8 @@ import secrets
 import pytest
 from nacl.signing import SigningKey
 
+from helpers.admin_wire import admit_adult
 from helpers.family_wire import (
-    admit_adult_directly,
     admit_ward,
     family_status,
     set_ward_policy,
@@ -109,7 +109,7 @@ def test_taking_back_a_lost_account_keeps_the_family_link_on_either_side(
     """
     nest = family_succession_nest
     suffix = os.urandom(3).hex()
-    guardian = admit_adult_directly(nest, f"famsucc-guardian-{suffix}")
+    guardian = admit_adult(nest, f"famsucc-guardian-{suffix}")
     ward = admit_ward(nest, guardian, f"famsucc-ward-{suffix}")
     set_ward_policy(nest, guardian, ward, contact_approval=True)
     _assert_linked(nest, guardian, ward, "before any recovery")

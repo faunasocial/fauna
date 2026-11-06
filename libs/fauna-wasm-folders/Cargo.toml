@@ -10,10 +10,13 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-# Forwards to fauna-folders-machine/test-helpers (none exposed on the wasm
-# surface yet; present for parity with fauna-wasm-onboarding and future E2E
-# snapshot setters).
-test-helpers = ["fauna-folders-machine/test-helpers"]
+# The `wasm-folders-test` flavor (testing.md convention 15; `just web-test`).
+# Forwards to fauna-folders-machine/test-helpers, and to the trust facet's
+# render-clock offset: this chunk is its own wasm runtime, so `custodyFacetLoad`
+# folds receipts against THIS chunk's copy of `trust_clock`
+# (`trustSetClockOffsetForTest`). A wasm-pack build is a release build, so
+# `debug_assertions` is no lever here.
+test-helpers = ["fauna-folders-machine/test-helpers", "fauna-client-capabilities/e2e-agent"]
 
 # wasm32-scoped on purpose: this crate builds only for wasm32, and a plain
 # [dependencies] table would leak its wasm-only feature activations (js,

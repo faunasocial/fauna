@@ -87,6 +87,47 @@ private func landedFixture(
             "the view must clear with its state-json twin, or a reset install's next section reads a stale ceremony")
 }
 
+/// The defer is a decision about the carried sweep, so it has the sweep's
+/// lifetime: a defer taken in the successor's session must survive a switch, and
+/// only a factory reset takes it away.
+///
+/// Mutation check — dropping it from `clearOnFactoryReset()`, or adding it to
+/// `ActorScope.resetSharedState()`, turns this red.
+@MainActor
+@Test func theMemberReviewDeferOutlivesTheSwitchButNotAReset() {
+    SuccessionHandoff.clearOnFactoryReset()
+    SuccessionHandoff.record(landedFixture(), predecessorActorIdHex: predecessorId)
+    #expect(!SuccessionHandoff.memberReviewDeferred, "a sweep alone defers nothing")
+
+    SuccessionHandoff.deferMemberReview()
+    ActorScope.resetSharedState()
+    #expect(SuccessionHandoff.memberReviewDeferred,
+            "a switch re-offering a pass the user deferred contradicts the press")
+
+    SuccessionHandoff.clearOnFactoryReset()
+    #expect(!SuccessionHandoff.memberReviewDeferred,
+            "a fresh identity on a reset box must not start with the pass dismissed")
+}
+
+/// The pass's gates, each failing for its own reason: no sweep this run is an
+/// ordinary session (the backlog belongs to the permanent view), and a defer hides
+/// the pass without touching the sweep.
+@MainActor
+@Test func theMemberReviewPassOpensOnlyOverASweepAndUntilDeferred() {
+    SuccessionHandoff.clearOnFactoryReset()
+    let vm = RecoveryKitVM()
+    #expect(!vm.memberReviewPassOpen, "no sweep ran this run: standing clutter otherwise")
+
+    vm.sweepView = landedFixture().sweep
+    #expect(vm.memberReviewPassOpen)
+
+    vm.deferMemberReview()
+    #expect(!vm.memberReviewPassOpen)
+    #expect(SuccessionHandoff.memberReviewDeferred, "the static is what outlives this view model")
+    #expect(vm.sweepView != nil, "a defer decides nothing about the sweep")
+    SuccessionHandoff.clearOnFactoryReset()
+}
+
 /// The succession landed either way, so the obligation is owed either way —
 /// including on the arm where the device could not save the successor seed and
 /// the user's route back is importing the secret off the error.

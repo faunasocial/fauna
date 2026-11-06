@@ -36,6 +36,7 @@ public class NestTrustFormatTests
             ["nests/mint_option_mail"] = "Read and filter my mail",
             ["nests/mint_option_calendar"] = "Read my calendar",
             ["nests/mint_option_paywalled"] = "Serve paywalled posts — {tier}",
+            ["nests/holders_status_unreachable"] = "Could not ask this nest which services it trusts",
         };
 
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;
@@ -44,6 +45,32 @@ public class NestTrustFormatTests
     public NestTrustFormatTests() => Strings.Initialize(new FakeLocalizer());
 
     private static TrustScope Scope(string @class, string? kind, string? tier = null) => new(@class, kind, tier);
+
+    // nest-trust-holders-status (nests.md § Trust facet — grants): both polarities,
+    // mirroring tui's an_unreadable_holder_roster_replaces_the_empty_state /
+    // a_readable_holder_roster_keeps_the_empty_state.
+    [Fact]
+    public void AnUnreadableHolderRoster_ReplacesTheEmptyState()
+    {
+        Assert.False(NestTrustFormat.TrustEmptyVisible(0, 0, holdersUnreachable: true));
+        Assert.Equal("Could not ask this nest which services it trusts",
+            NestTrustFormat.HoldersStatusText(true));
+    }
+
+    [Fact]
+    public void AReadableHolderRoster_KeepsTheEmptyState()
+    {
+        Assert.True(NestTrustFormat.TrustEmptyVisible(0, 0, holdersUnreachable: false));
+        Assert.Equal(string.Empty, NestTrustFormat.HoldersStatusText(false));
+    }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, 1)]
+    public void TrustEmpty_StaysHiddenWhenGrantsOrBackupsExist(int grants, int backups)
+    {
+        Assert.False(NestTrustFormat.TrustEmptyVisible(grants, backups, holdersUnreachable: false));
+    }
 
     [Theory]
     [InlineData("mail", "Mail")]

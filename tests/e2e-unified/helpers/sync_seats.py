@@ -110,10 +110,14 @@ def seat_names(count: int) -> tuple:
         )
     return SEAT_NAMES[:count]
 
-# How a seat is driven. `tui` and `native` drive the real UI for sign-in /
-# adopt / bind and then leave the subject to plain file I/O. The retired
-# `engine` (headless-daemon) mode is gone for good — see the module docstring.
-SEAT_MODES = ("tui", "native")
+# How a seat is driven (`SEAT_MODES`), the device-only modes and the ONE
+# resolution of a mode to an app live in `helpers/seat_modes.py` — stdlib-only,
+# so the feature catalog reads the same table (feature-catalog.md § Cell
+# semantics, *Two sources*); re-exported here for every existing reader.
+from helpers.seat_modes import (  # noqa: E402,F401 — re-exported
+    DEVICE_ONLY_MODES, NATIVE_APPS, PHONE_APPS, PHONE_MODE, SEAT_MODES, WEB_APPS,
+    WEB_MODE, native_app_for_platform, phone_app_for_platform, seat_mode_app,
+)
 
 # The tui UI pair and the native-app pair. The mixed pair (`tui+native`) comes
 # free from the axis as the cheapest bisect there is: green `tui+tui` beside a
@@ -140,13 +144,14 @@ DEFAULT_TRIOS = tuple((mode,) * 3 for mode in SEAT_MODES)
 DEFAULT_SEAT_SETS = DEFAULT_PAIRS + DEFAULT_TRIOS
 
 # Seat modes this OS CANNOT DRIVE, and why — a STRUCTURAL absence, closed
-# forever, never unbuilt debt (convention 7). tui on windows drives no sync agent
-# at all (`seat_app_error` refuses the pairing; the same ruling
-# `test_filesync_delete_declined_debounce.py` cites), so a `tui` seat there could
-# never sync a byte — the pair is filtered out of collection rather than
-# collected and skipped, because a pair that cannot exist is not coverage this
-# platform is missing.
-UNSUPPORTED_MODES = {"win32": ("tui",)}
+# forever, never unbuilt debt (convention 7). EMPTY since 2026-10-31: the tui
+# drives the sync agent on windows too (`sync-agent.md` — "windows included";
+# `apps/fauna-tui/src/sync_agent.rs` carries the windows spawner;
+# `multiseat_config.py` lists win32), so the `tui` seat the map once removed
+# there is collected like on every other platform. Keep the map: a pair that
+# genuinely cannot exist is filtered out of collection rather than collected and
+# skipped, because it is not coverage the platform is missing.
+UNSUPPORTED_MODES: dict[str, tuple[str, ...]] = {}
 
 # Seat modes whose driver is BUILT on some platforms and STILL OWED on others —
 # debt with a named owner. Deliberately a separate map from
@@ -447,24 +452,6 @@ def finalize_live_residue(run_token: str, seats, budget: float = 60.0) -> None:
         print(f"⚠️  [seats] finalizer itself failed: {exc!r}", flush=True)
 
 
-# Which concrete app a `native` seat means on each platform. One mode name, one
-# resolution point — so `seat_set_id` reads `native+native` on every box and a
-# new platform's seat is a row here rather than a new mode name (#1/#3).
-#
-# All three GUI desktops as of 2026-08-10. `linux` is the one row whose platform
-# key and app name coincide (`sys.platform == "linux"`, the app is `linux`);
-# that is a coincidence of naming, not a rule — do not "simplify" the lookup into
-# an identity fallback, which would silently resolve a `native` seat on any future
-# unix that has no app at all, exactly the case `make_seat`'s NotImplementedError
-# exists to make loud.
-NATIVE_APPS = {"win32": "windows", "darwin": "macos", "linux": "linux"}
-
-
-def native_app_for_platform(sys_platform: str) -> str | None:
-    """The app a ``native`` seat drives here, or None if this platform has none."""
-    return NATIVE_APPS.get(sys_platform)
-
-
 def windows_agent_data_dir(root) -> Path:
     """Where a windows seat's own sync agent keeps its state — and its log.
 
@@ -678,6 +665,27 @@ def unresolved_review_rows(rows, run_token: str) -> list:
     ]
 
 
+# The peer leg's own account of a pass, on the targets that hold it. A seat whose
+# agent never admits a sibling otherwise logs NOTHING about why: the dial pass
+# reports a failed dial at debug only, an empty target list not at all, and the
+# pump report that counts both (`PumpReport::peer_dial`) is dumped at debug on
+# `account_driver::pass`. Measured 2026-10-29 on the macOS native pair: both
+# agents bound their listener, published their endpoints, and the failure
+# message still could not say whether a dial was ever attempted.
+PEER_LEG_LOG_TARGETS = (
+    "fauna_sync_engine::peer_leg=debug",
+    "fauna_account_plane::account_driver::pass=debug",
+)
+
+
+def _apply_peer_leg_log_env(env: dict) -> None:
+    """Merge :data:`PEER_LEG_LOG_TARGETS` into the seat's ``RUST_LOG``; the app's
+    agent inherits the launch environment."""
+    targets = ",".join(PEER_LEG_LOG_TARGETS)
+    existing = env.get("RUST_LOG")
+    env["RUST_LOG"] = f"{existing},{targets}" if existing else f"info,{targets}"
+
+
 def make_seat(
     mode: str,
     *,
@@ -739,6 +747,7 @@ def make_seat(
             app_name = "tui"
 
         config = _build_app_config(app_name, {"url": node_url, "port": node_port}, request)
+        _apply_peer_leg_log_env(config.setdefault("environment", {}))
         if rescan_secs is not None:
             config.setdefault("environment", {})["FAUNA_E2E_RESCAN_MS"] = str(
                 int(rescan_secs) * 1000
@@ -794,6 +803,26 @@ def make_seat(
             node_url=node_url,
             agent_data_dir=agent_data_dir,
             expect_rescan_ms=None if rescan_secs is None else int(rescan_secs) * 1000,
+        )
+
+    if mode in DEVICE_ONLY_MODES:
+        from conftest import _build_app_config
+
+        app_name = seat_mode_app(mode, sys.platform)
+        if app_name is None:
+            # Loud, never a skip — the same disagreement as the native arm's.
+            raise NotImplementedError(
+                f"no {mode} seat on {sys.platform!r}, yet a `{mode}` seat set was "
+                f"collected — sync_seats.PHONE_APPS/WEB_APPS and the journey's own "
+                f"seat pairs disagree."
+            )
+        config = _build_app_config(app_name, {"url": node_url, "port": node_port}, request)
+        return DeviceSeatDriver(
+            app_name,
+            name=name,
+            launch_config=config,
+            sign_in=sign_in,
+            node_url=node_url,
         )
 
     # Loud, never a skip (convention 7): a seat that silently does not run looks
@@ -935,6 +964,10 @@ class AppSeatDriver:
     a module-level ``from drivers import create_driver`` would drag the whole
     driver/bridge surface into that.
     """
+
+    #: A desktop app seat holds the same-account peer leg (through its agent);
+    #: :class:`DeviceSeatDriver` is the seat that does not.
+    carries_peer_leg = True
 
     def __init__(
         self,
@@ -1117,6 +1150,36 @@ class AppSeatDriver:
                 pass
         return lines
 
+    def agent_client(self, timeout: float = 10.0):
+        """A client of this seat's own agent on whichever transport
+        :meth:`_agent_endpoint` names — both clients speak the same verbs —
+        or None when the seat publishes no agent endpoint (yet)."""
+        endpoint = self._agent_endpoint()
+        if endpoint is None:
+            return None
+        kind, address = endpoint
+        if kind == "unix":
+            from helpers.sync_agent_ipc_unix import SyncAgentClient
+        else:
+            from helpers.sync_agent_ipc import SyncAgentClient
+        return SyncAgentClient(address, timeout=timeout)
+
+    def agent_pid(self) -> int | None:
+        """The pid of the process serving this seat's agent endpoint, asked of
+        the kernel (``SO_PEERCRED`` / ``LOCAL_PEERPID`` on unix, the pipe's
+        server process on windows) — never read off the agent's own say-so —
+        or None when the seat publishes no endpoint (yet). For a witness that
+        observes the agent's process from outside, its sockets say."""
+        endpoint = self._agent_endpoint()
+        if endpoint is None:
+            return None
+        kind, address = endpoint
+        if kind == "unix":
+            from helpers.sync_agent_ipc_unix import server_pid
+        else:
+            from helpers.sync_agent_ipc import pipe_server_pid as server_pid
+        return server_pid(address)
+
     def peer_files(self) -> dict | None:
         """This seat's agent's same-account peer data plane reading —
         ``{siblings, chunks, bytes, to_nest}`` off its ``GetServiceStatus``
@@ -1126,17 +1189,11 @@ class AppSeatDriver:
         another of the account's devices or from the nest. Asked on whichever
         transport :meth:`_agent_endpoint` names — both clients speak the same
         ``GetServiceStatus``."""
-        endpoint = self._agent_endpoint()
-        if endpoint is None:
+        client = self.agent_client(timeout=5.0)
+        if client is None:
             return None
-        kind, address = endpoint
-        if kind == "unix":
-            from helpers.sync_agent_ipc_unix import SyncAgentClient
-        else:
-            from helpers.sync_agent_ipc import SyncAgentClient
-
         try:
-            return SyncAgentClient(address, timeout=5.0).service_status().get("peer_files")
+            return client.service_status().get("peer_files")
         except Exception:
             return None
 
@@ -1178,6 +1235,22 @@ class AppSeatDriver:
         """
         return set(self.sync_entry_states())
 
+    def _driver_agent_state_base(self) -> Path | None:
+        """The agent state root the seat's DRIVER names
+        (``sync_agent_state_base``), or None when it names none.
+
+        Where a driver names one, it is the agent's own answer and nothing
+        derived from ``config_home`` can be trusted over it: the apple drivers
+        have no ``config_home`` at all (``<launch HOME>/Library/Application
+        Support/Fauna/sync``), and the tui driver on windows has one but passes
+        the agent an explicit ``--data-dir`` at ``<launch root>/sync-agent``,
+        which carries no ``sync`` component for a ``config_home``-based sweep to
+        find (``drivers/tui.py::sync_agent_state_base``). linux names none:
+        its agent inherits the launch's XDG world under ``config_home``'s
+        parent."""
+        state_base = getattr(self._driver, "sync_agent_state_base", None)
+        return Path(state_base) if state_base else None
+
     def sync_entry_states(self) -> dict[str, tuple[str, bool]]:
         """Every ``sync_entries`` row as ``{path: (state, holds_local_hash)}`` —
         the engine's own record of whether it holds a file's bytes.
@@ -1191,10 +1264,19 @@ class AppSeatDriver:
         """
         import sqlite3
 
-        config_home = getattr(self._driver, "config_home", None)
-        assert config_home, f"[{self.name}] the driver exposes no launch root to search"
-        dbs = sorted(Path(config_home).parent.glob("**/sync/**/*.db"))
-        assert dbs, f"[{self.name}] no state DB under {Path(config_home).parent}"
+        # The same order :meth:`_find_agent_logs` takes: the agent's own state
+        # root when the driver names one, else the launch root `config_home`
+        # sits in.
+        state_base = self._driver_agent_state_base()
+        if state_base is not None:
+            root = state_base
+            dbs = sorted(root.glob("**/*.db"))
+        else:
+            config_home = getattr(self._driver, "config_home", None)
+            assert config_home, f"[{self.name}] the driver exposes no launch root to search"
+            root = Path(config_home).parent
+            dbs = sorted(root.glob("**/sync/**/*.db"))
+        assert dbs, f"[{self.name}] no state DB under {root}"
         rows: dict[str, tuple[str, bool]] = {}
         for db in dbs:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -1438,25 +1520,24 @@ class AppSeatDriver:
             except OSError:
                 return [], str(self._agent_data_dir)
 
+        # A driver that NAMES its agent's state root is believed before anything
+        # is derived from `config_home` (:meth:`_driver_agent_state_base`).
+        state_base = self._driver_agent_state_base()
+        if state_base is not None:
+            try:
+                return (
+                    sorted(state_base.glob(f"**/{AGENT_LOG_SUBDIR}/{AGENT_LOG_GLOB}")),
+                    str(state_base),
+                )
+            except OSError:
+                return [], str(state_base)
+
         # `config_home` is the per-launch isolated config dir every app driver
         # exposes; its parent is the launch's private root, which also holds the
         # private HOME/XDG_DATA_HOME the agent actually writes under.
         config_home = getattr(self._driver, "config_home", None)
         if not config_home:
-            # The macOS driver (apple has no `config_home` at all) publishes the
-            # agent's own state root instead — `<launch HOME>/Library/Application
-            # Support/Fauna/sync`, the very directory the `logs` leaf sits under.
-            state_base = getattr(self._driver, "sync_agent_state_base", None)
-            if not state_base:
-                return [], None
-            base = Path(state_base)
-            try:
-                return (
-                    sorted(base.glob(f"**/{AGENT_LOG_SUBDIR}/{AGENT_LOG_GLOB}")),
-                    str(base),
-                )
-            except OSError:
-                return [], str(base)
+            return [], None
         root = Path(config_home).parent
         try:
             return (
@@ -1532,8 +1613,172 @@ class AppSeatDriver:
             f"  ever seen here: "
             f"{', '.join(sorted(self._ever_held)) if self._ever_held else '(nothing)'}\n"
             f"  app error-message element: {error!r}\n"
+            f"{self._firewall_note()}"
             f"{self.agent_log_note()}"
         )
+
+    def _firewall_note(self) -> str:
+        """The macOS application firewall's verdict on this seat's agent binary,
+        when it would hold a sibling's inbound dial (`helpers.macos_firewall`
+        says why a peer-leg red needs it named); empty otherwise."""
+        from helpers.macos_firewall import firewall_note
+
+        agent_bin = (self._config.get("environment") or {}).get("FAUNA_E2E_SYNC_AGENT_BIN")
+        note = firewall_note([agent_bin]) if agent_bin else None
+        return f"{note}\n" if note else ""
+
+
+class DeviceSeatDriver:
+    """A device-only seat (:data:`DEVICE_ONLY_MODES` — a ``phone`` seat, the
+    account's mobile app, or a ``web`` seat, its web app in a browser): signed in
+    as one more device of the account — and nothing else.
+
+    It answers the lifecycle half of :class:`AppSeatDriver` (``start``,
+    ``await_ready``, ``app``, ``stop``, ``stop_keeping_state``, ``restart``) so a
+    device journey drives both kinds of seat through one body; it has no
+    :attr:`path`, binds no folder and hosts no agent, so :meth:`peer_files` is
+    always ``None`` — "I cannot look", never an empty reading — and
+    :attr:`carries_peer_leg` is False. A journey reads that attribute to leave
+    out the assertions that belong to the same-account peer leg (the outcomes
+    a phone is excused from), never the app name.
+
+    The device is still a full member of the account: the app hosts the account
+    runtime in-process, whose pump folds a sibling's pending request on this
+    device's roster row and reports its own setting back
+    (``fauna_sync_engine::peer_leg::reconcile_participation``, the step that
+    runs before any listener question) — which is what the journeys pairing a
+    phone with a desktop seat witness.
+
+    Ready means the WS-RPC session reached Connected: there is no engine to
+    wait for, and the Devices page needs nothing more.
+    """
+
+    carries_peer_leg = False
+
+    def __init__(
+        self,
+        app_name: str,
+        *,
+        name: str,
+        launch_config: dict,
+        sign_in,
+        node_url: str,
+    ) -> None:
+        self.name = name
+        self.app_name = app_name
+        self.node_url = node_url
+        self._config = launch_config
+        self._sign_in = sign_in
+        self._driver = None
+        self._app = None
+
+    def start(self) -> None:
+        from actions import ActionLayer
+        from drivers import create_driver
+
+        self._driver = create_driver(self.app_name)
+        self._driver.launch(self._config)
+        self._app = ActionLayer(self._driver)
+        self._sign_in(self._app, self.name)
+
+    @property
+    def app(self):
+        """The seat app's action layer — the Devices page is driven here."""
+        assert self._app is not None, f"[{self.name}] the seat is not started"
+        return self._app
+
+    def await_ready(self, budget: float) -> float:
+        """Poll until the app's session reads Connected; seconds waited."""
+        started = time.monotonic()
+        last: dict = {}
+
+        def connected() -> bool:
+            try:
+                last["status"] = self._driver.get_text("connection-status") or ""
+            except Exception as exc:  # an app still coming up reads as not yet
+                last["status"] = f"unreadable ({exc!r})"
+            return last["status"].startswith("Connected")
+
+        wait_until(
+            connected, budget, interval=1.5,
+            diagnose=lambda: (
+                f"[{self.name}] the {self.app_name} device seat never reached "
+                f"Connected (last status {last.get('status')!r})\n{self.diagnostics()}"
+            ),
+        )
+        return time.monotonic() - started
+
+    def stop(self) -> None:
+        if self._driver is not None:
+            self._driver.teardown()
+            self._driver = None
+            self._app = None
+
+    def stop_keeping_state(self) -> None:
+        """The user quits the app, leaving the device as it is: its keychain,
+        its container and with them its account store and roster row. Pinned
+        first, so :meth:`restart` reopens the SAME device — never ``teardown``,
+        which retires the machine it stops."""
+        assert self._driver.preserve_state_across_relaunch(), (
+            f"[{self.name}] the {self.app_name} driver cannot keep its launch "
+            f"state across a relaunch, so a restarted seat would be a new device "
+            f"and a catch-up assertion would prove nothing"
+        )
+        self._device_id_before_quit = self._device_id()
+        self._driver.quit_app()
+
+    def restart(self, budget: float) -> float:
+        """Reopen after :meth:`stop_keeping_state`: the app's own auto-login
+        from the pinned store (``hard_reload``), then Connected — as the SAME
+        device. A reopened app on another device id is a second roster row, on
+        which nothing addressed to this device (a sibling's pending request)
+        ever lands; that fails here, naming both ids, rather than as a
+        journey's timeout on the request it strands."""
+        before = getattr(self, "_device_id_before_quit", None)
+        self._driver.hard_reload()
+        waited = self.await_ready(budget)
+        after = self._device_id()
+        assert before is None or after == before, (
+            f"[{self.name}] the {self.app_name} device seat came back as another "
+            f"device: session.device_id {before!r} before the quit, {after!r} "
+            f"after the restart — the reopened app is a new roster row\n"
+            f"{self.diagnostics()}"
+        )
+        return waited
+
+    def _device_id(self):
+        """The running app's own device id (the ``session.device_id`` state
+        key) — the id its account runtime enrols as its roster row."""
+        return self._driver.get_state("session.device_id")
+
+    def peer_files(self) -> None:
+        """A device-only seat holds no same-account peer leg: nothing to read."""
+        return None
+
+    def describe(self) -> str:
+        return (
+            f"[seats] {self.name}: {self.app_name} device seat — real "
+            f"{self.app_name} app, no folder, no agent -> {self.node_url}"
+        )
+
+    def diagnostics(self) -> str:
+        if self._driver is None:
+            return f"  seat {self.name}: {self.app_name} device-only app, not running\n"
+        try:
+            error = self._driver.get_text("error-message")
+        except Exception:
+            error = None
+        return (
+            f"  seat {self.name}: {self.app_name} device-only app\n"
+            f"  app error-message element: {error!r}\n"
+        )
+
+    def __enter__(self) -> "DeviceSeatDriver":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
 
 
 __all__ = [
@@ -1542,6 +1787,9 @@ __all__ = [
     "DEFAULT_PAIRS",
     "DEFAULT_TRIOS",
     "NATIVE_APPS",
+    "PHONE_APPS",
+    "DEVICE_ONLY_MODES",
+    "PHONE_MODE",
     "RESOLVED_BADGES",
     "RUN_TOKEN_RE",
     "SEAT_MODES",
@@ -1549,17 +1797,22 @@ __all__ = [
     "SEAT_SETS_ENV",
     "UNBUILT_MODES",
     "UNSUPPORTED_MODES",
+    "WEB_APPS",
+    "WEB_MODE",
     "AppSeatDriver",
+    "DeviceSeatDriver",
     "SeatDriver",
     "finalize_live_residue",
     "isolate_windows_sync_agent",
     "make_seat",
     "native_app_for_platform",
     "new_run_token",
+    "phone_app_for_platform",
     "pin_macos_seat_sync_agent",
     "residue_note",
     "review_rows_for_run",
     "seat_names",
+    "seat_mode_app",
     "seat_set_id",
     "seat_sets_for_platform",
     "seat_sets_from_env",

@@ -16,7 +16,7 @@ package com.fauna.app.testing
  * out of the handler rather than refusing through it. Nobody had noticed
  * because android's e2e suite has never run against a device.
  *
- * Linux resolves the same protocol in `apps/fauna-linux/src/main.rs`
+ * Linux resolves the same protocol in `apps/fauna-linux/src/lib.rs`
  * (`explicit_sub` + `settings_subpage_for_view`, plus a bare admin nav landing
  * on the Dashboard); this is android's twin of that arm.
  *

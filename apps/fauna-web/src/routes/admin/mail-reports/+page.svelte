@@ -10,6 +10,7 @@
   // different facts. Re-reads on open, on a filter change and on refresh; no push.
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-mail-reports` page.
   import { identity } from '#lib/store';
+  import { localDate } from '#lib/value-format';
   import { dmarcReportsMachine } from '#lib/rpc';
   import { ensureWasm, dmarcReportWindowOptions } from '#lib/wasm';
   import { onMount } from 'svelte';
@@ -71,13 +72,6 @@
   const domainValue = $derived(snap?.our_domain ?? '');
   const domains = $derived(['', ...(snap?.local_domains ?? [])]);
 
-  // The local `YYYY-MM-DD` date of an epoch-seconds instant (the web twin of
-  // `fauna_core::format::format_unix_local_date`, which needs the OS tz
-  // database wasm lacks — same as the admin-mail page's `localDate`).
-  function localDate(secs: number): string {
-    const d = new Date(secs * 1000);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
 
   function applySnapshot(): void {
     if (!machine) return;
@@ -229,7 +223,7 @@
           <span data-testid={IDS.ADMIN_MAIL_REPORTS_REPORT_SUBMITTER}>{r.submitter}</span>
           <span class="mono" data-testid={IDS.ADMIN_MAIL_REPORTS_REPORT_DOMAIN}>{r.our_domain}</span>
           <span class="muted small" data-testid={IDS.ADMIN_MAIL_REPORTS_REPORT_PERIOD}>
-            {T.report_period({ begin: localDate(r.begin_at), end: localDate(r.end_at) })}
+            {T.report_period({ begin: localDate(r.begin_at * 1000), end: localDate(r.end_at * 1000) })}
           </span>
           <span class="muted small" data-testid={IDS.ADMIN_MAIL_REPORTS_REPORT_MESSAGES}>
             {T.row_messages({ count: String(r.message_count) })}

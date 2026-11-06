@@ -157,20 +157,15 @@ pub struct MediaHandles {
     pub media_page: gtk::Box,
 }
 
-/// Bridges `MediaMachine` notifications to the GTK main loop: each `on_changed`
-/// pushes a tick onto an `async-channel` the render loop drains (the
-/// `DevicesMachine` / wizard pattern). `on_changed` may fire from a worker
-/// thread (the async `refresh()` runs on the tokio runtime), so the thread-safe
-/// `async_channel::Sender` is the hand-off.
-struct GtkMediaObserver {
-    tx: async_channel::Sender<()>,
-}
-
-impl MediaObserver for GtkMediaObserver {
-    fn on_changed(&self) {
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(
+    /// Bridges `MediaMachine` notifications to the GTK main loop: each `on_changed`
+    /// pushes a tick onto an `async-channel` the render loop drains (the
+    /// `DevicesMachine` / wizard pattern). `on_changed` may fire from a worker
+    /// thread (the async `refresh()` runs on the tokio runtime), so the thread-safe
+    /// `async_channel::Sender` is the hand-off.
+    GtkMediaObserver,
+    MediaObserver
+);
 
 /// The `page-heading` title label (ui.yaml global rule).
 fn page_heading(text: &str) -> gtk::Label {
@@ -215,6 +210,23 @@ fn build_sort_dropdown() -> gtk::DropDown {
     );
     dropdown.set_expression(Some(&label_expr));
     set_test_id(&dropdown, ids::MEDIA_SORT_SELECT);
+    dropdown
+}
+
+/// The `media-sort-direction` dropdown: stable option values `"ascending"`
+/// (default) / `"descending"` with the shared localized label, applied by the
+/// media machine to whichever `media-sort-select` key is active.
+fn build_sort_direction_dropdown() -> gtk::DropDown {
+    let model = gtk::StringList::new(&["ascending", "descending"]);
+    let dropdown = gtk::DropDown::builder().model(&model).build();
+    let label_expr = gtk::ClosureExpression::new::<String>(
+        &[] as &[gtk::Expression],
+        glib::closure!(|item: gtk::StringObject| {
+            crate::i18n::media_sort_direction_label(item.string().as_str())
+        }),
+    );
+    dropdown.set_expression(Some(&label_expr));
+    set_test_id(&dropdown, ids::MEDIA_SORT_DIRECTION);
     dropdown
 }
 
@@ -322,6 +334,7 @@ pub(super) fn select_dropdown_value(dd: &gtk::DropDown, value: &str) {
 struct RenderCtx {
     view_toggle: gtk::ToggleButton,
     sort_dropdown: gtk::DropDown,
+    sort_direction_dropdown: gtk::DropDown,
     filter_dropdown: gtk::DropDown,
     /// Value → display label for filter options whose value is not its own label
     /// (today: the followed browse scopes, whose value is opaque). Shared with
@@ -361,6 +374,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
     set_test_id(&view_toggle, ids::MEDIA_VIEW_TOGGLE);
 
     let sort_dropdown = build_sort_dropdown();
+    let sort_direction_dropdown = build_sort_direction_dropdown();
     let filter_labels: FilterLabels = Rc::new(RefCell::new(std::collections::HashMap::new()));
     let filter_dropdown = build_filter_dropdown(Rc::clone(&filter_labels));
 
@@ -415,6 +429,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
     header.append(&heading);
     header.append(&view_toggle);
     header.append(&sort_dropdown);
+    header.append(&sort_direction_dropdown);
     header.append(&filter_dropdown);
     header.append(&upload_row);
 
@@ -606,6 +621,18 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
     {
         let machine = Arc::clone(&machine);
         let updating = Rc::clone(&updating);
+        sort_direction_dropdown.connect_selected_notify(move |dd| {
+            if updating.get() {
+                return;
+            }
+            if let Some(value) = dropdown_value(dd) {
+                machine.set_descending(value == "descending");
+            }
+        });
+    }
+    {
+        let machine = Arc::clone(&machine);
+        let updating = Rc::clone(&updating);
         filter_dropdown.connect_selected_notify(move |dd| {
             if updating.get() {
                 return;
@@ -636,6 +663,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
     let ctx = Rc::new(RenderCtx {
         view_toggle,
         sort_dropdown,
+        sort_direction_dropdown,
         filter_dropdown,
         filter_labels,
         upload_row,
@@ -771,6 +799,14 @@ fn render_page(machine: &Arc<MediaMachine>, ctx: &Rc<RenderCtx>) {
 
     // Sort select: reflect the active key.
     select_dropdown_value(&ctx.sort_dropdown, &snap.sort);
+    select_dropdown_value(
+        &ctx.sort_direction_dropdown,
+        if snap.descending {
+            "descending"
+        } else {
+            "ascending"
+        },
+    );
 
     // Filter select: rebuild options (all-media sentinel + the readable sets
     // the client knows, empty ones included), then reflect the active filter.
@@ -989,6 +1025,7 @@ mod tests {
             set_test_id(&vt, ids::MEDIA_VIEW_TOGGLE);
             header.append(&vt);
             header.append(&build_sort_dropdown());
+            header.append(&build_sort_direction_dropdown());
             header.append(&build_filter_dropdown(Rc::new(RefCell::new(
                 std::collections::HashMap::new(),
             ))));
@@ -1008,6 +1045,7 @@ mod tests {
                 "error-message",
                 "media-view-toggle",
                 "media-sort-select",
+                "media-sort-direction",
                 "media-folder-filter",
                 "file-upload",
                 "upload-button",

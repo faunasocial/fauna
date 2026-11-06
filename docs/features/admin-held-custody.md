@@ -1,6 +1,6 @@
 ---
 slug: admin-held-custody
-title: Held custody
+title: Held Custody: encrypted copies kept for people elsewhere
 section: admin area
 goal: docs/goal/architecture/account-replica-posture.md § The custody grant + ceremony
 guide: docs/guides/admin-tour.md § Held Custody
@@ -8,8 +8,9 @@ guide: docs/guides/admin-tour.md § Held Custody
 
 ## What a user gets
 
-A page listing the sealed copies this nest holds for people from elsewhere,
-honest when there are none.
+A page listing the encrypted copies this nest keeps for people from other nests,
+which it cannot read apart from anything they have published to everyone, honest
+when there are none.
 
 ## Coverage contract
 
@@ -51,31 +52,31 @@ Stamped 2026-10-01 at e129e78aa0.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
 | windows | ⚠ partial | 0.1.2-dev+ab96a0f8.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+923cec2d standalone |
-| ios | ⚠ partial | 0.1.2-dev+923cec2d standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+5cdec819.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_admin_custody_hosting_page_reachable_and_honestly_empty` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_custody_ceremony_journey.py::test_custody_ceremony_nest_anchored` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_an_admin_lists_and_removes_a_copy_another_member_holds` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_removing_the_last_copy_for_a_person_drops_their_store_and_one_of_several_keeps_it` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_a_paused_copy_keeps_its_space_until_it_is_removed` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_register_bounds.py::test_a_host_holds_a_bounded_number_of_copies_and_an_oversized_allowance_is_clamped` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_held_copies_are_bounded_by_the_hosts_tier_and_never_refuse_its_own_files` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_an_expired_copy_is_no_longer_fetched_and_a_month_on_its_bytes_are_reclaimed` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_when_the_owner_takes_the_permission_back_the_nest_stops_fetching` | nest (linux): passed |
-| 9 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_when_the_owner_takes_the_permission_back_the_nest_stops_serving` | nest (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_a_held_copy_comes_back_sealed_and_byte_identical_and_the_nest_never_held_a_key` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_the_nest_hands_a_held_copy_back_only_to_the_owners_own_devices` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_when_the_owner_takes_the_permission_back_the_nest_stops_serving` | nest (linux): passed, nest (windows): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_a_held_copy_comes_back_sealed_and_byte_identical_and_the_nest_never_held_a_key` | nest (linux): passed, nest (windows): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_serve.py::test_the_nest_hands_a_held_copy_back_only_to_the_owners_own_devices` | nest (linux): passed, nest (windows): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_custody_hosting_pump.py::test_what_the_nest_holds_never_grows_past_the_allowance_set_for_it` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_the_page_says_nothing_is_held_only_once_the_nest_has_answered` | web (linux): passed, tui (linux): failed |
+| 13 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_the_page_says_nothing_is_held_only_once_the_nest_has_answered` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed |
 | 13 | app | `tests/e2e-unified/tests/test_admin_custody_hosting.py::test_tui_names_no_count_while_the_registry_read_is_held` | tui (linux): passed |
 <!-- features-render:end -->

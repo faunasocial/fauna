@@ -229,6 +229,14 @@ const CodeSenderNotOwned = "fauna.bridges.sender_not_owned"
 // beside CodeSenderNotOwned.
 const CodeSubmitterNotProven = "fauna.bridges.submitter_not_proven"
 
+// CodeMailDisabledByUser is the `RpcError.code` `enqueue_outbound_mail` (and
+// every IMAP handler) returns while the submitting actor has turned their mail
+// off (`docs/goal/behavior/mail-credentials.md` § Trigger taxonomy, the
+// Disable-mail row). It holds until the user turns mail back on, so the
+// submission MTA maps it to a permanent `550 5.7.1` rather than a `451` the
+// mail app would retry for ever.
+const CodeMailDisabledByUser = "fauna.bridges.mail_disabled_by_user"
+
 // CodeProtocolMalformed is the shared `fauna.protocol.malformed` `RpcError.code`:
 // the request itself is invalid (empty msgid or sender, no or too many
 // recipients, an oversize body, an invalid recipient address), so re-sending
@@ -474,16 +482,23 @@ func (c *Client) log() *slog.Logger {
 
 // buildWSURL maps an http(s):// base URL to its ws(s):// counterpart and
 // appends /api/v1/ws/<actor_id_hex>. Mirrors
-// libs/fauna-client/src/ws_adapter.rs::build_ws_url.
+// libs/fauna-core/src/transport.rs::actor_ws_url.
 func buildWSURL(nestBaseURL, actorIDHex string) string {
+	return wsBaseURL(nestBaseURL) + "/api/v1/ws/" + actorIDHex
+}
+
+// wsBaseURL trims trailing slashes and maps an http(s):// base URL to its
+// ws(s):// counterpart; any other scheme passes through unchanged. The one
+// scheme mapping shared by buildWSURL and buildAnonymousWSURL.
+func wsBaseURL(nestBaseURL string) string {
 	base := strings.TrimRight(nestBaseURL, "/")
 	switch {
 	case strings.HasPrefix(base, "https://"):
-		base = "wss://" + base[len("https://"):]
+		return "wss://" + base[len("https://"):]
 	case strings.HasPrefix(base, "http://"):
-		base = "ws://" + base[len("http://"):]
+		return "ws://" + base[len("http://"):]
 	}
-	return base + "/api/v1/ws/" + actorIDHex
+	return base
 }
 
 // buildAnonymousWSURL maps an http(s):// base URL to its ws(s):// counterpart
@@ -491,14 +506,7 @@ func buildWSURL(nestBaseURL, actorIDHex string) string {
 // /<actor_id> segment (the connection binds no actor). Mirrors buildWSURL
 // minus the actor id.
 func buildAnonymousWSURL(nestBaseURL string) string {
-	base := strings.TrimRight(nestBaseURL, "/")
-	switch {
-	case strings.HasPrefix(base, "https://"):
-		base = "wss://" + base[len("https://"):]
-	case strings.HasPrefix(base, "http://"):
-		base = "ws://" + base[len("http://"):]
-	}
-	return base + "/api/v1/ws"
+	return wsBaseURL(nestBaseURL) + "/api/v1/ws"
 }
 
 // Call sends a Request and waits for the matching Reply.

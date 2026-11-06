@@ -3,6 +3,8 @@ package com.fauna.app.testing
 import com.fauna.app.core.AppMessages
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -96,6 +98,50 @@ class TestAgentMessagesTest {
         val messages = AppMessages().apply { showError("transient") }
         assert(TestAgent.messagesJson(messages) is JSONObject)
         messages.clearError()
+        assertSame(JSONObject.NULL, TestAgent.messagesJson(messages))
+    }
+
+    /**
+     * The `messages` patch ([TestAgent.applyMessagesPatch]): a string injects
+     * each level through the funnel's own setters — the ones that log to the
+     * ring, so `test_displayed_banner_reaches_ring` checks the real logging —
+     * and reads back on `messages`.
+     */
+    @Test
+    fun aMessagesPatchInjectsEveryLevelThroughTheFunnel() {
+        val messages = AppMessages()
+        val patch = JSONObject()
+            .put("error", "boom")
+            .put("warning", "careful")
+            .put("info", "fyi")
+        assertNull(TestAgent.applyMessagesPatch(patch, messages))
+        val json = TestAgent.messagesJson(messages) as JSONObject
+        assertEquals("boom", json.getString("error"))
+        assertEquals("careful", json.getString("warning"))
+        assertEquals("fyi", json.getString("info"))
+    }
+
+    /** An explicit null clears only the level it names. */
+    @Test
+    fun aNullInTheMessagesPatchClearsOnlyThatLevel() {
+        val messages = AppMessages().apply {
+            showError("boom")
+            showWarning("careful")
+        }
+        assertNull(TestAgent.applyMessagesPatch(JSONObject().put("warning", JSONObject.NULL), messages))
+        assertEquals("boom", messages.error.value)
+        assertNull(messages.warning.value)
+    }
+
+    /**
+     * Convention 11: a level the funnel does not have, or a value that is
+     * neither text nor null, is refused with a reason — never silently dropped.
+     */
+    @Test
+    fun anUnknownLevelOrANonTextValueIsRefused() {
+        val messages = AppMessages()
+        assertNotNull(TestAgent.applyMessagesPatch(JSONObject().put("fatal", "x"), messages))
+        assertNotNull(TestAgent.applyMessagesPatch(JSONObject().put("error", 7), messages))
         assertSame(JSONObject.NULL, TestAgent.messagesJson(messages))
     }
 }

@@ -19,6 +19,7 @@ import Testing
 /// (a `kSecUseDataProtectionKeychain` query sees only data-protection rows) and the
 /// ad-hoc refusal (`errSecMissingEntitlement` on every data-protection query).
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainPlaneTests {
     private static let secret = String(repeating: "ab", count: 32)
 
@@ -121,12 +122,12 @@ struct KeychainPlaneTests {
     @Test func theBackupPreferenceDrivesTheDataProtectionPolicy() {
         let fake = FakeKeychainBackend(dataProtectionAvailable: true)
         let store = KeychainStore(testBackend: fake)
-        try? store.save(rawKey: "secret_key", value: Self.secret)
+        try? store.save(rawKey: "fauna/ab/secret", value: Self.secret)
         store.setICloudBackup(enabled: true)
 
-        #expect(fake.rows(account: "secret_key", sync: false, dataProtection: true).count == 1)
-        #expect(fake.rows(account: "secret_key", sync: true, dataProtection: true).count == 1)
-        #expect(fake.rows(account: "secret_key", sync: true, dataProtection: false).isEmpty)
+        #expect(fake.rows(account: "fauna/ab/secret", sync: false, dataProtection: true).count == 1)
+        #expect(fake.rows(account: "fauna/ab/secret", sync: true, dataProtection: true).count == 1)
+        #expect(fake.rows(account: "fauna/ab/secret", sync: true, dataProtection: false).isEmpty)
     }
 
     @Test func theProbeNeverWritesItsProbeRow() {
@@ -138,4 +139,38 @@ struct KeychainPlaneTests {
         #expect(!fake.accounts(dataProtection: true).contains("__plane_probe__"))
         #expect(!fake.accounts(dataProtection: false).contains("__plane_probe__"))
     }
+
+    // MARK: - A real-keychain e2e launch: the harness's keychain file
+
+    #if os(macOS)
+    /// `ios.md` § Credential Storage, the macOS keychain witness seam: every query a
+    /// keychain-file launch issues names the file, so none can fall through to the
+    /// box's login keychain. `SecKeychainOpen` of a path that does not exist answers a
+    /// handle without touching anything.
+    @Test func aKeychainFileLaunchNeverIssuesAQueryWithoutTheFile() throws {
+        var opened: SecKeychain?
+        #expect(SecKeychainOpen("/nonexistent/fauna-plane-test.keychain-db", &opened) == errSecSuccess)
+        let file = try #require(opened)
+        let fake = FakeKeychainBackend(dataProtectionAvailable: false)
+        let store = KeychainStore(testBackend: fake, e2eKeychainFile: file)
+
+        try store.save(rawKey: "secret_key", value: Self.secret)
+        #expect(store.load(rawKey: "secret_key") == Self.secret)
+        store.reconcileCredentialAccessibility()
+        _ = store.e2eItemAttributes(account: "secret_key")
+        store.delete(rawKey: "secret_key")
+        store.deleteAll()
+
+        #expect(!fake.adds.isEmpty && !fake.matchQueries.isEmpty)
+        #expect(fake.adds.allSatisfy {
+            $0[kSecUseKeychain as String].map { CFEqual($0 as CFTypeRef, file) } == true
+        })
+        #expect(fake.matchQueries.allSatisfy {
+            ($0[kSecMatchSearchList as String] as? [AnyObject])?.map { CFEqual($0, file) } == [true]
+        })
+        #expect((fake.adds + fake.matchQueries).allSatisfy {
+            $0[kSecUseDataProtectionKeychain as String] == nil
+        })
+    }
+    #endif
 }

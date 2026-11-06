@@ -2078,7 +2078,8 @@ async fn check_kind(
 }
 
 /// A conv row is keyed by its channel, so the bearer-keyed list never saw one:
-/// the Conversations entry lists every channel the bearer belongs to.
+/// the Conversations entry, and the kind-less list the restore picker reads,
+/// list every channel the bearer belongs to.
 #[tokio::test]
 async fn list_conv_lists_the_rows_of_every_channel_the_bearer_belongs_to() {
     let (router, state) = router_and_state().await;
@@ -2100,7 +2101,7 @@ async fn list_conv_lists_the_rows_of_every_channel_the_bearer_belongs_to() {
     let created = create_kind(&router, &state, "conv").await;
     assert_eq!(created.snapshot_ids.len(), 1);
 
-    let list = |actor: [u8; 32]| {
+    let list = |actor: [u8; 32], kind: Option<&'static str>| {
         let (router, state) = (&router, state.clone());
         async move {
             let reply: SnapshotListReply = decode(
@@ -2110,7 +2111,7 @@ async fn list_conv_lists_the_rows_of_every_channel_the_bearer_belongs_to() {
                     actor,
                     "fauna.filesync.snapshot.list",
                     encode(&SnapshotListRequest {
-                        message_kind: Some("conv".into()),
+                        message_kind: kind.map(str::to_string),
                         ..Default::default()
                     }),
                 )
@@ -2121,14 +2122,20 @@ async fn list_conv_lists_the_rows_of_every_channel_the_bearer_belongs_to() {
             reply.rows
         }
     };
-    let rows = list(ACTOR_A).await;
-    assert_eq!(rows.len(), 1, "the member sees the channel's row");
-    assert_eq!(rows[0].id, created.snapshot_ids[0]);
-    assert_eq!(rows[0].message_kind.as_deref(), Some("conv"));
-    assert!(
-        list([0x72u8; 32]).await.is_empty(),
-        "a non-member sees none of it"
-    );
+    for kind in [Some("conv"), None] {
+        let rows = list(ACTOR_A, kind).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the member sees the channel's row ({kind:?})"
+        );
+        assert_eq!(rows[0].id, created.snapshot_ids[0]);
+        assert_eq!(rows[0].message_kind.as_deref(), Some("conv"));
+        assert!(
+            list([0x72u8; 32], kind).await.is_empty(),
+            "a non-member sees none of it ({kind:?})"
+        );
+    }
 }
 
 /// An unset kind row resolves to the kind default — `applied`, never `not_set`.

@@ -15,6 +15,7 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.core.RegionPlaneHost
 import com.fauna.ffi.onboarding.HandleCheckOutcome
 import com.fauna.ffi.onboarding.HandleCheckPhase
 import com.fauna.ffi.onboarding.OnboardingStep
@@ -147,7 +148,13 @@ fun HandleEntryScreen(
 
         // Only while Continue signs in — the shared snapshot's field, never
         // re-derived here (terms-and-content-guidelines.md § The decisions, 3).
-        if (snap.termsNoticeVisible) TermsNotice()
+        // The nest's rules sit directly above it, on the same condition — the
+        // machine's getter applies it (nest-rules.md § Acceptance at joining).
+        if (snap.termsNoticeVisible) {
+            val rules = remember(tick) { vm.host.machine.joiningNestRules(RegionPlaneHost.UI_LANG) }
+            rules?.let { NestRulesJoining(it) }
+            TermsNotice()
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),

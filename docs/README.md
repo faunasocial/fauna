@@ -11,8 +11,7 @@ This page is the front door to everything else.
 ## I want to try Fauna
 
 Fauna is in closed alpha: everything below works, but there is **no public
-release yet** — outside Google Play's invitation-only testing, trying it means
-building from source, and there is no public server to join. You bring (or rent) the box.
+release yet** — outside Google Play's invitation-only testing of the Android app and the pre-release downloads of the Windows, Linux and terminal apps, and apart from the web app (which needs no install at all), trying it means building from source, and there is no public server to join. You bring (or rent) the box.
 
 1. **[Getting started](guides/getting-started.md)** — create your identity,
    claim or join a nest (a Fauna server), and find your way around the app.
@@ -33,7 +32,7 @@ for users, not developers:
 | [Getting started](guides/getting-started.md) | First run: identity, joining a nest, the basics. |
 | [A tour of the app](guides/app-tour.md) | Every screen, from Feeds to Settings — the same app on every platform. |
 | [Installing the app](guides/install.md) | Building/running each app today. |
-| [Your identity, devices & recovery](guides/identity-and-devices.md) | The one-key, no-password model: keeping the key safe, adding and losing devices, what is (and isn't) recoverable. |
+| [Your identity, devices & recovery](guides/identity-and-devices.md) | The one-key, no-account-password model: keeping the key safe, adding and losing devices, what is (and isn't) recoverable. |
 | [Set up a nest from the app](guides/nest-app-setup.md) | The no-terminal path: the app builds the server in your own cloud account, and your provider bills you directly. |
 | [Set up a nest on the internet](guides/nest-internet-setup.md) | The same server, built by hand with Docker: your own domain, real certificates, email. |
 | [Set up a nest at home](guides/nest-home-setup.md) | A nest on a machine on your own network — never reachable from the internet. |
@@ -48,6 +47,7 @@ for users, not developers:
 | [Bring your posts from Facebook](guides/import-your-social-archive.md) | Import your old posts, photos and events from the export archive Facebook gives you. |
 | [File sync FAQ](guides/file-sync-faq.md) | Working together in shared folders, and what is available now. |
 | [Who can see what](guides/who-can-see-what.md) | Every way your data reaches the outside world — per feature, who can see it, and what stays private. |
+| [Connect an AI assistant](guides/connect-an-ai-assistant.md) | Let an AI assistant on your computer read your feeds, post, keep up with notifications and reply in your conversations as you. |
 
 Some guides describe Fauna as it is taking shape: each one states plainly, up
 front or in a closing table, where each piece stands.

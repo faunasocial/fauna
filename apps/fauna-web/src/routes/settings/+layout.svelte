@@ -81,6 +81,8 @@
     { id: 'mail-spam', key: 'mail-spam', label: t.mail_spam.title },
     { id: 'mail-export', key: 'mail-export', label: t.mail_export.title },
     { id: 'mail-import', key: 'mail-import', label: t.mail_import.title },
+    // Import from other services — directly after Import mailbox (tui.md's rail order).
+    { id: 'archive-import', key: 'archive-import', label: t.archive_import.title },
     { id: 'mail-lists', key: 'mail-lists', label: t.mail_lists.title },
     { id: 'mail-list-members', key: 'mail-list-members', label: t.mail_lists.members_title },
     { id: 'nests', key: 'nests', label: t.nests.title },

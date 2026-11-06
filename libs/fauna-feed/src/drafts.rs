@@ -119,9 +119,10 @@ impl PostDrafts {
     }
 
     /// Apply a restored draft onto a composer state, leaving the transient
-    /// fields at their live values. Used on the load-on-launch path, where the
-    /// composer is freshly default — so `error`/`submitting` stay cleared
-    /// rather than being resurrected from the blob (which never held them).
+    /// fields at their live values — so `error`/`submitting` are never
+    /// resurrected from the blob (which never held them). Unconditional: the
+    /// launch restore goes through [`Self::fill`], which decides whether the
+    /// live composer yields at all.
     pub fn apply_to(self, compose: &mut FeedComposeState) {
         compose.text = self.text;
         compose.tags = self.tags;
@@ -130,6 +131,39 @@ impl PostDrafts {
         compose.gate_preview = self.gate_preview;
         compose.sell = self.sell;
         compose.gate_room = self.gate_room;
+    }
+
+    /// The posts rail's FILL rule (`ui/feed.md` § Persistence, *A restore
+    /// FILLS*): the resting draft takes the composer only when the user has not
+    /// authored into it, and then whole — never a field-by-field merge of two
+    /// different posts. Returns whether the composer took it.
+    ///
+    /// The launch load retries a read lost to the transport for minutes
+    /// (`fauna_client_drafts::DraftsSync::load`), so a restore routinely
+    /// lands after the user has started typing; the composer being typed into
+    /// is strictly the newer of the two, the blob being at best as old as the
+    /// last autosave. The conversations rail's per-slot rule, for this rail's
+    /// one slot.
+    pub fn fill(self, compose: &mut FeedComposeState) -> bool {
+        if self.is_empty() || Self::from_compose(compose).has_user_input() {
+            return false;
+        }
+        self.apply_to(compose);
+        true
+    }
+
+    /// Whether this record holds anything the **user** authored — the predicate
+    /// [`Self::fill`] consults before a resting draft may replace a live one.
+    /// Any persisted field counts, a chosen audience or sell mode included;
+    /// whitespace alone is not authorship.
+    pub fn has_user_input(&self) -> bool {
+        !self.text.trim().is_empty()
+            || !self.tags.trim().is_empty()
+            || self.attached_file.is_some()
+            || self.gate_tier.is_some()
+            || !self.gate_preview.trim().is_empty()
+            || self.sell.is_some()
+            || self.gate_room.is_some()
     }
 
     /// Serialise to the canonical at-rest bytes. Byte-stable for equal logical

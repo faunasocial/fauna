@@ -4,7 +4,7 @@ Owns: windows, windows-shell-extension
 Status: ratified — as-built architecture; remaining gaps declared in § Implementation status today
 Authority: windows-app architecture — the WinUI 3 app and its two nest transports (the WS-RPC `NestRpcClient` over the UniFFI `FfiNestClient`, plus `DirectNestClient` HTTP for unmigrated clusters), in-process MLS via `fauna_ffi.dll`, the per-user sync agent + cfapi on-demand hydration host + per-session named-pipe IPC, and shell-extension behavior (overlay/context-menu COM surfaces, pipe protocol); MSI packaging, COM registration, Path-1 upgrade + the services process model → [`../installers/windows.md`](../installers/windows.md); cross-app behavior → [`common.md`](common.md); the app-lifecycle model mirrors [`linux.md`](linux.md) § System Tray.
 
-Last verified: 2026-10-14 (docs-consistency sweep) — two-plane transport (~116 `INestRpcClient` / ~14 `DirectNestClient` consuming files), the `FaunaApp/Views/` page enumeration (64 top-level pages), the `Views/Payments/` store-safe set (eleven) and the Credential Manager key-storage claims re-checked against the code | Source: `apps/fauna-windows/`
+Last verified: 2026-11-05 (docs-consistency sweep) — two-plane transport (~130 `INestRpcClient` / ~14 `DirectNestClient` consuming files), the `FaunaApp/Views/` page enumeration (69 top-level `.xaml.cs` files, one of them the empty `EndedPage` frame sentinel), the `Views/Payments/` store-safe set (eleven) and the Credential Manager key-storage claims re-checked against the code | Source: `apps/fauna-windows/`
 
 ## Goal
 
@@ -44,7 +44,7 @@ for basic connectivity.
 (or a uniffi-generated `I<Machine>` interface for machine-backed pages), faked
 for deterministic unit tests — never `FfiNestClient` directly in a page.
 
-The UniFFI client builds its own `wss` URL (`ws_adapter::build_ws_url`) and
+The UniFFI client builds its own `wss` URL (`fauna_core::transport::actor_ws_url`) and
 handles reconnect + token refresh internally; there is no C# WebSocket layer
 (the dead push-only `WebSocketService` was removed when notifications moved
 onto WS-RPC push).
@@ -75,15 +75,57 @@ the person's other PCs. The terminal app and the sync agent write the same arm
 under their own namespaces, so the grammar has one writer. A live test reads a
 row back through Win32 `CredReadW`, an observer sharing no code with the
 writer, and pins the name, the type, the persistence and the bytes
-(`SharedSecretBackendTests`). What the cross-app rule asks of a store, and
+(`SharedSecretBackendTests`); the same read over the row a real onboarding
+leaves behind is the e2e witness, in the real-session venue because this store
+has no private instance
+(`real_session/test_identity_rests_in_credential_manager.py`,
+[`../e2e-conventions.md`](../e2e-conventions.md) convention 12). What the
+cross-app rule asks of a store, and
 this one's cell: [`common.md`](common.md) § Credential storage.
 
+**Every call is serialized (2026-10-27).** Credential Manager itself loses
+overlapping updates: two writers of one user, even on rows that have nothing
+to do with each other, get a write that never reads back, a delete that does
+not take, or a deleted row back a moment later — every call reporting success.
+Measured on Windows 11 ARM64, two processes one thread apiece got about one
+iteration in a hundred wrong, and one writer at a time none in 1800. So every call of the
+shared arm holds one per-user lock file under the sync state base
+(`win_credman::lock_credman`, `%LOCALAPPDATA%\Fauna\sync`), which the app, the
+terminal app and the sync agent all take, being the same code; a file rather
+than a named mutex because the store is per user across logon sessions. A
+writer outside Fauna can still overlap, rarely. The crate's
+`overlapping_writers_lose_no_update` pins it, red without the lock.
+
 **The bound the store brings.** One row holds at most 2560 bytes, and a write
-past that reports nothing: the row keeps the value it had. Every registry row
+past that reports nothing: the row keeps the value it had (the shared arm
+refuses it with a warn line naming the cap, before Windows sees it). Every registry row
 but one is far under it. The account index, which grows with each account, is
 bounded against the cap by the shared registry
 ([`../long-term-store.md`](../long-term-store.md) § Multi-account evolution →
 *The index is bounded*).
+
+**The whole set has a budget too (measured 2026-10-27).** On Windows 11
+ARM64, one writer under the shared lock, beside eight credentials of other
+programs and of Fauna: the user's set filled at 220 rows of 2560 bytes (563 KB
+of values) and, in a second run, at 729 rows of 256 bytes (187 KB). The next
+write failed with `ERROR_NOT_ENOUGH_MEMORY` (Win32 error 8, HRESULT
+`0x80070008`), while two 16-byte rows still fitted after the first run's
+refusal. So the budget counts neither rows nor values alone: each row costs
+its value plus about 740 bytes (its two names, here about 80 characters, and
+the store's own bookkeeping), and the set holds about 730 KB in all. While it
+is full Windows refuses every write of this user, Fauna's and every other
+program's, until rows are deleted; deletes still work. Fauna keeps a few rows
+per account, most far under the per-row cap, so what fills the set is other
+programs' rows or leaked ones. The refusals that raised the question, about
+900 in one stress run, came with about 207 leaked 2560-byte test rows in the
+store, some 680 KB of the budget. Three things follow. The shared arm's warn
+line names a full store as full (`win_credman::set_failure_note`), because
+Windows' own text for the error speaks of memory. The one write whose silent
+loss would destroy an account, a freshly generated identity secret, is read
+back before the add counts (`persist_confirmed_identity` in
+`fauna-client-accounts`), so a full store fails that add visibly; every other
+write stays best-effort and log-only, as on every arm. And the arm's live
+tests sweep their probe namespaces even when they fail part-way.
 
 **The carry-across (removed 2026-10-04).** Until 2026-10-03 the store was
 `PasswordVault`, the platform's Credential Locker, which roams, and for one day
@@ -151,6 +193,23 @@ pattern to copy; pinned by
 the live-poller count (`diagnostics.live_sync_agent_pollers`) directly so a
 regression fails as itself rather than as a downstream timing flake.
 
+The rule reaches **the pages inside a shell's inner frame** too. WinUI calls
+`OnNavigatedFrom` only on a page whose OWN frame navigates, so when the shell is the
+page leaving — `MainPage` on every root-frame navigation, the Settings or Admin shell
+when the user leaves it — the page in its inner frame used to see only `Unloaded`,
+and its release never ran (a left Feed page stayed subscribed to the session's feed
+manager and kept re-rendering, blanking the app-wide error under the page on screen).
+Each of the three shells therefore ends its inner page from its own `OnNavigatedFrom`
+(`Views.NestedFrame`), which recurses, so a page's one release runs on every exit
+path. And a page whose `async void` `Page_Loaded` awaits re-checks, after each await,
+that it has not been navigated away meanwhile — its teardown has then already run,
+and anything started after it would never be released. Pinned by
+`tests/e2e-unified/tests/test_windows_feed_page_teardown.py`
+(`diagnostics.live_feed_pages`). A page's own subscription to a session-lifetime
+object is part of what it releases: the Feed page takes its observer off the feed
+manager, the shell VM (`MainViewModel.Detach`) its connection-state, reconnect and
+critical-alerts listeners.
+
 And the teardown corollary: **a page's own teardown runs AFTER the actor change,
 so it must tolerate a session object that is already destroyed.** The actor
 change (`DisposeNestClients` → `DropActorScopedState`, which retires the
@@ -166,7 +225,20 @@ and that wrapper is exactly what the actor change disposes: on that path every
 sign-out with a conversation (or a new message) open on the page killed the app
 (`[fauna] FATAL (UI thread) — Cannot access a disposed object`). Fixed 2026-10-09 by `ConversationsPage.UnlessManagerRetired`;
 pinned by `tests/e2e-unified/tests/test_windows_conversation_open_across_reset.py`,
-which forces the host-wrapper path deterministically.
+which forces the host-wrapper path deterministically. The same window holds for the
+conversations SESSION a page was handed (the actor change closes it), so every page
+resolves its manager through `ConversationsManagerHost.ManagerFor`, which answers
+"nothing" for a retired session — never the host's manager, which after the actor
+change is the incoming identity's.
+
+The producer side of the same window: **a disposed `NestRpcClient` is silent.** Its
+own `Disconnect()` makes the connection-state watch yield a last `Disconnected`, and
+delivered to the outgoing shell VM — the one writer of the process-wide offline gate
+— that event could grey the next session's controls after its client had connected.
+So a disposed client raises no event at all, including one posted to the UI thread
+before the dispose and delivered after it, and hands out no `FfiNestClient`
+(`NestRpcClient.DeliverOnUi`, `ConnectedAsync`'s entry; unit-pinned by
+`NestRpcClientDisposeTests`).
 
 ---
 
@@ -217,20 +289,21 @@ feature — see `FaunaApp/Views/`):
   `AdminUsersPage`, `AdminSettingsPage`, `AdminAliasesPage`,
   `AdminBridgesPendingPage`, `AdminCalendarPage`, `AdminContactsPage`,
   `AdminCustodyHostingPage`, `AdminDnsPage`, `AdminFilesPage`,
-  `AdminLogsPage`, `AdminMailPage`, `AdminNestPage`, `AdminWebPage`
+  `AdminLogsPage`, `AdminMailPage`, `AdminMailReportsPage`, `AdminNestPage`, `AdminWebPage`
   (`AdminNavigation.cs`; shell model → `behavior/admin.md`).
 - **Settings shell:** `SettingsShellPage` (Status is the default sub-page) +
   sub-pages Account, ConnectedApps, Encryption, General, LinkedNests (Nests), Logs, Mail,
   MailAliases, MailExport, MailImport, MailLists, MailListMembers, MailSpam,
-  MemberReview, MutedWords, Privacy, Subscriptions, TaskDelegation, Web —
+  MemberReview, MutedWords, Privacy, Sessions, Subscriptions, TaskDelegation, Web —
   plus `DevicesPage`, `FoldersPage`, `PersonalizationPage`,
-  `LabelerCatalogPage`, `AtprotoPage`, `NostrPage`, `StatusPage` reached
+  `LabelerCatalogPage`, `AtprotoPage`, `NostrPage`, `ArchiveImportPage`, `StatusPage` reached
   through the shell. Shared controls include `NestsPanel` and
   `MailSettingsPanel`.
 - **Launch surfaces:** `OnboardingPage` (+ `Views/Onboarding/`),
   `LaunchRetryPage`, `LaunchNeedsUpdatePage`, `LaunchIdentityChangedPage`,
   `LaunchInstanceChooserPage`, `LaunchAccountIndexUnreadablePage`,
-  `LaunchSignInRefusedPage`,
+  `LaunchSignInRefusedPage`, `LaunchAccountLockedPage` (with its
+  `identity_stolen_entry` step),
   `FamilyPage` (gated footer).
 
 **Retired (2026-06-28 sync/folder UI unification):** `GroupsPage` /
@@ -347,6 +420,14 @@ consumed by `fauna-sync-agent` (see *cfapi crate* below), **not** by this DLL.
   - **Folders carry a badge too**, so a synced folder is identifiable at a glance without
     opening it — the behaviour every comparable app ships (OneDrive, Dropbox). This
     covers the bound sync-root folder and every folder beneath it.
+  - **Both location modes are covered** (2026-10-27): an always-resident root badges, and
+    shows the "Fauna" submenu below, exactly as an on-demand one does — the agent resolves
+    every bound location (`path_map::resolve_to_folder_rel`) and reads the badge off the
+    file's row. The pipe's verbs that free or pin a copy (`PinFile`, `UnpinFile`,
+    `FreeSpace`) refuse a resident file with a reason before anything else runs
+    (`pipe_server::refuse_a_kept_copy`): every file there is a copy this device keeps. The
+    submenu carries no such leaf, and Explorer's own cloud verbs appear only on a cfapi sync
+    root, which a resident root is not.
   - **A folder's status is the aggregate of its tracked descendants**, resolved by
     severity so the badge always reports the worst thing inside: any `Error` → **Error**;
     else any `Syncing` → **Syncing**; else any `Synced` → **Synced** (a folder holding a
@@ -375,7 +456,7 @@ consumed by `fauna-sync-agent` (see *cfapi crate* below), **not** by this DLL.
 - **The Share hand-off (specified 2026-09-30).** Four links, each owned once:
   1. **The agent resolves, never mints.** The `ShareFile { path }` pipe verb answers
      `ShareTarget { folder_id, path }` — the Explorer path resolved through
-     `path_map::resolve_to_folder_rel` to its bound set's durable id and the folder-relative
+     `path_map::resolve_to_folder_rel` (every bound location, either mode) to its bound set's durable id and the folder-relative
      path (`None` for the set's own root) — or an error, which hides the leaf. Which items are
      targets is `share-links.md`'s; the agent's one mechanical fact is the file rule's
      "eligible": its set's running engine holds the public-audience write arm
@@ -452,11 +533,12 @@ consumed by `fauna-sync-agent` (see *cfapi crate* below), **not** by this DLL.
 | **Folder context menu** (`Directory\shell\Fauna`) | ✅ **decided + implemented (USER, 2026-07-16): folders get the submenu with a reduced leaf set.** The same `{4a7b8c10-…}` CLSID registers under `Directory\shell\Fauna` (shell-ext self-registration + the MSI's WiX twin + `test_installer_structure` pin); the root's tracked-ness gate already answers for folders via the badge fold. Reduced set (`context_menu::leaf_hidden_for_folder`, unit-pinned): **Share stays** — a bound location *is* the folder, the natural share target once sharing is live; **device info** and **version history hide** — per-file reads that would render a permanent "unavailable". Renders in the legacy menu via HKCR. The Win11 **default** menu's sparse-package manifest already carries `Directory` **and** `Directory\Background` item types alongside `*` (`apps/fauna-windows/installer/sparse/AppxManifest.xml.in`, present since the manifest's first commit 2026-07-14; pinned by `test_registers_the_verb_for_files_and_folders`) — **not** a remaining gap, corrected 2026-07-19 (a prior pass here mis-stated the manifest as file-types-only). **The folder-specific live render is now also captured (2026-07-22, the dev-fleet UIA observation harness):** a tracked folder shows `DEFAULT_HAS_Fauna=True` in the Win11 default menu (confirmed a genuinely folder-scoped Explorer window via its folder-only verb set — `Open in new tab`/`Pin to Start`/`Open in Terminal`, absent from the file case) and `LEGACY_HAS_Fauna=True` via the `Directory\shell\Fauna` registration (gate ③). No gap remains for either menu, file or folder |
 | Live-Explorer verification — **context menu** | ✅ **OBSERVED live 2026-07-15** (headless, no human eye). The **"Fauna" verb renders in the Win11 default context menu** on a tracked file — read via UI Automation by the dev-fleet observation harness below. First render confirmation since the registration fix. See the observation-harness note below the matrix |
 | Windows 11 **default** context menu (vs. "Show more options") | ✅ **OBSERVED live 2026-07-15, and the installer ships it — DONE.** "Fauna" renders in the Win11 **default** (top-level) menu (driven by the sparse package) **and** in the legacy "Show more options" menu (driven by the HKCR `*\shell\Fauna` verb), both on the *same* `{4a7b8c10-…}` CLSID. (Gate ② read live via UIA; gate ③ verified via the HKCR registration the OS renders the classic menu from — the `#32768` classic menu is MSAA-only and exposes nothing to UIA.) **The duplicate is cross-menu, not same-menu — decided: keep both, no OS-version gate** (installer decision, `installers/windows.md` § Menu placement): a Win11 `IExplorerCommand` registered the classic way is demoted to "Show more options" only, so gate ②'s UIA read showed exactly **one** "Fauna" in the modern menu; suppressing the HKCR verb would strand users who force the classic menu (a per-user `HKCU` setting a per-machine installer can't soundly detect). **The MSI ships + registers the sparse package, and both custom actions are now LIVE-VERIFIED** on a real elevated box (2026-07-15): `RegisterSparsePackage` produces the per-user **and** provisioned registrations on install (Return value 1), `DeregisterSparsePackage` removes both on uninstall (no stale entry), sequenced before `CleanShellDlls`; pinned by `TestSparsePackageRegistration` (11 tests). Not gated on code-signing — false blocker, corrected |
-| **Version history — service half** (`ListFileVersions` → `fauna.files.versions.list` via the shared `SyncClient`, keyed by `fauna_core::sync::path_hash`, scoped by `folder`) | built + unit-tested against an in-memory dag-cbor fake, **and exercised against a real nest headlessly** (tier_3 `versions_tier3.rs`, opt-in `--features tier3-nest`): `list_file_versions` returns the real `sync_changes` projection, proving the `SyncClient` wire shapes against the running handlers rather than a fake that re-encodes its own request types |
+| **Version history — service half** (`ListFileVersions` → `fauna.files.versions.list` via the shared `SyncClient`, keyed by `fauna_core::sync::path_hash`, scoped by `folder`) | built + unit-tested against an in-memory dag-cbor fake, **and exercised against a real nest headlessly** (tier_3 `versions_tier3.rs`, opt-in `--features tier3-nest`): `list_file_versions` returns the real `sync_changes` projection, proving the `SyncClient` wire shapes against the running handlers rather than a fake that re-encodes its own request types. **Red since the nest began refusing unsealed and unsigned records** (measured 2026-11-02: its hand-built records are refused `path_seal_required`) |
 | **Version history — Explorer submenu** (`FaunaInfoVersions` → `ECF_HASSUBCOMMANDS` + a dynamic `IEnumExplorerCommand` of per-version children) | built + unit-tested; the children are returned objects, so the 8-CLSID contract is untouched. The selected path is captured in `GetTitle`/`GetState` because `EnumSubCommands` receives no `IShellItemArray` |
 | **Explorer's native cloud verbs ("Free up space" / "Always keep on this device")** | ✅ **the product host shell-registers (2026-07-16).** Every on-demand engine registers via `cfapi_host::register_and_connect_shell` — `StorageProviderSyncRootManager` (per-folder display name `Fauna – {folder}`, `AllowPinning=true`, interim imageres icon) — so the verbs / status column / provider grouping render on a real user's root; a leftover filter-only root is shell-registered over in place, never unregistered (measured 2026-09-25 — the `0x8007018B` refusal once measured there no longer reproduces). The verbs complete through the pin-reaction loop. **Registration is persistent** — it belongs to the location↔folder binding; a service stop only disconnects, and only unbind / folder-removal / re-bind / mode-flip tears it down (`reconcile_engines` marks the root via `mark_root_for_full_teardown`; the drop guard runs the measured-order teardown disconnect → filter → shell), with a ghost janitor at service startup for folders deleted while down. Lifecycle rationale + measured facts owned by `behavior/file-sync.md` § Per-file sync-status display. 4 live tests (`cfapi_live_integration.rs`); Explorer render pass via `hold_a_live_root_for_explorer` (now exercising this exact product path under `FAUNA_HOLD_SHELL=1`) + `read-context-menu.ps1` |
 | **Live-root observation harness** (`hold_a_live_root_for_explorer`, `#[ignore]`d) | ✅ built 2026-07-16 — holds a real served root (optionally shell-registered, `FAUNA_HOLD_SHELL=1`) with a hydrated file for `FAUNA_HOLD_SECS`, printing `HOLD:` row/badge/event lines; `read-context-menu.ps1 -Invoke` clicks a named verb. Together they answer Explorer-render questions headlessly — no FaunaApp login chain |
-| **Version history — `RestoreFileVersion` verb** | built + unit-tested — records via the shared `SyncClient::restore_version`, then performs the recording-device local re-point (`behavior/file-versions.md` § Restore), because catch-up skips a device's own changes and would leave *this* machine's copy stale. **Exercised end-to-end against a real nest (2026-07-15, tier_3 `versions_tier3.rs`, `--features tier3-nest`):** restore records the historical `manifest_hash`/`size_bytes`/`content_key_version` **verbatim** as a new listable head (read back over `versions.get`), and `repoint_entry` re-points this device's own `SyncDb` row to the restored version (`Placeholder` at the new head). **The cfapi byte-plane half is also exercised headlessly** (2026-07-15, TRACK V slice G, `restore_byteplane_tier3.rs`): a real cfapi `FETCH_DATA` re-hydrates the restored version's actual bytes off a re-pointed row. **Remaining:** the live-Explorer submenu **render** (see `behavior/file-versions.md` § Implementation status today) |
+| **Version history — `RestoreFileVersion` verb** | built + unit-tested — records via the shared `SyncClient::restore_version`, then performs the recording-device local re-point (`behavior/file-versions.md` § Restore), because catch-up skips a device's own changes and would leave *this* machine's copy stale. **The record is writer-signed** like every other, through `SyncServiceState::record_signing` (the agent's one signer source and its content-key resolution's set nonces, shared with the custodian's re-seed); until 2026-11-02 the verb built its `SyncClient` with no signing, so every nest refused its record `signature_required` — found by `resident_restore_tier3.rs`'s first run. **Exercised end-to-end against a real nest (2026-07-15, tier_3 `versions_tier3.rs`, `--features tier3-nest`):** restore records the historical `manifest_hash`/`size_bytes`/`content_key_version` **verbatim** as a new listable head (read back over `versions.get`), and `repoint_entry` re-points this device's own `SyncDb` row to the restored version (`Placeholder` at the new head). **The cfapi byte-plane half is also exercised headlessly** (2026-07-15, TRACK V slice G, `restore_byteplane_tier3.rs`): a real cfapi `FETCH_DATA` re-hydrates the restored version's actual bytes off a re-pointed row. **Remaining:** the live-Explorer submenu **render** (see `behavior/file-versions.md` § Implementation status today) |
+| **Always-resident root's shell surface** (bullet above: both location modes covered) | ✅ **built + unit-tested (2026-10-27)**. One resolver for every verb: `path_map::resolve_to_folder_rel` serves every bound location whose mode an engine runs, carrying the mode (`an_always_resident_bound_folder_is_resolved_with_its_mode`); the share arm's separate every-mode resolver is retired into it. Pinned over a resident root's identity-keyed DB: the file and folder badges (`pipe_server::tests::a_resident_roots_file_and_folder_badge_from_its_rows`), the version list and restore reaching the nest step (`the_version_verbs_reach_the_nest_for_a_resident_root`, whose restore then takes the kept-copy road `a_restore_on_an_always_resident_root_takes_the_kept_copy_road` pins), and pin, unpin and free refusing before cfapi is touched while `mark_placeholder`, the dehydrate gate and the `CloudOnly` flip leave the row alone (`pin_unpin_and_free_refuse_on_a_resident_root`; measured red: cfapi pinned the ordinary file and answered `Ok`). **The restore end to end (2026-11-02):** `resident_restore_tier3.rs` (`--features tier3-nest`) drives `RestoreFileVersion` on a resident root through the capability's own WS client to a real nest and the root's own loop, to the restored bytes on disk (`behavior/file-versions.md` § Implementation status today). **Not yet run: the live-Explorer render on a resident root.** The observation harness binds one (`observe-context-menu.ps1 -Mode always`; the resident seed witnessed headlessly against the real agent, `STATUS=Synced`), but the shell extension is not yet installed on the machine that runs it |
 | **i18n** | ✅ **ruled + adopted (2026-08-27)****.** The submenu's user-visible strings (menu titles, device/version-count text, restore/share outcomes, the location-mode toggle, the notification caption) resolve through the shared catalog — `file_context_menu.*` + `common.app_name` in `i18n/strings/en.yaml`, via `fauna_core::localized::LocalizedText` + `fauna_i18n::strings::lookup` — rather than hardcoded English literals; the month table is `fauna_i18n::time::month_name_short` instead of a local copy. **The ruling:** a shell extension arguably could follow the OS UI language instead, but the product is single-language today (only `en.yaml` exists), so the distinction is moot in practice and the standing i18n rule (`ui/events.md` § Where logic lives) wins — adopt the catalog like every other user-facing surface. Output is unchanged (still English) until a second locale exists |
 
 Version-history behavior and restore semantics are owned by `behavior/file-versions.md`
@@ -469,15 +551,20 @@ only the submenu pixels remain.
 
 **Observation harness (a dev-fleet script directory, 2026-07-15).** The badges/menu are now
 observable **headlessly** — no FaunaApp, login, nest, or manual folder-bind. The
-load-bearing constraint: the shell-ext reports a file *tracked* only under an
-**on-demand + bound** folder, and — **when a capability is present** — binding one
+load-bearing constraint: the shell-ext reports a file *tracked* only under a
+**bound** folder (on-demand, or always-resident since 2026-10-27; the harness binds an
+on-demand one by default and an always-resident one with `-Mode always`), and — **when a
+capability is present** — binding an on-demand one
 makes `fauna-sync` register a **cfapi sync root** that is *unenumerable* without a
 real provider ("The cloud operation is invalid"). But a `fauna-sync` with **no
 capability** skips cfapi registration (`engine_driver::reconcile_engines` returns at
 the `No well-formed capability` gate), so the folder stays a **normal, enumerable**
 folder while `GetFileStatus` still reports it tracked from the seeded `sync_entries`
-row. The harness runs a no-capability `fauna-sync` on the per-SID pipe
-(`fauna-shellext-fixture` seeds one tracked file) and drives Explorer's menu via UIA.
+row. The harness runs a no-capability `fauna-sync` on the per-SID pipe — with a private
+credential store, since one shared with the box's other agents restores whatever capability
+was persisted there — (`fauna-shellext-fixture` seeds one tracked file) and drives
+Explorer's menu via UIA, inside the `e2e_other` slot lane so it never takes the desktop's
+foreground from a windows UI e2e run.
 Because the DLL hardcodes the single per-SID pipe, it displaces + restores the
 running production `fauna-sync` — dev-box only (no Windows CI runner). Full method +
 caveats documented alongside the harness scripts.
@@ -634,7 +721,7 @@ not `dotnet build`, on win-arm64 — see the internal dev-setup notes.)
 
 ### Rust Services
 
-Rust builds on Windows require the MSVC linker. Git Bash's `/usr/bin/link.exe` shadows it. Use the wrapper script:
+Rust builds on Windows need the MSVC build environment — its libraries, the Windows SDK, and `cl.exe` for the C dependencies — while the link itself is the Rust toolchain's own `rust-lld` (`.cargo/config.toml`; [`../build-target-layout-windows.md`](../build-target-layout-windows.md) § UniFFI cdylib rebuild cost (win) → *Linker verdict*). The wrapper script sets that environment up:
 
 ```
 cmd //c "scripts\cargo-win.cmd check -p fauna-sync-agent"
@@ -670,7 +757,10 @@ windows is the sixth and last app-shell to gain the App-Store escape hatch
 owned by [`../dynamic-features.md`](../dynamic-features.md) § Platform-family
 surface excision, not restated here. windows' condition is a C# `#define`
 (`PAYMENTS`, positive and default-ON, set by all three csprojs and removed by
-`/p:FaunaStoreSafe=true`); because XAML has no preprocessor, the define reaches
+the payments member's own property, `/p:FaunaExcisePayments=true`, which
+`/p:FaunaStoreSafe=true` sets beside `p2p-share`'s; the two store flavors are
+owned by [`../dynamic-features.md`](../dynamic-features.md) § The App-Store escape
+hatch → *The store flavors*); because XAML has no preprocessor, the define reaches
 the glue only, and the §4/§5 provider + claim sections, the claim-redeem
 input, and the per-card/detail tip surface (added 2026-08-30, closing a leak
 where `FeedPage.xaml` painted the tip ids directly in the shared per-card
@@ -686,13 +776,15 @@ excision → *The price-and-route class*) — the tier editor's money fields, th
 list's and the offer row's price, the offer's checkout link, the sell composer and
 the sold-post teaser, which together retired the single asking-price input
 (`AskingPriceInput`, 2026-09-06). Recipes: `just windows-ffi-store-safe`
-(the dll), `just windows-store-safe` (the app), `just windows-store-safe-check`
-(the two-column witness, scanning both the managed assembly and every compiled
-`.xbf`, since WinUI puts markup beside the assembly, not inside it).
+(the dll), `just windows-store-safe` (the app), their `store-no-payments`
+twins `just windows-ffi-store-no-payments` and `just windows-store-no-payments`
+(2026-10-27), and `just windows-store-safe-check` (the three-column witness —
+store-safe, store-no-payments, default — scanning both the managed assembly and
+every compiled `.xbf`, since WinUI puts markup beside the assembly, not inside it).
 
 ### Auto-Updates
 
-`UpdateCheck` (`FaunaApp.Core/Services/UpdateCheck.cs`, one process-wide instance) is windows' newer-version notice. **The one rule every desktop follows** (amended 2026-10-03): the user can trigger the check from Settings, and the app also looks ONCE per sign-in and only shows the same notice — through the shared `fauna_client::update_look`, the entry point linux and tui call, never a copy of its own; a failed look is silent. No timer, no download, no self-replacement, no toggle. Windows reaches it through the `fauna-ffi` `version` module's exports, macOS's face (built 2026-10-08): `check_for_newer_release(feed_origin, user_agent)` is the asked check (newer with tag, bare version and release page / up to date / failed — a failed round trip paints *Check failed*, never *Up to date*), `look_at_sign_in(feed_origin, user_agent)` runs from both session-building paths (`StartMainAppAsync` and the e2e session patch, which never reaches it), and `release_feed_origin()` is production's origin; under e2e a test-capable build passes the harness's stub feed instead, read only through `E2eEnv.ReleaseFeedUrl` (convention 15). No C# keeps a URL or a round trip, and the user agent is `fauna-windows/<fauna_ffi_build_version()>`. The door is Settings → General's About block, linux's and macOS's shape: `settings-app-version` (`fauna_ffi_build_version()`), `settings-check-updates-button` (its label carries the check's state — *Checking…*, *Up to date*, *Check failed*, *<version> available* — and holds an answer for three seconds), and `update-available-notice`, collapsed until the check or the look finds a newer release; `UpdateCheckFfiTests` drives the real exports against a loopback feed. The semver rule is the shared `fauna_core::version::is_newer`, applied inside the update look; the `IsNewer` export's cross-language conformance stays pinned by `VersionCompareFfiTests`. The cross-platform promise this serves — and its desktop-only scope (owed on linux, windows, macOS and, once it has a channel, tui; absent by design on web, iOS and Android) — is owned by [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out.
+`UpdateCheck` (`FaunaApp.Core/Services/UpdateCheck.cs`, one process-wide instance) is windows' newer-version notice. **The one rule every desktop follows** (amended 2026-10-03): the user can trigger the check from Settings, and the app also looks ONCE per sign-in and only shows the same notice — through the shared `fauna_client::update_look`, the entry point linux and tui call, never a copy of its own; a failed look is silent. No timer, no download, no self-replacement, no toggle. Windows reaches it through the `fauna-ffi` faces macOS uses: `check_for_newer_release(feed_origin, user_agent)` is the asked check (newer with tag, bare version and release page / up to date / failed — a failed round trip paints *Check failed*, never *Up to date*), and `release_feed_origin()` is production's origin for it; under e2e a test-capable build passes the harness's stub feed instead, read only through `E2eEnv.ReleaseFeedUrl` (convention 15). The sign-in look reads the nest the app just signed in to, never the release host (2026-11-04): both session-building paths (`StartMainAppAsync` and the e2e session patch, which never reaches it) hand their `NestRpcClient` to `UpdateCheck.LookOnceAtSignInAsync`, which calls `FfiNestClient.LookForNewerReleaseAtSignIn` over it, and with several nests a notice already showing only moves up (the `IsNewer` compare, `keep_the_newer`'s rule). No C# keeps a URL or a round trip, and the user agent is `fauna-windows/<fauna_ffi_build_version()>`. The door is Settings → General's About block, linux's and macOS's shape: `settings-app-version` (`fauna_ffi_build_version()`), `settings-check-updates-button` (its label carries the check's state — *Checking…*, *Up to date*, *Check failed*, *<version> available* — and holds an answer for three seconds), and `update-available-notice`, collapsed until the check or the look finds a newer release; `UpdateCheckFfiTests` drives the real asked-check export against a loopback feed, and the sign-in look over `MockNestRpcClient` with the feed closed. The semver rule is the shared `fauna_core::version::is_newer`, applied inside the update look; the `IsNewer` export's cross-language conformance stays pinned by `VersionCompareFfiTests`. The cross-platform promise this serves — and its desktop-only scope (owed on linux, windows, macOS and, once it has a channel, tui; absent by design on web, iOS and Android) — is owned by [`../installers/README.md`](../installers/README.md) § Knowing a newer version is out.
 
 ---
 
@@ -705,7 +797,7 @@ co-present share ceremony (a nest-free, iroh-direct two-party ceremony,
 landed 2026-08-27) lives on the Folders page instead —
 `FoldersPage.xaml.cs`'s `RenderOfflineShare`/`OpenOfflineSharePanelAsync`
 over `INestRpcClient`'s five ceremony doors + the pure `FaunaFfiMethods`
-reads called directly off the page. Layer authority: `behavior/p2p.md` §
+reads called directly off the page. Layer authority: `behavior/p2p-shared-set.md` §
 Offline share initiation.
 
 ---
@@ -818,7 +910,7 @@ post-decrypt **local detections** (`IModerationLocalDetections`, from
 
 - **Declared absences (owner [`../../behavior/account-age-band.md`](../../behavior/account-age-band.md) § The account age band):** no store age signal and therefore no `invite-request-age-notice` (D3 — at most the two store-distributed mobile apps ever receive one; the id is `platform_elements: {android, ios}` in ui.yaml), and no kids flavor (the kids-app bullet: the kids door is a store construct, android and ios only), and no store-consent lock (`store-consent-lock` + its message — `global.platform_elements: {android, ios}` in ui.yaml; the store-law developer duties bullet, ruled 2026-10-19: a parent's consent to a significant change is a store construct about one device). The e2e gate for all three is `declared_absence`, never `skip_unbuilt`.
 - **Two-plane transport is the shipped shape** (§ Architecture): `NestRpcClient`
-  over `FfiNestClient` for migrated clusters (~116 consuming files in FaunaApp,
+  over `FfiNestClient` for migrated clusters (~130 consuming files in FaunaApp,
   up from ~100 as more clusters migrated), `DirectNestClient` for the remainder
   (~14 consuming files). The bridges HTTP→WS-RPC swap is **done**
   (`BridgesViewModel` drives `INestRpcClient.BridgesListAsync`).
@@ -839,9 +931,8 @@ post-decrypt **local detections** (`IModerationLocalDetections`, from
   list via the FlaUI bridge's `/session/windows`). The second witness is not
   belt-and-braces — a red-verify with an activation injected *after* the gate found
   the self-report still honest and only the OS view red. Open: the live "session
-  survives a real relaunch on a live nest" re-verify, and the linux advisory legs
-  (autostart default + close-to-tray default) — both tracked in the respective
-  NEXT files.
+  survives a real relaunch on a live nest" re-verify, tracked in its NEXT file.
+  linux joined case J 2026-10-30 (`apps/linux.md` § Auto-start at sign-in).
 - **Shell extension:** COM surfaces + status producer + engine-driven end-to-end
   (headless) done; file-level live-Explorer verification is also done for both
   badges (2026-07-14) and the context menu (2026-07-15) — corrected 2026-07-20,

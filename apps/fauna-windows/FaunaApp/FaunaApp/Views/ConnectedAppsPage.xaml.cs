@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
-using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
@@ -36,8 +35,8 @@ namespace FaunaApp.Views;
 /// it until it turns non-empty and returns that AS the secret, so a mask would pass the reveal
 /// test without the on-demand read ever running — and it is dense (never collapsed): a collapsed
 /// element is pruned from the UIA tree, which would desync this leaf's index from the reveal
-/// button's. A burned mail row carries <c>revoked="true"</c> as its HelpText (the windows bridge
-/// maps any non-name attr to HelpText).</para>
+/// button's. A row's attributes ride its HelpText (the windows bridge maps any non-name attr to
+/// HelpText), packed by <see cref="ConnectedAppsViewModel.RowAttributes"/>.</para>
 ///
 /// <para><b>Capture suppression</b> (<c>security.md</c> § On-screen secret exposure, rule 2): a
 /// mail app password is a <em>minted, revocable</em> secret, so the window's capture is
@@ -61,6 +60,10 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
         FaunaApp.Helpers.SuppressScreenCapture.ForMainWindow();
 
     private ServiceClients? _clients;
+
+    /// <summary>True while <see cref="Render"/> paints the switch, so the paint is not read as a
+    /// gesture.</summary>
+    private bool _applying;
 
     public ConnectedAppsPage()
     {
@@ -167,6 +170,19 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
 
         var snap = _vm.Snapshot;
 
+        // 2b. The external-apps switch, above the roster at every integration level. Painted from
+        //     the snapshot (ON is the zero value); the guard keeps the paint from re-firing Toggled.
+        _applying = true;
+        try
+        {
+            ExternalAppsToggle.IsOn = _vm.ExternalAppsState == "on";
+            AutomationProperties.SetHelpText(ExternalAppsToggle, _vm.ExternalAppsState);
+        }
+        finally
+        {
+            _applying = false;
+        }
+
         // 1. Requests — only while a request is live.
         RequestsHost.Children.Clear();
         var requests = snap?.@requests ?? Array.Empty<ConsentCardRow>();
@@ -198,6 +214,13 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
         // Every gesture re-renders through here, so this is the one place that sees a reveal
         // land or end. Idempotent: N re-renders with a secret showing take one hold.
         _captureHold.Sync(_vm.Revealed.Count > 0);
+    }
+
+    private async void ExternalApps_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_applying || _vm is null) return;
+        await _vm.SetExternalAppsEnabledAsync(ExternalAppsToggle.IsOn);
+        Render();
     }
 
     private static Grid NewCard(string automationId, string name)
@@ -249,6 +272,11 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
             TextWrapping = TextWrapping.Wrap,
         });
 
+        // An admin's hosted-plugin install card (or a user's bind card) names what would run
+        // on the nest before the Approve — between the scope lines and the binding code.
+        if (ConnectedAppsViewModel.InstallSection(request) is { } install)
+            AddInstallSection(card, install);
+
         // The code's text is localized prose; the e2e reads the raw value off the `code` attr
         // (mapped from HelpText), never the sentence.
         var code = new TextBlock { Text = ConnectedAppsViewModel.RequestCodeText(request) };
@@ -285,6 +313,45 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
         return card;
     }
 
+    /// <summary>The install section (<c>third-party.md</c> § The runner contract → <i>The
+    /// install-approval leg</i>): one leaf per fact, each the shared composition's text, scoped
+    /// inside the card — the heading, the untagged framing line (an admin's install card only),
+    /// then the execution form (its raw value the <c>form</c> attr, mapped from HelpText), the
+    /// publisher, the digest, the kinds, the network reach and the settings summary. Reference
+    /// painter: tui <c>install_section_elements</c>.</summary>
+    private static void AddInstallSection(Grid card, InstallSectionPaint install)
+    {
+        var heading = InstallLeaf(Ids.ConnectedAppsRequestInstall, install.Heading);
+        heading.Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"];
+        AddRow(card, heading);
+        if (install.Framing is { } framing)
+        {
+            AddRow(card, new TextBlock
+            {
+                Text = framing,
+                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
+        var form = InstallLeaf(Ids.ConnectedAppsRequestInstallForm, install.Form);
+        AutomationProperties.SetHelpText(form, install.FormValue);
+        AddRow(card, form);
+        AddRow(card, InstallLeaf(Ids.ConnectedAppsRequestInstallPublisher, install.Publisher));
+        AddRow(card, InstallLeaf(Ids.ConnectedAppsRequestInstallDigest, install.Digest));
+        AddRow(card, InstallLeaf(Ids.ConnectedAppsRequestInstallKinds, install.Kinds));
+        AddRow(card, InstallLeaf(Ids.ConnectedAppsRequestInstallHosts, install.Hosts));
+        AddRow(card, InstallLeaf(Ids.ConnectedAppsRequestInstallSettings, install.Settings));
+    }
+
+    /// <summary>One install-section leaf: AutomationId only, no static Name — a get_text target
+    /// with a static Name returns the wrong value.</summary>
+    private static TextBlock InstallLeaf(string automationId, string text)
+    {
+        var leaf = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
+        AutomationProperties.SetAutomationId(leaf, automationId);
+        return leaf;
+    }
+
     private static Button Tagged(Button button, string tag)
     {
         button.Tag = tag;
@@ -299,19 +366,26 @@ public sealed partial class ConnectedAppsPage : Page, IAsyncLoadedPage
     private FrameworkElement BuildRow(ConnectedAppRow row)
     {
         var item = NewCard(Ids.ConnectedAppsItem, "connected app");
-        var burned = row.@mail is { @revoked: true };
-        // Two attributes (`revoked`, `status`) share the one HelpText the bridge maps any
-        // non-name attr to, so they are always packed; an empty `revoked` is not a burned
-        // row. `status` is `paused` (the account's external-apps switch is OFF), `connected`
-        // or `not_connected`, as a value a reader can count beside the words.
-        AutomationProperties.SetHelpText(item, AutomationAttributePack.Pack(
-            ("revoked", burned ? "true" : ""),
-            ("status", row.@paused ? "paused" : row.@connected ? "connected" : "not_connected")));
+        AutomationProperties.SetHelpText(item, ConnectedAppsViewModel.RowAttributes(row));
         AddRow(item, new TextBlock
         {
             Text = ConnectedAppsViewModel.RowText(row),
             TextWrapping = TextWrapping.Wrap,
         });
+
+        // A hosted plugin's row links to its settings card on the Bridges page — the shared
+        // predicate decides which rows (connected-apps.md § Layout & flow, region 3).
+        if (ConnectedAppsViewModel.OpensSettingsCard(row))
+        {
+            var link = new HyperlinkButton
+            {
+                Content = S.Get("connected_apps/settings_link"),
+                Padding = new Thickness(0),
+            };
+            AutomationProperties.SetAutomationId(link, Ids.ConnectedAppsItemSettingsLink);
+            link.Click += (_, _) => MainPage.Current?.NavigateToView("bridges");
+            AddRow(item, link);
+        }
 
         if (row.@mail is { } mail)
         {

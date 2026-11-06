@@ -35,6 +35,38 @@ public enum RecoverableBoxes {
         return loadLocal(ownerSecret: ownerSecret)
     }
 
+    /// The launch-retry surface's read (`LaunchRetryView`'s `loadRecoverableBoxes`,
+    /// both apple targets): the served account's custodied boxes, off the saved
+    /// nest when it answers and off the device's own store when it does not — so
+    /// a dead saved nest still offers recovery. Empty with no served account.
+    @MainActor
+    public static func loadForServedAccount() async -> [String] {
+        guard let material = FaunaAccounts.sessionMaterial() else { return [] }
+        return await load(nestUrl: material.nestUrl ?? "", ownerSecret: hex_to_data(material.secretHex))
+    }
+
+    /// The device's own store alone, for the served account: whether a session
+    /// that cannot reach its nest has anything to be offered (`LostNestOffer`).
+    /// Empty with no served account; off the main actor, as the read opens a store.
+    @MainActor
+    public static func loadLocalForServedAccount() async -> [String] {
+        guard let material = FaunaAccounts.sessionMaterial() else { return [] }
+        let ownerSecret = hex_to_data(material.secretHex)
+        return await Task.detached { loadLocal(ownerSecret: ownerSecret) }.value
+    }
+
+    /// `launch-recover-button`'s act: seed the wizard machine with the served
+    /// identity and the boxes the reveal read, so the host's wizard opens on
+    /// `nest_recovery`. `false` (nothing seeded) with no served account.
+    @MainActor
+    public static func seedLaunchRecovery(_ machine: OnboardingMachine, boxes: [String]) -> Bool {
+        guard let secret = FaunaAccounts.sessionMaterial()?.secretHex else { return false }
+        machine.reset()
+        machine.seedIdentityForRecovery(secret: secret)
+        machine.setRecoveryBoxes(boxes: boxes)
+        return true
+    }
+
     /// The device's own store alone — never throws (a fault logs and reads empty).
     public static func loadLocal(ownerSecret: Data) -> [String] {
         do {

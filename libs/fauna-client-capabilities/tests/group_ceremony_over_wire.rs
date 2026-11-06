@@ -283,6 +283,7 @@ async fn the_full_offline_ceremony_admits_bob_over_a_real_channel() {
         &scope,
         &bob().actor_id(),
         now,
+        None,
     )
     .expect("deliver builds");
     send_ceremony_deliver(Arc::clone(&channel), built.frame.clone())

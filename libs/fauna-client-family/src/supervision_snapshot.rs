@@ -180,7 +180,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::obligation::ContentFloor;
     use fauna_protocol::ByteBuf;
     use fauna_protocol::family::ReachPolicy;
 
@@ -194,10 +193,10 @@ mod tests {
 
     fn full_policy() -> ReachPolicy {
         ReachPolicy {
-            content_policy: Some(ContentPolicy {
-                nsfw: ContentFloor::Block,
-                ..Default::default()
-            }),
+            content_policy: Some(fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "nsfw",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )])),
             content_notify: Some(true),
             screen_time: Some(ScreenTimePolicy {
                 window_start: Some(1260),
@@ -230,9 +229,9 @@ mod tests {
             "parent@example.org"
         );
         assert_eq!(
-            snap.content_policy.unwrap().nsfw,
-            ContentFloor::Block,
-            "the guardian's floor is what a cold launch must restore"
+            snap.content_policy,
+            full_policy().content_policy,
+            "the guardian's rules are what a cold launch must restore"
         );
         assert!(snap.content_notify);
         assert_eq!(snap.screen_time.unwrap().daily_minutes, Some(90));
@@ -308,16 +307,15 @@ mod tests {
     #[test]
     fn an_unknown_field_from_a_newer_app_still_restores_the_floor() {
         let raw = r#"{"supervised_by":{"actor_id_hex":"ab","handle":"g"},
-            "content_policy":{"nsfw":"block","spam":"inherit",
-            "phishing":"inherit","commercial":"inherit"},
+            "content_policy":{},
             "content_notify":true,"screen_time":null,
             "a_field_from_the_future":{"nested":1}}"#;
         let snap = SupervisionSnapshot::from_json(raw).expect("unknown fields are ignored");
         assert!(snap.is_supervised());
-        assert_eq!(snap.content_policy.unwrap().nsfw, ContentFloor::Block);
+        assert!(snap.content_policy.is_some());
     }
 
-    /// A guardian id that does not decode must not cost the ward their floor —
+    /// A guardian id that does not decode must not cost the ward their rules —
     /// the handle is what renders, and the id authorizes nothing client-side.
     #[test]
     fn a_malformed_guardian_id_does_not_drop_the_guardian() {

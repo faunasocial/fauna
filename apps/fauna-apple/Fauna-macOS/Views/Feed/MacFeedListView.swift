@@ -62,6 +62,25 @@ struct MacFeedListView: View {
                         value: { vm.trendingSelected ? "on" : "off" }
                     ) { Task { await vm.selectTrendingFeed() } }
 
+                    // Built-in Local entry (feed.md § Layout & flow, region 1) —
+                    // directly below Trending, above the user's own feeds; the
+                    // way back to Local from a custom or Trending feed.
+                    Button {
+                        Task { await vm.selectLocalFeed() }
+                    } label: {
+                        HStack {
+                            Text(L.feed.list.local)
+                                .fontWeight(vm.trendingSelected || vm.selectedFeedId != nil ? .regular : .bold)
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(Ids.feedLocalItem)
+                    .automationActivate(
+                        Ids.feedLocalItem,
+                        value: { vm.trendingSelected || vm.selectedFeedId != nil ? "off" : "on" }
+                    ) { Task { await vm.selectLocalFeed() } }
+
                     ForEach(Array(vm.feeds.enumerated()), id: \.element.feedId) { index, feed in
                         HStack {
                             Button {
@@ -107,14 +126,7 @@ struct MacFeedListView: View {
                     }
                 }
 
-                // `|| !searchText.isEmpty` keeps the search field (and its clear
-                // button) reachable while a search is active even if the selection
-                // falls back to Local (`selectedFeedId == nil`), so the user can
-                // always clear their own query — the same reachable-during-active-
-                // search invariant iOS's FeedListView guarantees (priority #1;
-                // macOS normally rides a selected feed, so this is a defensive
-                // no-op in the common path).
-                if vm.selectedFeedId != nil || !vm.searchText.isEmpty {
+                if vm.showsSearchBar {
                     Divider()
                     HStack {
                         Image(systemName: "magnifyingglass")
@@ -143,6 +155,10 @@ struct MacFeedListView: View {
                         }
                     }
                 }
+
+                // The imported-posts selection's notice + clear
+                // (`feed.md` § State & data shape → *The imported-posts selection*).
+                FeedImportedNotice(vm: vm)
 
                 Divider()
 

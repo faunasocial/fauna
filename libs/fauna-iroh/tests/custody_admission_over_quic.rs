@@ -197,6 +197,7 @@ async fn the_custody_grant_admits_and_refuses_over_real_quic() {
         peer_transport: Some(factory),
         // The machine's named row — never read here (no nest answers enrollment).
         enrollment_target_device_id: "ab".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("assembly is offline-safe");
@@ -227,6 +228,9 @@ async fn the_custody_grant_admits_and_refuses_over_real_quic() {
         .expect("the factory reported where it bound");
     let server_addrs: Vec<SocketAddr> = server_addrs
         .into_iter()
+        // Only an IPv4 socket's port pairs with 127.0.0.1: the `[::]` socket is
+        // v6-only on Windows (`fauna_core::device_endpoints`).
+        .filter(SocketAddr::is_ipv4)
         .map(|a| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()))
         .collect();
 

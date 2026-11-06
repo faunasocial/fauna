@@ -105,7 +105,7 @@ mod tests {
     /// same call-site pin `devices.rs` holds for the Devices builder.
     ///
     /// Mutation: pass `None` for the resolver above → `has_folder_keys()` is
-    /// false → this pin reds (`cargo test -p fauna-ffi --lib media::`).
+    /// false → this pin reds (`cargo test -p fauna-ffi-core --lib media::`).
     #[cfg(all(feature = "folders-author", not(target_arch = "wasm32")))]
     #[test]
     fn the_builder_hands_the_machine_the_folder_key_resolver() {

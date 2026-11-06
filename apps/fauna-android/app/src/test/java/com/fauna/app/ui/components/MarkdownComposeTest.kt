@@ -91,6 +91,42 @@ class MarkdownComposeTest {
         }
     }
 
+    @Test
+    fun utf8ToUtf16Cursor_matchesPerOffsetConversionAscendingAndOutOfOrder() {
+        val text = "é😀a".repeat(50)
+        val total = text.toByteArray(Charsets.UTF_8).size
+        val boundaries = (0..text.length).map { utf16IndexToUtf8Byte(text, it) }
+            .filter { it <= total }.distinct()
+        val cursor = Utf8ToUtf16Cursor(text)
+        for (b in boundaries) assertEquals(utf8ByteToUtf16Index(text, b), cursor.indexAt(b))
+        // A lower offset after a higher one restarts from the head and still lands exactly.
+        for (b in boundaries.asReversed()) assertEquals(utf8ByteToUtf16Index(text, b), cursor.indexAt(b))
+    }
+
+    @Test
+    fun buildComposeDecoration_largeMarkerDenseBodyStylesEveryRun() {
+        // 2000 "é**b**" units: each is 2 + 2 + 1 + 2 = 7 UTF-8 bytes / 6 UTF-16 units, with a
+        // 2-byte multibyte head so byte and UTF-16 offsets drift apart across the whole body.
+        val n = 2000
+        val text = "é**b**".repeat(n)
+        val decorations = (0 until n).flatMap { k ->
+            val o = k * 7
+            listOf(
+                MarkdownDecoration(o + 2, o + 4, "marker", 0),
+                MarkdownDecoration(o + 4, o + 5, "bold", 0),
+                MarkdownDecoration(o + 5, o + 7, "marker", 0),
+            )
+        }
+        val out = buildComposeDecoration(text, decorations, emptyList(), link, marker, codeBg)
+        val bold = out.spanStyles.filter { it.item.fontWeight == FontWeight.Bold }
+        assertEquals(n, bold.size)
+        bold.forEachIndexed { k, r ->
+            assertEquals(k * 6 + 3, r.start)
+            assertEquals(k * 6 + 4, r.end)
+            assertEquals("b", out.text.substring(r.start, r.end))
+        }
+    }
+
     // ---- buildComposeDecoration (show-markers dim-mode inline styling) ----------------------
 
     private fun decos(text: String, dimRanges: List<RevealSpan>, vararg d: MarkdownDecoration) =

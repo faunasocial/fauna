@@ -30,9 +30,14 @@ precedent, ``test_admin_dns_managed.py``). Delegated domains reach the same tick
 through the same `IssueCert`; their witness would need a CNAME in the fake name
 server, which it does not serve, so this file walks the managed shape.
 
-**Which apps.** tui leads; linux and android carry their own `auto_renew_wake`
-leg (linux's `loop_wake::LoopWake`, android's debug `AutoRenewWake`), and the rest
-of the trickle-down rides on the same shared seed once each app has its leg.
+**Which apps.** tui leads; linux, android, web, macos and ios carry their own
+`auto_renew_wake` leg (linux's `loop_wake::LoopWake`, android's debug
+`AutoRenewWake`, web's `#lib/loop-wake` behind `__FAUNA_E2E_AUTOMATION__`, the
+tick itself `#lib/cert-auto-renew` in the SPA shell, its pass line on the console
+ring; macos + ios share FaunaKit's `DnsAutoRenewCadence` and its `#if DEBUG`
+`CadenceWake`; their walk waits on a pebble route to the docker-less macOS host), and windows rides on the same shared seed once it has its
+leg. Web reads the seed through
+*The web order* (`e2e-gated-seeds.md`).
 """
 
 import secrets
@@ -49,6 +54,9 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.android,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.ios,
     # Starts pebble + the fake name server for the session and seeds
     # FAUNA_E2E_ACME_* into every app launch.
     pytest.mark.acme_pebble,
@@ -214,7 +222,6 @@ def test_a_managed_domain_on_the_floor_is_issued_by_the_tick_with_no_tap(
         try:
             if _mode_of(admin_app, domain) == _LABEL_MANAGED:
                 admin_app.admin.toggle_domain_mode(index=_index(admin_app, domain))
-            while admin_app.admin.dns_credential_count() > 0:
-                admin_app.admin.clear_dns_credential(0)
+            admin_app.admin.clear_all_dns_credentials()
         except Exception:
             pass

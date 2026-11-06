@@ -5,7 +5,7 @@ import Testing
 // contract the e2e state protocol drives (`{"view":"settings"},{"view":"settings","id":"<navId>"}`),
 // matching the linux GTK Stack child names in
 // `apps/fauna-linux/src/views/settings_shell.rs`. The macOS Settings rail
-// (`SettingsNavRail`) and the iOS `SettingsView` `NavigationStack` both resolve
+// (`SettingsNavRail`) and the iOS More-tab `NavigationStack` both resolve
 // sub-pages through `SettingsPage(navId:)`, so a wrong id here silently breaks
 // programmatic nav on every Apple app — exactly the gap that blocked iOS
 // user-mail e2e (the user-mail sub-page id is `mail`, NOT `mail-settings`).
@@ -41,6 +41,10 @@ import Testing
     // The device roster (formerly the top-level "Peers" page); navId stays `devices`
     // (re-homed under the Settings shell, no `settings-devices` rename — O-3).
     #expect(SettingsPage.devices.navId == "devices")
+    // The sign-ins live now (ui/sessions.md), directly after Devices.
+    #expect(SettingsPage.sessions.navId == "sessions")
+    #expect(SettingsPage(navId: "sessions") == .sessions)
+    #expect(SettingsPage.sessions.navRowId == "settings-nav-row[sessions]")
     // The folder control plane (renamed from the former `sync` sub-page); absorbs
     // the wizard/list/conflicts + desktop binding + the Apple photo-backup controls.
     #expect(SettingsPage.folders.navId == "folders")
@@ -53,6 +57,9 @@ import Testing
     // The foreign-mailbox migration wizard (mailbox-migration.md), the
     // export twin's counterpart — sits directly after it in the rail.
     #expect(SettingsPage.mailImport.navId == "mail-import")
+    // Import from other services (archive-import.md), directly after it.
+    #expect(SettingsPage.archiveImport.navId == "archive-import")
+    #expect(SettingsPage(navId: "archive-import") == .archiveImport)
     #expect(SettingsPage.mailLists.navId == "mail-lists")
     #expect(SettingsPage.mailListMembers.navId == "mail-list-members")
     #expect(SettingsPage.nostr.navId == "nostr")
@@ -122,9 +129,34 @@ import Testing
     // consumed directly by the macOS `SettingsNavRail`.
     #expect(SettingsPage.built.map(\.navId) == [
         "status", "account", "member-review", "privacy", "muted-words", "personalization", "labeler-catalog", "general",
-        "encryption", "devices", "folders",
-        "nostr", "atproto", "mail-settings", "mail-aliases", "mail-spam", "mail-export", "mail-import", "mail-lists",
+        "encryption", "devices", "sessions", "folders",
+        "nostr", "atproto", "mail-settings", "mail-aliases", "mail-spam", "mail-export", "mail-import", "archive-import", "mail-lists",
         "mail-list-members", "web", "subscription-settings", "nests", "task-delegation",
         "connected-apps", "logs",
     ])
+}
+
+// The rail-row ids (ui.yaml `navigation.sub_page_nav_rows`): `settings-nav-row[<key>]`,
+// keyed by the ui.yaml page key the row opens (tui's `settings/root.rs::rail_id` is the
+// reference). Four nav ids differ from their page key; Account keeps its older
+// `account-settings-link` id as its rail-row id.
+@Test func navRowIdsAreKeyedByUiYamlPageKey() {
+    #expect(SettingsPage.mail.navRowId == "settings-nav-row[mail-settings]")
+    #expect(SettingsPage.memberReview.navRowId == "settings-nav-row[member_review]")
+    #expect(SettingsPage.web.navRowId == "settings-nav-row[web-settings]")
+    #expect(SettingsPage.linkedNests.navRowId == "settings-nav-row[nests]")
+    #expect(SettingsPage.logs.navRowId == "settings-nav-row[settings-logs]")
+    // An entry realized from the `settings` page itself is keyed by its nav slug.
+    #expect(SettingsPage.privacy.navRowId == "settings-nav-row[privacy]")
+    #expect(SettingsPage.status.navRowId == "settings-nav-row[status]")
+    #expect(SettingsPage.account.navRowId == "account-settings-link")
+}
+
+@Test func adminNavRowIdsAreKeyedByUiYamlPageKey() {
+    #expect(AdminPage.dns.navRowId == "admin-nav-row[admin-dns]")
+    #expect(AdminPage.bridgesPending.navRowId == "admin-nav-row[admin-bridges-pending]")
+    // The three pages whose nav id is bare take the prefixed ui.yaml page key.
+    #expect(AdminPage.users.navRowId == "admin-nav-row[admin-users]")
+    #expect(AdminPage.tiers.navRowId == "admin-nav-row[admin-settings]")
+    #expect(AdminPage.dashboard.navRowId == "admin-nav-row[admin-dashboard]")
 }

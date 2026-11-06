@@ -301,7 +301,7 @@ def test_a_bound_folder_flips_back_from_public_and_reseals_its_corpus(
     re-sealed under the folder's current content key, and (c) both happen off the
     picker gesture alone — no restart, no second door.
     """
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from tests.api import conv_api
 
@@ -316,9 +316,7 @@ def test_a_bound_folder_flips_back_from_public_and_reseals_its_corpus(
     # No app: bound-ness is minted by the owner's gesture and does not wait on
     # anybody accepting.
     recipient_handle = "flipbob" + secrets.token_hex(2)
-    recipient = register_handled_actor(
-        nest["port"], handle=recipient_handle, domain=MAIL_PRIMARY_DOMAIN
-    )
+    recipient = admit_adult(nest, recipient_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     conv_api.keypackage_upload(
         nest["port"],
         recipient,
@@ -527,12 +525,14 @@ def _member_sees_folder(member_app, name: str) -> bool:
     """
     b = member_app.backups
     b.navigate_folders()
-    return any(name in b.folder_title(i) for i in range(b.folder_count()))
+    return any(name in t for t in b.folder_titles())
 
 
 @pytest.mark.tui
 @pytest.mark.web
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web"], indirect=True)
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "ios", "android"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 # web owner added 2026-09-20. `public-folders-and-websites`
@@ -559,6 +559,11 @@ def _member_sees_folder(member_app, name: str) -> bool:
 # no web test drove one. Fixed there, in one place; dropping the prefix costs no
 # precision because `expandedFs` is a single value, so exactly one folder's member
 # items are in the DOM. Both cases green 2026-09-20.
+#
+# ios owner added 2026-10-30 on the same reasoning: the owner seat binds nothing, and
+# the share, the writer grant (`FolderSharingViews`' `folder-member-role-select`) and
+# the audience picker are shared FaunaKit, so iOS is a third owner param. Run it
+# `--app ios,tui`.
 #
 # ⚠ Both seats must be SELECTED, not just available: run it `--app web,tui`. The
 # collection hook deselects a param case whose OWNER app is unselected

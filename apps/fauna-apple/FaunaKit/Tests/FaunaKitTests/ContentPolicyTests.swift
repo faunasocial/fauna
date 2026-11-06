@@ -6,8 +6,8 @@ import Testing
 // (family-safety.md § Content policy, Slice C) — the twins of android's
 // `ContentPolicyInputsTest` and linux's `content_policy::tests`.
 //
-// The *composition* (own thresholds ∪ guardian floor, strictest-wins,
-// fail-closed on an unparseable floor) lives entirely in shared Rust and is
+// The *composition* (own thresholds ∪ the guardian's rules, strictest-wins,
+// fail-closed on an unreadable rule document) lives entirely in shared Rust and is
 // pinned there by `fauna_core::obligation`'s 19 tests + `fauna-ffi`'s six
 // `family::content_policy_tests` arms. These pin the **Swift-side wiring** only:
 // that `ContentPolicyInputs` hands the shared engine the right ingredients, and
@@ -17,14 +17,7 @@ private func entry(_ category: String, _ perMille: UInt16) -> ContentLabelEntry 
     ContentLabelEntry(category: category, confidencePerMille: perMille)
 }
 
-private func floors(
-    nsfw: String = "inherit", spam: String = "inherit",
-    phishing: String = "inherit", commercial: String = "inherit"
-) -> FfiContentPolicy {
-    FfiContentPolicy(nsfw: nsfw, spam: spam, phishing: phishing, commercial: commercial)
-}
-
-// MARK: - The short-circuit (no floor, no thresholds ⇒ no rule can fire)
+// MARK: - The short-circuit (no guardian rules, no thresholds ⇒ no rule can fire)
 
 @Test func noPolicyAndNoThresholdsRendersShowWithoutCallingTheEngine() {
     // A default-constructed value is what every VM-free preview/test harness
@@ -41,12 +34,12 @@ private func floors(
         ownSpamPermille: nil, ownPhishingPermille: nil) == "badge")
 }
 
-// MARK: - The guardian floor (the supervised half)
+// MARK: - The guardian's rules (the supervised half)
 
-@Test func aGuardianBlockFloorBlocksAFlaggedItem() {
-    let inputs = ContentPolicyInputs(contentPolicy: floors(spam: "block"))
+@Test func aGuardianBlockRuleBlocksAFlaggedItem() {
+    let inputs = ContentPolicyInputs(contentPolicy: guardianRule("spam", .block))
     #expect(inputs.verdictFor([entry("spam", 900)]) == "block")
-    // A different category the floor doesn't name is NOT enforced — it keeps
+    // A different category no guardian rule names is NOT enforced — it keeps
     // its badge. `badge` and `show` are distinct verdicts at the engine but
     // identical at the render gate: only `block` and `collapse` change what a
     // surface paints, which is exactly what the three render arms branch on.
@@ -62,23 +55,23 @@ private func floors(
     let enforcing = Set(["block", "collapse"])
     #expect(!enforcing.contains("show"))
     #expect(!enforcing.contains("badge"))
-    let inputs = ContentPolicyInputs(contentPolicy: floors(spam: "block"))
+    let inputs = ContentPolicyInputs(contentPolicy: guardianRule("spam", .block))
     #expect(enforcing.contains(inputs.verdictFor([entry("spam", 900)])))
     #expect(!enforcing.contains(inputs.verdictFor([entry("nsfw", 900)])))
 }
 
-@Test func aGuardianCollapseFloorCollapsesRatherThanBlocks() {
-    let inputs = ContentPolicyInputs(contentPolicy: floors(nsfw: "collapse"))
+@Test func aGuardianCollapseRuleCollapsesRatherThanBlocks() {
+    let inputs = ContentPolicyInputs(contentPolicy: guardianRule("nsfw", .collapse))
     #expect(inputs.verdictFor([entry("nsfw", 900)]) == "collapse")
 }
 
-@Test func anUnparseableFloorFailsClosedToBlockNeverInherit() {
-    // family-safety.md:265 — "A rule value a client cannot parse renders
-    // fail-closed (`block`)". Within a major version this client may be OLDER
-    // than its nest, so a newer floor spelling must never degrade to the
-    // permissive `inherit` (which would show the ward content the guardian
-    // actually blocked). The rule is enforced once, in shared Rust.
-    let inputs = ContentPolicyInputs(contentPolicy: floors(spam: "quarantine"))
+@Test func anUnreadableRuleDocumentFailsClosedToBlock() {
+    // A guardian rule document this build cannot read renders fail-closed
+    // (`block`; nest-rules.md § The shared rule editor). Within a major version
+    // this client may be OLDER than its nest, so a document it cannot read must
+    // never degrade to showing the ward content the guardian actually blocked.
+    // The rule is enforced once, in shared Rust.
+    let inputs = ContentPolicyInputs(contentPolicy: FfiContentPolicy(document: Data([0xff])))
     #expect(inputs.verdictFor([entry("spam", 900)]) == "block")
 }
 
@@ -103,11 +96,11 @@ private func floors(
     #expect(inputs.verdictFor([entry("spam", 900)]) == "badge")
 }
 
-@Test func theGuardianFloorOutranksTheViewersOwnThresholdStrictestWins() {
-    // A ward may set themselves STRICTER than the floor, never looser: the
+@Test func theGuardianRuleOutranksTheViewersOwnThresholdStrictestWins() {
+    // A ward may set themselves STRICTER than the guardian, never looser: the
     // guardian's `block` survives a viewer threshold that would only collapse.
     let inputs = ContentPolicyInputs(
-        contentPolicy: floors(spam: "block"), ownSpamPermille: 500, ownPhishingPermille: 500)
+        contentPolicy: guardianRule("spam", .block), ownSpamPermille: 500, ownPhishingPermille: 500)
     #expect(inputs.verdictFor([entry("spam", 900)]) == "block")
 }
 
@@ -119,11 +112,11 @@ private func floors(
 // itself is shared Rust's (`inject_inbound_from_test_payload`, pinned in
 // `manager_integration_tests.rs`); this pins the apple link end to end — the
 // exact wire shape the Python action layer sends, through the shell's inject
-// arm, onto the message the bubble renders — so a content-floor e2e failure
+// arm, onto the message the bubble renders — so a guardian-rule e2e failure
 // can never be a dropped label wearing a product bug's clothes (e2e point 11).
 
 @MainActor
-@Test func aStagedSpamLabelReachesTheMessageAndTripsAGuardianBlockFloor() {
+@Test func aStagedSpamLabelReachesTheMessageAndTripsAGuardianBlockRule() {
     let manager = ConversationsManager()
     manager.installMockBackendsForTest()
     ConversationsTestInject.injectInbound([
@@ -138,7 +131,7 @@ private func floors(
     #expect(labels.count == 1)
     #expect(labels.first?.category == "spam")
     #expect(labels.first?.confidencePerMille == 900)
-    let inputs = ContentPolicyInputs(contentPolicy: floors(spam: "block"))
+    let inputs = ContentPolicyInputs(contentPolicy: guardianRule("spam", .block))
     #expect(inputs.verdictFor(labels) == "block")
 }
 
@@ -148,6 +141,6 @@ private func floors(
     // Fail-closed here means "enforce nothing", not "block everything": a failed
     // status/preferences read must never hide content the nest never asked us to
     // hide. Under-enforcing a viewer's own collapse is the safe direction; the
-    // guardian floor re-arrives on the next refresh (login / reconnect).
+    // guardian's rules re-arrive on the next refresh (login / reconnect).
     #expect(ContentPolicyStore().inputs.verdictFor([entry("spam", 990)]) == "show")
 }

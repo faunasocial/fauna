@@ -80,7 +80,7 @@ pub enum MediaNestCall {
         version_num: i64,
     },
     /// `restore_member(folder, folder_id, device_id, path, manifest_hash,
-    /// size_bytes, content_key_version, path_sealed)`.
+    /// size_bytes, content_key_version, thumbnail_hash, path_sealed)`.
     RestoreMember {
         folder: String,
         /// The restored version's own row — recorded so a test can assert the
@@ -91,6 +91,9 @@ pub enum MediaNestCall {
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        /// The thumbnail manifest the restore record names — the version's
+        /// own, or the one re-sealed with its bytes.
+        thumbnail_hash: Option<String>,
         /// Same contract as [`Self::DeleteMember::path_sealed`].
         path_sealed: Option<Vec<u8>>,
     },
@@ -140,6 +143,13 @@ pub struct FakeMediaNestApi {
     /// `Some` makes the `share_*` calls fail with this error.
     share_error: Mutex<Option<MediaApiError>>,
     calls: Mutex<Vec<MediaNestCall>>,
+    /// How many more `media_snapshot()` reads hold every row back for want
+    /// of custody (items dropped, `held` counting them) — the window right
+    /// after sign-in, before the account runtime has assembled.
+    held_media_reads: Mutex<usize>,
+    /// How many more `list_folders()` reads fail transiently — the folder
+    /// list lost in the same window.
+    failed_folder_reads: Mutex<usize>,
 }
 
 impl FakeMediaNestApi {
@@ -225,6 +235,17 @@ impl FakeMediaNestApi {
         self.reader_predecessors.lock().unwrap().clone()
     }
 
+    /// Make the next `reads` media reads hold every row back for want of
+    /// custody: the judge drops each held row and counts it.
+    pub fn hold_media_reads(&self, reads: usize) {
+        *self.held_media_reads.lock().unwrap() = reads;
+    }
+
+    /// Make the next `reads` folder-list reads fail transiently.
+    pub fn fail_folder_reads(&self, reads: usize) {
+        *self.failed_folder_reads.lock().unwrap() = reads;
+    }
+
     /// All recorded read calls, in order.
     pub fn calls(&self) -> Vec<MediaNestCall> {
         self.calls.lock().unwrap().clone()
@@ -254,6 +275,12 @@ impl MediaNestApi for FakeMediaNestApi {
                     item.signed_as_current = signer.is_none();
                     item.signed_as = Some(signer.unwrap_or(FAKE_CURRENT_ID));
                 }
+                let mut held_reads = self.held_media_reads.lock().unwrap();
+                if *held_reads > 0 {
+                    *held_reads -= 1;
+                    snapshot.held += snapshot.items.len();
+                    snapshot.items.clear();
+                }
                 Ok(snapshot)
             }
         }
@@ -269,7 +296,16 @@ impl MediaNestApi for FakeMediaNestApi {
         // page's load path, and a test fixturing "the read fails" means both.
         match self.error.lock().unwrap().clone() {
             Some(e) => Err(e),
-            None => Ok(self.folders.lock().unwrap().clone()),
+            None => {
+                let mut failed = self.failed_folder_reads.lock().unwrap();
+                if *failed > 0 {
+                    *failed -= 1;
+                    return Err(MediaApiError::Transient {
+                        detail: "folder list unavailable".into(),
+                    });
+                }
+                Ok(self.folders.lock().unwrap().clone())
+            }
         }
     }
 
@@ -476,6 +512,7 @@ impl MediaNestApi for FakeMediaNestApi {
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError> {
         self.calls
@@ -489,6 +526,7 @@ impl MediaNestApi for FakeMediaNestApi {
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                thumbnail_hash,
                 path_sealed,
             });
         match self.write_error.lock().unwrap().clone() {

@@ -173,8 +173,50 @@ pub fn pinned_http_client(nest_url: &str) -> reqwest::Client {
         .user_agent("fauna-client")
         .timeout(std::time::Duration::from_secs(30))
         .use_preconfigured_tls(fauna_anon_client::store_pinned_reqwest_tls(nest_url))
+        .dns_resolver(Arc::new(ReachHintResolver))
         .build()
         .expect("failed to build reqwest client")
+}
+
+/// The HTTP arm of the reach hint's dial rule (`fauna_ws_substrate::reach_hint`):
+/// the system resolver first, and when the name does not resolve, the reach
+/// hint the launch installed for it — the hint's IP, the URL's own port. The
+/// request is untouched, so SNI, `Host` and the pinned TLS above all stay the
+/// domain's, exactly as on the WS dials. A resolver sees only a name, so this
+/// arm answers the unresolvable case alone; a domain that resolves but refuses
+/// is not a dark domain and takes no fallback here.
+struct ReachHintResolver;
+
+impl reqwest::dns::Resolve for ReachHintResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_ascii_lowercase();
+            let lookup = tokio::net::lookup_host((host.as_str(), 0)).await;
+            let unresolved: Box<dyn std::error::Error + Send + Sync> = match lookup {
+                Ok(addrs) => {
+                    let addrs: Vec<std::net::SocketAddr> = addrs.collect();
+                    if !addrs.is_empty() {
+                        return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
+                    }
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("{host}: no addresses"),
+                    ))
+                }
+                Err(e) => Box::new(e),
+            };
+            match fauna_ws_substrate::reach_hint::hint_for(&host) {
+                Some(hint) => {
+                    tracing::info!(host, %hint, "the domain did not resolve; answering its reach hint");
+                    Ok(
+                        Box::new(std::iter::once(std::net::SocketAddr::new(hint.ip(), 0)))
+                            as reqwest::dns::Addrs,
+                    )
+                }
+                None => Err(unresolved),
+            }
+        })
+    }
 }
 
 impl AuthClient {
@@ -435,6 +477,16 @@ impl AuthClient {
     /// when the source cannot say.
     pub fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
         self.bearer.subscribe_self_identity()
+    }
+
+    /// Follow [`Self::subscribe_self_identity`] for THIS client's actor
+    /// through the one shared judgement ([`crate::SelfIdentityFollower`]):
+    /// an identity minted for any other actor, or a bearer source that moved
+    /// to one, ends the follower instead of reaching the caller. `None` when
+    /// the source cannot say.
+    pub fn follow_self_identity(&self) -> Option<crate::SelfIdentityFollower> {
+        self.subscribe_self_identity()
+            .map(|watch| crate::SelfIdentityFollower::new(watch, self.bearer(), self.actor_id))
     }
 
     /// Nest base URL — the *current* value (the cell is swapped by

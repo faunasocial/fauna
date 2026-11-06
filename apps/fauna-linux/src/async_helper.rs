@@ -267,6 +267,30 @@ pub fn snapshot_wake_channel() -> (async_channel::Sender<()>, async_channel::Rec
     async_channel::bounded(1)
 }
 
+/// Declare a snapshot observer that only wakes the GTK thread: a struct with
+/// one `tx` field (the sender half of a [`snapshot_wake_channel`]) whose
+/// `on_changed` is `try_send(())`. `try_send` so the mutator path never blocks;
+/// a full channel is a wake already owed. Construct it as `Name { tx }`.
+///
+/// One macro for every observer trait here: each crate owns its own trait, so
+/// one generic struct cannot serve them all, but the struct and the one-line
+/// impl are identical.
+macro_rules! snapshot_wake_observer {
+    ($(#[$meta:meta])* $vis:vis $name:ident, $trait:path) => {
+        $(#[$meta])*
+        $vis struct $name {
+            tx: async_channel::Sender<()>,
+        }
+
+        impl $trait for $name {
+            fn on_changed(&self) {
+                let _ = self.tx.try_send(());
+            }
+        }
+    };
+}
+pub(crate) use snapshot_wake_observer;
+
 /// Run `step` on the GTK main thread once per coalesced wake from a
 /// [`snapshot_wake_channel`], until `step` answers [`glib::ControlFlow::Break`]
 /// or every sender is dropped. The one shape for every snapshot observer's

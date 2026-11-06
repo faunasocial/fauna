@@ -384,7 +384,9 @@ class MailAliasesActions:
 
     def can_extend(self, index: int) -> bool:
         """Whether the row at `index` shows its extend button."""
-        return self.driver.is_visible(
+        # The row can sit below the fold of the page's scroll container (windows reads
+        # UIA IsOffscreen), so bring the button into view before reading it.
+        return self.driver.is_visible_scrolled(
             "mail-aliases-list-item-extend-button", scope=self._row_scope(index)
         )
 
@@ -418,7 +420,9 @@ class MailAliasesActions:
 
     def audit_empty_shown(self, index: int) -> bool:
         """Whether the row at `index` shows the empty-history line."""
-        return self.driver.is_visible(
+        # The row can sit below the fold of the page's scroll container (windows reads
+        # UIA IsOffscreen), so bring the line into view before reading it.
+        return self.driver.is_visible_scrolled(
             "mail-aliases-audit-empty", scope=self._row_scope(index)
         )
 

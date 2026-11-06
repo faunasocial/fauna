@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -49,7 +50,7 @@ from nacl.signing import SigningKey
 
 from common import build_registry_seed, create_actor_and_register
 from common.scope_store import attach_scope_store
-from conftest import _seeded_environment
+from conftest import _apply_real_conversations_env, _seeded_environment
 from drivers import create_driver
 from drivers.machine_test_setter import set_handle_check_snapshot
 from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S, UI_SETTLE_S
@@ -62,6 +63,7 @@ from helpers.waiting import (
     wait_registry_index,
     wait_until,
 )
+from helpers.windows_file_openers import file_opener_pids
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.windows]
@@ -89,6 +91,12 @@ HANDLE_CONTINUE_BUTTON = "handle-entry-continue-button"
 INVITE_SUBMIT_BUTTON = "invite-request-submit-button"
 INVITE_RECHECK_BUTTON = "invite-request-recheck-button"
 
+# The wizard's submit → `PendingReview` round trip: one anonymous WS call whose
+# kind carries a 30 s deadline (`fauna.account.invite_request.submit`,
+# `invite_handlers.rs`), plus the observer tick that renders the result. A
+# ceiling, not a mirror (convention 14): green runs pass it in about a second.
+INVITE_SUBMIT_S = 45.0
+
 # tests/e2e-unified/ui.yaml § onboarding — the first-run "create identity" wizard
 # (ghost-row regression, below).
 CREATE_IDENTITY_BUTTON = "create-identity-button"
@@ -106,15 +114,28 @@ ACCOUNT_PAGE_NAV = {
 }
 
 
-def _seed_two_accounts(nest_instance, active="user"):
+def _seed_two_accounts(nest_instance, active="user", second="admin"):
     """A claimed-admin account + a freshly-registered regular-user account, seeded
     into the registry active on the regular user (``active="admin"`` flips it).
     Returns (seed_map, user_actor_id, admin_actor_id). The admin is
     ``nest_instance``'s own claimed identity (so ``am-i-admin`` is true for it);
-    the user is registered via the admin key."""
+    the user is registered via the admin key.
+
+    ``second="user"`` seeds a second fresh regular user in the admin's row
+    instead, for a journey that needs two identities but not an admin — one
+    that removes the second identity or keeps its store past teardown. The
+    admin is shared by the whole run, and a machine signed into it that the
+    harness cannot retire at teardown leaves its grant live and pins the
+    admin's fleet scope (`e2e-launch-isolation.md`, *A discarded driver
+    retires its machine*)."""
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    if second == "user":
+        other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+        admin_actor = other["actor_id_hex"]
+        admin_secret = bytes(other["signing_key"]).hex()
+    else:
+        admin_actor = bytes(admin_sk.verify_key).hex()
+        admin_secret = bytes(admin_sk).hex()
 
     user = create_actor_and_register(
         nest_instance["port"], admin_signing_key=admin_sk
@@ -590,13 +611,76 @@ def test_windows_add_account_pending_invite_submit_switches_the_live_session(
             json.dumps([nest_instance["url"], handle]),
         )
         driver.wait_for(INVITE_SUBMIT_BUTTON, timeout=30)
+        # The app's own account of the submit is the diagnosis of a red below:
+        # `OnboardingViewModel` logs the submit's return, the persist's success,
+        # and each exit that skips or fails it.
+        log_mark = driver.app_log_mark()
         driver.click(INVITE_SUBMIT_BUTTON)
+
+        def _onboarding_log_since_click():
+            lines = [
+                line for line in driver.app_log_since(log_mark).splitlines()
+                if "[onboarding]" in line
+            ]
+            return lines[-12:] if lines else "<no [onboarding] line since the click>"
+
+        # (3b) The causal barrier between the click and the registry: the submit
+        # reached `PendingReview`. That state alone reveals the recheck
+        # affordance (`invite_request.rs` gates it on `recheck_visible`), and it
+        # is the precondition of the writer below — `PendingInviteSlot()` is null
+        # in every other state, and a refused or failed submit lands in `Error`
+        # and returns normally. So this wait splits the old single signature
+        # ("registry untouched, one account") in two: red HERE means the submit
+        # never landed, and the status line + error element name why; red at the
+        # registry wait below means it landed and the writer dropped it (the app
+        # log carries `[onboarding] registry PersistPendingInvite failed`, and a
+        # skipped persist logs `no pending-invite slot at the submit return`).
+        # The recheck button renders on the append wizard's page, and again on
+        # the joiner's own launch surface once the adoption's switch has
+        # re-rendered; the registry already naming the joiner active is the
+        # third witness, because the writer runs only on a non-null slot. Any one
+        # of them proves `PendingReview` — the predicate takes all three so the
+        # switch's teardown, which briefly shows neither page, cannot stretch
+        # the wait past the submit itself.
+        def _diagnose_submit():
+            def _read(element_id):
+                try:
+                    return driver.get_text(element_id)
+                except Exception as exc:  # a failed read is itself a reportable fact
+                    return f"<unreadable: {type(exc).__name__}: {exc}>"
+
+            return (
+                f"invite-request-status={_read('invite-request-status')!r}, "
+                f"error-message={_read('error-message')!r}, "
+                f"registry: {describe_registry(driver)}; "
+                f"app log: {_onboarding_log_since_click()}"
+            )
+
+        def _registry_adopted_joiner():
+            index = _read_registry_index(driver) or {}
+            return index.get("active") == joiner_actor
+
+        wait_until(
+            lambda: _registry_adopted_joiner() or driver.is_visible(INVITE_RECHECK_BUTTON),
+            INVITE_SUBMIT_S,
+            diagnose=lambda: (
+                "the real invite_request.submit never reached PendingReview "
+                f"(no {INVITE_RECHECK_BUTTON!r}): {_diagnose_submit()}"
+            ),
+        )
 
         # (4) The registry half — the shared writer's own contract, already true
         # before the switch existed: the joiner is registered and active, the
         # original survives (no-user-data-loss), and the per-actor pending-invite
-        # slot is written.
-        index = _wait_registry_index(driver, 2, timeout=45, active=joiner_actor)
+        # slot is written. Past the barrier, a red here is the writer's: the app
+        # log since the click names which exit it took.
+        try:
+            index = _wait_registry_index(driver, 2, timeout=45, active=joiner_actor)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"{exc}; the submit reached PendingReview, so the writer dropped it — "
+                f"app log: {_onboarding_log_since_click()}"
+            ) from exc
         actor_ids = [a["actor_id"] for a in index["accounts"]]
         assert first_actor in actor_ids, (
             "the original account must survive the append (no-user-data-loss)"
@@ -1294,8 +1378,15 @@ def test_windows_open_as_new_instance_spawns_a_bound_sibling(
     observe the child stands up a second, app-less bridge
     (``driver.start_bridge_only()``) and names it in ``FAUNA_E2E_CHILD_BRIDGE``. The
     observer drives nothing — it only reads ``/app/state``.
+
+    Both identities are dedicated, never the run's shared admin: the two
+    instances share a test-owned store (a supplied ``credential_dir`` and
+    ``keyring_app``) the teardown cannot retire, and a shared actor signed in on
+    it would keep a live grant that pins the account's fleet scope for the rest
+    of the run (`e2e-launch-isolation.md`, *A discarded driver retires its
+    machine*).
     """
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
     # ONE shared install world: the child inherits the parent's environment, so it
     # reads the same registry and contends on the same per-account lock files. A
     # supplied data_dir is the caller's to clean up (`_owns_data_dir`).
@@ -1326,13 +1417,13 @@ def test_windows_open_as_new_instance_spawns_a_bound_sibling(
             and bool(s.get("session", {}).get("authenticated")),
             timeout=60,
         )
-        # Row 0 = user (active), row 1 = admin. Since windows' W5.6
+        # Row 0 = user (active), row 1 = the other identity. Since windows' W5.6
         # (account-data-plane.md § Workstreams) retirement (
         # 2026-08-24) the button renders on EVERY row, active included
         # (account-scoping.md § Concurrent instances — the restriction that
         # reserved it for non-active rows only has lapsed; mirrors linux's own
         # test_linux_open_as_new_instance_spawns_a_bound_sibling), so
-        # `index=1` targets the admin row explicitly rather than relying on
+        # `index=1` targets the other row explicitly rather than relying on
         # the bare ID being the only match.
         _wait_switcher_count(driver, 2, timeout=45)
         driver.click(OPEN_NEW_INSTANCE_BUTTON, index=1)
@@ -1341,22 +1432,23 @@ def test_windows_open_as_new_instance_spawns_a_bound_sibling(
         # `spawned_instances` shape (apple's stateRecords, linux's spawned_instances).
         state = driver.wait_for_state(
             lambda s: any(
-                r.get("actor_id") == admin_actor and r.get("pid")
+                r.get("actor_id") == other_actor and r.get("pid")
                 for r in s.get("spawned_instances", [])
             ),
             timeout=30,
         )
         assert any(
-            r["actor_id"] == admin_actor for r in state["spawned_instances"]
+            r["actor_id"] == other_actor for r in state["spawned_instances"]
         ), f"the spawn must be recorded for the picked account; got {state.get('spawned_instances')!r}"
 
-        # The child comes up BOUND: authenticated as the admin, over its own bridge.
+        # The child comes up BOUND: authenticated as the other identity, over its
+        # own bridge.
         child = observer.wait_for_state(
-            lambda s: s.get("session", {}).get("actor_id") == admin_actor
+            lambda s: s.get("session", {}).get("actor_id") == other_actor
             and bool(s.get("session", {}).get("authenticated")),
             timeout=90,
         )
-        assert child["session"]["actor_id"] == admin_actor, (
+        assert child["session"]["actor_id"] == other_actor, (
             "the spawned sibling must authenticate as its BOUND account, not the "
             "store-active one — reading the active account here is what makes a bound "
             f"launch silently inert; got {child.get('session')!r}"
@@ -1447,12 +1539,17 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
     `test_windows_remove_account_shrinks_switcher_live` proves the row and the
     registry entry go; neither says anything about the account's on-device
     state — the half a user cannot see and cannot get back. Both identities
-    first run a real session each (the admin's through a switch), so each owns
-    a populated scope; the removal must then leave no admin scope under ANY
-    base the erase sweeps (`common.scope_store.WindowsScopeStore`: the flat
-    base and the unified store root) while the user's scope and secret are
-    still there. Every wait is on state."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    first run a real session each (the second's through a switch), so each owns
+    a populated scope; the removal must then leave no scope of the removed
+    identity under ANY base the erase sweeps (`common.scope_store.WindowsScopeStore`:
+    the flat base and the unified store root) while the user's scope and secret
+    are still there. Every wait is on state.
+
+    Both identities are dedicated, never the run's shared admin: the removal
+    erases the removed identity's slot on this machine without retiring its
+    enrollment nest-side, so no teardown could find that grant to retire it
+    (`e2e-launch-isolation.md`, *A discarded driver retires its machine*)."""
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance, second="user")
 
     driver = create_driver("windows")
     driver.launch({
@@ -1467,14 +1564,14 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
         user_scope = store.scope_dirs(user_actor)[0]
         _wait_for_path(user_scope, "the user's own account scope")
 
-        # Give the admin a real session of its own, so it has data to lose.
+        # Give the other identity a real session of its own, so it has data to lose.
         _wait_switcher_count(driver, 2, timeout=45)
         driver.click(SWITCHER_ITEM, index=1)
-        _await_working_session(driver, admin_actor, "the switch to the admin")
-        admin_dirs = store.scope_dirs(admin_actor)
-        _wait_for_path(admin_dirs[0], "the admin's own account scope")
+        _await_working_session(driver, other_actor, "the switch to the other identity")
+        other_dirs = store.scope_dirs(other_actor)
+        _wait_for_path(other_dirs[0], "the other identity's own account scope")
 
-        # Back to the user: the admin row is now the non-active one, the only row
+        # Back to the user: the other row is now the non-active one, the only row
         # the switcher offers a remove button on.
         _wait_switcher_count(driver, 2, timeout=45)
         driver.click(SWITCHER_ITEM, index=0)
@@ -1484,23 +1581,23 @@ def test_windows_removing_an_identity_deletes_its_data_and_leaves_the_others(
         driver.click(REMOVE_BUTTON, scope=f"{SWITCHER_ITEM}[1]")
         index = _wait_registry_index(driver, 1, timeout=30)
         assert [a["actor_id"] for a in index["accounts"]] == [user_actor], (
-            f"only the removed admin may leave the registry; got {index!r}"
+            f"only the removed identity may leave the registry; got {index!r}"
         )
 
         wait_until(
-            lambda: not any(d.exists() for d in admin_dirs),
+            lambda: not any(d.exists() for d in other_dirs),
             RPC_ROUNDTRIP_S,
             diagnose=lambda: (
                 "the removed identity's scope survived under: "
-                f"{[str(d) for d in admin_dirs if d.exists()]}; app error: "
+                f"{[str(d) for d in other_dirs if d.exists()]}; app error: "
                 f"{_app_error(driver)!r}"
             ),
         )
         assert user_scope.is_dir(), (
-            "removing the admin must leave the remaining identity's data "
+            "removing the other identity must leave the remaining identity's data "
             f"untouched; {user_scope} is gone"
         )
-        assert _read_store_slot(driver, f"fauna/{admin_actor}/secret") is None, (
+        assert _read_store_slot(driver, f"fauna/{other_actor}/secret") is None, (
             "the removed identity's secret must be gone from this device"
         )
         assert _read_store_slot(driver, f"fauna/{user_actor}/secret"), (
@@ -1686,6 +1783,170 @@ def test_windows_switching_identity_keeps_device_settings_and_moves_drafts(
         assert start_at_login() == "false", (
             "the device setting must still hold after switching back; reads "
             f"{driver.get_attr(AUTOSTART_TOGGLE, 'checked')!r}"
+        )
+    finally:
+        driver.teardown()
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_windows_a_registry_write_queues_behind_a_sibling_instances_mutation_lock(
+    nest_instance, windows_app_path, request
+):
+    """``multiple-accounts`` outcome 14 on windows: a second window changing the
+    identities at the same time never loses the change — one waits for the
+    other (``account-scoping.md`` § Concurrent instances; ``long-term-store.md``
+    § Multi-account evolution → *Cross-process mutation lock*).
+
+    The test stands in for the sibling instance mid-mutation: it locks byte 0 of
+    ``<data dir>/account-registry.lock``, a range overlapping the whole-file
+    ``LockFileEx`` every mutator asks for, and holds it, then presses
+    ``account-require-confirm-toggle`` — a real gesture whose write is one index
+    read-modify-write. Polarised (convention 14): windows has no lock table, so
+    the positive observable is the kernel's list of the file's openers naming
+    the APP's pid (the shared ``FileMutationLock`` opens the file only inside
+    ``acquire`` and drops it with the guard, so it cannot hold the file while we
+    do), with the flag still off in the same reading; after release the write
+    lands and the app closes the file. A registry built without the lock writes
+    straight through, which the poll reports as the first failure it sees.
+    macOS twin, the same shape over ``lsof``:
+    ``test_apple_a_registry_write_queues_behind_a_sibling_instances_mutation_lock``."""
+    import msvcrt
+
+    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    driver = create_driver("windows")
+    driver.launch({
+        "app_path": windows_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    held = None
+    try:
+        driver.wait_for_state(
+            lambda s: bool(s.get("session", {}).get("authenticated")), timeout=30
+        )
+        _wait_switcher_count(driver, 2, timeout=30)
+        lock_path = os.path.join(driver.data_dir(), "account-registry.lock")
+        wait_until(
+            lambda: os.path.isfile(lock_path) or None, 20.0,
+            diagnose=lambda: f"the app never stamped {lock_path}",
+        )
+        # Read before the hold: the bridge may not answer once the app's UI
+        # thread is parked behind the lock.
+        app_pid = driver.foreground_report()["app_pid"]
+        assert app_pid > 0, "the bridge reports no app process for this session"
+        # Non-vacuity: at rest the app does NOT keep the lock file open, so its
+        # pid in the list below can only mean a mutator inside `acquire`.
+        wait_until(
+            lambda: app_pid not in file_opener_pids(lock_path) or None, 20.0,
+            diagnose=lambda: f"the idle app (pid {app_pid}) holds {lock_path} open",
+        )
+
+        # (1) The sibling holds the registry lock. `LK_LOCK` waits out a mutator
+        # still finishing, as a real sibling's `acquire` would.
+        held = open(lock_path, "r+b")
+        msvcrt.locking(held.fileno(), msvcrt.LK_LOCK, 1)
+
+        # (2) The app flips the admin row's flag — it must QUEUE behind the hold.
+        _wait_flag(driver, admin_actor, False, timeout=10)
+        # The mutator blocks the app's UI thread inside `LockFileEx`, so the
+        # click helper's own follow-up driver calls cannot answer until the
+        # sibling lets go: press from a thread, and watch only the openers and
+        # the index file (neither goes through the app) meanwhile.
+        pressed = threading.Thread(
+            target=lambda: driver.click(REQUIRE_CONFIRM_TOGGLE, scope=f"{SWITCHER_ITEM}[1]"),
+            daemon=True,
+        )
+        pressed.start()
+        deadline = time.monotonic() + 30.0
+        while app_pid not in file_opener_pids(lock_path):
+            flags = {
+                a["actor_id"]: a.get("require_confirm_to_activate", False)
+                for a in (_read_registry_index(driver) or {}).get("accounts", [])
+            }
+            assert flags.get(admin_actor) is not True, (
+                "the registry write LANDED while a sibling held "
+                f"{lock_path} — the mutator never asked for the lock. flags={flags!r}"
+            )
+            assert time.monotonic() < deadline, (
+                f"the toggle write never showed as blocked on {lock_path}"
+            )
+            time.sleep(0.3)
+        flags = {
+            a["actor_id"]: a.get("require_confirm_to_activate", False)
+            for a in (_read_registry_index(driver) or {}).get("accounts", [])
+        }
+        assert flags.get(admin_actor) is not True, (
+            f"the app has {lock_path} open but the write already landed — it "
+            f"wrote before locking. flags={flags!r}"
+        )
+
+        # (3) The sibling lets go → the write lands, the app closes the file.
+        held.seek(0)
+        msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 1)
+        pressed.join(timeout=60)
+        _wait_flag(driver, admin_actor, True, timeout=30)
+        wait_until(
+            lambda: app_pid not in file_opener_pids(lock_path) or None, 20.0,
+            diagnose=lambda: "the app still holds the registry lock file open",
+        )
+    finally:
+        if held is not None:
+            held.close()
+        driver.teardown()
+
+
+@pytest.mark.real_conversations
+@pytest.mark.feature("drafts-survive")
+def test_windows_a_new_message_draft_never_shows_under_another_identity(
+    nest_instance, windows_app_path, request
+):
+    """Each identity's half-written new message stays its own across switches —
+    the shared arc in `helpers/identity_switch_drafts.py`, which every app's
+    switcher module runs (apple's and tui's twins of the same name).
+
+    windows wires conversation drafts only behind the `real_conversations` gate
+    (`App.xaml.cs` registers `ConvDrafts` with the real rails), so this test
+    carries the marker per test and passes the gate's env into its own launch;
+    the gate is session-wide, so run it in its own pytest invocation. The admin's
+    first activation flags it require-confirm (the admin auto-default); windows
+    never renders the in-app prompt (Windows Hello behind the seam file), so the
+    user approves through the file, as apple's twin does."""
+    from helpers.identity_switch_drafts import assert_new_message_draft_never_crosses_identity
+
+    admin_sk = nest_instance["admin"]["signing_key"]
+    admin_actor = bytes(admin_sk.verify_key).hex()
+    user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    user_actor = user["actor_id_hex"]
+    seed = build_registry_seed(
+        [
+            {"actor_id": user_actor, "secret_hex": bytes(user["signing_key"]).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-user", "handle": "user"},
+            {"actor_id": admin_actor, "secret_hex": bytes(admin_sk).hex(),
+             "nest_url": nest_instance["url"], "device_id": "drafts-admin", "handle": "admin"},
+        ],
+        active=user_actor,
+    )
+    environment = _seeded_environment(request, nest_instance)
+    _apply_real_conversations_env(environment, request)
+
+    driver = create_driver("windows")
+    driver.launch({
+        "app_path": windows_app_path,
+        "url": nest_instance["url"],
+        "seed_credentials": seed,
+        "environment": environment,
+    })
+    try:
+        _write_reauth_verdict(driver, "approve")
+        assert_new_message_draft_never_crosses_identity(
+            driver, nest_instance["url"],
+            user=(user_actor, bytes(user["signing_key"])),
+            admin=(admin_actor, bytes(admin_sk)),
+            show_switcher=lambda: _wait_switcher_count(driver, 2, timeout=45),
+            await_session=lambda actor, what: await_session_actor(
+                driver, actor, budget_s=APP_RELAUNCH_S, what=what
+            ),
         )
     finally:
         driver.teardown()

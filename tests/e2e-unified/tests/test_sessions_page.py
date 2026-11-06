@@ -49,7 +49,6 @@ import pytest
 from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.enrollment import device_sign_in, grant_device_principal, register_device
 from helpers.connection import wait_until_online
 from helpers.launch_token import own_session_ids, renew_own_sign_in
@@ -69,18 +68,6 @@ DEVICE_LABEL = "e2e-sessions-device"
 _LOCAL_TIME = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
 
 
-def _require_sessions_page(driver) -> None:
-    """Convention 7: tui is the lead app (built first); the other six follow as
-    one batched trickle-down row — linux, web and android have landed."""
-    if app_name(driver) not in ("tui", "linux", "web", "android"):
-        skip_unbuilt(
-            driver,
-            surface="sessions page",
-            detail="tui leads; this app renders the shared sessions_view fold in its trickle-down leg",
-            tracked="docs/goal/ui/sessions.md § Implementation status today",
-        )
-
-
 def _client(nest_url: str, user: dict) -> WsRpcAdminClient:
     return WsRpcAdminClient(
         nest_url, bytes.fromhex(user["actor_id_hex"]), bytes(user["signing_key"])
@@ -88,9 +75,11 @@ def _client(nest_url: str, user: dict) -> WsRpcAdminClient:
 
 
 def _mint_stranger_session(nest_url: str, user: dict) -> str:
-    """A second sign-in of this account from somewhere else — its session id."""
-    with _client(nest_url, user) as client:
-        return client.own_token_id
+    """A second sign-in of this account from somewhere else — its session id.
+    A fresh mint the harness does not hold: ``own_token_id`` is the harness's
+    one shared sign-in per (nest, actor), so two strangers read off it were one
+    session, and revoking the first ended the second."""
+    return _client(nest_url, user).mint_bearer().token_id
 
 
 def _listed_rows(nest_url: str, user: dict, harness_ids: set[str]) -> dict[str, dict]:
@@ -138,7 +127,6 @@ def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instan
     from conftest import _login_app_as, _make_user
 
     driver = app.driver
-    _require_sessions_page(driver)
     nest_url = nest_instance["url"]
     user = _make_user(nest_instance)
     actor_id = bytes.fromhex(user["actor_id_hex"])
@@ -211,7 +199,10 @@ def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instan
     assert all(m is None for m in marks[tier:]), (
         f"a 'This device' row sorts after an unmarked one; {shown}"
     )
-    rest = [(rows[t]["last_used_at"], t) for t in painted[tier:]]
+    # The harness's own sign-in is painted too, and reading `rows` used it after
+    # the fold — its `last_used_at` is newer than the order the page drew, so it
+    # is left out (dropping one row from a sorted list keeps it sorted).
+    rest = [(rows[t]["last_used_at"], t) for t in painted[tier:] if t not in harness_ids]
     assert rest == sorted(rest, key=lambda r: (-r[0], r[1])), (
         f"the other sign-ins are not newest-activity first: {rest}"
     )
@@ -298,23 +289,29 @@ def test_list_revoke_one_then_sign_out_everywhere_else(app, request, nest_instan
     app.sessions.cancel_sign_out_everywhere_else()
     assert stranger_b in _listed(nest_url, user, harness_ids), "Cancel ended something"
 
+    # The act keeps the id the bearer holder calls current when pressed, and an
+    # app holding two own ids paints the newer (`devices.md` § The client's own
+    # session), so the painted `own_id` is not the kept id. Every own id is
+    # outside "the others"; exactly what must survive is one of them.
+    own_ids = own_session_ids(app.driver)
     before = _listed(nest_url, user, harness_ids)
     app.sessions.sign_out_everywhere_else()
 
-    def others_gone() -> bool:
-        return not ((before - {own_id}) & _listed(nest_url, user, harness_ids))
+    def others_left() -> set[str]:
+        return (before - own_ids) & _listed(nest_url, user, harness_ids)
 
     wait_until(
-        others_gone,
+        lambda: not others_left(),
         ACT_FOLDED_S,
         diagnose=lambda: (
             f"sessions still listed after sign out everywhere else: "
-            f"{sorted((before - {own_id}) & _listed(nest_url, user, harness_ids))} "
-            f"(error={app.sessions.error_text()!r})"
+            f"{sorted(others_left())} "
+            f"(error={app.sessions.error_text()!r}, the app's own ids {sorted(own_ids)}, "
+            f"rows {_listed_rows(nest_url, user, harness_ids)})"
         ),
     )
-    assert own_id in _listed(nest_url, user, harness_ids), (
-        "sign out everywhere else must keep this app's own session"
+    assert own_ids & _listed(nest_url, user, harness_ids), (
+        f"sign out everywhere else must keep this app's own session; own {sorted(own_ids)}"
     )
     wait_until(
         lambda: stranger_b not in (app.sessions.painted_token_ids() or [stranger_b]),
@@ -342,7 +339,6 @@ def test_own_renewals_fold_into_one_row_and_survive_sign_out_everywhere_else(
     from conftest import _login_app_as, _make_user
 
     driver = app.driver
-    _require_sessions_page(driver)
     nest_url = nest_instance["url"]
     user = _make_user(nest_instance)
     _login_app_as(app, request, nest_instance, user, verify_live_actor=True)

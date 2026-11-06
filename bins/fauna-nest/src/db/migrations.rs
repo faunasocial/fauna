@@ -265,7 +265,79 @@ use rusqlite::Connection;
 ///  content rule document, written by the shared rule editor
 ///  (`nest-rules.md` § The shared rule editor (b)). Additive and nullable: a
 ///  ward policy written before it carries no document, only its floors.
-pub const CURRENT_SCHEMA_VERSION: u32 = 156;
+///  157 = `actor_mls_pubkeys.calendar_pubkey` + `.calendar_mlkem_ek` +
+///  `.card_pubkey` + `.card_mlkem_ek` (2026-10-23): the calendar and card
+///  keypairs' public halves (`owner-key-material.md` § Path B-sibling-5 /
+///  -6), all `NOT NULL` — NOT additive: the one-shot
+///  `recreate_actor_mls_pubkeys_for_the_dav_split` drops the pre-split table
+///  (public keys every app re-asserts on connect) and the reader floor rises
+///  with it, since an older binary's registration write omits the new
+///  columns. Owed no compat under the 0.1.x window
+///  (`version-compatibility.md` § Dimension 2, the fifth exception).
+///  158 = `dav_pre_split_tombstone_pending` (2026-10-23): the one-row mark
+///  `mark_pre_split_dav_tombstoning` sets on a database stamped below 158,
+///  which the boot pass `dav_pre_split::run_at_boot` clears once it has
+///  tombstoned every calendar and card record still sealed as a `mail-record`
+///  (`owner-key-material.md` § Path B-sibling-5 → *Migration*). Additive.
+///  159 = `actor_mail_enabled` (2026-10-26): the per-actor mail-off flag the
+///  user's "Disable mail" sets and the IMAP serving gate reads
+///  (`mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+///  Additive: absent ⇒ on, so a database written before it reads every
+///  actor's mail as on.
+///  160 = `succession_pull_queue` (2026-11-03): the hourly succession pull's
+///  visit order, so every identity on its work list is reached within a
+///  bounded number of passes (`succession-propagation.md`, the
+///  federation-propagation entry). Additive: derived scheduling state, an
+///  empty table is seeded on the next pass.
+///  161 = `follow_delivery_homes` (2026-11-04): per-home custody of a
+///  follow-delivered row (`federated-follow.md` § Decision 3, *What a
+///  reader-named home is trusted for*). Additive; the one-shot
+///  `seed_follow_delivery_custody` gives every delivered row of a database
+///  stamped below 161 the custody of the home its `content.origin_nest_*`
+///  columns name.
+///  162 = the guardian content floors retired (2026-11-04): the four
+///  `guardian_policies.content_{nsfw,spam,phishing,commercial}` columns are
+///  dropped by `retire_guardian_content_floors`, which logs any non-`inherit`
+///  floor it drops (`nest-rules.md` § The shared rule editor (b)).
+///  Non-additive under the 0.1.x compat-free window: the reader floor rises
+///  to 162, since a 161 binary reads the dropped columns.
+///  163 = `sync_conflicts.reporter_actor_id` (2026-11-04): the actor whose
+///  device filed the report, so choose-winner's reporting-device attestation
+///  is bound to the reporter's actor and not to device bytes alone
+///  (`conflicts.md`, the choose-winner substrate). Additive and nullable: a
+///  conflict written before it falls through to the change-row attestation.
+///  164 = `payment_purchases` (2026-11-05): the stable per-purchase
+///  reference a provider refund, dispute or renewal names, bound to the buyer
+///  or the claim the purchase minted (`monetization.md` § Expiry &
+///  revocation). A new table, additive: a purchase recorded before it is
+///  still voided by its claim's `external_ref`, as before.
+///  165 = `payment_providers.product_ref` (2026-11-05): the product a
+///  provider's tier is sold as (Stripe: the Payment Link id), so a paid
+///  checkout for anything else on the creator's account mints nothing
+///  (`monetization.md` § Pillar 3 → *Configuration*). Additive and nullable:
+///  a provider configured before it maps every payment, as before.
+///  166 = `materialize_deleted_collections` (2026-11-05): the in-flight
+///  marker's companion, naming each collection a door deleted while a flip
+///  stood, so the flip's retry keeps the deletion (`backup-destinations.md` §
+///  *the in-flight marker*). A new table, additive: an older binary never
+///  writes or reads it, and only loses the keep it gives.
+///  167 = `payment_purchases.product_ref` (2026-11-05): the product a
+///  purchase was sold as, so a renewal is covered by its recorded purchase
+///  only while the provider's mapping still names that product
+///  (`monetization.md` § Pillar 3 → *Configuration*). Additive and nullable:
+///  a purchase recorded before it names no product, so its renewal is
+///  covered only by a mapping with no product.
+///  168 = `idx_folder_deposit_inbox_staged` (2026-11-05): a partial index over
+///  the staged deposit uploads, serving the idle-upload sweep and the begin's
+///  staged-upload caps (`folder-deposit.md` § Deposits larger than one
+///  message). A new index, additive.
+///  169 = `folder_deposit_parts.plain_length` (2026-11-05): each staged
+///  part's plaintext length, summed by the commit into the depositor's
+///  signed statement (`folder-deposit.md` § The depositor signs, the owner's
+///  device verifies). Additive with a constant default: a part staged before
+///  it counts 0, so its upload's signed commit is refused and the principal
+///  re-sends (a staged upload expires within the hour anyway).
+pub const CURRENT_SCHEMA_VERSION: u32 = 169;
 
 /// The oldest `schema_version` whose binary can still safely **operate** a DB
 /// this binary writes. Bump **only** on a non-additive/breaking change (the
@@ -273,10 +345,13 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 156;
 /// exactly what keeps an older binary working against a newer additive DB.
 /// Raising it is what makes an older binary treat a DB as `Incompatible` and
 /// boot the degraded needs-update serve (`SchemaIncompatible`) rather than fail
-/// lazily at its first query. The floor sits AT the genesis: no binary of a
-/// retired number may operate a genesis database (version-compatibility.md
-/// § 2.2, the genesis paragraph).
-pub const MIN_READER_SCHEMA_VERSION: u32 = 125;
+/// lazily at its first query. The floor sits above every retired number: no
+/// binary of a retired number may operate a genesis database
+/// (version-compatibility.md § 2.2, the genesis paragraph). Raised from the
+/// genesis (125) to 157 by the calendar and card key split's `NOT NULL`
+/// registration columns (the 157 ledger line), and to 162 by the dropped
+/// guardian content floors (the 162 ledger line).
+pub const MIN_READER_SCHEMA_VERSION: u32 = 162;
 
 /// The last schema number retired by a genesis collapse (1..=78 by the first,
 /// 79..=124 by the second) — kept only as the bound the genesis numbering must
@@ -762,6 +837,12 @@ pub(super) const MIGRATIONS_SYNC: &str = "
         -- Receivers account-and-skip it; the row keeps GC-pinning and
         -- candidate-listing the losing version.
         is_retention INTEGER,
+        -- The 32-byte writer key of the DEPOSITOR on the row the owner's
+        -- device records when it adopts a folder deposit (folder-deposit.md
+        -- § The depositor signs -- ruling 3). Covered by the row's writer
+        -- signature; stored and echoed verbatim; stripped on the public
+        -- projection. NULL on every other row.
+        deposited_by BLOB,
         -- W2.3 -- the generalized account-data feed (account-sync-plane.md
         -- § Feeds and cursors). The explicit item-class discriminator —
         -- 'chunk-manifest' | 'direct-blob' | 'record-cid' | 'state-entry'
@@ -993,6 +1074,15 @@ pub(super) const MIGRATIONS_BACKUP_CUSTODY_GENERATIONS: &str = "
 ///
 /// `segment_ids` is the dag-cbor `Vec<u32>` of the corpus's content segment ids,
 /// ascending; `journal` is `'adopt'` (a journaled kind) or `'none'` (posts).
+///
+/// `materialize_deleted_collections` is the marker's companion: one row per
+/// collection a door deleted while the marker for `(actor, kind)` stood (today
+/// only the CardDAV address-book delete door writes one, in its own
+/// transaction). The retry neither re-inserts such a collection from the corpus
+/// nor keeps the corpus's version of it in the adopted journal, and the commit
+/// deletes the rows with the marker. Why-recreatable: as the marker's — it
+/// holds no user data, and losing it only lets a retry bring back a collection
+/// deleted mid-flip.
 pub(super) const MIGRATIONS_MATERIALIZE_IN_FLIGHT: &str = "
     CREATE TABLE IF NOT EXISTS materialize_in_flight (
         actor_id    BLOB    NOT NULL,
@@ -1002,6 +1092,12 @@ pub(super) const MIGRATIONS_MATERIALIZE_IN_FLIGHT: &str = "
         journal     TEXT    NOT NULL,
         started_at  INTEGER NOT NULL,
         PRIMARY KEY (actor_id, kind)
+    );
+    CREATE TABLE IF NOT EXISTS materialize_deleted_collections (
+        actor_id      BLOB NOT NULL,
+        kind          TEXT NOT NULL,
+        collection_id BLOB NOT NULL,
+        PRIMARY KEY (actor_id, kind, collection_id)
     );
 ";
 
@@ -1407,6 +1503,12 @@ pub(super) const MIGRATIONS_ROOMS: &str = "
 ///   Sent row (same id), deleted by the bridge's ack — or by the nest when the
 ///   serving principal ends (`bridged_conversations::end_bridged_outbox_in_tx`),
 ///   which stamps the Sent row's `undelivered_at` (additive, 2026-10-03).
+/// - The user's local remove (`docs/goal/behavior/bridged-adapter.md`
+///   § Removing bridged rows; additive, 2026-11-06): a removed message keeps
+///   its row as a tombstone — `sealed_content` emptied, `removed_at` stamped,
+///   `far_message_id` kept so the dedup still answers `duplicate`; a removed
+///   room carries `removed_at` (hidden from the list until a new live row
+///   clears it) and every room its newest removal in `last_removed_at`.
 /// - `first_party_bridge_keys` — an in-process leg's X25519 keypair, the key
 ///   its outbound items are sealed to; minted on first use, the secret wrapped
 ///   under the deployment seed (`crate::nest_kek`'s
@@ -1432,6 +1534,8 @@ pub(super) const MIGRATIONS_BRIDGED_CONVERSATIONS: &str = "
         bridge_x25519       BLOB NOT NULL,
         created_at          INTEGER NOT NULL,
         last_at             INTEGER NOT NULL,
+        removed_at          INTEGER,
+        last_removed_at     INTEGER,
         UNIQUE (actor_id, bridge_id, far_room_id)
     );
     CREATE INDEX IF NOT EXISTS idx_bridge_conversation_rooms_principal
@@ -1448,7 +1552,8 @@ pub(super) const MIGRATIONS_BRIDGED_CONVERSATIONS: &str = "
         created_at     INTEGER NOT NULL,
         received_at    INTEGER NOT NULL,
         receipt        TEXT CHECK(receipt IS NULL OR receipt IN ('delivered', 'read')),
-        undelivered_at INTEGER
+        undelivered_at INTEGER,
+        removed_at     INTEGER
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_bridge_conversation_messages_far
         ON bridge_conversation_messages(room_id, far_message_id)
@@ -2597,7 +2702,13 @@ pub(super) const MIGRATIONS_FORWARD_QUEUE: &str = "
         -- 'copy' | 'redirect' | NULL (unknown: parked before the column
         -- existed) -- the same column and reading as
         -- `outbound_mail_queue.forward_copy_mode` and carried across promotion.
-        copy_mode              TEXT
+        copy_mode              TEXT,
+        -- The source message's inbound verdicts, carried across promotion
+        -- onto `outbound_mail_queue.inbound_*` for the forwarder NDR's
+        -- backscatter check ('' = parked before the columns existed).
+        inbound_spf            TEXT    NOT NULL DEFAULT '',
+        inbound_dmarc          TEXT    NOT NULL DEFAULT '',
+        inbound_dmarc_pol      TEXT    NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_forward_queue_actor_fifo
         ON forward_queue(actor_id, id);
@@ -2794,6 +2905,9 @@ pub(super) const MIGRATIONS_PAYMENTS: &str = "
         created_at     INTEGER NOT NULL,
         last_verified_at INTEGER,
         last_rejected_at INTEGER,
+        -- The provider's product reference the tier is sold as (Stripe: the
+        -- Payment Link id). NULL = every verified payment maps to the tier.
+        product_ref    TEXT,
         PRIMARY KEY (author_id, kind)
     );
 
@@ -2823,6 +2937,30 @@ pub(super) const MIGRATIONS_PAYMENTS: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_payment_claim_codes_author
         ON payment_claim_codes (author_id);
+
+    -- One row per (purchase reference) a provider payment named: the stable
+    -- per-purchase id (Stripe: subscription, payment intent, Checkout
+    -- Session) a later renewal extends by and a refund or dispute voids by —
+    -- `external_ref` names one delivery and differs on every event
+    -- (monetization.md § Expiry & revocation). A purchase names several ids,
+    -- so it has several rows carrying the same binding: the bound buyer, or
+    -- the claim minted for an unbound one (by the claim's `external_ref`,
+    -- never its bearer code). Rows are kept for audit, never deleted.
+    CREATE TABLE IF NOT EXISTS payment_purchases (
+        author_id          BLOB NOT NULL,
+        provider           TEXT NOT NULL,
+        purchase_ref       TEXT NOT NULL,
+        tier_name          TEXT NOT NULL,
+        buyer_actor_id     BLOB,
+        claim_external_ref TEXT,
+        created_at         INTEGER NOT NULL,
+        voided_at          INTEGER,
+        -- The product the purchase was sold as (Stripe: the Payment Link id
+        -- its checkout named). NULL = no payment of it named one; a renewal
+        -- is covered by the purchase only while the mapping names this one.
+        product_ref        TEXT,
+        PRIMARY KEY (author_id, provider, purchase_ref)
+    );
 ";
 
 /// Membership designation (monetization.md § Pillar 4 — paid nest access): the
@@ -3316,7 +3454,12 @@ pub(super) const MIGRATIONS_SYNC_CONFLICTS: &str = "
         -- because `details` is mutable under that same salt.
         details_sealed BLOB,
         winning_manifest_hash BLOB,
-        resolution TEXT
+        resolution TEXT,
+        -- The reporting ACTOR, beside `device_id`: `sync_devices` is keyed
+        -- (actor, device), so the device bytes alone do not say whose device
+        -- reported. Choose-winner's reporting-device attestation reads it;
+        -- NULL (a row written before it) attests nothing by itself.
+        reporter_actor_id BLOB
     );
     CREATE INDEX IF NOT EXISTS idx_sync_conflicts_fs ON sync_conflicts(folder_id, resolved_at);
 ";
@@ -3596,11 +3739,21 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
     -- ML-KEM-768 encapsulation key, MSEK-derived alongside the X25519
     -- `mls_pubkey`. Required: the provision door writes both halves in one
     -- statement, so every recipient's mail is sealed under the hybrid suite.
+    --
+    -- `calendar_pubkey` / `calendar_mlkem_ek` and `card_pubkey` /
+    -- `card_mlkem_ek` are the recipient's calendar and card keypairs'
+    -- public halves (owner-key-material.md § Path B-sibling-5 / -6). The
+    -- same one write carries all three pairs as required fields, so a
+    -- half-registered actor is unrepresentable.
     CREATE TABLE IF NOT EXISTS actor_mls_pubkeys (
-        actor_id    BLOB PRIMARY KEY,
-        mls_pubkey  BLOB NOT NULL,
-        updated_at  INTEGER NOT NULL,
-        mlkem_ek    BLOB NOT NULL
+        actor_id           BLOB PRIMARY KEY,
+        mls_pubkey         BLOB NOT NULL,
+        updated_at         INTEGER NOT NULL,
+        mlkem_ek           BLOB NOT NULL,
+        calendar_pubkey    BLOB NOT NULL,
+        calendar_mlkem_ek  BLOB NOT NULL,
+        card_pubkey        BLOB NOT NULL,
+        card_mlkem_ek      BLOB NOT NULL
     );
 
     -- Per-actor index public encryption key. Sibling of actor_mls_pubkeys:
@@ -3927,6 +4080,14 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_bridge_caldav_expunged_modseq
         ON bridge_caldav_expunged(actor_id, calendar_id, modseq);
+
+    -- The pre-split DAV tombstoning's durable pending mark (schema 158): one
+    -- row while the boot pass (`dav_pre_split::run_at_boot`) still owes a
+    -- database written before the calendar and card key split its scan;
+    -- cleared by the pass on completion, so a crash mid-pass re-runs it.
+    CREATE TABLE IF NOT EXISTS dav_pre_split_tombstone_pending (
+        id  INTEGER PRIMARY KEY CHECK (id = 1)
+    );
 ";
 
 // Phase-E CardDAV collection/card state (encrypted-mode bridge) — a structural
@@ -4477,6 +4638,27 @@ pub(super) const MIGRATIONS_FOREIGN_RECOVERY_HEADS: &str = "
         learned_at      INTEGER NOT NULL,
         anchor_nest_id BLOB NOT NULL
     );
+";
+
+/// The **succession pull's visit order** (`succession-propagation.md`, the
+/// federation-propagation entry's visit bound): one row per remote identity on
+/// the pull's work list, `turn` the queue position it holds. An identity first
+/// seen joins behind every queued one; an identity whose candidate walk a pass
+/// finished moves to the back. The hourly pass walks the queue from the front
+/// and stops at its dial bound, so every identity is reached within a bounded
+/// number of passes however many identities a caller adds — re-walking the
+/// work list from the start each pass let 64 cheap residue rows starve every
+/// later identity of the pull for ever.
+///
+/// Derived scheduling state, not user data: losing every row only restarts the
+/// order (`turn` is re-seeded on the next pass).
+pub(super) const MIGRATIONS_SUCCESSION_PULL_QUEUE: &str = "
+    CREATE TABLE IF NOT EXISTS succession_pull_queue (
+        actor_id BLOB    PRIMARY KEY,
+        turn     INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_succession_pull_queue_turn
+        ON succession_pull_queue(turn, actor_id);
 ";
 
 /// Web-paywall **sealed rendered output** (`monetization.md` § Pillar 2;
@@ -5346,6 +5528,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
         MIGRATIONS_FOREIGN_RECOVERY_HEADS,
     ),
     (
+        "MIGRATIONS_SUCCESSION_PULL_QUEUE",
+        MIGRATIONS_SUCCESSION_PULL_QUEUE,
+    ),
+    (
         "MIGRATIONS_WEB_RENDERED_SEALED",
         MIGRATIONS_WEB_RENDERED_SEALED,
     ),
@@ -5424,6 +5610,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     (
         "MIGRATIONS_ACTOR_MAIL_SERVING",
         MIGRATIONS_ACTOR_MAIL_SERVING,
+    ),
+    (
+        "MIGRATIONS_ACTOR_MAIL_ENABLED",
+        MIGRATIONS_ACTOR_MAIL_ENABLED,
     ),
     ("MIGRATIONS_IMPORT_SESSIONS", MIGRATIONS_IMPORT_SESSIONS),
     (
@@ -5668,7 +5858,18 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         "PRAGMA application_id = {NEST_DB_APPLICATION_ID};"
     ))
     .context("stamp the nest database's application_id")?;
+    // A guarded one-shot step (§ Genesis, the non-additive bullet), BEFORE the
+    // genesis so its `CREATE … IF NOT EXISTS` recreates the table in the new
+    // shape and the additive reconcile never meets a `NOT NULL` column it
+    // cannot add.
+    recreate_actor_mls_pubkeys_for_the_dav_split(conn)?;
+    // Read before anything below can stamp it: the version this database was
+    // written at, `None` on a fresh one.
+    let stamped_before = stamped_schema_version(conn)?;
     apply_genesis(conn)?;
+    mark_pre_split_dav_tombstoning(conn, stamped_before)?;
+    seed_follow_delivery_custody(conn, stamped_before)?;
+    retire_guardian_content_floors(conn)?;
     reconcile_added_columns(conn)?;
     // Indexes over columns the reconcile may just have added (§ Genesis, the
     // index bullet: in a block they would run before the column exists).
@@ -5692,9 +5893,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
              WHERE follow_delivered = 1;",
     )
     .context("create the follow-delivered index")?;
-    // A guarded one-shot step (§ Genesis, the non-additive bullet) goes here,
-    // keyed on the version the database was stamped with before this boot.
-    // None exists: the genesis is the only schema this line has had.
+    // Backs the staged-upload sweep (`expire_staged_folder_deposits`) and the
+    // begin's staged-upload caps: the few uploads still open, by activity.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_folder_deposit_inbox_staged
+             ON folder_deposit_inbox (received_at)
+             WHERE committed = 0;",
+    )
+    .context("create the staged folder deposit index")?;
     seed_genesis_rows(conn)?;
     // A code deploy that bumps a `scorer_version::*` constant advances the
     // registry here, firing the re-score obligation for content scored under
@@ -5737,6 +5943,248 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     // reach here are `UpgradeOrCurrent` (stamp up to this binary) and
     // `NewerCompatible` (`record_schema_meta`'s guard declines to stamp down).
     record_schema_meta(conn)?;
+    Ok(())
+}
+
+/// Schema 157's one-shot step: drop an `actor_mls_pubkeys` table written
+/// before the calendar and card keypairs existed (no `calendar_pubkey`
+/// column), so the genesis recreates it with the three required pairs
+/// (`owner-key-material.md` § Path B-sibling-5 → *Migration*), and delete the
+/// pre-split calendar grants with it. Keyed on the column rather than the
+/// stamped version so a crash between this step and the version stamp re-runs
+/// nothing it should not; the drop and the grant deletes commit in one
+/// transaction, so a failure between them leaves the pre-split table — and the
+/// guard — in place for the next boot to run the whole step again
+/// (`nest/common.md` § Client-state recoverability). A no-op on a fresh
+/// database and on every boot after the first.
+fn recreate_actor_mls_pubkeys_for_the_dav_split(conn: &Connection) -> Result<()> {
+    let has_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'actor_mls_pubkeys'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .context("probe actor_mls_pubkeys")?
+        > 0;
+    if !has_table {
+        return Ok(());
+    }
+    let has_calendar: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('actor_mls_pubkeys') WHERE name = 'calendar_pubkey'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .context("probe actor_mls_pubkeys.calendar_pubkey")?
+        > 0;
+    if has_calendar {
+        return Ok(());
+    }
+    // The drop and the grant deletes are ONE decision: the drop is what turns
+    // the guard above false, so a drop committed without the deletes would
+    // leave the pre-split calendar grants for good. SQLite DDL is
+    // transactional; any error rolls both back (the transaction's drop) and
+    // the next boot runs the whole step again.
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin the DAV split step")?;
+    // I1: (b) ephemeral / derived — public keys only, routing metadata every
+    // app re-asserts on connect (the mail-epoch refresh's
+    // `provision_recipient_mls_pubkey`), so the row heals with no hand at the
+    // owner's next connect.
+    tx.execute_batch("DROP TABLE actor_mls_pubkeys;")
+        .context("drop the pre-split actor_mls_pubkeys")?;
+    delete_pre_split_calendar_grants(&tx)?;
+    tx.commit().context("commit the DAV split step")?;
+    Ok(())
+}
+
+/// The same one-shot step's second half (`owner-key-material.md` § Path
+/// B-sibling-5 → *Existing calendar grants*): a `content.read{calendar}` grant
+/// minted before the split wraps the MAIL secret, so it must not outlive the
+/// split. The scope tuples are plaintext in the stored `GrantBlob`, so no key
+/// is needed; a row whose blob does not decode is left as it is. Runs only
+/// inside [`recreate_actor_mls_pubkeys_for_the_dav_split`]'s guard and
+/// transaction, so a grant minted after the split is never touched and a
+/// failed delete un-drops the table it is keyed on.
+fn delete_pre_split_calendar_grants(conn: &Connection) -> Result<()> {
+    use fauna_mls::wrapped_blob::{GrantBlob, ScopeTuple};
+    let has_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'capability_grants'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .context("probe capability_grants")?
+        > 0;
+    if !has_table {
+        return Ok(());
+    }
+    let rows: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = {
+        let mut stmt = conn
+            .prepare("SELECT owner_actor_id, grant_id, blob FROM capability_grants")
+            .context("prepare the calendar grant scan")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .context("scan capability grants")?
+            .collect::<rusqlite::Result<_>>()
+            .context("read capability grants")?
+    };
+    for (owner, grant_id, blob) in rows {
+        // window-ok(migration teardown). The decode only picks which rows to
+        // delete; no grant authorizes anything here, and an expired or
+        // not-yet-open calendar grant is retired like any other.
+        let Ok(grant) = GrantBlob::from_canonical_bytes(&blob) else {
+            continue;
+        };
+        let reads_calendar = grant.scope.iter().any(|t| {
+            t.class == ScopeTuple::CLASS_CONTENT_READ
+                && t.kind.as_deref() == Some(ScopeTuple::KIND_CALENDAR)
+        });
+        if reads_calendar {
+            // I1: (b) — the grant is the owner's to revoke and re-mint: it
+            // stays a phantom row of the owner's log (`ui/nests.md` § Trust
+            // facet — grants → *Record-then-deposit*; the facet never renders
+            // a nest's holdings); the wrapped mail secret it carries is
+            // exactly what the split retires.
+            conn.execute(
+                "DELETE FROM capability_grants WHERE owner_actor_id = ?1 AND grant_id = ?2",
+                rusqlite::params![owner, grant_id],
+            )
+            .context("delete a pre-split calendar grant")?;
+        }
+    }
+    Ok(())
+}
+
+/// The `schema_version` this database was stamped with, or `None` when it has
+/// never been stamped (a fresh database, or a first boot that died before its
+/// stamp — neither holds a DAV record). Unlike [`read_schema_meta`], an absent
+/// stamp is not read as the baseline.
+fn stamped_schema_version(conn: &Connection) -> Result<Option<u32>> {
+    use rusqlite::OptionalExtension;
+    let has_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .context("probe schema_meta")?
+        > 0;
+    if !has_table {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT schema_version FROM schema_meta WHERE id = 1",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .context("read the stamped schema_version")
+    .map(|v| v.map(|v| v as u32))
+}
+
+/// Schema 158's guarded one-shot step: on a database stamped below 158 — one
+/// whose calendars and address books may hold records sealed before the
+/// calendar and card key split — set the pending mark the boot pass
+/// `dav_pre_split::run_at_boot` consumes (`owner-key-material.md` § Path
+/// B-sibling-5 → *Migration*). The scan needs the segment stores, so it cannot
+/// run here. A crash before the version stamp sets the mark again (it is
+/// idempotent); a fresh database never gets it, and neither does any boot
+/// after the first.
+fn mark_pre_split_dav_tombstoning(conn: &Connection, stamped_before: Option<u32>) -> Result<()> {
+    if stamped_before.is_some_and(|v| v < 158) {
+        conn.execute(
+            "INSERT OR IGNORE INTO dav_pre_split_tombstone_pending (id) VALUES (1)",
+            [],
+        )
+        .context("mark the pre-split DAV tombstoning pending")?;
+    }
+    Ok(())
+}
+
+/// Schema 161's guarded one-shot step: on a database stamped below 161, give
+/// every follow-delivered row the custody of the one home it was held from
+/// before per-home custody (`federated-follow.md` § Decision 3) — its
+/// `content.origin_nest_id` / `origin_nest_url`, a row missing either skipped
+/// (the purge then removes it as custody-less). `INSERT OR IGNORE`, so a crash
+/// before the version stamp re-runs it harmlessly; no boot after the first
+/// runs it, so a custody the purge dropped is never seeded back.
+fn seed_follow_delivery_custody(conn: &Connection, stamped_before: Option<u32>) -> Result<()> {
+    if stamped_before.is_some_and(|v| v < 161) {
+        conn.execute(
+            "INSERT OR IGNORE INTO follow_delivery_homes
+                 (post_id, origin_nest_id, origin_nest_url, delivered_at)
+             SELECT id, origin_nest_id, origin_nest_url, created_at FROM content
+              WHERE follow_delivered = 1
+                AND origin_nest_id IS NOT NULL AND origin_nest_url IS NOT NULL",
+            [],
+        )
+        .context("seed the follow-delivery custody")?;
+    }
+    Ok(())
+}
+
+/// Drop the four retired per-category content-floor columns from
+/// `guardian_policies` (schema 162; `nest-rules.md` § The shared rule editor
+/// (b) — the guardian's rule document is the content pillar's only rule set
+/// since every app mounts the editor).
+///
+/// I1: dropped under the 0.1.x compat-free window
+/// (`version-compatibility.md` § Dimension 2, the fifth exception), never
+/// silently: a row still holding a non-`inherit` floor is counted and logged
+/// before the drop, so the loss is reported. A floor is not converted into a
+/// rule because a rule needs a reason the guardian never wrote; the guardian
+/// re-creates it in the rule editor. Keyed on the columns' presence, not the
+/// stamp, so a crash between the drops and the stamp re-runs cleanly.
+fn retire_guardian_content_floors(conn: &Connection) -> Result<()> {
+    const FLOORS: [&str; 4] = [
+        "content_nsfw",
+        "content_spam",
+        "content_phishing",
+        "content_commercial",
+    ];
+    let present: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('guardian_policies')")
+            .context("read guardian_policies columns")?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("list guardian_policies columns")?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        names
+            .into_iter()
+            .filter(|n| FLOORS.contains(&n.as_str()))
+            .collect()
+    };
+    if present.is_empty() {
+        return Ok(());
+    }
+    let set = present
+        .iter()
+        .map(|c| format!("{c} <> 'inherit'"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let with_floor: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM guardian_policies WHERE {set}"),
+            [],
+            |r| r.get(0),
+        )
+        .context("count guardian content floors")?;
+    if with_floor > 0 {
+        tracing::warn!(
+            wards = with_floor,
+            "retiring the guardian content floors: {with_floor} ward polic(ies) held a \
+             per-category floor, which is dropped; the guardian re-creates it as a rule \
+             in the rule editor"
+        );
+    }
+    for column in present {
+        conn.execute_batch(&format!(
+            "ALTER TABLE guardian_policies DROP COLUMN {column}"
+        ))
+        .with_context(|| format!("drop guardian_policies.{column}"))?;
+    }
     Ok(())
 }
 
@@ -6987,6 +7435,21 @@ pub(super) const MIGRATIONS_ACTOR_MAIL_SERVING: &str = "
     );
 ";
 
+// Per-actor mail-off flag (schema 159): the nest-side half of the user's
+// "Disable mail" (`docs/goal/behavior/mail-credentials.md` § Trigger taxonomy,
+// the Disable-mail row). The exact sibling of `actor_mail_serving` above — user-
+// set, per-actor, absent ⇒ ON — read only by the IMAP serving gate
+// (`require_local_mail_serving`), so turning mail off refuses the actor's IMAP
+// operations while CalDAV, CardDAV and WebDAV keep serving the same credential.
+// Set via `fauna.bridges.set_actor_mail_enabled` (User-class, caller-scoped).
+pub(super) const MIGRATIONS_ACTOR_MAIL_ENABLED: &str = "
+    CREATE TABLE IF NOT EXISTS actor_mail_enabled (
+        actor_id  BLOB PRIMARY KEY,
+        enabled   INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        set_at    INTEGER NOT NULL
+    );
+";
+
 // Mailbox-migration import sessions (`mailbox-migration.md` § Progress lives
 // nest-side): one row per client-driven import from a foreign IMAP source; the
 // row is the source of truth the progress UI renders from and the resume
@@ -7165,13 +7628,8 @@ pub(super) const MIGRATIONS_FAMILY: &str = "
         -- value -- so a fresh link enforces nothing until the guardian
         -- tightens it.
         --
-        -- Content pillar (§ Content policy): per-category render floor --
-        -- closed enum inherit|collapse|block (default 'inherit' = the ward's
-        -- own preferences decide). Client-enforced post-decrypt.
-        content_nsfw        TEXT    NOT NULL DEFAULT 'inherit',
-        content_spam        TEXT    NOT NULL DEFAULT 'inherit',
-        content_phishing    TEXT    NOT NULL DEFAULT 'inherit',
-        content_commercial  TEXT    NOT NULL DEFAULT 'inherit',
+        -- The content pillar is the guardian's rule document
+        -- (content_document below).
         -- Guardian Notify knob (§ Guardian Notify): default off. Declared here
         -- with the pillar batch; the notify report handler that writes it
         -- lands in Slice D -- so no reader touches this column yet.
@@ -7836,6 +8294,9 @@ pub(super) const MIGRATIONS_FOLDER_DEPOSIT_INBOX: &str = "
         idx         INTEGER NOT NULL,
         sealed      BLOB NOT NULL,
         byte_length INTEGER NOT NULL,
+        -- The part's plaintext length, which the commit sums into the
+        -- depositor's signed statement (the nest cannot open `sealed`).
+        plain_length INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (deposit_id, idx)
     );
 ";
@@ -8003,6 +8464,264 @@ pub(super) const MIGRATIONS_DEVICE_ORACLE: &str = "
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    fn pre_split_pending(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dav_pre_split_tombstone_pending",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    /// Schema 158's one-shot step: a database stamped below 158 gets the
+    /// pre-split DAV tombstoning's pending mark (the boot pass
+    /// `dav_pre_split::run_at_boot` clears it); a fresh database and a
+    /// database already at 158 never do (`owner-key-material.md` § Path
+    /// B-sibling-5 → *Migration*).
+    #[test]
+    fn the_pre_split_dav_mark_is_set_only_on_a_database_stamped_below_158() {
+        let fresh = Connection::open_in_memory().unwrap();
+        run_migrations(&fresh).unwrap();
+        assert!(!pre_split_pending(&fresh), "a fresh genesis owes no scan");
+        run_migrations(&fresh).unwrap();
+        assert!(!pre_split_pending(&fresh), "nor does its second boot");
+
+        let older = Connection::open_in_memory().unwrap();
+        run_migrations(&older).unwrap();
+        seed_schema_meta(&older, 157, 157);
+        run_migrations(&older).unwrap();
+        assert!(pre_split_pending(&older), "a 157 database owes the scan");
+        // The pass clears it; the next boot (now stamped 158) never re-marks.
+        older
+            .execute("DELETE FROM dav_pre_split_tombstone_pending", [])
+            .unwrap();
+        run_migrations(&older).unwrap();
+        assert!(
+            !pre_split_pending(&older),
+            "a 158 database is never re-marked"
+        );
+    }
+
+    /// Schema 161's one-shot step: on a database stamped below 161, a
+    /// follow-delivered row gets the custody of the home its `content.
+    /// origin_nest_*` columns name (a row missing either is skipped, a
+    /// nest-wide row takes none), and no later boot seeds custody back
+    /// (`federated-follow.md` § Decision 3, *What a reader-named home is
+    /// trusted for*).
+    #[test]
+    fn a_pre_custody_delivered_row_is_seeded_its_homes_custody_once() {
+        let custody = |conn: &Connection| -> Vec<(Vec<u8>, Vec<u8>, String, i64)> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT post_id, origin_nest_id, origin_nest_url, delivered_at \
+                     FROM follow_delivery_homes ORDER BY post_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let insert = |id: u8, delivered: i64, url: Option<&str>, home: Option<[u8; 32]>| {
+            conn.execute(
+                "INSERT INTO content (id, schema, author, created_at, payload, \
+                     origin_nest_url, origin_nest_id, follow_delivered) \
+                 VALUES (?1, 'fauna.post', ?2, ?3, X'', ?4, ?5, ?6)",
+                rusqlite::params![
+                    [id; 32].as_slice(),
+                    [0xAAu8; 32].as_slice(),
+                    1_000 + id as i64,
+                    url,
+                    home.map(|h| h.to_vec()),
+                    delivered
+                ],
+            )
+            .unwrap();
+        };
+        insert(1, 1, Some("https://home.example"), Some([0xB0; 32]));
+        insert(2, 1, None, Some([0xB0; 32]));
+        insert(3, 0, Some("https://stub.example"), None);
+        seed_schema_meta(&conn, 160, 157);
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            custody(&conn),
+            vec![(
+                vec![1; 32],
+                vec![0xB0; 32],
+                "https://home.example".to_string(),
+                1_001
+            )],
+            "only the delivered row naming its home is seeded"
+        );
+        conn.execute("DELETE FROM follow_delivery_homes", [])
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(
+            custody(&conn).is_empty(),
+            "a 161 database is never re-seeded: a dropped custody stays dropped"
+        );
+    }
+
+    /// Insert a capability grant row whose blob carries `scope`, owned by the
+    /// fixture actor (schema 157's tests).
+    fn insert_scoped_grant(conn: &Connection, id: u8, scope: fauna_mls::wrapped_blob::ScopeTuple) {
+        use fauna_mls::wrapped_blob::{BLOB_FORMAT_VERSION, GrantBlob, GrantIndex, GrantWindow};
+        let blob = GrantBlob {
+            version: BLOB_FORMAT_VERSION,
+            kind: GrantBlob::KIND.into(),
+            index: GrantIndex(vec![1u8; 32], vec![id; 16]),
+            holder: serde_bytes::ByteBuf::from(vec![4u8; 32]),
+            window: GrantWindow(0, u64::MAX),
+            scope: vec![scope],
+            wrapped_keys: vec![],
+        };
+        conn.execute(
+            "INSERT INTO capability_grants
+                 (owner_actor_id, grant_id, holder_pubkey, blob, epoch_end, created_at)
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![
+                vec![1u8; 32],
+                vec![id; 16],
+                vec![4u8; 32],
+                blob.to_canonical_bytes().unwrap()
+            ],
+        )
+        .unwrap();
+    }
+
+    /// The grant ids left at the nest, in order.
+    fn grant_ids(conn: &Connection) -> Vec<Vec<u8>> {
+        let mut stmt = conn
+            .prepare("SELECT grant_id FROM capability_grants ORDER BY grant_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// A migrated database put back in the shape schema 157 meets: a
+    /// pre-split `actor_mls_pubkeys` holding one row, a pre-split
+    /// `content.read{calendar}` grant (0xCA) and a mail grant (0x4A).
+    fn seed_pre_split_database() -> Connection {
+        use fauna_mls::wrapped_blob::ScopeTuple;
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE actor_mls_pubkeys;
+             CREATE TABLE actor_mls_pubkeys (
+                 actor_id BLOB PRIMARY KEY, mls_pubkey BLOB NOT NULL,
+                 updated_at INTEGER NOT NULL, mlkem_ek BLOB NOT NULL);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO actor_mls_pubkeys VALUES (?1, ?2, 0, ?3)",
+            rusqlite::params![vec![1u8; 32], vec![2u8; 32], vec![3u8; 1184]],
+        )
+        .unwrap();
+        insert_scoped_grant(
+            &conn,
+            0xCA,
+            ScopeTuple::delegable_kind_read(ScopeTuple::KIND_CALENDAR),
+        );
+        insert_scoped_grant(&conn, 0x4A, ScopeTuple::mail());
+        conn
+    }
+
+    /// Schema 157's one-shot step on a database written before the calendar
+    /// and card key split: the pre-split `actor_mls_pubkeys` comes back in the
+    /// three-pair shape (its rows gone — public keys the apps re-assert), and a
+    /// `content.read{calendar}` grant (it wraps the mail secret) is deleted
+    /// while a mail grant stays (`owner-key-material.md` § Path B-sibling-5 →
+    /// *Migration*, *Existing calendar grants*). A second boot touches nothing.
+    #[test]
+    fn the_dav_split_step_recreates_the_key_row_and_drops_pre_split_calendar_grants() {
+        use fauna_mls::wrapped_blob::ScopeTuple;
+        let conn = seed_pre_split_database();
+
+        run_migrations(&conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('actor_mls_pubkeys')
+                 WHERE name IN ('calendar_pubkey', 'calendar_mlkem_ek', 'card_pubkey', 'card_mlkem_ek')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 4, "the table comes back in the three-pair shape");
+        let keys: i64 = conn
+            .query_row("SELECT COUNT(*) FROM actor_mls_pubkeys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            keys, 0,
+            "the pre-split row is gone, for the app to re-assert"
+        );
+        assert_eq!(
+            grant_ids(&conn),
+            vec![vec![0x4Au8; 16]],
+            "the calendar grant is deleted, the mail grant stays"
+        );
+
+        // A calendar grant minted after the split survives every later boot.
+        insert_scoped_grant(
+            &conn,
+            0xCB,
+            ScopeTuple::delegable_kind_read(ScopeTuple::KIND_CALENDAR),
+        );
+        run_migrations(&conn).unwrap();
+        assert_eq!(grant_ids(&conn), vec![vec![0x4Au8; 16], vec![0xCBu8; 16]]);
+    }
+
+    /// Schema 157's step is ONE decision (`nest/common.md` § Client-state
+    /// recoverability): a failure after the table drop and before the
+    /// pre-split calendar grants are gone must not leave the drop standing, or
+    /// the column guard reads false at every later boot and the grants — which
+    /// wrap the owner's mail secret — survive for good. The failure is
+    /// injected as a trigger refusing the grant delete; once it is gone, the
+    /// next boot deletes the calendar grant.
+    #[test]
+    fn a_failure_inside_the_dav_split_step_leaves_it_to_run_again() {
+        let conn = seed_pre_split_database();
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_grant_delete BEFORE DELETE ON capability_grants
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+
+        assert!(
+            run_migrations(&conn).is_err(),
+            "the injected failure surfaces"
+        );
+        let shape: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM sqlite_master WHERE name = 'actor_mls_pubkeys'),
+                     (SELECT COUNT(*) FROM pragma_table_info('actor_mls_pubkeys')
+                      WHERE name = 'calendar_pubkey')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            shape,
+            (1, 0),
+            "the failed step leaves the pre-split table, so the guard still fires"
+        );
+
+        conn.execute_batch("DROP TRIGGER refuse_grant_delete;")
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            grant_ids(&conn),
+            vec![vec![0x4Au8; 16]],
+            "the next boot deletes the pre-split calendar grant"
+        );
+    }
 
     /// The three flag columns ARE the place: a roster row that omits one is
     /// refused rather than resting a default nobody chose.

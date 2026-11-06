@@ -28,6 +28,7 @@ struct SidebarView: View {
             get: { selection },
             set: { newValue in
                 appState.profileActorId = nil
+                appState.profileHome = nil
                 selection = newValue
             }
         )) {
@@ -42,6 +43,7 @@ struct SidebarView: View {
                     // a bare-string literal for the `--nav` lint).
                     .automationActivate("\(item.rawValue)-tab") {
                         appState.profileActorId = nil
+                        appState.profileHome = nil
                         selection = item
                     }
             }
@@ -121,7 +123,8 @@ struct AdminNavRail: View {
             List(AdminPage.built, selection: $state.selectedAdminPage) { page in
                 Label(page.label, systemImage: page.systemImage)
                     .tag(page)
-                    .accessibilityIdentifier("admin-nav-\(page.navId)")
+                    .accessibilityIdentifier(page.navRowId)
+                    .automationActivate(page.navRowId) { appState.selectedAdminPage = page }
             }
             .listStyle(.sidebar)
         }
@@ -164,7 +167,7 @@ struct SettingsNavRail: View {
             List(SettingsPage.built, selection: $state.selectedSettingsPage) { page in
                 Label(page.label, systemImage: page.systemImage)
                     .tag(page)
-                    .accessibilityIdentifier("settings-nav-\(page.navId)")
+                    .settingsNavRow(page) { appState.selectedSettingsPage = page }
             }
             .listStyle(.sidebar)
         }

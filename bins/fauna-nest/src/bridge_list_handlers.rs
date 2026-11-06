@@ -525,6 +525,10 @@ fn send_list_message_handler() -> RpcHandler {
             // The owner's own send switch (`mail-policy-config.md` § Tier 3),
             // ahead of every cap so a refused send reserves nothing.
             crate::bridge_routing_handlers::refuse_if_send_disabled(&state, &actor_id).await?;
+            // "Disable mail" stops sending (`mail-credentials.md` § Trigger
+            // taxonomy, the Disable-mail row): a list send goes out as its
+            // owner, so the owner's mail-off flag refuses it, before any cap.
+            crate::bridge_routing_handlers::ensure_actor_mail_enabled(&state, &actor_id).await?;
 
             // RFC 5322 §3.6: exactly one From field, before any cap is reserved
             // (`smtp-server.md` § Architectural rules → *Exactly one From

@@ -17,18 +17,25 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <!-- ── The store flavors' one property per member — see FaunaApp.csproj.
+       `/p:FaunaStoreSafe=true` sets both; it comes first so the groups below
+       read the members after it. ── -->
+  <PropertyGroup Condition="'$(FaunaStoreSafe)'=='true'">
+    <FaunaExcisePayments>true</FaunaExcisePayments>
+    <FaunaExciseP2pShare>true</FaunaExciseP2pShare>
+  </PropertyGroup>
   <!-- ── The `payments` compile condition — see FaunaApp.csproj for the full
        rationale. Mirrored here because the payments view-model tests
        (SubscriptionsSettingsViewModelTests, ProfileViewModelTests' §4/§5 cases,
        MockNestRpcClient's payments arm) name types that a store-safe build does
-       not have. dynamic-features.md § The feature-matrix test story: both flavors
-       build and run their test subset, so this project has to compile in the
-       excised flavor too. ── -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+       not have. dynamic-features.md § The feature-matrix test story: every flavor
+       builds and runs its test subset, so this project has to compile in the
+       excised flavors too. ── -->
+  <PropertyGroup Condition="'$(FaunaExcisePayments)'!='true'">
     <DefineConstants>$(DefineConstants);PAYMENTS</DefineConstants>
   </PropertyGroup>
   <!-- The `p2p-share` condition, mirrored for MockNestRpcClient's ceremony arm. -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+  <PropertyGroup Condition="'$(FaunaExciseP2pShare)'!='true'">
     <DefineConstants>$(DefineConstants);P2P_SHARE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>

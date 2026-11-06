@@ -286,9 +286,7 @@ def _self_actor_url(wf_doc: dict) -> str:
 @pytest.mark.feature("fediverse")
 def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
                                                  request, tmp_path):
-    skip_unless_fresh_box_reach_app(
-        app.driver, surface="the live 3-party ActivityPub federation observer drive"
-    )
+    skip_unless_fresh_box_reach_app(app.driver)
 
     token, dns_token = hetzner_token(), hetzner_token(purpose="dns")
     secret_hex = box.identity_secret_hex

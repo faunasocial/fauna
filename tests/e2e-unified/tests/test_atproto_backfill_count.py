@@ -15,8 +15,8 @@ Its own module, deliberately: the opt-in rides only a *minting* transition, so
 the module-scoped `atproto_hosted_nest` must not yet hold an identity for this
 user — a module sharing that nest with a test that mints first would hide it.
 
-tui, linux, web and android: tui led; windows and
-apple render the composed label in their own trickle-down.
+All 7 apps render the composed label: tui led, and
+windows was the last to follow.
 """
 import pytest
 
@@ -35,6 +35,9 @@ _written = 0
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_history_opt_in_names_the_public_post_count(atproto_hosted_logged_in_app):
     global _written

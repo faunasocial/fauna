@@ -38,6 +38,33 @@ pub const MAX_REPORTED_DOMAINS: usize = 10_000;
 /// Most distinct rows one From domain tracks in one window (same reason).
 pub const MAX_ROWS_PER_DOMAIN: usize = 10_000;
 
+/// Longest domain or selector an observation row keeps (RFC 1035 §2.3.4: a
+/// name is at most 253 octets in text form). The counts above bound how many
+/// rows the window holds; this bounds each row's bytes, since every string is
+/// a stranger's choice held until the daily pass. A From domain past it is
+/// not a domain and is not counted; any other string is clipped.
+pub const DMARC_OBSERVATION_NAME_MAX_BYTES: usize = 253;
+
+/// Longest result token a row keeps — RFC 7489 §A.1's longest is 9
+/// (`temperror`, `permerror`).
+pub const DMARC_OBSERVATION_TOKEN_MAX_BYTES: usize = 16;
+
+/// Most DKIM signature results one row keeps, in verification order. A
+/// message may carry any number of signatures; a report row needs a few.
+pub const DMARC_OBSERVATION_MAX_DKIM_RESULTS: usize = 8;
+
+/// `s` cut to at most `max` bytes, on a character boundary.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Most `_dmarc` lookups one policy discovery makes (the DMARCbis-style tree
 /// walk's bound: the From domain, then each parent while two labels remain).
 pub const MAX_POLICY_WALK: usize = 8;
@@ -163,7 +190,7 @@ impl DmarcAggregator {
             .header_from_domain
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        if domain.is_empty() {
+        if domain.is_empty() || domain.len() > DMARC_OBSERVATION_NAME_MAX_BYTES {
             return false;
         }
         if !self.domains.contains_key(&domain) && self.domains.len() >= MAX_REPORTED_DOMAINS {
@@ -172,16 +199,26 @@ impl DmarcAggregator {
         let rows = self.domains.entry(domain).or_default();
         let key = RowKey {
             source_ip: source_ip.to_string(),
-            envelope_from: obs.envelope_from_domain.to_ascii_lowercase(),
+            envelope_from: clip(
+                &obs.envelope_from_domain.to_ascii_lowercase(),
+                DMARC_OBSERVATION_NAME_MAX_BYTES,
+            ),
             disposition: disposition.into(),
             dkim_aligned: obs.dkim_aligned,
             spf_aligned: obs.spf_aligned,
             dkim_results: obs
                 .dkim_results
                 .iter()
-                .map(|r: &DkimAuthResult| (r.domain.clone(), r.selector.clone(), r.result.clone()))
+                .take(DMARC_OBSERVATION_MAX_DKIM_RESULTS)
+                .map(|r: &DkimAuthResult| {
+                    (
+                        clip(&r.domain, DMARC_OBSERVATION_NAME_MAX_BYTES),
+                        clip(&r.selector, DMARC_OBSERVATION_NAME_MAX_BYTES),
+                        clip(&r.result, DMARC_OBSERVATION_TOKEN_MAX_BYTES),
+                    )
+                })
                 .collect(),
-            spf_result: obs.spf_result.clone(),
+            spf_result: clip(&obs.spf_result, DMARC_OBSERVATION_TOKEN_MAX_BYTES),
         };
         if !rows.contains_key(&key) && rows.len() >= MAX_ROWS_PER_DOMAIN {
             return false;
@@ -340,47 +377,24 @@ pub enum RuaDestination {
     Unsupported { uri: String },
 }
 
-/// Read one `rua=` URI. A `!<n>[k|m|g|t]` suffix is the size limit; an
-/// RFC 6068 `?query` on a mailto is dropped (we write our own headers).
+/// Read one `rua=` URI with the shared strict reader
+/// ([`crate::dmarc_uri::parse_dmarc_uri`]): a `!<n>[k|m|g|t]` suffix is the
+/// size limit and an RFC 6068 `?query` is dropped (we write our own headers).
+/// The address becomes the report's `To:` header and SMTP recipient, so
+/// anything but one plain addr-spec — a CR/LF, a control or non-ASCII byte, a
+/// quote, a separator, an over-long address — is `Unsupported`, like any
+/// non-mailto scheme.
 pub fn parse_rua(uri: &str) -> RuaDestination {
     let uri = uri.trim();
-    let (body, size) = match uri.rsplit_once('!') {
-        Some((b, s)) => (b, parse_ruri_size(s)),
-        None => (uri, None),
-    };
-    let lower = body.to_ascii_lowercase();
-    if !lower.starts_with("mailto:") {
-        return RuaDestination::Unsupported {
+    match crate::dmarc_uri::parse_dmarc_uri(uri) {
+        Ok(u) => RuaDestination::Mailto {
+            address: u.address,
+            max_bytes: u.max_bytes,
+        },
+        Err(_) => RuaDestination::Unsupported {
             uri: uri.to_string(),
-        };
+        },
     }
-    let address = body["mailto:".len()..]
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if address.is_empty() || !address.contains('@') {
-        return RuaDestination::Unsupported {
-            uri: uri.to_string(),
-        };
-    }
-    RuaDestination::Mailto {
-        address,
-        max_bytes: size,
-    }
-}
-
-fn parse_ruri_size(s: &str) -> Option<u64> {
-    let s = s.trim().to_ascii_lowercase();
-    let (digits, mult) = match s.chars().last()? {
-        'k' => (&s[..s.len() - 1], 1u64 << 10),
-        'm' => (&s[..s.len() - 1], 1u64 << 20),
-        'g' => (&s[..s.len() - 1], 1u64 << 30),
-        't' => (&s[..s.len() - 1], 1u64 << 40),
-        _ => (s.as_str(), 1),
-    };
-    digits.parse::<u64>().ok()?.checked_mul(mult)
 }
 
 /// The destinations one report goes to: the mailto URIs among the first

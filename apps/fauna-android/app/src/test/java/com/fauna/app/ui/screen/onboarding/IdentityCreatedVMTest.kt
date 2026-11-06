@@ -92,13 +92,12 @@ class IdentityCreatedVMTest {
         val committed = IdentityCreatedVM(host, throwing).confirm(TEMPLATE)
 
         assertEquals(false, committed)
-        org.mockito.Mockito.verify(machine).identityCommitFailed(
-            org.mockito.ArgumentMatchers.contains("keystore unavailable"),
-        )
+        // The screen shows the fixed text; the raw error goes to the log only.
+        org.mockito.Mockito.verify(machine).identityCommitFailed(TEMPLATE)
     }
 
     private companion object {
-        const val TEMPLATE = "Couldn't save your new identity: {message}"
+        const val TEMPLATE = "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is."
         const val SECRET =
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
         const val LIVE_SECRET =

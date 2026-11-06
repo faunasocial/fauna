@@ -73,19 +73,23 @@ _e2e_dir = str(Path(__file__).resolve().parent.parent)  # tests/e2e-unified/
 if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
-from common.nest import CLAIM_CODE  # noqa: E402
 from conftest import MAIL_PRIMARY_DOMAIN, get_available_apps  # noqa: E402
 from helpers.authenticated_shell import SHELL_MARKERS  # noqa: E402
 from helpers.waiting import wait_until  # noqa: E402
 
 _avail_apps = get_available_apps()
-if not any(c in _avail_apps for c in ("linux", "macos", "ios", "tui", "windows")):
+if not any(c in _avail_apps for c in ("linux", "macos", "ios", "tui", "windows", "android")):
     pytest.skip(
-        "drives the linux/macOS/iOS/tui/windows in-process admin-claim onboarding wizard",
+        "drives the linux/macOS/iOS/tui/windows/android in-process admin-claim onboarding wizard",
         allow_module_level=True,
     )
 
-pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
+# The module guard above, spelled where the feature ledger can read it.
+pytestmark = [
+    pytest.mark.tier1, pytest.mark.tier_3,
+    pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui,
+    pytest.mark.windows, pytest.mark.android,
+]
 
 
 # The authed app shell has mounted once any main-view landmark is visible: this
@@ -251,7 +255,7 @@ def test_logged_in_terminal_survives_an_empty_secret_slot(app, empty_store_uncla
     ob.submit_handle()
 
     app.driver.wait_for("claim-code-input", timeout=_CLAIM_PAGE_BUDGET_S)
-    app.driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    app.driver.clear_and_type("claim-code-input", empty_store_unclaimed_nest["claim_code"])
     app.driver.click("claim-code-submit-button")
 
     # Pinned AFTER the claim and BEFORE the terminal, so the comparison spans

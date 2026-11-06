@@ -19,3 +19,10 @@
 # package = "name"
 # reason = "..."
 # recorded = "YYYY-MM-DD"
+
+[[exception]]
+tree = "apps/fauna-web"
+id = "GHSA-gcqx-w48m-w2h4"
+package = "deepmerge"
+reason = "No fixed release exists (4.3.1 is the newest). It reaches the web tree only through the Svelte Vite build plugin, which merges the build's own configuration objects at build time; it is not in the shipped bundle and never sees user or network data. Owner-approved in bump round 17 (2026-11-05) knowing it runs in the build. Remove when a fixed deepmerge, or a plugin release without it, clears the 7-day age."
+recorded = "2026-11-05"

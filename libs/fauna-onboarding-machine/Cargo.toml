@@ -14,7 +14,9 @@ default = []
 # feature — without this forward it never turns on, and any UniFFI build hits
 # `the trait uniffi::FfiConverterArc<UniFfiTag> is not implemented for (dyn
 # fauna_launch_machine::PendingProvisionStore + 'static)`.
-uniffi = ["dep:uniffi", "fauna-provisioning/uniffi", "fauna-core/uniffi", "fauna-launch-machine/uniffi", "dep:fauna-uniffi-async"]
+# It forwards `fauna-client-policy/uniffi` for the same reason:
+# `joining_nest_rules` returns that crate's `NestRulesSummary` record.
+uniffi = ["dep:uniffi", "fauna-provisioning/uniffi", "fauna-core/uniffi", "fauna-launch-machine/uniffi", "fauna-client-policy/uniffi", "dep:fauna-uniffi-async"]
 # Test helpers — CountingObserver, set_step_for_test.
 test-observer = []
 # The E2E bridge surface (`call_machine_method*`). Forwards to the native trust
@@ -88,6 +90,13 @@ fauna-account-plane = { path = "../fauna-account-plane" }
 # `RpcRequester` seam this crate's `WsRpcNestApi` is — so it adds no native
 # surface to the wasm onboarding build.
 fauna-client-recovery = { path = "../fauna-client-recovery" }
+# The joining surfaces' nest rules (`nest-rules.md` § Acceptance at joining):
+# the rules read before sign-in are verified and summarised through the same
+# `NestRulesBook` the signed-in app keeps, so a rule reads the same at joining
+# and in settings. Default features only — wasm-clean (fauna-core
+# default-features = false + serde); its `scorers` interpreter is the app's to
+# turn on, never a pre-login surface's.
+fauna-client-policy = { path = "../fauna-client-policy" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = "0.1"
@@ -148,7 +157,7 @@ fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
 [dev-dependencies]
 tokio = { workspace = true }
 wiremock = "0.6"
-tracing-subscriber = { workspace = true }
+fauna-test-tracing = { path = "../fauna-test-tracing" }
 # `nest_host`'s own unit test needs `fauna_core::web::AUTHORITY_TERMINATOR_CASES`,
 # which is `#[cfg(any(test, feature = "test-helpers"))]` on fauna-core's own
 # side — `cfg(test)` is never set on a dependency, only on the crate under

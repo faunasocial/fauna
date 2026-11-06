@@ -197,6 +197,7 @@ public static partial class Ids
     public const string AdminMailDmarcAggregateRetentionInput = "admin-mail-dmarc-aggregate-retention-input";
     public const string AdminMailDmarcFoModeSelect = "admin-mail-dmarc-fo-mode-select";
     public const string AdminMailDmarcForensicRetentionInput = "admin-mail-dmarc-forensic-retention-input";
+    public const string AdminMailDmarcOutboundAggregateToggle = "admin-mail-dmarc-outbound-aggregate-toggle";
     public const string AdminMailDmarcRufPublishToggle = "admin-mail-dmarc-ruf-publish-toggle";
     public const string AdminMailDmarcRufWarning = "admin-mail-dmarc-ruf-warning";
     public const string AdminMailDmarcSaveButton = "admin-mail-dmarc-save-button";
@@ -509,7 +510,6 @@ public static partial class Ids
     public const string AtprotoHistoryBackfill = "atproto-history-backfill";
     public const string AtprotoHostedHandle = "atproto-hosted-handle";
     public const string AtprotoPage = "atproto-page";
-    public const string AtprotoSettingsLink = "atproto-settings-link";
     public const string AttachmentButton = "attachment-button";
     public const string AttendeeId = "attendee-id";
     public const string AttendeeInviteButton = "attendee-invite-button";
@@ -676,6 +676,11 @@ public static partial class Ids
     public const string ContactActorIdLookup = "contact-actor-id-lookup";
     public const string ContactActorIdOpenProfileButton = "contact-actor-id-open-profile-button";
     public const string ContactActorIdResult = "contact-actor-id-result";
+    public const string ContactArchiveLinkNo = "contact-archive-link-no";
+    public const string ContactArchiveLinkPrompt = "contact-archive-link-prompt";
+    public const string ContactArchiveLinkYes = "contact-archive-link-yes";
+    public const string ContactArchiveLinked = "contact-archive-linked";
+    public const string ContactArchiveUnlink = "contact-archive-unlink";
     public const string ContactConfirm = "contact-confirm";
     public const string ContactFindError = "contact-find-error";
     public const string ContactLabels = "contact-labels";
@@ -771,9 +776,12 @@ public static partial class Ids
     public const string DeviceOwnFingerprint = "device-own-fingerprint";
     public const string DeviceP2pParticipationToggle = "device-p2p-participation-toggle";
     public const string DeviceRemoveButton = "device-remove-button";
+    public const string DeviceRenameButton = "device-rename-button";
+    public const string DeviceRenameCancelButton = "device-rename-cancel-button";
+    public const string DeviceRenameConfirmButton = "device-rename-confirm-button";
+    public const string DeviceRenameInput = "device-rename-input";
     public const string DeviceStatus = "device-status";
     public const string DeviceThisMarkBadge = "device-this-mark-badge";
-    public const string DevicesSettingsLink = "devices-settings-link";
     public const string DispatchProbe = "dispatch-probe";
     public const string DmAttachmentFile = "dm-attachment-file";
     public const string DmAttachmentImage = "dm-attachment-image";
@@ -914,12 +922,8 @@ public static partial class Ids
     public const string FamilyIncomingTransferDeclineButton = "family-incoming-transfer-decline-button";
     public const string FamilyIncomingTransferItem = "family-incoming-transfer-item";
     public const string FamilyPolicyContactApprovalToggle = "family-policy-contact-approval-toggle";
-    public const string FamilyPolicyContentCommercialSelect = "family-policy-content-commercial-select";
     public const string FamilyPolicyContentHint = "family-policy-content-hint";
     public const string FamilyPolicyContentNotifyToggle = "family-policy-content-notify-toggle";
-    public const string FamilyPolicyContentNsfwSelect = "family-policy-content-nsfw-select";
-    public const string FamilyPolicyContentPhishingSelect = "family-policy-content-phishing-select";
-    public const string FamilyPolicyContentSpamSelect = "family-policy-content-spam-select";
     public const string FamilyPolicyFeatureLimitsEditButton = "family-policy-feature-limits-edit-button";
     public const string FamilyPolicyFeatureLimitsName = "family-policy-feature-limits-name";
     public const string FamilyPolicyFeatureLimitsRow = "family-policy-feature-limits-row";
@@ -984,8 +988,11 @@ public static partial class Ids
     public const string FeedFactorGlobalToggle = "feed-factor-global-toggle";
     public const string FeedFactorSelect = "feed-factor-select";
     public const string FeedFactorWeightInput = "feed-factor-weight-input";
+    public const string FeedImportedClear = "feed-imported-clear";
+    public const string FeedImportedNotice = "feed-imported-notice";
     public const string FeedItem = "feed-item";
     public const string FeedLikeButton = "feed-like-button";
+    public const string FeedLocalItem = "feed-local-item";
     public const string FeedNoResults = "feed-no-results";
     public const string FeedPostActionsButton = "feed-post-actions-button";
     public const string FeedPostActionsMenu = "feed-post-actions-menu";
@@ -1121,6 +1128,8 @@ public static partial class Ids
     public const string FolderNestRetentionSnapshots = "folder-nest-retention-snapshots";
     public const string FolderNestSaveButton = "folder-nest-save-button";
     public const string FolderNestSnapshotsSelect = "folder-nest-snapshots-select";
+    public const string FolderOnDemandOpenSettingsButton = "folder-on-demand-open-settings-button";
+    public const string FolderOnDemandOsEnableHint = "folder-on-demand-os-enable-hint";
     public const string FolderOnDemandToggle = "folder-on-demand-toggle";
     public const string FolderPaywallHint = "folder-paywall-hint";
     public const string FolderPaywallTierSelect = "folder-paywall-tier-select";
@@ -1146,9 +1155,7 @@ public static partial class Ids
     public const string FolderWebsiteToggle = "folder-website-toggle";
     public const string FolderWriterPublishedWarning = "folder-writer-published-warning";
     public const string FolderWriterUncappedWarning = "folder-writer-uncapped-warning";
-    public const string FoldersSettingsLink = "folders-settings-link";
     public const string GatedPostBadge = "gated-post-badge";
-    public const string GatedPostPurchasePending = "gated-post-purchase-pending";
     public const string GroupConversationHint = "group-conversation-hint";
     public const string HandleCheckButton = "handle-check-button";
     public const string HandleControlCheckbox = "handle-control-checkbox";
@@ -1258,7 +1265,6 @@ public static partial class Ids
     public const string LinkPreviewDomain = "link-preview-domain";
     public const string LinkPreviewImage = "link-preview-image";
     public const string LinkPreviewTitle = "link-preview-title";
-    public const string LinkedNestsLink = "linked-nests-link";
     public const string LoadRemoteContentButton = "load-remote-content-button";
     public const string LogClearButton = "log-clear-button";
     public const string LogCopyButton = "log-copy-button";
@@ -1427,7 +1433,6 @@ public static partial class Ids
     public const string MailSettingsForwardAllToInput = "mail-settings-forward-all-to-input";
     public const string MailSettingsForwardPerHourInput = "mail-settings-forward-per-hour-input";
     public const string MailSettingsKeysInfo = "mail-settings-keys-info";
-    public const string MailSettingsLink = "mail-settings-link";
     public const string MailSettingsMailboxQuota = "mail-settings-mailbox-quota";
     public const string MailSettingsMuaAuthMechanism = "mail-settings-mua-auth-mechanism";
     public const string MailSettingsMuaCaldavHost = "mail-settings-mua-caldav-host";
@@ -1627,7 +1632,6 @@ public static partial class Ids
     public const string NostrRelayItem = "nostr-relay-item";
     public const string NostrRemoveFollow = "nostr-remove-follow";
     public const string NostrRemoveRelay = "nostr-remove-relay";
-    public const string NostrSettingsLink = "nostr-settings-link";
     public const string NostrSigningMode = "nostr-signing-mode";
     public const string NostrTab = "nostr-tab";
     public const string NostrUnlinkButton = "nostr-unlink-button";
@@ -1717,6 +1721,7 @@ public static partial class Ids
     public const string PostAuthor = "post-author";
     public const string PostCard = "post-card";
     public const string PostImage = "post-image";
+    public const string PostReactionPill = "post-reaction-pill";
     public const string PostSubmitButton = "post-submit-button";
     public const string PrivateNatModeRadio = "private-nat-mode-radio";
     public const string ProbeAction = "probe-action";
@@ -2107,7 +2112,6 @@ public static partial class Ids
     public const string SubscriptionRequestTier = "subscription-request-tier";
     public const string SubscriptionRequestsSection = "subscription-requests-section";
     public const string SubscriptionSettings = "subscription-settings";
-    public const string SubscriptionSettingsLink = "subscription-settings-link";
     public const string SubscriptionSubscriberHandle = "subscription-subscriber-handle";
     public const string SubscriptionSubscriberList = "subscription-subscriber-list";
     public const string SubscriptionSubscriberRemoveButton = "subscription-subscriber-remove-button";
@@ -2142,7 +2146,6 @@ public static partial class Ids
     public const string TaskDelegationKindItem = "task-delegation-kind-item";
     public const string TaskDelegationKindName = "task-delegation-kind-name";
     public const string TaskDelegationKindRunner = "task-delegation-kind-runner";
-    public const string TaskDelegationLink = "task-delegation-link";
     public const string TaskDelegationList = "task-delegation-list";
     public const string ThreadAddParticipantButton = "thread-add-participant-button";
     public const string ThreadHeader = "thread-header";
@@ -2163,6 +2166,7 @@ public static partial class Ids
     public const string TuiSettings = "tui-settings";
     public const string TuiSettingsExternalMedia = "tui-settings-external-media";
     public const string UnlockConfirmInput = "unlock-confirm-input";
+    public const string UnlockKeyringLockedNotice = "unlock-keyring-locked-notice";
     public const string UnlockPasskeyButton = "unlock-passkey-button";
     public const string UnlockPassphraseInput = "unlock-passphrase-input";
     public const string UnlockResetButton = "unlock-reset-button";
@@ -2208,7 +2212,6 @@ public static partial class Ids
     public const string WebPublishedPostsList = "web-published-posts-list";
     public const string WebSettings = "web-settings";
     public const string WebSettingsContentInfo = "web-settings-content-info";
-    public const string WebSettingsLink = "web-settings-link";
     public const string WebSettingsRenderStatus = "web-settings-render-status";
     public const string WebSettingsSubdomainToggle = "web-settings-subdomain-toggle";
     public const string WebSettingsSubdomainUrl = "web-settings-subdomain-url";
@@ -2237,6 +2240,7 @@ public static partial class Ids
     public const string GatedPostBuyButton = "gated-post-buy-button";
     public const string GatedPostPaymentLink = "gated-post-payment-link";
     public const string GatedPostPrice = "gated-post-price";
+    public const string GatedPostPurchasePending = "gated-post-purchase-pending";
     public const string PostTipCount = "post-tip-count";
     public const string PostTipItem = "post-tip-item";
     public const string PostTipList = "post-tip-list";

@@ -501,6 +501,9 @@ pub async fn fetch_binding_basis(
                 None
             }
         },
+        // A group set has no nest row and no custody record, so nothing a
+        // read could return moves its basis: it is the constant default.
+        FolderRef::Group(_) => Some(Some(BindingBasis::default())),
     }
 }
 
@@ -805,6 +808,11 @@ pub struct ResolvedBinding {
     /// The account may only read the set and the host builds such a set
     /// read-only ([`ReaderHosting::ReadOnly`]).
     pub read_only: bool,
+    /// A **group set**'s generation ring (`p2p-shared-set-build.md` § Build
+    /// design — the group set, decision 7): `Some` builds the engine keyed by
+    /// it and with **no nest leg** ([`SyncEngine::with_nest_leg_absent`]).
+    /// Only [`resolve_group_binding`] sets it, always with a tip.
+    pub group_keys: Option<fauna_core::group_content::GroupContentKeys>,
 }
 
 /// Where a cross-nest set's planes go (`federation-shared-folders.md` § Cross-nest shared
@@ -833,10 +841,17 @@ pub struct ForeignTransport {
 pub async fn build_engine(params: EngineParams) -> Option<BuiltEngine> {
     // The set's identity, for every log line before its name is known.
     let folder_id = params.folder_ref.to_wire();
-    register_device(&params).await;
     let binding = match params.folder_ref {
-        FolderRef::Local(_) => resolve_local_binding(&params).await?,
-        FolderRef::Foreign(channel) => resolve_foreign_binding(&params, channel).await?,
+        FolderRef::Local(_) => {
+            register_device(&params).await;
+            resolve_local_binding(&params).await?
+        }
+        FolderRef::Foreign(channel) => {
+            register_device(&params).await;
+            resolve_foreign_binding(&params, channel).await?
+        }
+        // No device registration: a group set has no nest leg (decision 7).
+        FolderRef::Group(scope) => resolve_group_binding(&params, scope).await?,
     };
     match assemble_engine(params, binding) {
         Ok(built) => Some(built),
@@ -848,6 +863,44 @@ pub async fn build_engine(params: EngineParams) -> Option<BuiltEngine> {
             None
         }
     }
+}
+
+/// Resolve a **group set**'s binding — `None` = refused
+/// (`p2p-shared-set-build.md` § Build design — the group set, decision 7). A
+/// group set has no nest row and no custody record: its keys are the scope's
+/// generation ring, read through the host's [`FolderKeyReader`] from the
+/// account store's group plane (`fauna_account_plane::group_set::group_set_keys`,
+/// the one reader), and its engine has no nest leg. **Fail closed:** a ring
+/// that cannot be read, or that holds no tip to seal under, builds nothing —
+/// never an engine that could seal under no key or reach a nest.
+async fn resolve_group_binding(params: &EngineParams, scope: [u8; 32]) -> Option<ResolvedBinding> {
+    let folder_id = params.folder_ref.to_wire();
+    let ring = match params.folder_keys.group_set_keys(&scope).await {
+        Ok(Some(ring)) => ring,
+        Ok(None) => {
+            tracing::warn!(
+                "folder {folder_id}: this host holds no group plane to read the ring from —                  refusing"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("folder {folder_id}: the group ring is unreadable — refusing: {e:#}");
+            return None;
+        }
+    };
+    if ring.tip().is_none() {
+        tracing::warn!(
+            "folder {folder_id}: the group ring holds no tip this member can seal under —              refusing until a generation it is wrapped for arrives"
+        );
+        return None;
+    }
+    Some(ResolvedBinding {
+        // The scope's wire form is the set's label: a group set's name rides
+        // its plane sealed (decision 2), never a nest row.
+        folder: folder_id,
+        group_keys: Some(ring),
+        ..ResolvedBinding::default()
+    })
 }
 
 /// Best-effort device registration over the control plane
@@ -1129,6 +1182,7 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
         // Reached for a reader only under `ReaderHosting::ReadOnly` — the
         // decision above refused it otherwise.
         read_only: summary.is_reader_member(),
+        group_keys: None,
     })
 }
 
@@ -1306,6 +1360,7 @@ async fn resolve_foreign_binding(
         // (its bind gesture verified the grant at the home nest).
         read_only: params.reader_hosting == ReaderHosting::ReadOnly
             && record.access.as_deref() != Some("writer"),
+        group_keys: None,
     })
 }
 
@@ -1384,6 +1439,7 @@ pub fn assemble_engine(params: EngineParams, binding: ResolvedBinding) -> Result
         member,
         webdav_served,
         read_only,
+        group_keys,
     } = binding;
     // This account — the owner of a same-nest set whose binding names none.
     let auth_actor_id = auth.actor_id();
@@ -1476,7 +1532,7 @@ pub fn assemble_engine(params: EngineParams, binding: ResolvedBinding) -> Result
 
     // Owned by value (not `Arc`): `SyncEngine` is `Send` but not `Sync` (rusqlite
     // `Connection`), and it is driven by exactly one loop.
-    let mut engine = SyncEngine::new(
+    let engine = SyncEngine::new(
         watch_dir,
         db,
         client,
@@ -1507,6 +1563,16 @@ pub fn assemble_engine(params: EngineParams, binding: ResolvedBinding) -> Result
     // A foreign ref addresses the home nest by the channel the byte-plane
     // token is minted for.
     .with_folder_ref(folder_ref);
+    // A group set's seat: its ring, and no nest leg (decision 7).
+    let engine = match group_keys {
+        Some(ring) => {
+            let mut engine = engine.with_nest_leg_absent();
+            engine.set_group_keys(Some(ring));
+            engine
+        }
+        None => engine,
+    };
+    let mut engine = engine;
     engine.set_retired_content_keys(retired_content_keys);
     engine.set_served_era_hold(served_era_hold);
     engine.set_change_signer(change_signer, set_nonce);
@@ -1802,9 +1868,10 @@ mod tests {
     #[test]
     fn restore_destinations_resolve_absolute_or_home_relative_only() {
         let home = || Some(std::ffi::OsString::from("/home/u"));
+        let absolute = if cfg!(windows) { r"C:\srv\r" } else { "/srv/r" };
         assert_eq!(
-            resolve_restore_destination("/srv/r", home()),
-            Some(std::path::PathBuf::from("/srv/r"))
+            resolve_restore_destination(absolute, home()),
+            Some(std::path::PathBuf::from(absolute))
         );
         assert_eq!(
             resolve_restore_destination("  ~/Restored ", home()),

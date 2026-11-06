@@ -1203,6 +1203,9 @@ pub fn set_lineage_by_ref(
         FolderRef::Foreign(channel) => {
             find_foreign_set(cfg, channel).map(|f| set_lineage(cfg, None, Some(&f.channel_id)))
         }
+        // A group set has no custody record and no set nonce: its rows are
+        // the scope's plane entries, verified by the plane's own writer check.
+        FolderRef::Group(_) => None,
     }
 }
 

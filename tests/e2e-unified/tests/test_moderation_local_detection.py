@@ -53,10 +53,9 @@ from helpers.waiting import (
 from tests.api import conv_api
 
 # tier_3 only (matching the sibling two-driven-client tests). Each leg guards its own
-# app: the two-real-engine leg skips any `app` param that is neither linux nor tui
-# (those are the apps that both build a standalone moderation queue and are supported
-# by the `second_real_faunamls_app` fixture — tui joined 2026-07-29), and the web leg
-# skips any non-web one.
+# app: the two-real-engine leg runs on the apps that both build a standalone moderation
+# queue and are supported by the `second_real_faunamls_app` fixture (the
+# `moderation-queue-second-real-engine` surface), and the web leg skips any non-web one.
 pytestmark = pytest.mark.tier_3
 
 # A body the shared ``fauna_core::text_heuristic::classify_text`` flags as spam well
@@ -78,6 +77,9 @@ SPAM_BODY = "BUY NOW!!! CLICK HERE for FREE MONEY!!! Limited time — act now!!!
 # docstring says so.
 @pytest.mark.linux
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_local_spam_detection_surfaces_in_moderation_queue(
     real_faunamls_app, second_real_faunamls_app, nest_instance
@@ -217,18 +219,13 @@ def test_web_local_spam_detection_surfaces_in_moderation_queue(
     # contact so her DM Welcome flows under the default mode — per-pair,
     # so the session-scoped recipient's own mode stays untouched.
     conv_api.accept_contact(port, test_user, alice["actor_id_hex"])
-    conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
-    wait_until(
-        lambda: any(
-            t.rail == "FaunaMls" and t.channel_id_hex == channel_id_hex
-            for t in bob_app.conversations.list_threads()
-        ),
-        # Generous: the web receive loop is poll-only (no push arm), so this waits on a
-        # poll tick, not a slow code path — and a dev machine running parallel builds
-        # stretches that cadence well past a tight 30s.
-        MLS_HANDSHAKE_S,
-        diagnose=lambda: "waiting for bob's web GUI to drain the inbox + join the Welcome's group",
-    )
+    inbox_id = conv_api.welcome_deliver(port, alice, bob_actor_id, channel_id_hex, welcome_bytes)
+    # The acked Welcome is the join witness: a Welcome-only 1:1 is listed on
+    # no rail until its first message. Generous: the web receive loop is
+    # poll-only (no push arm), so this waits on a poll tick, not a slow code
+    # path — and a dev machine running parallel builds stretches that cadence
+    # well past a tight 30s.
+    conv_api.await_welcome_applied(port, test_user, inbox_id, MLS_HANDSHAKE_S, who="bob's web GUI")
 
     # 4) Post the spam message to the channel. bob's poll fetches + DECRYPTS it — the
     #    `poll_inbound_conv` → `ingest_inbound_to_thread` path, which is exactly where

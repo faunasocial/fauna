@@ -12,7 +12,7 @@ whose glue gives the shared `MailExportMachine` key custody and spawns
 linux, macos, ios, windows, android and web followed. Any apps not in `_DRIVING_APPS`
 still build the seam-only machine (`rpc_glue::build_mail_export_machine_without_key_custody`) and answer
 `Start` with an honest refusal — deliberately, since custody without a spawn would
-open a session nothing drives. They are gated below as `skip_unbuilt`
+open a session nothing drives. They are gated below as `require_surface`
 (convention 7), not silently omitted, and each one's trickle-down flips its gate.
 
 Test taxonomy:
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.app_surface import app_name, skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment, require_surface
 from helpers.budgets import MLS_HANDSHAKE_S
 from helpers.mail_client_ui import route_inbound_mail_to_app
 from helpers.mail_export_ui import (
@@ -85,23 +85,10 @@ SENDER_DOMAIN = "external.test"
 _SENDER_DATE_HEADER = "Mon, 21 Sep 2026 12:00:00 +0000"
 _SENDER_DAY = "2026-09-21"
 
-# The apps whose glue spawns `run_export` today. Every other app builds the
-# custody-less machine, so `Start` refuses honestly and the journey below cannot
-# be run — which is parity debt to declare, not a test to weaken.
-_DRIVING_APPS = {"tui", "linux", "macos", "ios", "windows", "android", "web"}
-
 
 def _require_driving_app(driver):
     """Skip-with-a-reason on an app that paints the wizard but does not drive it."""
-    if app_name(driver) not in _DRIVING_APPS:
-        skip_unbuilt(
-            driver,
-            surface="mail-export drive loop",
-            detail="the app builds the seam-only MailExportMachine "
-            "(build_mail_export_machine_without_key_custody), so Start refuses "
-            "honestly rather than opening a session nothing drives",
-            tracked="mail-export.md § Implementation status today",
-        )
+    require_surface(driver, "mail-export-drive")
 
 
 def _deliver_inbound(mx_port: int, server_name: str, recipient_addr: str,
@@ -724,6 +711,11 @@ _FETCH_KIND = "fauna.bridges.fetch_export_chunk_ciphertext"
 # The call that turns a fully uploaded blob into a `completed` session: held,
 # the archive's bytes rest on the nest while the session is still unfinished.
 _FINALIZE_KIND = "fauna.bridges.finalize_export_session"
+# What a live device calls when its held finalize runs out of client budget
+# (5 s, `RpcKindMeta` in `libs/fauna-protocol/src/kind.rs`): a nest hold ends no
+# client's clock. Held with the finalize, that report never lands, so the session
+# stays `running` for as long as another device takes to reach it.
+_FAIL_KIND = "fauna.bridges.fail_export_session"
 
 
 def _mailboxes(nest_instance, user) -> list[dict]:
@@ -1617,6 +1609,18 @@ def test_mail_export_a_failed_export_shows_as_failed_after_a_restart_and_dismiss
 
     # ── After a restart: the failure, on its Progress step, with its reason.
     export = _relaunch_onto_the_export(app)
+    # The reopened page hydrates before it paints Progress: read the log only
+    # once that step is on screen (an app that has not painted it yet has no
+    # error-log element to read, which is a lookup failure, not an empty log).
+    wait_until(
+        lambda: app.driver.is_visible("mail-export-progress-summary") or None,
+        MLS_HANDSHAKE_S,
+        diagnose=lambda: (
+            f"the reopened app does not show the failed export's Progress step.\n"
+            f"  Format step showing: {app.driver.is_visible('mail-export-format-picker')}\n"
+            f"  error-message: {export.error_text()!r}"
+        ),
+    )
     log = wait_until(
         lambda: export.error_log() or None,
         MLS_HANDSHAKE_S,
@@ -1743,10 +1747,13 @@ def test_mail_export_cancel_asks_first_and_leaves_no_partial_archive_from_any_ap
 # the way `devices.md` § Adding a Second Device adds one (the same secret key, a
 # distinct device id) with a fresh, empty client store, so whatever it opens it
 # opens with its own key custody, never a store the first device wrote.
-
-# The apps `alice_second_device` launches a second seat of (its own docstring);
-# the web second device is a different fixture, and the phones have none.
-_SECOND_DEVICE_APPS = {"tui", "linux", "macos", "windows"}
+#
+# **On android the roles swap** (`alice_second_device` names the pairing): the
+# phone is one device, so a tui seat (`android_other_device_seat`) is the device
+# that runs the export and the phone is the one that adopts it — the outcomes
+# are about the OTHER device, and a phone that only ran the export would leave
+# its adopt, Pause-refusal, Cancel and Download legs unwitnessed. On every other
+# app the app under test runs the export and `alice_second_device` adopts it.
 
 
 def _second_device(request, app):
@@ -1756,23 +1763,41 @@ def _second_device(request, app):
     ``(device_b, export actions on device B)``."""
     from actions.mail_export import MailExportActions
 
-    if app_name(app.driver) not in _SECOND_DEVICE_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="a second signed-in device of the same user",
-            detail="alice_second_device launches a second seat on tui, linux, "
-                   "macOS and windows only",
-            tracked="tests/e2e-unified/conftest.py::alice_second_device",
-        )
+    require_surface(app.driver, "second-device-same-user")
     device_b, _driver_b = request.getfixturevalue("alice_second_device")
     export_b = MailExportActions(device_b.driver)
     export_b.navigate()
     return device_b, export_b
 
 
+def _runner_app(app, runner_seat):
+    """The device that RUNS the export: the app under test, except on android
+    (``runner_seat`` is not ``None``), where it is a tui seat of the same
+    identity launched now, before the mail is routed through it."""
+    if runner_seat is None:
+        return app
+    seat_app, _driver = runner_seat("mail-export-runner")
+    return seat_app
+
+
+def _adopting_device(request, app, runner_seat):
+    """The device that ADOPTS the export, with its export-page actions: a second
+    device of the app under test, or — on android — the phone itself, signed in
+    since before the seat ran anything and opening the export page now."""
+    from actions.mail_export import MailExportActions
+
+    if runner_seat is None:
+        return _second_device(request, app)
+    require_surface(app.driver, "mail-export-drive")
+    export_b = MailExportActions(app.driver)
+    export_b.navigate()
+    return app, export_b
+
+
 @pytest.mark.feature("mailbox-export")
 def test_mail_export_finished_on_one_device_downloads_and_opens_on_another(
-    request, logged_in_app, mail_bridge_mta, nest_instance, test_user, tmp_path
+    request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,
+    test_user, tmp_path
 ):
     """A finished export can be downloaded and opened from any of your devices,
     not only the one that ran it (`mail-export.md` § Wizard steps step 5, § Key
@@ -1780,19 +1805,21 @@ def test_mail_export_finished_on_one_device_downloads_and_opens_on_another(
     (not just the one that started the session) can fetch it, unwrap under the
     actor key, and decrypt the download").
 
-    Device A runs the export to Done. Device B — signed in afterwards, with a
-    store A never wrote — opens the export page, which adopts the newest export
+    Device A runs the export to Done. Device B — with a store A never wrote
+    (signed in afterwards, except on android, where the phone is B and was
+    signed in all along) — opens the export page, which adopts the newest export
     not yet discarded and so opens on that export's Done step; Download there
     saves an archive B unsealed with its own key custody, holding the message.
     """
     app = logged_in_app
     _require_driving_app(app.driver)
+    runner = _runner_app(app, android_other_device_seat)
     _export, nonce, _subject = _export_to_done(
-        app, mail_bridge_mta, nest_instance, test_user, "e2eexportotherdevice"
+        runner, mail_bridge_mta, nest_instance, test_user, "e2eexportotherdevice"
     )
     done = _newest_completed_session(nest_instance, test_user)
 
-    device_b, export_b = _second_device(request, app)
+    device_b, export_b = _adopting_device(request, app, android_other_device_seat)
     wait_until(
         lambda: device_b.driver.is_visible("mail-export-done-summary") or None,
         MLS_HANDSHAKE_S,
@@ -1816,7 +1843,8 @@ def test_mail_export_finished_on_one_device_downloads_and_opens_on_another(
 
 @pytest.mark.feature("mailbox-export")
 def test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_it(
-    request, logged_in_app, mail_bridge_mta, nest_instance, test_user, tmp_path
+    request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,
+    test_user, tmp_path
 ):
     """On another of your devices, an export the first device is running does
     not pause — pausing it would stall the device driving it — and resuming it
@@ -1836,8 +1864,9 @@ def test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_
     app = logged_in_app
     _require_driving_app(app.driver)
     port = nest_instance["port"]
+    runner = _runner_app(app, android_other_device_seat)
     export, nonce, _subject = _deliver_and_open_confirm(
-        app, mail_bridge_mta, nest_instance, test_user, "e2eexportotherresume"
+        runner, mail_bridge_mta, nest_instance, test_user, "e2eexportotherresume"
     )
 
     arm_rpc_hold(port, _FETCH_KIND)
@@ -1848,7 +1877,7 @@ def test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_
         session = _the_live_session(nest_instance, test_user)
         sid = session["session_id"]
 
-        device_b, export_b = _second_device(request, app)
+        device_b, export_b = _adopting_device(request, app, android_other_device_seat)
         wait_until(
             lambda: device_b.driver.is_visible("mail-export-progress-summary") or None,
             MLS_HANDSHAKE_S,
@@ -1907,7 +1936,8 @@ def test_mail_export_another_device_cannot_pause_it_and_resuming_there_restarts_
 
 @pytest.mark.feature("mailbox-export")
 def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains(
-    request, logged_in_app, mail_bridge_mta, nest_instance, test_user
+    request, logged_in_app, android_other_device_seat, mail_bridge_mta, nest_instance,
+    test_user
 ):
     """Any of your devices can cancel an export another one is running, and the
     cancelled export leaves no partial archive behind (`mail-export.md`
@@ -1917,19 +1947,27 @@ def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains
     Device A's export is held after its last upload and before it is finalized,
     so the whole archive rests on the nest under a session still `running`.
     Device B opens on that export, and its Cancel — asked, then confirmed —
-    cancels it and removes the blob. Releasing A's parked finalize afterwards
-    does not bring the export back.
+    cancels it and removes the blob. Releasing A's parked calls afterwards does
+    not bring the export back.
+
+    Unlike the same-device twin, A stays alive here, and its finalize gives up
+    after its client budget, whereupon A reports the export failed. A second
+    seat takes longer than that to launch, so the report is held as well
+    (`_FAIL_KIND`): without it this test measures whether B opens inside A's
+    budget.
     """
     from actions.mail_export import MailExportActions
 
     app = logged_in_app
     _require_driving_app(app.driver)
     port = nest_instance["port"]
+    runner = _runner_app(app, android_other_device_seat)
     export, _nonce, _subject = _deliver_and_open_confirm(
-        app, mail_bridge_mta, nest_instance, test_user, "e2eexportothercancel"
+        runner, mail_bridge_mta, nest_instance, test_user, "e2eexportothercancel"
     )
 
     arm_rpc_hold(port, _FINALIZE_KIND)
+    arm_rpc_hold(port, _FAIL_KIND)
     try:
         export.start()
         wait_for_held_rpc(port, _FINALIZE_KIND,
@@ -1940,7 +1978,7 @@ def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains
             "precondition: the unfinished export's archive must be on the nest's disk"
         )
 
-        device_b, export_b = _second_device(request, app)
+        device_b, export_b = _adopting_device(request, app, android_other_device_seat)
         wait_until(
             lambda: device_b.driver.is_visible("mail-export-cancel-button") or None,
             MLS_HANDSHAKE_S,
@@ -1970,13 +2008,18 @@ def test_mail_export_another_device_can_cancel_it_and_no_partial_archive_remains
         )
     finally:
         release_rpc_hold(port, _FINALIZE_KIND)
+        release_rpc_hold(port, _FAIL_KIND)
 
-    # Device A's finalize, parked all along, now reaches the nest: it must not
-    # complete what the user cancelled on the other device.
+    # Whichever of device A's calls is still parked now reaches the nest: it
+    # must not complete, or fail, what the user cancelled on the other device.
     wait_until(
-        lambda: rpc_hold_status(port, _FINALIZE_KIND).get("holding", 0) == 0 or None,
+        lambda: not any(rpc_hold_status(port, k).get("holding", 0)
+                        for k in (_FINALIZE_KIND, _FAIL_KIND)) or None,
         MLS_HANDSHAKE_S,
-        diagnose=lambda: f"the parked finalize never woke: {rpc_hold_status(port, _FINALIZE_KIND)!r}",
+        diagnose=lambda: (
+            f"a parked call never woke: finalize {rpc_hold_status(port, _FINALIZE_KIND)!r}, "
+            f"fail {rpc_hold_status(port, _FAIL_KIND)!r}"
+        ),
     )
     after = _session(nest_instance, test_user, sid)
     assert after and after["state"] == "cancelled", f"the cancelled export came back: {after!r}"

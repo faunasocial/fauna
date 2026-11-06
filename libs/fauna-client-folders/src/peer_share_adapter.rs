@@ -29,6 +29,25 @@ impl<G: FolderGroupCrypto + Send + Sync> SetMembership for RosterMembership<G> {
     fn is_member(&self, channel_id: &[u8; 32], actor: &ActorId) -> bool {
         self.0.contains_member(channel_id, actor).unwrap_or(false)
     }
+
+    /// NotListed only when the seam both holds the set's group and answers
+    /// the roster without error; any error, or a set it does not hold, is
+    /// Unreadable — a deletion never rides a failed read.
+    fn roster_reading(
+        &self,
+        channel_id: &[u8; 32],
+        actor: &ActorId,
+    ) -> fauna_peer_share::RosterReading {
+        use fauna_peer_share::RosterReading;
+        match (
+            self.0.holds_group(channel_id),
+            self.0.contains_member(channel_id, actor),
+        ) {
+            (_, Ok(true)) => RosterReading::Listed,
+            (Ok(true), Ok(false)) => RosterReading::NotListed,
+            _ => RosterReading::Unreadable,
+        }
+    }
 }
 
 #[cfg(test)]

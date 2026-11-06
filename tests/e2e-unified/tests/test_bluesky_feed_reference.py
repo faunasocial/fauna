@@ -114,6 +114,9 @@ def _signed_in_on_the_ingested_post(request, app, nest, far, text, rkey) -> tupl
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("mode", sorted(MODES))
 def test_a_quote_of_a_bluesky_post_is_published_on_bluesky_carrying_it(
@@ -174,6 +177,9 @@ def test_a_quote_of_a_bluesky_post_is_published_on_bluesky_carrying_it(
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 @pytest.mark.parametrize("kind", ["reply", "quote"])
 def test_replying_or_quoting_with_no_bluesky_account_linked_is_refused_with_the_remedy(

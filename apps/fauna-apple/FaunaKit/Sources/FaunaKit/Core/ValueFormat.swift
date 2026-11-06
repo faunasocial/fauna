@@ -91,13 +91,42 @@ public enum ValueFormat {
         let display = conversationTimestampDisplay(
             nowMs: nowMs, thenMs: thenMs,
             utcOffsetSeconds: DeviceOffset.utcOffsetSeconds())
+        return renderTimestampDisplay(display, fallbackMs: thenMs)
+    }
+
+    /// Renders a shared-Rust `ConversationTimestampDisplay` bucket: today → the
+    /// 24 h `clock`, Yesterday / weekday → the resolved `localized` text, older →
+    /// the platform's native `.medium` date of `absoluteEpochMs`.
+    private static func renderTimestampDisplay(
+        _ display: ConversationTimestampDisplay, fallbackMs: Int64
+    ) -> String {
         if let clock = display.clock { return clock }              // today → 24 h HH:MM
         if let localized = display.localized {                     // Yesterday / weekday
             return renderLocalizedText(localized)
         }
-        let absMs = display.absoluteEpochMs ?? thenMs              // older → native date
+        let absMs = display.absoluteEpochMs ?? fallbackMs          // older → native date
         let date = Date(timeIntervalSince1970: Double(absMs) / 1000.0)
         return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .none)
+    }
+
+    /// A `family-approval-item` row's text: who the item is from (the shared
+    /// `approvalDisplayText`, or the localized no-sender label) and, for a held
+    /// mail, when it arrived — "stranger@example.com · 14:03". Which kinds carry
+    /// a time and the bucketing are shared Rust
+    /// (`fauna_core::format::approval_timestamp_display`, the
+    /// `conversationTimestamp` buckets over the entry's `created_at`); this only
+    /// joins and renders, as tui's `approval_item_text` and android's
+    /// `approvalRowText`. No time (other kinds, an unset stamp) → the sender alone.
+    public static func approvalRowText(
+        entry: FfiFamilyApprovalEntry,
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+    ) -> String {
+        let who = approvalDisplayText(entry: entry) ?? L.family.approvalNoSender
+        guard let display = approvalTimestampDisplay(
+            entry: entry, nowMs: nowMs,
+            utcOffsetSeconds: DeviceOffset.utcOffsetSeconds())
+        else { return who }
+        return "\(who) · \(renderTimestampDisplay(display, fallbackMs: 0))"
     }
 
     /// Convenience: contextual conversation timestamp against the current wall clock.
@@ -191,6 +220,18 @@ public enum ValueFormat {
         var composed = cell.value
         composed.args["remaining"] = renderLocalizedText(magnitudes.remaining)
         composed.args["limit"] = renderLocalizedText(magnitudes.limit)
+        return renderLocalizedText(composed)
+    }
+
+    /// The `mail-settings-mailbox-quota` readout, fully composed — the Swift
+    /// twin of shared Rust `fauna_client_mail_settings::mail_quota_text` and
+    /// android's `Localized.kt::mailQuotaText`, by the same two-level shape as
+    /// ``cellValueText(_:)``: the label's `{used}` / `{limit}` holes are
+    /// localized sizes, resolved first and substituted into its own args.
+    public static func mailQuotaText(_ display: MailQuotaDisplay) -> String {
+        var composed = display.label
+        composed.args["used"] = renderLocalizedText(display.used)
+        composed.args["limit"] = renderLocalizedText(display.limit)
         return renderLocalizedText(composed)
     }
 

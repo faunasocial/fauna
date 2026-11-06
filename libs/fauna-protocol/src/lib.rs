@@ -58,6 +58,7 @@ pub mod labelers;
 pub mod labels;
 pub mod linkpreview;
 pub mod log_plane;
+pub mod mail_import_tunnel;
 pub mod media;
 pub mod media_ticket;
 pub mod member_rows;

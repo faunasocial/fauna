@@ -44,7 +44,7 @@ public struct LabelerCatalogView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(indexedEntries) { pair in
                             LabelerCatalogRow(
-                                entry: pair.entry, index: pair.index,
+                                entry: pair.entry, index: pair.index, position: pair.index,
                                 showInspectSubscribe: true, vm: vm)
                         }
                     }
@@ -95,10 +95,15 @@ struct IndexedLabelerEntry: Identifiable {
 /// `showInspectSubscribe` gates the inspect + subscribe affordances
 /// (labeler-catalog page only — ui.yaml `labeler-catalog-item`); unsubscribe
 /// is always shown so a subscribed row can be dropped from either page.
-/// Mirrors linux `build_labeler_row`.
+/// Mirrors linux `build_labeler_row`. `index` addresses the full catalog
+/// snapshot (the VM's gestures); `position` is the row's place on the page in
+/// view and is its `labeler-catalog-item[i]` scope index — the same positional
+/// index every other app's widget order gives it, so the subscribed-only home
+/// scopes its first row `[0]` whatever its catalog index.
 struct LabelerCatalogRow: View {
     let entry: LabelerCatalogEntry
     let index: Int
+    let position: Int
     let showInspectSubscribe: Bool
     let vm: LabelerCatalogVM
 
@@ -170,7 +175,7 @@ struct LabelerCatalogRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.labelerCatalogItem)
         .automationValue(Ids.labelerCatalogItem, text: { entry.labelerId })
-        .automationScope(Ids.labelerCatalogItem, index: index)
+        .automationScope(Ids.labelerCatalogItem, index: position)
     }
 }
 #endif // !FAUNA_KIDS

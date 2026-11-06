@@ -222,6 +222,69 @@ public sealed record AliasPolicyValues(
         @wildcardPrefixEnabled: WildcardPrefixEnabled);
 }
 
+/// <summary>The deployment's own Microsoft app registration for the Outlook import
+/// (<c>admin-mail</c> Microsoft section → <c>SetMicrosoftRegistration</c>): the two stored
+/// strings the fields seed from (empty when none is set) and whether the project's
+/// registration is the one in force. Mirrors the internal <c>MicrosoftRegistrationView</c>.</summary>
+public sealed record MicrosoftRegistrationValues(string ClientId, string Tenant, bool IsDefault)
+{
+    internal static MicrosoftRegistrationValues From(MicrosoftRegistrationView v) => new(
+        v.@clientId,
+        v.@tenant,
+        v.@isDefault);
+}
+
+/// <summary>Editable deployment-wide DMARC policy values (→ <c>SaveDmarc</c> full PUT).
+/// Mirrors the internal <c>DmarcPolicyView</c>. Only the four report fields are edited on
+/// the page (forensic opt-in, <c>fo=</c> mode, the two retention windows); every other
+/// record tag, and the outbound aggregate-report switch, is carried through
+/// <see cref="ToView"/> unchanged so a save never resets it.</summary>
+public sealed record DmarcPolicyValues(
+    string PolicyMode,
+    string SubdomainPolicyMode,
+    byte Pct,
+    string AdkimMode,
+    string AspfMode,
+    string? RuaDestination,
+    bool RufPublish,
+    string? RufDestination,
+    string FoMode,
+    uint RiSeconds,
+    uint AggregateRetentionDays,
+    uint ForensicRetentionDays,
+    bool OutboundAggregateEnabled)
+{
+    internal static DmarcPolicyValues From(DmarcPolicyView v) => new(
+        v.@policyMode,
+        v.@subdomainPolicyMode,
+        v.@pct,
+        v.@adkimMode,
+        v.@aspfMode,
+        v.@ruaDestination,
+        v.@rufPublish,
+        v.@rufDestination,
+        v.@foMode,
+        v.@riSeconds,
+        v.@aggregateRetentionDays,
+        v.@forensicRetentionDays,
+        v.@outboundAggregateEnabled);
+
+    internal DmarcPolicyView ToView() => new(
+        @policyMode: PolicyMode,
+        @subdomainPolicyMode: SubdomainPolicyMode,
+        @pct: Pct,
+        @adkimMode: AdkimMode,
+        @aspfMode: AspfMode,
+        @ruaDestination: RuaDestination,
+        @rufPublish: RufPublish,
+        @rufDestination: RufDestination,
+        @foMode: FoMode,
+        @riSeconds: RiSeconds,
+        @aggregateRetentionDays: AggregateRetentionDays,
+        @forensicRetentionDays: ForensicRetentionDays,
+        @outboundAggregateEnabled: OutboundAggregateEnabled);
+}
+
 /// <summary>Read-only outcome of the last <c>PublishSpamBaseline</c> action
 /// (<c>admin-mail-publish-spam-baseline-button</c>). Aggregate-only — never a
 /// contributor identity. Mirrors the internal <c>BaselinePublishView</c>;
@@ -311,6 +374,21 @@ public partial class AdminMailViewModel : ObservableObject
     /// flag, reflected from the snapshot after each load / action.</summary>
     [ObservableProperty] private bool _mailEnabled;
 
+    /// <summary>The box cannot enable mail (a public box with no content scanners) —
+    /// <c>MailPolicySnapshot.mailUnavailableHere</c>, computed once in shared Rust from
+    /// <c>fauna.setup.status</c> and read here, never re-derived (admin.md § 6 Mail).</summary>
+    [ObservableProperty] private bool _mailUnavailableHere;
+
+    /// <summary>The enable toggle is refused: disabled, under
+    /// <c>admin-mail-unavailable-notice</c>. Only while mail is off — where mail is
+    /// already on the toggle stays live so the admin can still turn it off.</summary>
+    public bool MailEnableRefused => !MailEnabled && MailUnavailableHere;
+
+    /// <summary><c>admin-mail-enabled-toggle</c>'s <c>state</c> attr:
+    /// <c>on</c> / <c>unavailable</c> / <c>off</c> (ui.yaml).</summary>
+    public string MailEnabledToggleState =>
+        MailEnabled ? "on" : MailEnableRefused ? "unavailable" : "off";
+
     /// <summary><c>admin-mail-auto-enable-new-users-toggle</c> — the deployment-wide
     /// "auto-enable mail for new users" policy (default-on; when on, a freshly-registered
     /// user's client auto-provisions its own mailbox on first setup). Reflected from the
@@ -338,6 +416,13 @@ public partial class AdminMailViewModel : ObservableObject
     /// <summary>Current persisted nest-side alias policy.</summary>
     public AliasPolicyValues Alias { get; private set; } = null!;
 
+    /// <summary>Current persisted deployment-wide DMARC policy.</summary>
+    public DmarcPolicyValues Dmarc { get; private set; } = null!;
+
+    /// <summary>The deployment's own Microsoft registration for the Outlook import
+    /// (read back via <c>fauna.setup.status</c>).</summary>
+    public MicrosoftRegistrationValues Microsoft { get; private set; } = null!;
+
     /// <summary>Outcome of the last publish-baseline action, or <c>null</c> until the
     /// admin clicks <c>admin-mail-publish-spam-baseline-button</c>. A transient action
     /// outcome (not persisted policy) — a later re-read clears it.</summary>
@@ -351,10 +436,30 @@ public partial class AdminMailViewModel : ObservableObject
     /// (before the first hydrate) — the page then hides the whole section.</summary>
     public MailHealthValues? Health { get; private set; }
 
-    /// <summary>True after the first press of <c>admin-mail-health-warmup-reset-button</c>:
-    /// the same button now reads the confirm sentence and the next press dispatches.
-    /// Any re-read (every <see cref="Apply"/>) disarms it.</summary>
-    public bool WarmupResetArmed { get; private set; }
+    /// <summary>The confirm button a first press armed (the shared
+    /// <c>snapshot.armed</c>), or <c>null</c>: that button now reads its confirm sentence
+    /// and the next press of it dispatches. Any other action or re-read disarms it in the
+    /// shared machine, so every <see cref="Apply"/> re-projects it.</summary>
+    internal MailPolicyConfirm? Armed { get; private set; }
+
+    /// <summary>True while <c>admin-mail-health-warmup-reset-button</c> is the armed one.</summary>
+    public bool WarmupResetArmed => Armed == MailPolicyConfirm.ResetWarmup;
+
+    /// <summary>True while <c>admin-mail-publish-spam-baseline-button</c> is the armed one.</summary>
+    public bool PublishSpamBaselineArmed => Armed == MailPolicyConfirm.PublishSpamBaseline;
+
+    /// <summary>True while <c>admin-mail-list-unsubscribe-secret-rotate-button</c> is the
+    /// armed one.</summary>
+    public bool ListUnsubscribeSecretRotateArmed => Armed == MailPolicyConfirm.RotateListUnsubscribeSecret;
+
+    /// <summary>True while <c>admin-mail-forward-srs-secret-rotate-button</c> is the armed one.</summary>
+    public bool ForwardSrsSecretRotateArmed => Armed == MailPolicyConfirm.RotateSrsSecret;
+
+    /// <summary>The last secret rotation's outcome line under the Secrets group
+    /// (<c>mail-mass-mailing.md</c> § Secret rotation, <c>mail-forwarding.md</c> § SRS
+    /// scheme), worded by the shared <c>secret_rotation_text</c>; <c>null</c> until a
+    /// rotation ran.</summary>
+    public string? SecretRotationLine { get; private set; }
 
     private readonly Func<long> _nowMs;
 
@@ -428,11 +533,24 @@ public partial class AdminMailViewModel : ObservableObject
     public Task SaveAliasAsync(AliasPolicyValues values)
         => DispatchAsync(new MailPolicyAction.SaveAlias(values.ToView()));
 
-    /// <summary>Publish the opt-in aggregate as the deployment baseline
-    /// (<c>admin-mail-publish-spam-baseline-button</c> →
-    /// <c>publish_spam_baseline</c>). The outcome lands in <see cref="BaselinePublish"/>.</summary>
-    public Task PublishSpamBaselineAsync()
-        => DispatchAsync(new MailPolicyAction.PublishSpamBaseline());
+    /// <summary>Persist the whole deployment-wide DMARC catalog (full PUT).</summary>
+    public Task SaveDmarcAsync(DmarcPolicyValues values)
+        => DispatchAsync(new MailPolicyAction.SaveDmarc(values.ToView()));
+
+    /// <summary>Save the deployment's own Microsoft registration from the two fields'
+    /// drafts (<c>admin-mail-microsoft-save-button</c> → <c>SetMicrosoftRegistration</c>);
+    /// both empty clears it. The shared machine checks the pair first — a refused draft
+    /// sends nothing and its sentence lands on <see cref="Error"/>.</summary>
+    public Task SetMicrosoftRegistrationAsync(string clientId, string tenant)
+        => DispatchAsync(new MailPolicyAction.SetMicrosoftRegistration(clientId, tenant));
+
+    /// <summary>One press of the same-button two-press
+    /// (<c>admin-mail-publish-spam-baseline-button</c>): the first press arms it (the page
+    /// relabels the button to the confirm sentence) and publishes nothing; the second
+    /// dispatches <c>publish_spam_baseline</c>, and the outcome lands in
+    /// <see cref="BaselinePublish"/>. Returns <c>true</c> when this press dispatched.</summary>
+    public Task<bool> PressPublishSpamBaselineAsync()
+        => PressAsync(MailPolicyConfirm.PublishSpamBaseline);
 
     /// <summary>Flip the standing baseline publish
     /// (<c>admin-mail-spam-baseline-standing-toggle</c> →
@@ -446,20 +564,35 @@ public partial class AdminMailViewModel : ObservableObject
     public Task RecheckHealthAsync()
         => DispatchAsync(new MailPolicyAction.RecheckHealth());
 
-    /// <summary><c>admin-mail-health-warmup-reset-button</c>: the same-button two-click
-    /// confirm. The first press arms (the page relabels the button to the confirm
-    /// sentence) and dispatches nothing; the second dispatches <c>ResetWarmup</c>.
+    /// <summary><c>admin-mail-health-warmup-reset-button</c>: the same-button two-press.
+    /// The first press arms (the page relabels the button to the confirm sentence) and
+    /// dispatches nothing; the second dispatches <c>ResetWarmup</c>.
     /// Returns <c>true</c> when this press dispatched.</summary>
-    public async Task<bool> PressWarmupResetAsync()
+    public Task<bool> PressWarmupResetAsync()
+        => PressAsync(MailPolicyConfirm.ResetWarmup);
+
+    /// <summary><c>admin-mail-list-unsubscribe-secret-rotate-button</c>: the same-button
+    /// two-press. The second press dispatches <c>rotate_list_unsubscribe_secret</c> and the
+    /// outcome lands in <see cref="SecretRotationLine"/>. Returns <c>true</c> when this
+    /// press dispatched.</summary>
+    public Task<bool> PressListUnsubscribeSecretRotateAsync()
+        => PressAsync(MailPolicyConfirm.RotateListUnsubscribeSecret);
+
+    /// <summary><c>admin-mail-forward-srs-secret-rotate-button</c>: the same-button
+    /// two-press. The second press dispatches <c>rotate_srs_secret</c> and the outcome
+    /// lands in <see cref="SecretRotationLine"/>. Returns <c>true</c> when this press
+    /// dispatched.</summary>
+    public Task<bool> PressForwardSrsSecretRotateAsync()
+        => PressAsync(MailPolicyConfirm.RotateSrsSecret);
+
+    /// <summary>One press of a shared confirm button (<c>MailPolicyAction.Press</c>): the
+    /// machine arms it when it is not the armed one, else disarms and runs the act. The
+    /// press dispatched exactly when <paramref name="button"/> was already armed.</summary>
+    private async Task<bool> PressAsync(MailPolicyConfirm button)
     {
-        if (!WarmupResetArmed)
-        {
-            WarmupResetArmed = true;
-            OnPropertyChanged(nameof(WarmupResetArmed));
-            return false;
-        }
-        await DispatchAsync(new MailPolicyAction.ResetWarmup());
-        return true;
+        var dispatches = Armed == button;
+        await DispatchAsync(new MailPolicyAction.Press(button));
+        return dispatches;
     }
 
     /// <summary>Dispatch an action then re-project the snapshot. The machine captures
@@ -520,6 +653,9 @@ public partial class AdminMailViewModel : ObservableObject
     {
         Error = string.IsNullOrEmpty(snap.error) ? null : snap.error;
         MailEnabled = snap.mailEnabled;
+        MailUnavailableHere = snap.mailUnavailableHere;
+        OnPropertyChanged(nameof(MailEnableRefused));
+        OnPropertyChanged(nameof(MailEnabledToggleState));
         AutoEnableMailForNewUsers = snap.autoEnableMailForNewUsers;
         Spam = SpamPolicyValues.From(snap.spam);
         Auth = AuthPolicyValues.From(snap.auth);
@@ -527,16 +663,26 @@ public partial class AdminMailViewModel : ObservableObject
         Imap = ImapPolicyValues.From(snap.imap);
         Outbound = OutboundPolicyValues.From(snap.outbound);
         Alias = AliasPolicyValues.From(snap.alias);
+        Dmarc = DmarcPolicyValues.From(snap.dmarc);
+        Microsoft = MicrosoftRegistrationValues.From(snap.microsoftRegistration);
         BaselinePublish = snap.baselinePublishResult is null
             ? null
             : BaselinePublishValues.From(snap.baselinePublishResult);
         BaselineState = snap.baselineState is null
             ? null
             : BaselineStateValues.From(snap.baselineState);
-        WarmupResetArmed = false;
+        Armed = snap.armed;
+        SecretRotationLine = snap.secretRotation is null
+            ? null
+            : Strings.Resolve(FaunaClientMailSettingsMethods.SecretRotationText(snap.secretRotation));
         Health = snap.health is null ? null : ProjectHealth(snap.health);
         OnPropertyChanged(nameof(Health));
+        OnPropertyChanged(nameof(Armed));
         OnPropertyChanged(nameof(WarmupResetArmed));
+        OnPropertyChanged(nameof(PublishSpamBaselineArmed));
+        OnPropertyChanged(nameof(ListUnsubscribeSecretRotateArmed));
+        OnPropertyChanged(nameof(ForwardSrsSecretRotateArmed));
+        OnPropertyChanged(nameof(SecretRotationLine));
         OnPropertyChanged(nameof(BaselineState));
         OnPropertyChanged(nameof(Spam));
         OnPropertyChanged(nameof(Auth));
@@ -544,6 +690,8 @@ public partial class AdminMailViewModel : ObservableObject
         OnPropertyChanged(nameof(Imap));
         OnPropertyChanged(nameof(Outbound));
         OnPropertyChanged(nameof(Alias));
+        OnPropertyChanged(nameof(Dmarc));
+        OnPropertyChanged(nameof(Microsoft));
         OnPropertyChanged(nameof(BaselinePublish));
     }
 }

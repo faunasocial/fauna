@@ -19,7 +19,6 @@ askama = { version = "0.13", default-features = false, features = ["config", "de
 camino = "1.0.8"
 cargo_metadata = "0.19"
 clap = { workspace = true }
-extend = "1.1"
 fs-err = "2.7"
 heck = "0.4"
 serde = { workspace = true }

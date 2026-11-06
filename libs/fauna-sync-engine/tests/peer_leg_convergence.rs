@@ -32,7 +32,7 @@ use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::{RecordIndexEntry, WriterId};
 use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
 use fauna_core::data::ContentHash;
-use fauna_core::data::{Capability, DeviceAuthorization, ModerationConfig, Timestamp};
+use fauna_core::data::{Capability, DeviceAuthorization, SyncPrefsConfig, Timestamp};
 use fauna_core::encoding::{EmbedAsBytes, sign_envelope};
 use fauna_core::identity::ActorKeypair;
 use fauna_core::read_marker::{ReadMarker, channel_key};
@@ -45,7 +45,7 @@ use fauna_peer_sync::server::{
 use fauna_peer_sync::{AdmissionViews, PeerRequester, admit_over_as, pull_missing_blocks};
 use fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
 use fauna_protocol::merge_policy::{
-    KIND_MODERATION, KIND_READ_MARKER, KIND_SEEN_SET, LwwStamp, MODERATION_KEY,
+    KIND_READ_MARKER, KIND_SEEN_SET, KIND_SYNC_PREFS, LwwStamp, PREFERENCE_KEY,
 };
 use fauna_protocol::scope::ContentScope;
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
@@ -440,17 +440,16 @@ impl fauna_protocol::RpcRequester for NoNest {
     }
 }
 
-fn moderation_item() -> ItemId {
+fn sync_prefs_item() -> ItemId {
     ItemId {
-        kind: KIND_MODERATION.into(),
-        key: MODERATION_KEY.into(),
+        kind: KIND_SYNC_PREFS.into(),
+        key: PREFERENCE_KEY.into(),
     }
 }
 
-fn moderation_with(keyword: &str) -> Vec<u8> {
-    encode_canonical(&ModerationConfig {
-        muted_keywords: vec![keyword.into()],
-        ..Default::default()
+fn sync_prefs_with(policy: &str) -> Vec<u8> {
+    encode_canonical(&SyncPrefsConfig {
+        default_conflict_policy: Some(policy.into()),
     })
     .unwrap()
     .to_vec()
@@ -510,14 +509,14 @@ async fn two_replicas_converge_store_to_store_with_no_nest() {
 
     // Divergent local writes on both sides — the nest-outage picture.
     a.put_local(
-        &moderation_item(),
-        moderation_with("from-a"),
+        &sync_prefs_item(),
+        sync_prefs_with("from-a"),
         stamp(1_000, DEVICE_A),
     )
     .await;
     b.put_local(
-        &moderation_item(),
-        moderation_with("from-b"),
+        &sync_prefs_item(),
+        sync_prefs_with("from-b"),
         stamp(2_000, DEVICE_B),
     )
     .await;
@@ -539,14 +538,14 @@ async fn two_replicas_converge_store_to_store_with_no_nest() {
     a.walk_peer(&ab).await;
 
     // LWW: the newer stamp (B's) wins on both replicas.
-    let a_mod = stored(&a.store, KIND_MODERATION, MODERATION_KEY).await;
-    let b_mod = stored(&b.store, KIND_MODERATION, MODERATION_KEY).await;
-    assert_eq!(a_mod, b_mod, "moderation must converge to identical bytes");
-    let decoded: ModerationConfig = decode_strict(&a_mod).unwrap();
+    let a_prefs = stored(&a.store, KIND_SYNC_PREFS, PREFERENCE_KEY).await;
+    let b_prefs = stored(&b.store, KIND_SYNC_PREFS, PREFERENCE_KEY).await;
     assert_eq!(
-        decoded.muted_keywords,
-        vec![fauna_core::data::MutedKeyword::from("from-b")]
+        a_prefs, b_prefs,
+        "sync-prefs must converge to identical bytes"
     );
+    let decoded: SyncPrefsConfig = decode_strict(&a_prefs).unwrap();
+    assert_eq!(decoded.default_conflict_policy.as_deref(), Some("from-b"));
 
     // CRDT: both converge to the union — a value neither replica wrote.
     let a_seen = stored(&a.store, KIND_SEEN_SET, &post_scope).await;
@@ -1903,8 +1902,8 @@ async fn a_removed_device_is_refused_at_the_next_handshake_in_both_directions() 
 
     // 3. A writes a row only a still-admitted peer may ever see.
     a.put_local(
-        &moderation_item(),
-        moderation_with("written-after-b-was-removed"),
+        &sync_prefs_item(),
+        sync_prefs_with("written-after-b-was-removed"),
         stamp(2_000, DEVICE_A),
     )
     .await;
@@ -1944,7 +1943,7 @@ async fn a_removed_device_is_refused_at_the_next_handshake_in_both_directions() 
     );
     assert!(
         b.store
-            .state(KIND_MODERATION, MODERATION_KEY)
+            .state(KIND_SYNC_PREFS, PREFERENCE_KEY)
             .await
             .unwrap()
             .is_none(),
@@ -1991,8 +1990,8 @@ async fn removal_severs_a_live_connection_at_its_next_request() {
     )
     .await;
     a.put_local(
-        &moderation_item(),
-        moderation_with("before-removal"),
+        &sync_prefs_item(),
+        sync_prefs_with("before-removal"),
         stamp(1_000, DEVICE_A),
     )
     .await;
@@ -2003,8 +2002,8 @@ async fn removal_severs_a_live_connection_at_its_next_request() {
         .await
         .expect("the walk of an admitted sibling");
     assert_eq!(
-        stored(&b.store, KIND_MODERATION, MODERATION_KEY).await,
-        moderation_with("before-removal")
+        stored(&b.store, KIND_SYNC_PREFS, PREFERENCE_KEY).await,
+        sync_prefs_with("before-removal")
     );
 
     // 2. A learns of the removal — the pump's snapshot refresh — and writes.
@@ -2017,8 +2016,8 @@ async fn removal_severs_a_live_connection_at_its_next_request() {
     .await;
     assert_eq!(a.refresh_removed_devices().await, 1);
     a.put_local(
-        &moderation_item(),
-        moderation_with("after-removal"),
+        &sync_prefs_item(),
+        sync_prefs_with("after-removal"),
         stamp(2_000, DEVICE_A),
     )
     .await;
@@ -2037,8 +2036,8 @@ async fn removal_severs_a_live_connection_at_its_next_request() {
         "so the walk riding that connection stops too"
     );
     assert_eq!(
-        stored(&b.store, KIND_MODERATION, MODERATION_KEY).await,
-        moderation_with("before-removal"),
+        stored(&b.store, KIND_SYNC_PREFS, PREFERENCE_KEY).await,
+        sync_prefs_with("before-removal"),
         "nothing written after the removal may reach B"
     );
 }
@@ -3487,6 +3486,254 @@ async fn follows_converge_per_folder_through_the_production_door() {
             .expect("an unfollow of nothing"),
         "unfollowing a row already tombstoned writes nothing"
     );
+}
+
+// ── The muted words and hidden subjects (`content-moderation-and-ranking.md` § Implementation status today; `fauna.state.moderation`) ──
+
+/// Run one shared delta (`fauna_client_config::preference_records`) on
+/// `replica`'s moderation fold and write the rows it changed through the
+/// production door (`moderation_rows::write_changes`, over the delegable
+/// scope), then the runtime's publish step — what every muted-words and
+/// report-sheet gesture does. Whether the door wrote.
+async fn moderation_door(
+    replica: &Replica,
+    mutate: impl FnOnce(&mut fauna_core::data::ModerationConfig),
+) -> bool {
+    use fauna_sync_engine::moderation_rows::{read_moderation, write_changes};
+    let requester = NoNest;
+    let sk = signing_key(replica.device);
+    let sched = schedule();
+    let tr = trust();
+    let plane = AccountStatePlane::new_pull_only(
+        &replica.store,
+        &requester,
+        &sched,
+        &sk,
+        &tr,
+        ACCOUNT_STATE_SCOPE,
+    )
+    .unwrap();
+    let before = read_moderation(&replica.store).await.expect("the fold");
+    let mut after = before.clone();
+    mutate(&mut after);
+    let changes = before.changes_to(&after).expect("the diff");
+    let wrote = write_changes(&replica.store, &plane, &changes)
+        .await
+        .expect("the door writes");
+    plane.publish_pending().await.expect("publish step");
+    wrote
+}
+
+/// Both replicas' moderation folds, after `a` and `b` each walked the other.
+async fn moderation_on_both(
+    a: &Replica,
+    b: &Replica,
+    ab: &Arc<PeerChannel>,
+    ba: &Arc<PeerChannel>,
+) -> [fauna_core::data::ModerationConfig; 2] {
+    use fauna_sync_engine::moderation_rows::read_moderation;
+    a.walk_peer(ab).await;
+    b.walk_peer(ba).await;
+    [
+        read_moderation(&a.store).await.expect("A's fold"),
+        read_moderation(&b.store).await.expect("B's fold"),
+    ]
+}
+
+/// Two replicas of one account, each admitted to the other.
+async fn moderation_pair() -> (Replica, Replica, Arc<PeerChannel>, Arc<PeerChannel>) {
+    let listeners: Listeners = fauna_transport::testing::listeners();
+    let now = Arc::new(AtomicU64::new(5_000));
+    let a = replica(DEVICE_A, &listeners, &now, None, QuotaConfig::default()).await;
+    let b = replica(DEVICE_B, &listeners, &now, None, QuotaConfig::default()).await;
+    let ab = a.admitted_channel(&b, &now).await;
+    let ba = b.admitted_channel(&a, &now).await;
+    (a, b, ab, ba)
+}
+
+fn terms(moderation: &fauna_core::data::ModerationConfig) -> Vec<&str> {
+    moderation
+        .muted_keywords
+        .iter()
+        .map(|k| k.keyword.as_str())
+        .collect()
+}
+
+/// **Outcome 5's guarantee, at the plane:** two devices that each add a word
+/// before walking the other's write both keep both words — two adds are two
+/// rows, and latest-wins orders only writes to one key. The whole-record row
+/// this replaced kept only the later stamp's list.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_muted_word_adds_converge_on_both_rows() {
+    use fauna_client_config::preference_records::add_muted_keyword;
+    let (a, b, ab, ba) = moderation_pair().await;
+
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "from-a")).await);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&b, |m| add_muted_keyword(m, "from-b")).await);
+
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(
+            terms(&moderation),
+            vec!["from-a", "from-b"],
+            "{side}: both concurrent adds survive, in the order they were added"
+        );
+    }
+    // A re-add of a term already muted, in another case, writes nothing.
+    assert!(!moderation_door(&a, |m| add_muted_keyword(m, "FROM-B")).await);
+}
+
+/// **A removal still propagates** — the property a per-key union could not
+/// keep: B takes off a word A added, and the stamped tombstone reaches A
+/// while the other word stays on both.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cross_device_muted_word_remove_converges() {
+    use fauna_client_config::preference_records::{add_muted_keyword, remove_muted_keyword};
+    let (a, b, ab, ba) = moderation_pair().await;
+
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "kept")).await);
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "gone")).await);
+    moderation_on_both(&a, &b, &ab, &ba).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&b, |m| remove_muted_keyword(m, "gone")).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(
+            terms(&moderation),
+            vec!["kept"],
+            "{side}: the remove propagated"
+        );
+    }
+    assert!(
+        !moderation_door(&a, |m| remove_muted_keyword(m, "gone")).await,
+        "removing a term already tombstoned writes nothing"
+    );
+}
+
+/// **A remove racing a level change of one term converges by the stamp**, as
+/// any two writes to one row do — whichever was written later wins on both
+/// replicas, in either order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remove_racing_a_level_change_converges_by_stamp() {
+    use fauna_client_config::preference_records::{
+        add_muted_keyword, remove_muted_keyword, set_muted_keyword_weight,
+    };
+    use fauna_core::scoring::MutedKeywordLevel;
+    let soft = MutedKeywordLevel::ShowLess.weight();
+
+    // The level change is the later write: the term stays, at its new level.
+    let (a, b, ab, ba) = moderation_pair().await;
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "term")).await);
+    moderation_on_both(&a, &b, &ab, &ba).await;
+    assert!(moderation_door(&a, |m| remove_muted_keyword(m, "term")).await);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&b, |m| set_muted_keyword_weight(m, "term", soft)).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(
+            moderation
+                .muted_keywords
+                .iter()
+                .map(|k| (k.keyword.as_str(), k.weight))
+                .collect::<Vec<_>>(),
+            vec![("term", soft)],
+            "{side}: the later level change outranks the earlier remove"
+        );
+    }
+
+    // The remove is the later write: the term is gone everywhere.
+    let (a, b, ab, ba) = moderation_pair().await;
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "term")).await);
+    moderation_on_both(&a, &b, &ab, &ba).await;
+    assert!(moderation_door(&b, |m| set_muted_keyword_weight(m, "term", soft)).await);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&a, |m| remove_muted_keyword(m, "term")).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert!(
+            moderation.muted_keywords.is_empty(),
+            "{side}: the later remove outranks the earlier level change"
+        );
+    }
+}
+
+/// **The hidden family converges the same way:** two devices hide different
+/// subjects concurrently and both stay hidden on both; showing one again on
+/// one device reaches the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_hides_converge_and_an_unhide_propagates() {
+    use fauna_client_config::preference_records::{hide_reported_content, unhide_reported_content};
+    let (a, b, ab, ba) = moderation_pair().await;
+
+    assert!(moderation_door(&a, |m| hide_reported_content(m, "aa11")).await);
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&b, |m| hide_reported_content(m, "BB22")).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(
+            moderation.hidden_content,
+            vec!["aa11".to_string(), "bb22".to_string()],
+            "{side}: both concurrent hides survive"
+        );
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert!(moderation_door(&b, |m| unhide_reported_content(m, "aa11")).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(
+            moderation.hidden_content,
+            vec!["bb22".to_string()],
+            "{side}: the unhide propagated"
+        );
+    }
+}
+
+/// **A retired whole-record `self` row is read past, never refused** (the
+/// 0.1.x compat-free window owes it no lift): a replica that still holds the
+/// pre-cut row, and a peer it reaches, fold only the per-term rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retired_whole_record_moderation_row_is_read_past() {
+    use fauna_client_config::preference_records::add_muted_keyword;
+    use fauna_protocol::merge_policy::KIND_MODERATION;
+    let (a, b, ab, ba) = moderation_pair().await;
+
+    a.put_local(
+        &ItemId {
+            kind: KIND_MODERATION.into(),
+            key: "self".into(),
+        },
+        encode_canonical(&fauna_core::data::ModerationConfig {
+            muted_keywords: vec!["pre-cut".into()],
+            hidden_content: vec!["cc33".into()],
+        })
+        .unwrap()
+        .to_vec(),
+        stamp(1_000, DEVICE_A),
+    )
+    .await;
+    assert!(moderation_door(&a, |m| add_muted_keyword(m, "post-cut")).await);
+    for (side, moderation) in ["A", "B"]
+        .into_iter()
+        .zip(moderation_on_both(&a, &b, &ab, &ba).await)
+    {
+        assert_eq!(terms(&moderation), vec!["post-cut"], "{side}");
+        assert!(moderation.hidden_content.is_empty(), "{side}");
+    }
 }
 
 /// **The door refuses while no generation tip resolves, and keeps nothing.**
@@ -5103,7 +5350,7 @@ async fn mail_rows_converge_per_credential_through_the_production_door() {
     let msek = SecretArray32::new([0x5e; 32]);
 
     // A enables mail (the MSEK) and adds iPhone Mail; B — never having heard
-    // of A's MSEK — turns CalDAV on later and adds Thunderbird.
+    // of A's MSEK — turns mail off later and adds Thunderbird.
     let enabled = MailStateRow {
         msek: Some(msek.clone()),
         mail_enabled: Some(true),
@@ -5117,11 +5364,15 @@ async fn mail_rows_converge_per_credential_through_the_production_door() {
     let iphone = a_mail_credential("iphone-mail", "correct horse", 1);
     let thunderbird = a_mail_credential("thunderbird", "battery staple", 2);
     assert!(mail_door(&a, MailWrite::Put(&iphone), 101).await.unwrap());
-    let caldav = MailStateRow {
-        caldav_enabled: true,
+    let mail_off = MailStateRow {
+        mail_enabled: Some(false),
         ..MailStateRow::default()
     };
-    assert!(mail_door(&b, MailWrite::State(&caldav), 200).await.unwrap());
+    assert!(
+        mail_door(&b, MailWrite::State(&mail_off), 200)
+            .await
+            .unwrap()
+    );
     assert!(
         mail_door(&b, MailWrite::Put(&thunderbird), 201)
             .await
@@ -5140,10 +5391,9 @@ async fn mail_rows_converge_per_credential_through_the_production_door() {
         );
         assert_eq!(
             mail.mail_enabled,
-            Some(true),
-            "{side}: present-wins beside the MSEK"
+            Some(false),
+            "{side}: the newer device's flag wins"
         );
-        assert!(mail.caldav_enabled, "{side}: the newer device's flags win");
         let ids: Vec<&str> = mail
             .credentials
             .iter()
@@ -5361,7 +5611,7 @@ async fn a_reverted_mail_key_swap_is_caught_on_read_back_and_re_driven() {
 /// (`mail-credentials.md` § Cross-device finalize race). A finalizes a
 /// rotation — the old key's generation row, the swap to MSEK′ under its
 /// sentinel, the sentinel's clear; B, which has not walked any of it, flips
-/// CalDAV on above all three stamps. B's write keeps its stored MSEK at its
+/// mail off above all three stamps. B's write keeps its stored MSEK at its
 /// stored key stamp, so after the walks both replicas hold MSEK′ with no
 /// sentinel, the old key a generation row, and B's flag.
 #[tokio::test(flavor = "multi_thread")]
@@ -5412,9 +5662,9 @@ async fn a_stale_mail_flag_flip_never_reverts_a_committed_key_swap() {
     assert!(mail_door(&a, MailWrite::Clear(&new), 310).await.unwrap());
     assert_eq!(read_mail(&a.store).await.unwrap().msek, Some(new.clone()));
 
-    // B, stale, flips CalDAV on — stamped above every one of A's writes.
+    // B, stale, turns mail off — stamped above every one of A's writes.
     let flip = MailStateRow {
-        caldav_enabled: true,
+        mail_enabled: Some(false),
         ..MailStateRow::recreatable_of(&b_view)
     };
     assert!(mail_door(&b, MailWrite::State(&flip), 400).await.unwrap());
@@ -5425,7 +5675,11 @@ async fn a_stale_mail_flag_flip_never_reverts_a_committed_key_swap() {
         let mail = read_mail(store).await.unwrap();
         assert_eq!(mail.msek, Some(new.clone()), "{side}: the swap survives");
         assert!(mail.pending_rotation.is_none(), "{side}: the clear holds");
-        assert!(mail.caldav_enabled, "{side}: B's newer flag wins");
+        assert_eq!(
+            mail.mail_enabled,
+            Some(false),
+            "{side}: B's newer flag wins"
+        );
         assert_eq!(
             mail.prior_mseks,
             vec![old.clone()],
@@ -5437,7 +5691,7 @@ async fn a_stale_mail_flag_flip_never_reverts_a_committed_key_swap() {
 
 /// **A stale flag flip never clears a sentinel its replica never
 /// saw.** A starts a rotation (the sentinel naming MSEK′); B, which has
-/// not walked it, flips CalDAV on above it. After the walks both replicas
+/// not walked it, turns mail off above it. After the walks both replicas
 /// still hold the sentinel — the rotation stays resumable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_mail_flag_flip_never_clears_an_unseen_sentinel() {
@@ -5470,7 +5724,7 @@ async fn a_stale_mail_flag_flip_never_clears_an_unseen_sentinel() {
     };
     assert!(mail_door(&a, MailWrite::State(&start), 300).await.unwrap());
     let flip = MailStateRow {
-        caldav_enabled: true,
+        mail_enabled: Some(false),
         ..MailStateRow::recreatable_of(&b_view)
     };
     assert!(mail_door(&b, MailWrite::State(&flip), 400).await.unwrap());
@@ -5485,7 +5739,11 @@ async fn a_stale_mail_flag_flip_never_clears_an_unseen_sentinel() {
             "{side}: the sentinel survives"
         );
         assert_eq!(mail.msek, Some(old.clone()));
-        assert!(mail.caldav_enabled, "{side}: B's newer flag wins");
+        assert_eq!(
+            mail.mail_enabled,
+            Some(false),
+            "{side}: B's newer flag wins"
+        );
     }
     assert_mail_rows_identical(&a, &b).await;
 }

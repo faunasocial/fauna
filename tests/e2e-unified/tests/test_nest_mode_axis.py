@@ -30,6 +30,7 @@ import contextlib
 import pathlib
 import re
 import ssl
+import types
 import urllib.error
 import urllib.request
 
@@ -793,15 +794,31 @@ _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
         "HTTP listener (`session.http_port`) — the cli's MCP authority, never "
         "the nest's API listener, which the module reaches only as a nest "
         "handle's url",
+    "tests/test_mail_enable_at_admin_claim.py":
+        "the mail bridge's own CalDAV listener (`mda.caldav_port`, the MDA's "
+        "self-signed HTTPS endpoint a stock calendar client dials) — a bridge "
+        "authority, never the nest's API listener",
+    "tests/test_mail_settings_caldav_only.py":
+        "the mail bridge's own CalDAV listener (`handle.caldav_port`, the "
+        "MDA's self-signed HTTPS endpoint a stock calendar client dials) — a "
+        "bridge authority, never the nest's API listener",
     "tests/test_mail_abuse_refused.py":
         "the mail bridge's `clamd_addr` / `rspamd_url` scanner addresses on "
         "free loopback ports nothing listens on — the deployment shape of a "
         "scanner that is down; a bridge-side scanner authority, never the "
         "nest's API listener",
+    "tests/test_nest_retire.py":
+        "`_closed_port()` — a loopback port nothing listens on, the saved "
+        "identity's refused nest url; deliberately NOT a nest's API listener",
     "tests/api/test_backup_lease_handback.py":
         "a synthetic `destination_nest_url` on a `find_free_port()` port "
         "nothing serves — deliberately unreachable so the sweep fails to "
         "CONNECT, never a fixture's own nest authority",
+    "tests/api/test_folder_read_principal.py":
+        "the mail bridge's own DAV listener (`mda.caldav_port`, the MDA's "
+        "self-signed HTTPS endpoint, its `Host` header naming "
+        "`mail.<primary>`) — a bridge authority, never the nest's API "
+        "listener",
 }
 
 
@@ -3323,6 +3340,39 @@ def test_an_explicit_context_still_wins_over_the_installed_opener():
         _assert_verification_refused(url, context=ssl.create_default_context())
 
 
+def test_a_requests_get_to_a_registered_tls_nest_survives_the_floor_cert():
+    """The `requests` half of the floor-cert posture. `requests` rides urllib3,
+    never urllib's installed opener, so a module dialling the nest with
+    `requests.get` met the floor cert bare under `--nest docker` (measured
+    2026-10-23: the export, custody and mail-export modules, fixed one module at
+    a time until the grant moved to the transport)."""
+    import requests
+
+    from common.auth import mark_tls_nest
+
+    with _floor_cert_listener() as (port, url):
+        mark_tls_nest(port)
+        assert requests.get(url, timeout=10).content == b"ok"
+
+
+def test_a_requests_get_keeps_verifying_an_unregistered_port_and_an_explicit_bundle():
+    """The converses: a TLS listener the harness never declared keeps full
+    verification, and a dial naming its own trust (`verify=<CA bundle>`) is
+    left to it — the negative-control escape hatch, as `context=` is urllib's."""
+    import certifi
+    import requests
+
+    from common.auth import mark_tls_nest
+
+    with _floor_cert_listener() as (_port, url):
+        with pytest.raises(requests.exceptions.SSLError):
+            requests.get(url, timeout=10)
+    with _floor_cert_listener() as (port, url):
+        mark_tls_nest(port)
+        with pytest.raises(requests.exceptions.SSLError):
+            requests.get(url, timeout=10, verify=certifi.where())
+
+
 def _ws_dial(url: str, **kwargs):
     """Dial ``url`` with a raw ``websocket.create_connection``, as the modules
     that bypass the WS-RPC clients do. Returns the exception it raised.
@@ -3814,6 +3864,36 @@ def test_a_supervised_nest_does_NOT_get_a_second_supervisor():
     assert waited == [], "the provider's answer was not the thing called"
 
 
+def test_a_supervised_self_exit_is_back_only_once_the_front_door_is():
+    """Docker half, what the provider DOES wait for: the box, not the process.
+
+    Every nest boot re-mints the sidecar tokens, so the sni-router on :443 —
+    the box's only front door — is refused at its next hello and exits for s6
+    to restart it (`fauna-sni-router/src/main.rs`, "the accepted cost"). Until
+    its channel is back, a client dialling the box meets a reset: the 0.1.5
+    candidate run's member-reset journey clicked Retry in exactly that second.
+    The witness is ordering in the container's own log — a self-exit this
+    resume has not consumed yet, then the router's channel after it — never a
+    sleep.
+    """
+    import conftest
+
+    seen = conftest._front_door_back_after_self_exit
+    exit_line = "WARN factory_reset: exiting 0 for supervisor restart\n"
+    router_up = "INFO router channel to nest established; log plane is live\n"
+    booted = router_up  # the first boot's channel, before any reset
+
+    assert seen(booted, exits_consumed=0) is None, "no self-exit yet"
+    assert seen(booted + exit_line, exits_consumed=0) is None, (
+        "the nest exited but the front door has not come back")
+    assert seen(booted + exit_line + router_up, exits_consumed=0) == 1
+    # A second reset on the same nest: the first cycle's lines must not answer.
+    cycle = booted + exit_line + router_up
+    assert seen(cycle, exits_consumed=1) is None
+    assert seen(cycle + exit_line, exits_consumed=1) is None
+    assert seen(cycle + exit_line + router_up, exits_consumed=1) == 2
+
+
 def test_a_dedicated_fixture_nest_still_takes_the_binary_path(monkeypatch):
     """The converse, and the reason the fallback is not a guess.
 
@@ -4149,6 +4229,52 @@ def _package_own_image_fixtures():
     return fixtures, {n: requested_names(funcs[n]) for n in fixtures}
 
 
+def _package_tests_booting_the_image_in_their_body():
+    """The package's tests that reach the image by a CALL in their own body
+    while requesting no fixture that does — invisible to `classify`, which sees
+    only `item.fixturenames`."""
+    import ast
+    from pathlib import Path
+
+    fixtures, _ = _package_own_image_fixtures()
+    pkg = Path(__file__).resolve().parents[1] / "tests" / "platform" / "docker"
+    helpers = {}
+    tests = []
+    for source in sorted(pkg.glob("*.py")):
+        for node in ast.parse(source.read_text()).body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith("test_"):
+                tests.append((source.name, node))
+            else:
+                helpers.setdefault(node.name, node)
+
+    def names_in(node):
+        return (
+            {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            | {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+        )
+
+    # Same seed and closure as the fixture derivation, over plain helpers only.
+    reaches = {n for n, f in helpers.items() if {"IMAGE_TAG", "image_tag"} & names_in(f)}
+    grew = True
+    while grew:
+        grew = False
+        for name, node in helpers.items():
+            if name not in reaches and names_in(node) & (reaches | fixtures):
+                reaches.add(name)
+                grew = True
+
+    found = []
+    for module, node in tests:
+        requested = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+        if requested & fixtures:
+            continue
+        if names_in(node) & (reaches | {"IMAGE_TAG", "image_tag"}):
+            found.append(f"{module}::{node.name}")
+    return sorted(found)
+
+
 def _fixture_names_defined_outside_the_docker_package():
     """Every fixture name defined anywhere in the e2e tree but that package."""
     import ast
@@ -4313,6 +4439,22 @@ def test_the_own_image_fixture_list_matches_the_platform_docker_package():
         "run's nest in any mode — the record would name a commit, a digest and "
         "a mode the test never touched (feature-catalog.md § The ledger). Add "
         "it to OWN_IMAGE_FIXTURES."
+    )
+
+
+def test_no_platform_docker_test_boots_the_image_from_its_own_body():
+    """A test that calls `docker_build` (or a venue helper that boots the image)
+    in its body, requesting no own-image fixture, escapes the own-image
+    exclusion: `classify` matches fixture names only. Measured 2026-10-23: six
+    such tests ran in the 0.1.5 release-candidate run and failed for want of
+    this tree's keyed image — noise the candidate run cannot tell from a
+    release defect. Boot the image through a fixture instead."""
+    found = _package_tests_booting_the_image_in_their_body()
+    assert not found, (
+        f"{found} boot the package's own image from the test body, so a docker "
+        "or live run selects them (nest_surface.OWN_IMAGE_FIXTURES matches "
+        "fixture names). Move the boot into a fixture the test requests — a "
+        "module `docker_image`, or a venue fixture like `abuse_nest`."
     )
 
 
@@ -4613,6 +4755,7 @@ _OWN_AUTHORITY_FIXTURES = (
     "caldav_cross_nest_peer",
     "cross_nest_foreign_ephemeral",
     "smoke_handled_nest",
+    "store_nest",
 )
 
 #: The fixtures that reach the sentinel through `_start_handled_tls_nest` (the
@@ -5345,6 +5488,31 @@ def _install_fake_docker(monkeypatch, ports, fake_start, created=None):
         dh, "create_network",
         lambda name, labels=None: (created.append(name) if created is not None else None),
     )
+    # The scanner sidecars' name suffix — never a published port, so it draws
+    # nothing from `ports`, which each pin sizes to the nests it starts.
+    monkeypatch.setattr(port_util, "find_free_ports", lambda n: list(range(45000, 45000 + n)))
+    monkeypatch.setattr(dh, "start_fake_scanner_sidecars", _fake_scanner_sidecars)
+    monkeypatch.setattr(conftest._DockerProvider, "_run_resolver_ip", None)
+    _RESOLVER_CALLS.clear()
+    monkeypatch.setattr(dh, "start_fake_dns_sidecar", _fake_dns_sidecar)
+
+
+#: Every run resolver the fake daemon was asked for, as the call's kwargs.
+_RESOLVER_CALLS: list = []
+
+
+def _fake_dns_sidecar(network, fakes_dir, **kwargs):
+    _RESOLVER_CALLS.append({"network": network, **kwargs})
+    return "172.30.0.53"
+
+
+#: Every scanner pair the fake daemon was asked for, as the call's kwargs.
+_SCANNER_CALLS: list = []
+
+
+def _fake_scanner_sidecars(network, fakes_dir, **kwargs):
+    _SCANNER_CALLS.append({"network": network, **kwargs})
+    return {"clamd_addr": "172.30.0.7:3310", "rspamd_url": "http://172.30.0.8:11333"}
 
 
 def _run_sweep_over(monkeypatch, rows):
@@ -5540,6 +5708,98 @@ def test_every_container_joins_the_run_network_and_carries_both_labels(monkeypat
 
     assert seen["network"] == conftest._docker_run_network()
     assert seen["labels"] == conftest._docker_run_labels()
+
+
+def test_a_plain_docker_nest_runs_beside_its_content_scanners(monkeypatch, tmp_path_factory):
+    """A box runs clamd and rspamd beside the nest, and an image started without
+    them declares no scanners and refuses the mail enable — so a docker run whose
+    plain nests lacked them measured its own shape (the 0.1.5 release-candidate
+    run lost about 228 mail tests to that refusal). Every plain start therefore
+    stands the pair up on the run network, under the run's labels so the
+    dead-run sweep reclaims them, and wires their addresses into the container."""
+    import conftest
+
+    seen = {}
+
+    def _fake_start(name, port_map, **kwargs):
+        seen.update(kwargs)
+        return "cid"
+
+    _SCANNER_CALLS.clear()
+    _install_fake_docker(monkeypatch, iter((41015,)), _fake_start)
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest")
+
+    assert len(_SCANNER_CALLS) == 1, _SCANNER_CALLS
+    assert _SCANNER_CALLS[0]["network"] == conftest._docker_run_network()
+    assert _SCANNER_CALLS[0]["labels"] == conftest._docker_run_labels()
+    assert seen["env"]["FAUNA_CLAMD_ADDR"] == "172.30.0.7:3310"
+    assert seen["env"]["FAUNA_RSPAMD_URL"] == "http://172.30.0.8:11333"
+
+
+def test_a_plain_docker_nest_resolves_no_outside_name(monkeypatch, tmp_path_factory):
+    """A test venue never depends on the outside world: left on docker's default
+    upstream, the image ordered certs from the public ACME CA for `*.fauna.test`
+    and polled the release host to its rate limit at every boot. Every plain
+    nest therefore resolves through the run's ONE resolver — a record-less
+    `fake_dns` on the run network, under the run's labels — so an outside name
+    does not resolve, and two nests of a run share it."""
+    import conftest
+
+    seen = []
+
+    def _fake_start(name, port_map, **kwargs):
+        seen.append(kwargs)
+        return "cid"
+
+    _install_fake_docker(monkeypatch, iter((41017, 41018)), _fake_start)
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest")
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest2")
+
+    assert len(_RESOLVER_CALLS) == 1, _RESOLVER_CALLS
+    call = _RESOLVER_CALLS[0]
+    assert call["network"] == conftest._docker_run_network()
+    assert call["labels"] == conftest._docker_run_labels()
+    assert call["txt_records"] == {} and not call.get("a_records")
+    assert [k["dns"] for k in seen] == ["172.30.0.53", "172.30.0.53"]
+
+
+def test_a_venue_resolver_replaces_the_run_resolver(monkeypatch, tmp_path_factory):
+    """A venue that publishes records (the mail venue's `fake_dns`) brings its
+    own resolver; the run's empty one is neither started for it nor used."""
+    import conftest
+
+    seen = {}
+
+    def _fake_start(name, port_map, **kwargs):
+        seen.update(kwargs)
+        return "cid"
+
+    _install_fake_docker(monkeypatch, iter((41019,)), _fake_start)
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest",
+                                     _venue_env={}, _venue_dns="172.30.0.99")
+
+    assert _RESOLVER_CALLS == []
+    assert seen["dns"] == "172.30.0.99"
+
+
+def test_a_venue_start_keeps_its_own_scanner_shape(monkeypatch, tmp_path_factory):
+    """A venue passes `_venue_env` and owns its scanners — the MTA-free venues
+    run none — so the provider's plain-start pair is not stood up beside it."""
+    import conftest
+
+    seen = {}
+
+    def _fake_start(name, port_map, **kwargs):
+        seen.update(kwargs)
+        return "cid"
+
+    _SCANNER_CALLS.clear()
+    _install_fake_docker(monkeypatch, iter((41016,)), _fake_start)
+    conftest._DockerProvider().start(None, tmp_path_factory, "nest",
+                                     _venue_env={"FAUNA_LAN_BIND_IP": "0.0.0.0"})
+
+    assert _SCANNER_CALLS == []
+    assert "FAUNA_CLAMD_ADDR" not in seen["env"]
 
 
 def test_a_docker_peer_url_is_the_container_ip_not_the_published_port(monkeypatch, tmp_path_factory):
@@ -6384,11 +6644,14 @@ _PEER_FIELDS_REVIEWED_AS_CLIENT_DIALS = {
     # nest the actor lives on, not a peer a nest is asked to dial.
     "test_user",
     "test_discarded_machines_leave_no_live_grant_on_a_shared_account",
+    "test_discarded_machines_leave_no_fleet_entry_behind",   # ditto, the fleet-scope census
+    "test_a_wedge_recovery_leaves_no_live_grant_on_a_shared_account",   # ditto, the wedge-recovery twin
     "test_activitypub_federation_live_three_party",  # `_ui_claim`: the app's own nest
     "test_private_relay_behind_hetzner_public_node",  # ditto, private axis
     "test_provision_drives_nest_url_without_device_toml",  # sync-agent → its nest
     "test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it",
                                # the app's own registry row, not a peer
+    "test_flatpak_seam_always_on_agent",  # seeds the app's account registry with its own throwaway nest
     "test_two_pipe_isolation",  # two agents, one nest, both their own
     "test_wasm_claim_pin_differing_root_overwrites",   # web claim of its own nest
     "test_wasm_claim_pin_same_root_preserves_rotation_seq",  # ditto
@@ -6666,7 +6929,7 @@ _PROVIDER_ROUTED_MODULE_LOCAL_NESTS = (
     # open registration". Routing `local_nest` also retired the last fixed nest
     # port (13025) and the module-local `nest_binary` that shadowed conftest's.
     "tests/test_client_at_rest_upgrade.py::head_nest",
-    "tests/platform/linux/test_desktop_join.py::local_nest",
+    "tests/test_desktop_join.py::local_nest",
     # The HOST-driven federation family (2026-09-02) — the mirror image of the
     # nest-dials-nest pair above, and the reason the distinction is worth the
     # words. These three drive `clients/ws_rpc_federation_client.py`, which
@@ -7326,6 +7589,63 @@ def test_kind_reach_stops_at_the_mail_venue_seam():
             "cut has widened past the standalone-only bodies")
 
 
+def test_kind_reach_follows_a_module_alias_to_the_function_it_names(tmp_path):
+    """A call through a module-level alias reaches what the aliased function
+    reaches: `_advance_mail_clock = advance_mail_clock` and
+    `from m import seeded_outbound as _seeded_outbound` are the same function
+    under a second name. Without the edge, `api/test_mail_health.py` reached the
+    `/api/v1/test/outbound/clock` hook only through its aliases, so the docker
+    axis collected three of its tests against a release image that carries no
+    hook (the 0.1.5 candidate run's two "rate-limited" failures)."""
+    from helpers import kind_reach
+
+    (tmp_path / "seeds.py").write_text(
+        "def advance(nest):\n"
+        "    post(nest, '/api/v1/test/outbound/clock')\n"
+        "def seed(nest):\n"
+        "    post(nest, '/api/v1/test/dns/record')\n"
+    )
+    (tmp_path / "test_x.py").write_text(
+        "from seeds import advance, seed as _seed\n"
+        "_advance = advance\n"
+        "def test_through_assignment(nest):\n"
+        "    _advance(nest)\n"
+        "def test_through_import_as(nest):\n"
+        "    _seed(nest)\n"
+    )
+    reach = kind_reach.build_reach(prefix="/api/v1/test/", root=tmp_path)
+    assert reach["test_through_assignment"] == {"/api/v1/test/outbound/clock"}
+    assert reach["test_through_import_as"] == {"/api/v1/test/dns/record"}
+
+    # An imported private name is its source module's function, not every
+    # module's of that name (the merge stays for an import the trees lack).
+    (tmp_path / "hooky.py").write_text(
+        "def _record(nest):\n    post(nest, '/api/v1/test/tls/issuance-error')\n")
+    (tmp_path / "plain.py").write_text("def _record(nest):\n    write(nest)\n")
+    (tmp_path / "test_y.py").write_text(
+        "from plain import _record\n"
+        "def test_imports_the_plain_one(nest):\n"
+        "    _record(nest)\n"
+    )
+    reach = kind_reach.build_reach(prefix="/api/v1/test/", root=tmp_path)
+    assert not reach.get("test_imports_the_plain_one")
+
+    # `self._record()` is a method of the caller's object, never a module-level
+    # `_record` of some other file.
+    (tmp_path / "fake.py").write_text(
+        "class Server:\n"
+        "    def _record(self):\n        pass\n"
+        "    def handle(self):\n        self._record()\n"
+        "def test_uses_the_fake(nest):\n    Server().handle()\n"
+    )
+    reach = kind_reach.build_reach(prefix="/api/v1/test/", root=tmp_path)
+    assert not reach.get("handle") and not reach.get("test_uses_the_fake")
+
+    # The tree itself: the module whose aliases hid the hook.
+    assert "/api/v1/test/outbound/clock" in kind_reach.routes_reached_by(
+        "test_running_the_checks_changes_no_record_or_setting", "/api/v1/test/")
+
+
 def test_the_caldav_only_docker_venue_publishes_no_mail_port():
     """A CalDAV-only container venue exposes `caldav_port` and NO mail port.
 
@@ -7644,6 +7964,13 @@ _NEST_BINARY_DISPOSITIONS = {
         "compiles no `test-hooks`, so the routed form would accept the app and "
         "assert nothing.",
     "tests/test_version_mismatch_launch.py::"
+    "test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web":
+        "PREMISE: the web half of its file-mate above — the same "
+        "`FAUNA_TEST_REQUIRED_SUBPROTOCOL` nest, which only a `test-hooks` "
+        "build reads. Reached this map 2026-10-23, when `kind_reach` stopped "
+        "merging `self._x()` calls into module-level functions and the hook "
+        "verdict that had hidden it lapsed.",
+    "tests/test_version_mismatch_launch.py::"
     "test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface":
         "PREMISE: the mid-session half of the same witness — the signed-in "
         "app's nest is re-spawned in place with "
@@ -7759,15 +8086,9 @@ _NEST_BINARY_DISPOSITIONS = {
     # that the bundle "reflects current Rust", which an image built from another
     # commit cannot witness even in principle. Unlike the sync package's
     # cargo-culted `--static-dir`, this one IS the subject.
-    "tests/test_onboarding_localhost.py::"
-    "test_test_at_localhost_reaches_admin_claim":
-        "PREMISE: the nest is the only thing that can serve THIS TREE's "
-        "test-flavoured SPA at its own origin. The subject is the localhost "
-        "handle-check driven through the wasm bundle in a browser — the module "
-        "docstring's own claim is that the bundle reflects current Rust — and "
-        "the image ships a production SPA, built from another commit, with the "
-        "e2e setters compiled out (convention 15). A routed form would drive a "
-        "different bundle through a bridge that is not there.",
+    # `test_onboarding_localhost.py` left this map when it moved onto the shared
+    # `spa_unclaimed_nest` fixture (the provider seam, no direct `nest_binary`);
+    # the premise above still describes why that module is tier_3-only.
     "tests/test_onboarding_handle_check_reset.py::"
     "test_handle_check_resets_on_identity_reimport":
         "PREMISE: same test-flavoured-SPA premise as its onboarding sibling, "
@@ -8495,6 +8816,8 @@ def test_the_provider_seam_resolves_the_binary_only_where_it_is_real():
     class _Recorder:
         def __init__(self):
             self.asked = []
+            # `_acme_pebble_seed` reads the selected items; a fake selects none.
+            self.session = types.SimpleNamespace(items=[])
 
         def getfixturevalue(self, name):
             self.asked.append(name)
@@ -8552,6 +8875,8 @@ def test_the_provider_seam_resolves_a_named_build_only_where_it_is_real():
     class _Recorder:
         def __init__(self):
             self.asked = []
+            # `_acme_pebble_seed` reads the selected items; a fake selects none.
+            self.session = types.SimpleNamespace(items=[])
 
         def getfixturevalue(self, name):
             self.asked.append(name)
@@ -9012,6 +9337,30 @@ def test_the_reclaim_after_a_factory_reset_carries_the_claimed_domain():
     )
 
 
+def test_the_factory_reset_restart_asks_the_mode_who_supervises():
+    """`factory_reset_and_restart` hands the restart to `resume_after_self_exit`
+    — the provider's answer — and never re-spawns `node_binary` itself. It used
+    to play the supervisor in every mode, so under `--nest docker` the reset
+    tests raised `NestCapabilityError` on `node_binary` while s6 had already
+    brought the wiped nest back (measured 2026-10-23, the 0.1.5 image: three
+    `api/test_factory_reset_wipe.py` failures)."""
+    import ast
+
+    import common.nest as cn
+
+    tree = ast.parse(pathlib.Path(cn.__file__).read_text())
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "factory_reset_and_restart"
+    )
+    called = {getattr(c.func, "id", None) for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "resume_after_self_exit" in called
+    assert not {"_spawn_and_wait", "_build_nest_cli_args"} & called
+    assert not any(
+        isinstance(c, ast.Constant) and c.value == "node_binary" for c in ast.walk(fn)
+    )
+
+
 # ---------------------------------------------------------------------------
 # The TLS channel binding is a MODE fact, not a constant (`testing.md`
 # § Default app and nest mode, ruling (1) — every nest the harness starts is
@@ -9329,7 +9678,7 @@ def test_a_journey_that_names_no_admin_element_still_runs_on_live():
     from helpers import nest_surface as ns
 
     reached = kind_reach.element_ids_reached_by(
-        "test_enable_activitypub", ns.admin_shell_element_ids()
+        "test_enable_activitypub", ns.admin_shell_element_ids() - ns.ADMIN_SHELL_EXIT_IDS
     )
     assert not reached, sorted(reached)
     item = _FakeItem(name="test_enable_activitypub")
@@ -9861,6 +10210,46 @@ def test_the_test_hook_kinds_are_what_the_gated_modules_register():
                     r'\.add\(\s*"(fauna\.[a-z0-9_.]+)"', path.read_text(encoding="utf-8")
                 ))
     assert registered == ns.TEST_HOOK_KINDS
+
+
+def test_a_test_hook_route_reached_by_a_module_fixture_is_class_six():
+    """A hook route the test reaches only through a fixture of its own module is
+    class (6) too. `api/test_custody_hosting_serve.py`'s `serve_nest` holds the
+    pump over `/api/v1/test/custody_hosting/hold`; the test body never names it,
+    so the docker axis collected the test, and against a release image the
+    route answered the SPA's fallback page (measured 2026-10-23, the 0.1.5
+    image: a `JSONDecodeError` in the fixture)."""
+    from helpers import nest_surface as ns
+
+    item = _FakeItem(
+        fixturenames=["serve_nest", "domainless_nest"],
+        name="test_an_owners_web_app_on_another_origin_may_fetch_held_segments_but_only_with_a_bearer",
+    )
+    item.path = (
+        pathlib.Path(__file__).resolve().parent / "api" / "test_custody_hosting_serve.py"
+    )
+    for mode in ("docker", "live"):
+        assert ns.RULE_TEST_HOOKS in set(ns.all_rules(item, nm.parse_nest_mode(mode))), mode
+
+
+def test_an_own_code_private_helper_reaches_only_its_own_modules_hooks():
+    """The converse: an own-code private helper is ITS module's function. Looked
+    up by bare name, `_seat`, `_step` and `_state` inherited every same-named
+    helper's hooks, and 40 journeys that post no hook were excluded from docker
+    (measured 2026-10-23 on the first cut of the fixture scan)."""
+    from helpers import kind_reach
+
+    tests = pathlib.Path(__file__).resolve().parent
+    for module, name, fixtures in (
+        ("test_share_links.py", "test_create_open_list_and_revoke_a_share_link",
+         ["share_link_app"]),
+        ("test_offline_share_two_seat.py",
+         "test_a_stranger_cannot_start_a_ceremony_nobody_asked_for", []),
+        ("test_provisioning_progress.py", "test_idle_renders_four_pending_rows", []),
+    ):
+        item = _FakeItem(fixturenames=fixtures, name=name)
+        item.path = tests / module
+        assert not kind_reach.routes_reached_by_own_code(item, "/api/v1/test/"), module
 
 
 def test_a_test_hook_kind_is_class_six_in_both_non_standalone_modes():

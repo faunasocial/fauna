@@ -28,8 +28,9 @@ to ``test_feed_link_preview.py``: a real resolve needs a live nest fetch of an
 OpenGraph page (SSRF-guarded, tier_3), so the ``Resolved`` card paint is seeded
 deterministically here. The real nest is needed only for auth (the same tier_2 shape
 as the feed link-preview test). ``web`` + ``linux`` + ``tui`` + ``macos`` + ``ios`` +
-``windows`` adopt the card here; the android render leg (its card is built) adds its
-marker when its e2e inject-seam command lands. Windows joined 2026-09-21: its card
+``windows`` + ``android`` adopt the card here; android's card was built and its
+TestAgent now carries the ``conversations_seed_resolved_link_preview`` arm over the
+same UniFFI seam (2026-10-28). Windows joined 2026-09-21: its card
 had been built for some time, so the only thing owed was the agent arm
 (``ConversationsCommands.SeedResolvedLinkPreview`` over the already-generated UniFFI
 binding) — no shared-Rust work at all, the seam was exported the whole time. The apple leg landed that seam: ``DmMessageBubble`` already built the same
@@ -56,6 +57,7 @@ LINK_BODY = f"[{LINK_URL}]({LINK_URL})"
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("link-previews")
 def test_conversations_link_preview_card_paints_and_reveals(logged_in_app):
     """An inbound DM whose body is a bare url paints the ``link-preview-card``

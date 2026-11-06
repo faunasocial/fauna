@@ -275,32 +275,6 @@ class FamilyActions:
         self.driver.select("family-policy-feed-sources-select",
                            self.FEED_SOURCES_LABELS[value])
 
-    def require_unknown_peer_dm_select(self) -> None:
-        """Skip unless this app renders `family-policy-unknown-peer-dm-select`
-        — e2e convention 7, the platform check lives in the action layer.
-
-        The knob's nest half landed 2026-07-17 and the shared catalog
-        (`fauna_core::format::unknown_peer_dm_options`/`_label`) has existed as
-        long; **tui shipped the select 2026-08-14** as the lead app, **linux
-        and web 2026-08-22**, **macOS and iOS 2026-08-27**, **android
-        2026-08-28**, **windows 2026-09-07** — the last of the seven."""
-        if not (self.driver.is_tui() or self.driver.is_linux() or self.driver.is_web()
-                or self.driver.is_macos() or self.driver.is_ios() or self.driver.is_android()
-                or self.driver.is_windows()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="family-policy-unknown-peer-dm-select",
-                detail=(
-                    "the bridge-DM gate's knob; tui shipped it 2026-08-14, linux "
-                    "and web 2026-08-22, macOS and iOS 2026-08-27, android "
-                    "2026-08-28, windows 2026-09-07, all over the shared "
-                    "unknown_peer_dm_options catalog"
-                ),
-                tracked="family-safety.md § The bridge-DM gate → App affordance",
-            )
-
     def unknown_peer_dm_label(self) -> str:
         return self.driver.get_text("family-policy-unknown-peer-dm-select")
 
@@ -333,28 +307,6 @@ class FamilyActions:
         the content-verdict leg of test_family.py now runs (and passes) on
         tui instead of skipping."""
 
-    def require_content_collapse_ids(self) -> None:
-        """Skip unless this app tags the content-policy COLLAPSE arm —
-        ``content-policy-blocked-notice`` in state ``collapsed`` and
-        ``content-policy-collapsed-reveal-button`` (ids user-approved
-        2026-10-16). tui leads (2026-10-17); linux, web and android followed
-        (2026-10-18); windows and macos/ios paint the arm as untagged chrome and
-        lift the ids with their family batch."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="content-policy-collapsed-reveal-button",
-                detail="the collapse placeholder's state attribute and its reveal",
-                tracked="family-client-enforcement.md § Content policy",
-            )
-
     def content_notice_blocked(self, scope: str) -> bool:
         """Whether ``scope`` (``post-card[i]``) shows a content-policy BLOCK —
         ``content-policy-blocked-notice`` in state ``blocked``.
@@ -386,26 +338,6 @@ class FamilyActions:
             return None
         return self.driver.get_text("content-policy-blocked-notice", scope=scope)
 
-    def require_policy_hints(self) -> None:
-        """Skip unless this app tags the editor's honest-bound hint
-        (``family-policy-screen-hint``, user-approved 2026-10-16). tui leads
-        (2026-10-17); linux, web and android followed (2026-10-18); windows and
-        macos/ios lift the id with their family batch."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="family-policy-screen-hint",
-                detail="the screen-time bound on the guardian's editor, tagged",
-                tracked="family-client-enforcement.md § Screen time",
-            )
-
     def screen_hint_text(self) -> str:
         if not self.driver.is_visible("family-policy-screen-hint"):
             return ""
@@ -414,34 +346,23 @@ class FamilyActions:
     def require_content_hint(self) -> None:
         """Skip unless this app paints the editor's content-category honest
         bound (``family-policy-content-hint``, user-approved 2026-10-16). tui
-        leads (2026-10-21); the other apps lift the id with their family batch."""
-        if not self.driver.is_tui():
-            from helpers.app_surface import skip_unbuilt
+        leads (2026-10-21), macos/ios (shared FaunaKit) 2026-10-24, web 2026-10-24, linux 2026-10-30; the other
+        apps lift the id with their family batch."""
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="family-policy-content-hint",
-                detail="the content-category bound on the guardian's editor, tagged",
-                tracked="family-client-enforcement.md § Content policy",
-            )
+        require_surface(self.driver, "family-policy-content-hint")
 
     def content_hint_text(self) -> str:
         if not self.driver.is_visible("family-policy-content-hint"):
             return ""
         return self.driver.get_text("family-policy-content-hint")
 
-    # The apps whose family page mounts the shared rule editor in
-    # `family-policy-rules-section` in place of the four content-floor selects
-    # (nest-rules.md § The shared rule editor (b); the selects retire app by
-    # app as each one mounts it). A floor is then a category rule at the
-    # standard level, written through the editor and saved by its own button.
-    RULES_EDITOR_APPS = ("tui", "web", "linux", "android")
+    # Every app's family page mounts the shared rule editor in
+    # `family-policy-rules-section`, where the four content-floor selects stood
+    # (nest-rules.md § The shared rule editor (b); windows, the seventh, retired
+    # them 2026-11-04). A floor is a category rule at the standard level,
+    # written through the editor and saved by its own button.
     _RULE_REASON = "Set by the guardian"
-
-    def _mounts_rules_editor(self) -> bool:
-        from helpers.app_surface import app_name
-
-        return app_name(self.driver) in self.RULES_EDITOR_APPS
 
     def _category_rule_row(self, category: str) -> int | None:
         """The row of the category rule on `category`, or None."""
@@ -461,12 +382,9 @@ class FamilyActions:
         return RuleEditorActions(self.driver)
 
     def content_floor_label(self, category: str) -> str:
-        """The rendered label of a content-floor select (`category` is one of
-        nsfw|spam|phishing|commercial). On an app mounting the rule editor, the
-        floor label the category rule stands for (`Use my settings` when there
-        is none), so callers compare one vocabulary on every app."""
-        if not self._mounts_rules_editor():
-            return self.driver.get_text(f"family-policy-content-{category}-select")
+        """The floor label the category rule on `category` (one of
+        nsfw|spam|phishing|commercial) stands for in the rule editor — `Use my
+        settings` when there is none — so callers keep the floor vocabulary."""
         from i18n.strings import S
 
         editor = self._rule_editor()
@@ -483,13 +401,9 @@ class FamilyActions:
         """Set a per-category content floor. `category` is nsfw|spam|phishing|
         commercial; `value` is the wire value inherit|collapse|block.
 
-        On an app mounting the rule editor this adds, edits or removes the
-        category rule and SAVES it at once (the editor's own button) — the
-        policy form's save leaves the rules as they are there."""
-        if not self._mounts_rules_editor():
-            self.driver.select(f"family-policy-content-{category}-select",
-                               self.CONTENT_FLOOR_LABELS[value])
-            return
+        This adds, edits or removes the category rule in the rule editor and
+        SAVES it at once (the editor's own button) — the policy form's save
+        leaves the rules as they are."""
         from i18n.strings import S
 
         editor = self._rule_editor()
@@ -517,39 +431,6 @@ class FamilyActions:
         editor.save()
         editor.wait_status(S.rule_editor.saved)
 
-    def require_guardian_notify_client_supported(self) -> None:
-        """Skip unless this app has landed Guardian Notify's client half
-        (Slice D-client) — the ward-side enforcement counting + report, and
-        the guardian's `family-ward-content-notices` readout (e2e convention
-        7 — the platform check lives in the action layer, not the test
-        body).
-
-        Built on linux + web (2026-07-19), android (2026-08-02), tui
-        (2026-08-02 — `apps/fauna-tui/src/content_policy.rs`'s NotifyAccumulator,
-        wired in `family.rs:892,981`; this gate excluding tui was stale, not a
-        real gap — family-safety.md § Implementation status today's tui row
-        confirms Slice C landed the same day), windows (2026-08-11) and apple
-        (macOS + iOS together, 2026-08-21;
-        `GuardianNotifyCadence` wraps the shared `FfiNotifyAccumulator` UniFFI
-        object directly rather than hand-rolling the accumulator a third
-        time, since it lands after the 2026-08-11 lift of the state machine
-        into shared Rust)."""
-        if not (self.driver.is_linux() or self.driver.is_web() or self.driver.is_android()
-                or self.driver.is_windows() or self.driver.is_tui()
-                or self.driver.is_macos() or self.driver.is_ios()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="Guardian Notify's client half (ward-side counting + "
-                        "the guardian's content_notices readout)",
-                detail="built on linux + web + android + tui + windows + "
-                       "apple (macOS + iOS); android e2e stays host-emulator-"
-                       "gated separately",
-                tracked="family-safety.md § Implementation status today "
-                        "(Slice D-client)",
-            )
-
     def content_notify_state(self) -> str:
         return self.driver.get_attr("family-policy-content-notify-toggle", "state") or ""
 
@@ -564,35 +445,6 @@ class FamilyActions:
     # after 21:00" is the window 07:00-21:00) and may wrap midnight; both bounds
     # are typed HH:MM. The daily budget is whole minutes across every device.
     # An empty field clears that control — which is why these are text inputs.
-
-    def require_screen_time_supported(self) -> None:
-        """Skip unless this app has landed the screen-time client half
-        (Slice E) — the guardian's three policy inputs and the ward's
-        `screen-time-lock` (e2e convention 7 — the platform check lives in the
-        action layer, not the test body).
-
-        Built on linux + web (2026-08-01, the reference legs), tui
-        (2026-08-01, the lead-app leg), android (2026-08-02, once the
-        UniFFI faces landed), apple (macOS + iOS together, 2026-08-22; `ScreenTimeStore` drives the shared
-        `FfiUsageHeartbeat` UniFFI object + the `screenLockMessage`/
-        `usageTodayLine`/`parseTimeOfDay`/`parseDailyMinutes` free functions,
-        writing no policy logic of its own), and windows (2026-08-24, the
-        seventh and last app — `ScreenTimeCache` mirrors the same
-        no-policy-logic-of-its-own contract)."""
-        if not (self.driver.is_linux() or self.driver.is_web() or self.driver.is_tui()
-                or self.driver.is_android() or self.driver.is_macos() or self.driver.is_ios()
-                or self.driver.is_windows()):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the screen-time client half (the guardian's window/"
-                        "budget inputs and the ward's screen-time-lock)",
-                detail="built on all 7 apps (linux, web, tui, android, "
-                       "macOS, iOS, windows)",
-                tracked="family-safety.md § Implementation status today "
-                        "(Slice E client half)",
-            )
 
     def screen_window_start(self) -> str:
         return self.driver.get_text("family-policy-screen-window-start-input") or ""
@@ -656,6 +508,47 @@ class FamilyActions:
             {"play": {"status": status, "approval_date": approval_date}},
             timeout=20,
         )
+
+    def inject_apple_consent_signal(
+        self,
+        *,
+        parental_consent_required: bool = False,
+        adult_notification_required: bool = False,
+        current_rating: int | None = None,
+    ) -> None:
+        """The iOS twin of `inject_play_consent_signal` (`store_consent_inject`
+        — `FaunaApp.swift`): stand in for DeclaredAgeRange's
+        `requiredRegulatoryFeatures` and StoreKit's `AppStore.ageRatingCode`,
+        swap the PermissionKit asker for an inert one (the ask button raises no
+        system dialog), and run one real shared round. With the ledger empty
+        (D-S8), a changed `current_rating` against the install's stored one is
+        what makes a change pending — the first read is a silent baseline."""
+        self.driver.call_command(
+            "store_consent_inject",
+            {"apple": {
+                "parental_consent_required": parental_consent_required,
+                "adult_notification_required": adult_notification_required,
+                "current_rating": current_rating,
+            }},
+            timeout=20,
+        )
+
+    def answer_store_consent_ask(self, answer: str) -> None:
+        """A PermissionKit answer (`"approved"` / `"declined"`) arriving on the
+        device, as `AskCenter.responses(for:)` delivers it (iOS)."""
+        self.driver.call_command("store_consent_inject", {"answer": answer}, timeout=20)
+
+    def reset_store_consent_state(self) -> None:
+        """Forget the install's device-local `{ consented_through, last_rating }`
+        record, so the next round is a first run again (iOS)."""
+        self.driver.call_command("store_consent_inject", {"reset_state": True}, timeout=20)
+
+    def store_consent_asks_sent(self) -> int:
+        """How many asks the ask button handed to the (inert, injected) asker."""
+        return int(self.driver.get_state("store_consent.asks_sent") or 0)
+
+    def ask_store_parent(self) -> None:
+        self.driver.click("store-consent-lock-ask-button")
 
     def clear_store_consent_signal(self) -> None:
         """Drop the injected signal; the next round reads the real store again."""
@@ -753,50 +646,6 @@ class FamilyActions:
     # half, which is exactly how tui's ward-side badge shipped broken); and a
     # row is found by its device **label**, never by position, so the nest's
     # device order is not silently part of the contract.
-
-    def require_device_mark_control_supported(self) -> None:
-        """Skip unless this app has landed the guardian's device-mark control
-        (Slice F's guardian half) — the `family-device-mark-item` rows and
-        their toggles on the Family page (e2e convention 7: the platform check
-        lives in the action layer, not the test body).
-
-        Built on linux + web + tui (2026-08-01), macos + ios (the apple
-        Slice-G lift, mirroring the same shared FaunaKit `FamilyView` on both
-        targets), and now windows. android's UI joined 2026-08-01 too but
-        STAYS SKIPPED here — this test reads `device_mark_state()` via
-        `driver.get_attr(...)`, and android's e2e bridge has no
-        `/element/attr` route at all yet
-        (
-        host-gated: needs a device to design the state-carrying mechanism
-        empirically). Widening this gate to android before that lands would
-        not skip gracefully — `PlatformDriver.get_attr` raises
-        `NotImplementedError` with no android override, a hard failure, not a
-        clean skip. windows is the LAST app to land the UI (family-safety.md §
-        Implementation status today) — android's bridge gap is now the only
-        one left. The ward-facing half of Slice F — the badge + the delete
-        refusal — is a different surface and is already built on all of
-        linux/web/windows/android/tui/apple."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_tui()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the guardian's device-mark control "
-                        "(family-device-mark-item rows + toggles)",
-                detail="built on linux + web + tui + apple (macos + ios) + "
-                       "windows; android's UI joined 2026-08-01 but stays "
-                       "skipped pending the android e2e bridge "
-                       "attr/enabled-route",
-                tracked="family-safety.md § Implementation status today "
-                        "(Slice F, guardian half)",
-            )
 
     def device_mark_count(self) -> int:
         return self.driver.count("family-device-mark-item")
@@ -896,31 +745,6 @@ class FamilyActions:
     # for the SELECTED ward, directly after the policy save button. The editor
     # itself is `FeaturePolicyEditorActions`, shared with the admin and self
     # hosts. Lives inside the per-ward editor, so select the ward first.
-
-    def require_feature_limits_supported(self) -> None:
-        """Skip unless this app renders the guardian's feature-limits rows (e2e
-        convention 7). tui is the lead app (2026-10-04); the other six follow in
-        one batched trickle-down — each arm that lands widens the admitted set
-        below (linux, web, then windows)."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_windows()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-        ):
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="family-policy-feature-limits-section",
-                detail="the guardian host of the shared feature-policy editor; "
-                       "its logic is the shared fauna_client_features guardian "
-                       "arm behind UniFFI + wasm faces, so the per-app work is "
-                       "painting the rows and forwarding keystrokes",
-                tracked="",
-            )
 
     def wait_for_feature_limits(self, timeout: float = 20.0) -> None:
         """Wait for the section AND its rows — the section label paints with the

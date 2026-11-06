@@ -417,7 +417,8 @@ impl AbuseReportSubject {
 
     /// The stored `subject_id` — the key the one-open-per-(reporter, subject)
     /// dedupe and the doorbell's per-subject dedupe bind on. A message is keyed
-    /// by its record cid (unique across channels). Empty for
+    /// by its record cid (the same bytes in two channels share one cid; the
+    /// report's `channel` says which copy an admin block acts on). Empty for
     /// [`AbuseReportSubject::Unknown`], which no nest stores.
     pub fn id(&self) -> &str {
         match self {

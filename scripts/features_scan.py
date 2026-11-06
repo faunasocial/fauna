@@ -103,6 +103,9 @@ APP_LAUNCHING_FIXTURES = frozenset({
     "folder_share_owner_app",
     "folder_share_recipient_app",
     "folder_share_stranger_app",
+    # The Fauna iOS app installed on a throwaway simulator and driven through
+    # its DEBUG File Provider verbs (`test_folder_deposit_adoption_file_provider_ios.py`).
+    "ios_file_provider_app",
 })
 
 
@@ -123,6 +126,16 @@ DRIVER_FACTORY_IMPORTS = frozenset({
     ("helpers.room_seats", "room_seats"),
     # Its two-seat twin (a founder and a member, no witness).
     ("helpers.room_seats", "room_seat_pair"),
+    # The Play-store install's out-of-process driver: it drives the app the
+    # store delivered through UiAutomation, the app's own UI
+    # (`test_android_store_install.py`; feature-catalog.md § Implementation
+    # status today, how the Android store install is driven).
+    ("helpers.android_store_driver", "StoreDriver"),
+    # Its iOS twin: an XCUITest runner on a paired iPhone that drives the app
+    # TestFlight delivered through the accessibility tree, the app's own UI
+    # (`test_ios_store_install.py`; feature-catalog.md § Implementation status
+    # today, how the iOS store install is driven).
+    ("helpers.ios_store_driver", "run_test"),
     ("helpers.skew_client", "launch_on_home"),
     ("helpers.skew_client", "launch_build"),
     # The directory-driven custody journeys' shared launcher (the feeder and
@@ -228,6 +241,17 @@ class TestFacts:
     #: plus `live` for a file under `tests/live/` — the witnesses a plain app selection
     #: collects but does not record.
     opt_in: tuple = ()
+    #: The surface-registry keys its `@pytest.mark.requires_surface(...)` markers name
+    #: (module, class and function folded together, in order) — read the way the app
+    #: marks are (e2e-conventions.md convention 7, *The static reader is the
+    #: catalog's*), so the matrix knows which surfaces a test needs without a run.
+    surfaces: tuple = ()
+    #: The host platforms its `@pytest.mark.host_platform(...)` markers allow
+    #: (e2e-conventions.md convention 7, the fourth skip kind) — module, class and
+    #: function folded by INTERSECTION, sorted, exactly the fold conftest's setup gate
+    #: applies; `None` when it carries none (every platform). An empty tuple is a
+    #: contradiction no host can run. `features_catalog.witness_platforms` reads it.
+    platforms: tuple | None = None
 
     @property
     def rel(self) -> str:
@@ -254,6 +278,19 @@ def _mark_calls(node: ast.AST, name: str) -> list:
     return found
 
 
+def _constant_param_marks(node: ast.AST, scope: tuple) -> set:
+    """App marks carried by a module constant a `parametrize` names (`_SEATS = [pytest.param(
+    "android", marks=pytest.mark.android), …]`). pytest adds a param's marks to its item,
+    so the run's app axis selects the arm exactly as if the decorator spelled them; the
+    plain `_app_marks` walk sees only the decorator's own nodes and misses a constant."""
+    found: set = set()
+    for call in _mark_calls(node, "parametrize"):
+        if len(call.args) >= 2 and isinstance(call.args[1], ast.Name) \
+                and call.args[1].id in scope[0]:
+            found |= _app_marks(scope[0][call.args[1].id])
+    return found
+
+
 def _feature_slugs(node: ast.AST) -> list:
     slugs = []
     for call in _mark_calls(node, "feature"):
@@ -261,6 +298,32 @@ def _feature_slugs(node: ast.AST) -> list:
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 slugs.append(arg.value)
     return slugs
+
+
+def _surface_keys(node: ast.AST) -> list:
+    keys = []
+    for call in _mark_calls(node, "requires_surface"):
+        for arg in call.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                keys.append(arg.value)
+    return keys
+
+
+def _platform_marks(node: ast.AST) -> list:
+    """One frozenset per `@pytest.mark.host_platform(...)` call in `node` — the twin of
+    `_surface_keys`, kept per call because the marks fold by intersection, never union
+    (`_fold_platforms`). A non-constant argument is left out: the parse cannot read it."""
+    return [frozenset(arg.value for arg in call.args
+                      if isinstance(arg, ast.Constant) and isinstance(arg.value, str))
+            for call in _mark_calls(node, "host_platform")]
+
+
+def _fold_platforms(marks) -> tuple | None:
+    """The intersection of every `host_platform` mark, sorted — `None` for no mark."""
+    allowed = None
+    for mark in marks:
+        allowed = set(mark) if allowed is None else allowed & mark
+    return None if allowed is None else tuple(sorted(allowed))
 
 
 def _app_marks(node: ast.AST, names: frozenset = APP_MARKERS) -> set:
@@ -548,6 +611,8 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
     param_fixtures = fixture_param_sets(tree, scope)
 
     module_slugs: list = []
+    module_surfaces: list = []
+    module_platforms: list = []
     module_apps: set = set()
     module_params: list = []
     module_overrides: set = set()
@@ -557,6 +622,8 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "pytestmark":
                     module_slugs.extend(_feature_slugs(node.value))
+                    module_surfaces.extend(_surface_keys(node.value))
+                    module_platforms.extend(_platform_marks(node.value))
                     module_apps |= _app_marks(node.value)
                     module_opt |= _app_marks(node.value, OPT_IN_MARKERS)
                     module_params.extend(client_param_sets(node.value, scope))
@@ -582,19 +649,25 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
               inherited_apps: frozenset = frozenset(),
               inherited_params: tuple = (),
               inherited_overrides: frozenset = frozenset(),
-              inherited_opt: frozenset = frozenset()) -> None:
+              inherited_opt: frozenset = frozenset(),
+              inherited_surfaces: tuple = (),
+              inherited_platforms: tuple = ()) -> None:
         slugs = list(module_slugs)
+        surfaces = list(module_surfaces) + list(inherited_surfaces)
+        platform_marks = list(module_platforms) + list(inherited_platforms)
         apps = set(module_apps) | set(inherited_apps)
         params = list(module_params) + list(inherited_params)
         overridden = set(module_overrides) | set(inherited_overrides)
         opt = set(module_opt) | set(inherited_opt)
         for dec in fn.decorator_list:
             slugs.extend(_feature_slugs(dec))
-            apps |= _app_marks(dec)
+            surfaces.extend(_surface_keys(dec))
+            platform_marks.extend(_platform_marks(dec))
+            apps |= _app_marks(dec) | _constant_param_marks(dec, scope)
             opt |= _app_marks(dec, OPT_IN_MARKERS)
             params.extend(client_param_sets(dec, scope))
             overridden |= parametrized_names(dec)
-        args = list(fn.args.args) + list(fn.args.kwonlyargs)
+        args =list(fn.args.args) + list(fn.args.kwonlyargs)
         requested = {a.arg for a in args}
         params.extend(requested_param_sets(requested, overridden))
         fixtures = requested & launching
@@ -618,7 +691,9 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             features=tuple(dict.fromkeys(slugs)),
             drives_app=bool(fixtures) or browser or class_drives,
             apps=tuple(sorted(apps if contradictory else columns)),
-            contradictory=contradictory, opt_in=tuple(sorted(opt))))
+            contradictory=contradictory, opt_in=tuple(sorted(opt)),
+            surfaces=tuple(dict.fromkeys(surfaces)),
+            platforms=_fold_platforms(platform_marks)))
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
@@ -632,7 +707,11 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             class_params: list = []
             class_overrides: set = set()
             class_opt: set = set()
+            class_surfaces: list = []
+            class_platforms: list = []
             for dec in node.decorator_list:
+                class_surfaces.extend(_surface_keys(dec))
+                class_platforms.extend(_platform_marks(dec))
                 class_apps |= _app_marks(dec)
                 class_opt |= _app_marks(dec, OPT_IN_MARKERS)
                 class_params.extend(client_param_sets(dec, scope))
@@ -640,6 +719,8 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             for sub in node.body:
                 if isinstance(sub, ast.Assign) and any(
                         isinstance(t, ast.Name) and t.id == "pytestmark" for t in sub.targets):
+                    class_surfaces.extend(_surface_keys(sub.value))
+                    class_platforms.extend(_platform_marks(sub.value))
                     class_apps |= _app_marks(sub.value)
                     class_opt |= _app_marks(sub.value, OPT_IN_MARKERS)
                     class_params.extend(client_param_sets(sub.value, scope))
@@ -647,7 +728,8 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub.name.startswith("test"):
                     visit(sub, f"{node.name}::", class_drives, frozenset(class_apps),
-                          tuple(class_params), frozenset(class_overrides), frozenset(class_opt))
+                          tuple(class_params), frozenset(class_overrides), frozenset(class_opt),
+                          tuple(class_surfaces), tuple(class_platforms))
     return facts
 
 

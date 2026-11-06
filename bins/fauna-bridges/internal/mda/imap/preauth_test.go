@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -150,8 +151,10 @@ func TestPreAuthDeadlineLiftedByAuthenticatePLAIN(t *testing.T) {
 }
 
 // TestPreAuthDeadlineClosesAnIdleStranger: with the accept reading a time
-// already past the bound, a client that sends nothing after the greeting
-// reads EOF at once — a real close, no wall-clock wait — counted once.
+// already past the bound, a client that sends nothing reads EOF at once — a
+// real close, no wall-clock wait — counted once. The greeting is optional:
+// the bound clamps writes too, so the greeting's own write may already time
+// out on it.
 func TestPreAuthDeadlineClosesAnIdleStranger(t *testing.T) {
 	var fired atomic.Int32
 	// Only the accept reads the past; every later read of the clock is the
@@ -176,10 +179,7 @@ func TestPreAuthDeadlineClosesAnIdleStranger(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	r := bufio.NewReader(conn)
-	if line, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(line, "* ") {
-		t.Fatalf("want the greeting, got %q (%v)", line, err)
-	}
-	for {
+	for first := true; ; first = false {
 		line, err := r.ReadString('\n')
 		if err == io.EOF {
 			break
@@ -187,13 +187,104 @@ func TestPreAuthDeadlineClosesAnIdleStranger(t *testing.T) {
 		if err != nil {
 			t.Fatalf("want EOF from the server's close, got %v", err)
 		}
-		// An untagged BYE before the close is allowed; nothing else is.
-		if !strings.HasPrefix(line, "* BYE") {
+		// The greeting first and an untagged BYE before the close are
+		// allowed; nothing else is.
+		if !(first && strings.HasPrefix(line, "* OK")) && !strings.HasPrefix(line, "* BYE") {
 			t.Fatalf("unexpected line before close: %q", line)
 		}
 	}
 	if got := fired.Load(); got != 1 {
 		t.Fatalf("preauth_deadline counted %d times, want 1", got)
+	}
+}
+
+// smallSendBufListener shrinks every accepted socket's kernel send buffer so
+// a client that stops reading fills it after a few replies, not megabytes.
+type smallSendBufListener struct{ net.Listener }
+
+func (l smallSendBufListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetWriteBuffer(4096)
+	}
+	return c, nil
+}
+
+// TestPreAuthDeadlineClosesAStrangerThatStopsReading: on the 143 shape with
+// the real fork, a client that pipelines CAPABILITY and never reads leaves the
+// server blocked in Write, where no read deadline applies; the write half of
+// the bound still closes it at the bound, counted once. The injected accept
+// sits just under the bound in the past, so the close comes in seconds.
+func TestPreAuthDeadlineClosesAStrangerThatStopsReading(t *testing.T) {
+	const margin = time.Second
+	var accepted atomic.Bool
+	clock := func() time.Time {
+		if accepted.CompareAndSwap(false, true) {
+			return time.Now().Add(-(connlimit.PreAuthDeadline - margin))
+		}
+		return time.Now()
+	}
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	fired := make(chan struct{}, 4)
+	pl := connlimit.NewPreAuthListener(smallSendBufListener{raw}, func() { fired <- struct{}{} })
+	pl.SetClockForTest(clock)
+	defer pl.Close()
+	srv := NewServer(ServerConfig{}, NewBackend(&authCaller{}, slog.Default(), 0, 0, 1, nil, nil))
+	go func() { _ = srv.Serve(pl) }()
+	defer func() { _ = srv.Close() }()
+
+	conn, err := net.Dial("tcp", pl.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	r := bufio.NewReader(conn)
+	if line, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(line, "* ") {
+		t.Fatalf("want the greeting, got %q (%v)", line, err)
+	}
+
+	// Pipeline commands and never read: the writer blocks once every buffer
+	// between the two ends is full, and ends when the server's close resets it.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		for i := 0; ; i++ {
+			if _, err := fmt.Fprintf(conn, "a%d CAPABILITY\r\n", i); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-fired:
+	case <-time.After(margin + 10*time.Second):
+		t.Fatalf("the server was not closed on the pre-auth bound while blocked writing to a client that stopped reading")
+	}
+	// The close is real: draining what the server wrote ends in EOF or a reset.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		_, err := r.ReadString('\n')
+		if err == nil {
+			continue
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("the connection is still open after the bound: %v", err)
+		}
+		break
+	}
+	<-writerDone
+	if extra := len(fired); extra != 0 {
+		t.Fatalf("preauth_deadline counted %d times, want 1", extra+1)
 	}
 }
 

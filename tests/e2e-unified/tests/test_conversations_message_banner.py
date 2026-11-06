@@ -42,7 +42,7 @@ import pytest
 
 from helpers import waiting
 from helpers.app_log_section import app_text
-from helpers.app_surface import app_name, skip_unbuilt
+from helpers.app_surface import app_name, skip_environment
 
 
 def _why(driver):
@@ -62,22 +62,25 @@ def _why(driver):
     reaches all of them without any driver growing a third spelling of it.
     """
     lines = [ln for ln in app_text(driver).splitlines() if "banner" in ln.lower()]
-    return f"\nApp log (banner lines): {lines[-5:]}" if lines else ""
+    # The tracker fires only on a rise of a thread's unread count whose activity
+    # is at or past the launch floor: a thread reading 0 unread never rose, one
+    # reading ≥1 that fired nothing was held under the floor.
+    try:
+        threads = driver.get_state("data.conversation_threads") or []
+        unread = {t.get("thread_id"): t.get("unread_count") for t in threads}
+        selected = driver.get_state("data.selected_thread_id")
+    except Exception as exc:  # never let the diagnostic mask the real assert
+        unread, selected = f"(unreadable: {exc!r})", None
+    why = f"\nThreads' unread counts: {unread}; selected thread: {selected!r}"
+    return why + (f"\nApp log (banner lines): {lines[-5:]}" if lines else "")
 
 
 pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 
-# The apps that have built the *firing* leg and publish the log. Everything else
-# is debt with a row pointed at it, declared here rather than inferred from a
-# missing state key: an app that had built the firing and then broke the key must
-# fail, not skip (convention 7 — a skip is not coverage).
-#
-# ⚠ `macos` is deliberately NOT here, and not because the app is short: it shares
-# every line of the firing leg with `ios` (both are FaunaKit's
-# `MessageBannerObserver`). What decides the macOS column is the LAUNCH SHAPE,
-# which is run-level rather than per-app — so it cannot be a membership question.
-# See `_launched_as_a_bundle`.
-_BANNER_APPS = {"android", "ios", "linux", "tui", "web", "windows"}
+# Every app has built the *firing* leg and publishes the log. The one short
+# column is a LAUNCH SHAPE, not an app: macOS shares every line of the firing leg
+# with `ios` (both are FaunaKit's `MessageBannerObserver`), and what decides its
+# column is run-level rather than per-app. See `_launched_as_a_bundle`.
 
 
 def _launched_as_a_bundle(driver) -> bool:
@@ -97,57 +100,32 @@ def _launched_as_a_bundle(driver) -> bool:
     be replayed against the artifact"* — so no per-module launch shape is
     invented here; this module is simply one of the journeys that replay covers.
     The default stays the bare binary (rule 9 of the same doc), which is why
-    `macos` cannot go in `_BANNER_APPS`: that set is consulted unconditionally
-    and would red every ordinary run.
+    The bare-binary launch is therefore a property of the run, declared as an
+    environment skip: it is not app work and not debt.
     """
     reader = getattr(driver, "bundle_path", None)
     return bool(reader()) if callable(reader) else False
 
-# Why each column is short, in the goal doc's own words. The shipped pointer is
-# the status row itself — `conversations.md` § Implementation status today, the
-# *DM OS-toast firing* row — which carries the same per-app verdicts and is
-# where a reader should look first.
-_TRACKED = "conversations.md § Implementation status today (DM OS-toast firing)"
-
-#: What `skip_unbuilt` names as missing — per-app, because macOS's is not the
-#: others'. `skip_unbuilt` composes "<app> has not built <surface>", which is
-#: the plain truth for an app with no firing leg and a falsehood for macOS:
-#: the banner IS built there and the bare-binary process simply has nothing to
-#: hand it to. One shared string would put "has not built the … banner" in the
-#: run summary directly above a detail saying it is built.
-_SURFACE = "the new-message OS banner (conversations outcome 11)"
-_SURFACE_MACOS = (
-    "a notification host for the new-message OS banner (conversations "
-    "outcome 11) in this launch shape"
+#: Why the macOS bare-binary column is short, in the goal doc's own words. The
+#: pointer is the status row itself — `conversations.md` § Implementation status
+#: today, the *DM OS-toast firing* row.
+_BARE_BINARY = (
+    "the firing leg IS built and IS witnessed — by `--app ios` on the same "
+    "shared FaunaKit code, and by replaying THIS module run-level under "
+    "`--macos-artifact`. An ordinary `--app macos` run launches the BARE "
+    "`FaunaMacOS` binary, and a non-bundle process has no notification host "
+    "at all (`NotificationHost.isAvailable`), so the app hands no banner to "
+    "the platform and honestly records none. Not app work and not debt: "
+    "replay it with `pytest tests/e2e-unified/tests/"
+    "test_conversations_message_banner.py --app macos --macos-artifact` "
+    "(conversations.md § Implementation status today, DM OS-toast firing)"
 )
-
-_UNBUILT = {
-    "macos": (
-        "the firing leg IS built and IS witnessed — by `--app ios` on the same "
-        "shared FaunaKit code, and by replaying THIS module run-level under "
-        "`--macos-artifact`. An ordinary `--app macos` run launches the BARE "
-        "`FaunaMacOS` binary, and a non-bundle process has no notification host "
-        "at all (`NotificationHost.isAvailable`), so the app hands no banner to "
-        "the platform and honestly records none. Not app work and not debt: "
-        "replay it with `pytest tests/e2e-unified/tests/"
-        "test_conversations_message_banner.py --app macos --macos-artifact`"
-    ),
-}
 
 
 def _require_banner_leg(driver):
-    """Skip with a declared reason on an app that has not built the firing."""
-    name = app_name(driver)
-    if name in _BANNER_APPS:
-        return
-    if name == "macos" and _launched_as_a_bundle(driver):
-        return
-    skip_unbuilt(
-        driver,
-        surface=_SURFACE_MACOS if name == "macos" else _SURFACE,
-        detail=_UNBUILT.get(name, "no firing leg"),
-        tracked=_TRACKED,
-    )
+    """Skip with a declared reason when the launch shape cannot fire a banner."""
+    if app_name(driver) == "macos" and not _launched_as_a_bundle(driver):
+        skip_environment(_BARE_BINARY)
 
 
 @pytest.mark.feature("conversations")

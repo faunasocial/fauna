@@ -412,13 +412,15 @@ where
 /// they are authenticated kinds, and the grant they install is what the
 /// *next* connection can authenticate with instead.
 ///
-/// A row that does not exist yet registers under
-/// [`fauna_client_sync::SELF_REGISTER_LABEL`] with no seal: no human has named
-/// this machine yet (a label is a user choice — there is no hostname fallback
-/// by design), and the provisioner's labeled register supersedes it. A row
-/// that **does** exist gets only the grant columns — never a re-registration,
-/// which would replace the user's device name with the placeholder label
-/// (label custody).
+/// A row that does not exist yet registers under the host app's **app
+/// default** ([`FleetWriter::enrollment_label`] — `fauna-ios`, `fauna-tui`, …;
+/// `devices.md` § Device names, class (2)) with no seal: no human has named
+/// this machine yet, and there is no hostname fallback by design (class (3)).
+/// So a phone with no in-process engine is born `fauna-ios`, never the `fauna`
+/// placeholder — which only a host with no app to name passes
+/// ([`fauna_client_sync::SELF_REGISTER_LABEL`]). A row that **does** exist
+/// gets only the grant columns — never a re-registration, which would replace
+/// the user's device name with a machine label (label custody).
 ///
 /// **The latch is a memory about one nest replica**
 /// (`account-replica-posture.md` § The store device principal): `latch_void`
@@ -524,10 +526,10 @@ where
     {
         Ok(_) => {}
         Err(e) if fauna_client_sync::is_device_grant_no_device(&e) => {
-            match sync
-                .register(target.clone(), fauna_client_sync::SELF_REGISTER_LABEL, None)
-                .await
-            {
+            let label = fleet_writer
+                .enrollment_label
+                .unwrap_or(fauna_client_sync::SELF_REGISTER_LABEL);
+            match sync.register(target.clone(), label, None).await {
                 Ok(_) => {}
                 // The tier device-cap refusal: nothing was written, and no
                 // retry clears it — only a freed slot does. Named as its own

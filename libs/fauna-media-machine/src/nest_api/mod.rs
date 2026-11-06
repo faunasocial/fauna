@@ -318,6 +318,11 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// carried **verbatim** so readers select `key_for(version)`. The
     /// `file-version-restore-confirm-button` gesture calls this.
     ///
+    /// `thumbnail_hash` is the version's thumbnail manifest (hex) as the
+    /// restore record names it — the version's own, or the one re-sealed with
+    /// its bytes (`media.md` § Encryption at rest → *A thumbnail rests as its
+    /// file rests*); `None` records no thumbnail.
+    ///
     /// `path_sealed`: same contract as [`Self::delete_member`] — machine-minted,
     /// best-effort, carried verbatim.
     ///
@@ -336,6 +341,7 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         manifest_hash: String,
         size_bytes: i64,
         content_key_version: Option<u64>,
+        thumbnail_hash: Option<String>,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError>;
 

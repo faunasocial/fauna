@@ -62,7 +62,7 @@ use fauna_transport::{EndpointKey, PathCandidates, PeerTransport};
 use crate::group_ceremony::{
     AdmittedGroupShare, BegunGroupShare, BuiltGroupShareDeliver, GroupCeremonyError,
     GroupIngestOutcome, admit_group_share, begin_group_share, build_group_deliver,
-    ingest_group_frame, mark_group_delivered, mark_group_offer_posted,
+    ingest_group_frame, mark_group_delivered, mark_group_offer_posted, record_recipient_candidates,
 };
 use crate::group_ceremony_peer::{GroupCeremonyPeer, NowFn, OnConfigChange};
 use crate::group_ceremony_view::{CeremonyStatus, PeerCode, format_peer_code};
@@ -336,6 +336,28 @@ impl CeremonyNode {
         self.server.set_group_roster(state);
     }
 
+    /// Wire the group plane's feed — what lets this seat answer a member's
+    /// `fauna.sync.changes.list` for a group scope
+    /// (`ShareServer::set_group_feed`): a serve handle over a connection to
+    /// this account's own store, whose relay plane holds the scopes' rows.
+    /// Without it the feed kind is refused.
+    pub fn set_group_feed(&self, feed: fauna_peer_sync::store_serve::ServeStoreHandle) {
+        self.server.set_group_feed(feed);
+    }
+
+    /// The release of this seat's group feed, for a stop that must see its
+    /// store connection closed while other holders keep the seat
+    /// (`ShareServer::clear_group_feed`). Holds the server weakly: a seat
+    /// already gone has nothing to release.
+    pub fn group_feed_release(&self) -> impl FnOnce() + Send + 'static {
+        let server = Arc::downgrade(&self.server);
+        move || {
+            if let Some(server) = server.upgrade() {
+                server.clear_group_feed();
+            }
+        }
+    }
+
     /// Record where this seat's listener actually bound — the one fact only
     /// the **assembler** can observe.
     ///
@@ -557,6 +579,12 @@ pub struct GroupShareInitiator {
     recipient: ActorId,
     scope_id: Option<[u8; 32]>,
     redial: Option<Redial>,
+    /// This seat's own endpoints, carried in the deliver as the group's first
+    /// `fauna.group.endpoints` cell ([`Self::with_bootstrap_endpoints`]).
+    bootstrap_endpoints: Option<fauna_core::device_endpoints::DeviceEndpointsEntry>,
+    /// The recipient's compare-code candidates, kept in the ceremony record
+    /// at begin ([`Self::with_recipient_candidates`]).
+    recipient_candidates: Vec<std::net::SocketAddr>,
 }
 
 impl GroupShareInitiator {
@@ -571,7 +599,31 @@ impl GroupShareInitiator {
             recipient,
             scope_id: None,
             redial: None,
+            bootstrap_endpoints: None,
+            recipient_candidates: Vec::new(),
         }
+    }
+
+    /// Keep the recipient's compare-code LAN candidates in the ceremony
+    /// record at [`Self::begin`] — decision 8's other half
+    /// (`p2p-shared-set-build.md` § Build design — the group set): the
+    /// initiator's first group-pump dial of the recipient, until the
+    /// recipient's own endpoints cell has reached it.
+    pub fn with_recipient_candidates(mut self, lan_endpoints: Vec<std::net::SocketAddr>) -> Self {
+        self.recipient_candidates = lan_endpoints;
+        self
+    }
+
+    /// Carry this seat's endpoints in the deliver's snapshot — decision 8's
+    /// bootstrap (`p2p-shared-set-build.md` § Build design — the group set):
+    /// the recipient's first dial target for the new scope is the initiator,
+    /// before any pull has run. The entry's `node_id` is this seat's actor.
+    pub fn with_bootstrap_endpoints(
+        mut self,
+        entry: fauna_core::device_endpoints::DeviceEndpointsEntry,
+    ) -> Self {
+        self.bootstrap_endpoints = Some(entry);
+        self
     }
 
     /// Let [`Self::drive`] dial the counterpart again when the connection
@@ -631,7 +683,14 @@ impl GroupShareInitiator {
     ) -> Result<BegunGroupShare, CeremonyDriveError> {
         let begun = {
             let mut cfg = self.config.lock().unwrap();
-            begin_group_share(&mut cfg, initiator, self.recipient, now)?
+            let begun = begin_group_share(&mut cfg, initiator, self.recipient, now)?;
+            record_recipient_candidates(
+                &mut cfg,
+                &begun.scope_id,
+                &self.recipient,
+                &self.recipient_candidates,
+            );
+            begun
         };
         send_ceremony_offer(Arc::clone(&self.channel), begun.frame.clone())
             .await
@@ -719,6 +778,7 @@ impl GroupShareInitiator {
             &scope,
             &self.recipient,
             now,
+            self.bootstrap_endpoints.as_ref(),
         )?)
     }
 

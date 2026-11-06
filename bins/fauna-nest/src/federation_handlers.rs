@@ -1776,9 +1776,23 @@ pub(crate) async fn resolve_origin_home_url(
     origin_nest_id: &[u8; 32],
     declared: Option<&str>,
 ) -> Result<Option<String>, RpcError> {
-    let declared = declared
-        .map(|u| u.trim_end_matches('/'))
-        .filter(|u| !u.is_empty());
+    // A declaration is a stranger peer's word, and the directory it lands in
+    // is read by unattended dials (the follow outbox, the abuse-report outcome
+    // return, the succession pull): one that is not an origin-form https
+    // address — or is loopback on a production nest — is neither recorded nor
+    // returned.
+    let declared = declared.filter(|u| !u.trim().is_empty()).and_then(|u| {
+        let admitted =
+            crate::ssrf::peer_declared_origin(u.trim(), state.peer_fetch_loopback.is_some());
+        if admitted.is_none() {
+            tracing::debug!(
+                origin = %hex::encode(origin_nest_id),
+                "relayed home declaration not an admissible origin; ignored"
+            );
+        }
+        admitted
+    });
+    let declared = declared.as_deref();
     let proven = state
         .db
         .proven_foreign_nest_urls(origin_nest_id)
@@ -1805,6 +1819,40 @@ pub(crate) async fn resolve_origin_home_url(
         return Ok(Some(declared.to_string()));
     }
     Ok(proven.into_iter().next())
+}
+
+/// A relayed room invitation's `invitee_node` — the invitee's home as the
+/// inviter's nest spelled it — admitted for the delivery this home makes to it
+/// unattended, or refused: it is a peer's word about another nest, so it
+/// passes the same test as every peer-declared address
+/// ([`crate::ssrf::peer_declared_origin`]), loopback admitted only on test
+/// state.
+pub(crate) fn admitted_invitee_node(node: &str, loopback: bool) -> Result<String, RpcError> {
+    crate::ssrf::peer_declared_origin(node, loopback).ok_or_else(|| {
+        invalid_request("the invitee's home nest must be an origin-form https address")
+    })
+}
+
+/// The node `room.invite.issue` delivers to: the relayed `invitee_node`
+/// admitted by [`admitted_invitee_node`], or, when none was named, the
+/// relaying nest's resolved home. Split out of the handler so a test drives
+/// the call site the handler uses.
+async fn invitee_node_for_issue(
+    state: &AppState,
+    origin_nest_id: &[u8; 32],
+    invitee_node: &str,
+    origin_nest_url: Option<&str>,
+) -> Result<String, RpcError> {
+    match invitee_node.trim() {
+        "" => resolve_origin_home_url(state, origin_nest_id, origin_nest_url)
+            .await?
+            .ok_or_else(|| {
+                invalid_request(
+                    "the relaying nest declared no address the invitation could be delivered to",
+                )
+            }),
+        node => admitted_invitee_node(node, state.peer_fetch_loopback.is_some()),
+    }
 }
 
 /// `fauna.federation.conversation.room.invite` — a room's home nest delivers
@@ -2007,20 +2055,13 @@ fn room_invite_issue_handler() -> RpcHandler {
                 &requester,
             )?;
             require_foreign_member(&state, &room_id, &requester, &origin_nest_id).await?;
-            let invitee_node = match req.invitee_node.trim() {
-                "" => resolve_origin_home_url(
-                    &state,
-                    &origin_nest_id,
-                    req.origin_nest_url.as_deref(),
-                )
-                .await?
-                .ok_or_else(|| {
-                    invalid_request(
-                        "the relaying nest declared no address the invitation could be delivered to",
-                    )
-                })?,
-                node => node.to_string(),
-            };
+            let invitee_node = invitee_node_for_issue(
+                &state,
+                &origin_nest_id,
+                &req.invitee_node,
+                req.origin_nest_url.as_deref(),
+            )
+            .await?;
             let ack = crate::conversations_handlers::room_invite_apply(
                 &state,
                 &room_id,
@@ -2300,6 +2341,7 @@ pub(crate) fn well_formed_asserted_name<'a>(
     domain: Option<&'a str>,
     origin_nest_id: &[u8; 32],
     context: &'static str,
+    loopback: bool,
 ) -> Option<(&'a str, &'a str)> {
     let (Some(handle), Some(domain)) = (
         handle.map(str::trim).filter(|h| !h.is_empty()),
@@ -2318,6 +2360,23 @@ pub(crate) fn well_formed_asserted_name<'a>(
         tracing::debug!(
             origin = %hex::encode(origin_nest_id),
             "{context}: asserted domain ignored (invalid syntax)"
+        );
+        return None;
+    }
+    // The binding dials `https://<domain>` unattended, at a stranger peer's
+    // word, so a loopback host — the in-process fixture shape
+    // `validate_peer_url` admits for an authenticated caller — is refused
+    // before any dial unless `loopback` says this is test state (the state's
+    // `peer_fetch_loopback`, `None` on every production nest), where the
+    // conformance suites' nests share one host.
+    if !loopback
+        && url::Url::parse(&format!("https://{domain}"))
+            .ok()
+            .is_none_or(|u| u.host().is_none_or(|h| crate::ssrf::is_loopback_host(&h)))
+    {
+        tracing::debug!(
+            origin = %hex::encode(origin_nest_id),
+            "{context}: asserted domain ignored (loopback)"
         );
         return None;
     }
@@ -2418,8 +2477,13 @@ pub(crate) async fn verified_owner_label(
     domain: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     const CONTEXT: &str = "federation welcome relay: owner label";
-    let Some((handle, domain)) = well_formed_asserted_name(handle, domain, origin_nest_id, CONTEXT)
-    else {
+    let Some((handle, domain)) = well_formed_asserted_name(
+        handle,
+        domain,
+        origin_nest_id,
+        CONTEXT,
+        state.peer_fetch_loopback.is_some(),
+    ) else {
         return (None, None);
     };
     let Some(_in_flight) = start_domain_verification(state, origin_nest_id, CONTEXT) else {
@@ -2494,8 +2558,13 @@ async fn record_announced_handle(
     domain: Option<&str>,
 ) {
     const CONTEXT: &str = "federation channel fetch: announce";
-    let Some((handle, domain)) = well_formed_asserted_name(handle, domain, origin_nest_id, CONTEXT)
-    else {
+    let Some((handle, domain)) = well_formed_asserted_name(
+        handle,
+        domain,
+        origin_nest_id,
+        CONTEXT,
+        state.peer_fetch_loopback.is_some(),
+    ) else {
         return;
     };
     // The cap is checked BEFORE `begin_verification` records the assertion: a
@@ -2766,6 +2835,246 @@ mod announce_domain_tests {
                 .await,
             "the collision loser must be free to start a fresh verification \
              immediately, not stay suppressed"
+        );
+    }
+
+    /// The production state's one difference that matters here: no
+    /// `peer_fetch_loopback`, so a peer-asserted loopback domain is never
+    /// dialled.
+    fn production_state() -> Arc<AppState> {
+        let base = AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+        Arc::new(AppState {
+            peer_fetch_loopback: None,
+            ..base
+        })
+    }
+
+    /// A loopback listener that counts every connection it accepts — the
+    /// observable a dial leaves, whatever the resolver's counters say.
+    async fn counting_listener() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let authority = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        // spawn-ok(test): a test's loopback listener, holding no `AppState`.
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        (authority, accepted)
+    }
+
+    async fn quiesce(state: &AppState) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while state.federation_pool.in_flight_verification_count() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "spawned verifications never quiesced"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A production nest never dials a loopback domain a peer asserted for
+    /// its member's announced handle — the loopback carve-out of
+    /// `validate_peer_url` is an authenticated caller's and test state's,
+    /// never an unattended stranger's. Remove the refusal and
+    /// the announce's binding task dials the listener.
+    #[tokio::test]
+    async fn a_production_nest_never_dials_an_announced_loopback_domain() {
+        let state = production_state();
+        let (authority, accepted) = counting_listener().await;
+        let (channel, actor, origin) = ([21u8; 32], [22u8; 32], [23u8; 32]);
+        for domain in [authority.as_str(), "localhost", "[::1]:443"] {
+            record_announced_handle(&state, &channel, &actor, &origin, Some("bob"), Some(domain))
+                .await;
+        }
+        quiesce(&state).await;
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an announced loopback domain is never dialled"
+        );
+        assert_eq!(state.federation_pool.domain_resolve_attempt_count(), 0);
+        assert!(
+            !state
+                .federation_pool
+                .is_current_verification(channel, actor, 1)
+                .await,
+            "an announced loopback domain never starts a verification"
+        );
+    }
+
+    /// The same refusal on the inline path: a relayed Welcome's owner label
+    /// naming a loopback domain is delivered unstamped without a dial.
+    #[tokio::test]
+    async fn a_production_nest_never_dials_a_welcome_owner_labels_loopback_domain() {
+        let state = production_state();
+        let (authority, accepted) = counting_listener().await;
+        let label =
+            super::verified_owner_label(&state, &[24u8; 32], Some("bob"), Some(&authority)).await;
+        quiesce(&state).await;
+        assert_eq!(label, (None, None));
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a loopback owner-label domain is never dialled"
+        );
+        assert_eq!(state.federation_pool.domain_resolve_attempt_count(), 0);
+    }
+
+    /// A stranger's declared home URL is never recorded or returned as
+    /// loopback on a production nest: every unattended dial that reads the
+    /// directory (the follow outbox, the abuse-report outcome return, the
+    /// succession pull) would otherwise reach a co-located service at a
+    /// stranger's word. Remove the refusal and the declaration
+    /// is recorded and handed back.
+    #[tokio::test]
+    async fn a_production_nest_never_records_a_loopback_home_declaration() {
+        let state = production_state();
+        let (authority, _accepted) = counting_listener().await;
+        let origin = [26u8; 32];
+        for declared in [
+            format!("http://{authority}"),
+            format!("https://{authority}/"),
+            "https://localhost:8444".to_string(),
+            "http://[::1]:8444".to_string(),
+            "https://h.example/x".to_string(),
+        ] {
+            let home = super::resolve_origin_home_url(&state, &origin, Some(&declared))
+                .await
+                .unwrap();
+            assert_eq!(home, None, "{declared} must not be returned");
+        }
+        assert!(
+            state
+                .db
+                .resolve_foreign_nest_urls(&origin, 16)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no refused declaration may reach the address directory"
+        );
+
+        // A proven address still serves when the declaration is refused.
+        state
+            .db
+            .record_nest_address(&origin, "https://origin.example", true)
+            .await
+            .unwrap();
+        let home =
+            super::resolve_origin_home_url(&state, &origin, Some(&format!("http://{authority}")))
+                .await
+                .unwrap();
+        assert_eq!(home.as_deref(), Some("https://origin.example"));
+        assert_eq!(
+            state
+                .db
+                .resolve_foreign_nest_urls(&origin, 16)
+                .await
+                .unwrap(),
+            vec!["https://origin.example".to_string()]
+        );
+    }
+
+    /// Test state still records the fixture shape the in-process suites
+    /// declare (`http://127.0.0.1:PORT`).
+    #[tokio::test]
+    async fn test_state_still_records_a_loopback_home_declaration() {
+        let state = Arc::new(AppState::for_test(Arc::new(
+            CacheDb::open_in_memory().unwrap(),
+        )));
+        let origin = [27u8; 32];
+        let home = super::resolve_origin_home_url(&state, &origin, Some("http://127.0.0.1:9000/"))
+            .await
+            .unwrap();
+        assert_eq!(home.as_deref(), Some("http://127.0.0.1:9000"));
+        assert_eq!(
+            state
+                .db
+                .resolve_foreign_nest_urls(&origin, 16)
+                .await
+                .unwrap(),
+            vec!["http://127.0.0.1:9000".to_string()]
+        );
+    }
+
+    /// A relayed room invitation's invitee node is a peer's word too: a
+    /// production nest refuses a loopback one before it is delivered to.
+    #[test]
+    fn a_production_nest_refuses_a_loopback_invitee_node() {
+        assert!(super::admitted_invitee_node("http://127.0.0.1:9000", false).is_err());
+        assert!(super::admitted_invitee_node("https://localhost", false).is_err());
+        assert_eq!(
+            super::admitted_invitee_node("https://b.example/", false).unwrap(),
+            "https://b.example"
+        );
+        assert_eq!(
+            super::admitted_invitee_node("http://127.0.0.1:9000", true).unwrap(),
+            "http://127.0.0.1:9000"
+        );
+    }
+
+    /// The call site `room.invite.issue` uses: on a production state a
+    /// loopback `invitee_node` is refused with the invalid-request error
+    /// before any write, and nothing connects to it.
+    #[tokio::test]
+    async fn the_invite_issue_call_site_refuses_a_loopback_invitee_node_on_a_production_nest() {
+        let base = AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+        let state = AppState {
+            peer_fetch_loopback: None,
+            ..base
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        // spawn-ok(test): a test's loopback listener, holding no `AppState`.
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        let node = format!("http://127.0.0.1:{port}");
+        let err = super::invitee_node_for_issue(&state, &[7u8; 32], &node, None)
+            .await
+            .expect_err("a loopback invitee node is refused on a production nest");
+        assert_eq!(
+            err.code,
+            super::invalid_request("x").code,
+            "refused as an invalid request"
+        );
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Test state keeps the fixture shape: the in-process suites' nests share
+    /// one host, so there a loopback domain is still bound by discovery.
+    #[test]
+    fn test_state_still_admits_a_loopback_domain() {
+        let origin = [25u8; 32];
+        assert!(
+            super::well_formed_asserted_name(Some("bob"), Some("127.0.0.1:1"), &origin, "t", true)
+                .is_some()
+        );
+        for domain in [
+            "127.0.0.1:1",
+            "localhost",
+            "LOCALHOST.",
+            "127.1:9",
+            "[::1]:443",
+        ] {
+            assert!(
+                super::well_formed_asserted_name(Some("bob"), Some(domain), &origin, "t", false)
+                    .is_none(),
+                "{domain} must be refused on production state"
+            );
+        }
+        assert!(
+            super::well_formed_asserted_name(Some("bob"), Some("example.org"), &origin, "t", false)
+                .is_some()
         );
     }
 }
@@ -3131,17 +3440,14 @@ fn folder_changes_fetch_handler() -> RpcHandler {
             let fs = claimed_folder_for_channel(&state, &channel_id).await?;
 
             let limit = crate::segments::effective_fetch_limit(req.limit);
-            let mut rows = state
-                .db
-                .get_sync_changes_for_folder(fs.id, req.after, None)
-                .await
-                .map_err(internal)?;
-            rows.truncate(limit as usize);
-            // Frame-budget the page exactly like `channel.fetch` — close early,
-            // never skip (the member's drain walks a contiguous seq cursor).
-            let (rows, rest) = crate::segments::take_page_within_budget(rows, |c| {
-                c.wire_len() + crate::segments::RECORD_WIRE_OVERHEAD
-            });
+            // The clamped `limit` is the query's own LIMIT — never a full
+            // load cut afterwards — then the page is frame-budgeted exactly
+            // like `channel.fetch`: close early, never skip (the member's
+            // drain walks a contiguous seq cursor); the cut counts the page's
+            // `signer_certs` side table too.
+            let (rows, rest, signer_certs) =
+                crate::sync_handlers::folder_change_page(&state.db, fs.id, req.after, None, limit)
+                    .await?;
             if rows.is_empty()
                 && let Some(head) = rest.first()
             {
@@ -3152,7 +3458,6 @@ fn folder_changes_fetch_handler() -> RpcHandler {
                      the WS frame budget — the foreign member's drain cannot advance"
                 );
             }
-            let signer_certs = crate::sync_handlers::signer_certs_for(&state.db, &rows).await?;
             encode_reply(&FedFolderChangesFetchReply {
                 changes: rows
                     .iter()
@@ -3482,6 +3787,11 @@ pub struct FedFolderChangesRecordRequest {
     /// Resolution marker, relayed verbatim ([`SyncChange::is_resolution`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_resolution: Option<bool>,
+    /// The depositor of an adopted deposit, relayed verbatim
+    /// ([`SyncChange::deposited_by`]) — a covered field of the statement.
+    /// Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deposited_by: Option<String>,
     /// The writer's signature over the record's `SignedChange` statement,
     /// relayed verbatim (`mls-group-key-material.md` § M2 → *Writer-signed
     /// change records*). Wire-additive.
@@ -3563,7 +3873,10 @@ fn folder_changes_record_handler() -> RpcHandler {
                 crate::change_signature::CarriedSignature::new(
                     req.signature.as_ref(),
                     req.signer_key.as_ref(),
-                ),
+                )
+                .with_deposited_by(crate::sync_handlers::parse_deposited_by(
+                    req.deposited_by.as_deref(),
+                )?),
                 // Across the trust boundary: the cert rides inline, and the
                 // signed actor must be `requesting_actor_id` — the recorder
                 // the core rebuilds the statement for.
@@ -5365,7 +5678,7 @@ pub fn register_profile_federation_handlers(b: &mut FederationRouterBuilder) {
 /// — not hosted, no profile, `ThisNest`, an audience this build does not name,
 /// a stored row that no longer verifies — is the one `not_found`, so a peer
 /// learns nothing about whether the actor publishes a profile.
-fn profile_get_handler() -> RpcHandler {
+pub(crate) fn profile_get_handler() -> RpcHandler {
     Box::new(|state, _origin_nest_id, payload| {
         Box::pin(async move {
             let req: FedProfileGetRequest = decode(&payload)?;
@@ -5590,8 +5903,13 @@ fn post_forward_handler() -> RpcHandler {
                         // ...and the same reception pass: a room-restricted
                         // post this nest now stores is one it may index, if it
                         // homes the room (`crate::room_post_view`).
-                        crate::room_post_view::index_room_post(&state, &post_id, &stored_bytes)
-                            .await;
+                        crate::room_post_view::index_room_post(
+                            &state,
+                            &post_id,
+                            &stored_bytes,
+                            None,
+                        )
+                        .await;
                     }
                 }
                 Err(e) if e.to_string().contains("UNIQUE") => {}

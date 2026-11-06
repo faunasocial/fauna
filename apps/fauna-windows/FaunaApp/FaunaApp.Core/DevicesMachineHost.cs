@@ -51,8 +51,11 @@ internal static class DevicesMachineHost
 
     /// <summary>The session's live machine, or <c>null</c> before either page
     /// has built one and after an actor change. Readers only (the e2e state
-    /// serializer's refresh barrier).</summary>
+    /// serializer's refresh barrier) — its only reader, so it compiles out of
+    /// Release with it (convention 15).</summary>
+#if DEBUG || FAUNA_E2E_AGENT
     public static DevicesMachine? Current => _current;
+#endif
 
     /// <summary>
     /// Route the machine's change notifications to <paramref name="observer"/>
@@ -96,6 +99,8 @@ internal static class DevicesMachineHost
             await rpc.WireDevicesFollowedFoldersAsync(machine);
             _current = machine;
             _builtOver = rpc;
+            _staleWiring?.Dispose();
+            _staleWiring = WireStaleResync(rpc, () => machine.Resync());
             return machine;
         }
         finally
@@ -124,9 +129,67 @@ internal static class DevicesMachineHost
     {
         _current = null;
         _builtOver = null;
+        _staleWiring?.Dispose();
+        _staleWiring = null;
         var ended = Observers.Clear();
         if (ended > 0)
             Logs.ShellLog.Info("Devices", $"actor change ended {ended} page listener(s)");
+    }
+
+    private static IDisposable? _staleWiring;
+
+    /// <summary>
+    /// Answer <see cref="INestRpcClient.DevicesStale"/> with the machine's
+    /// <c>Resync()</c> — never <c>Refresh()</c> (<c>ui/devices.md</c>: a reconnect
+    /// sweep resyncs). Done here, once per session, rather than per page so the
+    /// Devices page and the Folders page are both covered whichever is open (or
+    /// neither: the machine's rows are then fresh at the next visit). The resync
+    /// ticks the listeners, the open Folders page rebuilds its rows and every open
+    /// row's reads re-fire — each retiring its own error text. Resyncs coalesce: one
+    /// in flight, one more queued, so a burst of raises costs two reads at most.
+    /// Failure is swallowed (the connection is the likeliest reason, and the next
+    /// raise or visit re-reads); returns the subscription handle.
+    /// </summary>
+    internal static IDisposable WireStaleResync(INestRpcClient rpc, Func<Task> resync)
+    {
+        var running = 0;
+        var again = 0;
+        async void OnStale()
+        {
+            if (Interlocked.CompareExchange(ref running, 1, 0) != 0)
+            {
+                Volatile.Write(ref again, 1);
+                return;
+            }
+            try
+            {
+                do
+                {
+                    Volatile.Write(ref again, 0);
+                    try { await resync(); }
+                    catch (Exception ex)
+                    {
+                        Logs.ShellLog.Warn("Devices", $"stale resync failed: {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+                while (Volatile.Read(ref again) == 1);
+            }
+            finally
+            {
+                Volatile.Write(ref running, 0);
+            }
+        }
+        rpc.DevicesStale += OnStale;
+        return new Unsubscribe(() => rpc.DevicesStale -= OnStale);
+    }
+
+    private sealed class Unsubscribe(Action off) : IDisposable
+    {
+        private int _disposed;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) off();
+        }
     }
 
     /// <summary>Tick the listeners exactly as a machine change does — the unit

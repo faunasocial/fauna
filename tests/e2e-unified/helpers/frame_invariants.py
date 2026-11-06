@@ -314,8 +314,9 @@ def _check_nav_stack(state):
 # that died by panic, and a web pump whose pass outran its ceiling
 # (`fauna_e2e_agent::CONV_RECEIVE_CYCLES_KEY` owns the vocabulary).
 _DEAD_RECEIVE_EXITS = frozenset({"panicked", "stalled"})
-# The designed exits — the session was dropped, or the engine handed over.
-_DESIGNED_RECEIVE_EXITS = frozenset({"closed", "retired"})
+# The designed exits — the session was dropped, the engine handed over, or the
+# account it served was signed out or switched away from.
+_DESIGNED_RECEIVE_EXITS = frozenset({"closed", "retired", "identity-changed"})
 
 
 def _check_receive_loop_alive(state):

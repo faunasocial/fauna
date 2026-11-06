@@ -118,6 +118,53 @@ fn rejection_asks_now(
     }
 }
 
+/// The loop's memory of readers' reports, pure: the bearer it last asked the
+/// nest about (the once-per-distinct-bearer bound, [`rejection_asks_now`])
+/// and the bearer whose ask is still OWED — asked, but not yet answered by a
+/// mint that succeeded or was refused. A transient failure, or a wake held by
+/// an earlier failure's backoff, leaves the ask owed, so the next unheld wake
+/// mints again on the loop's backoff: the readers never report the same bearer
+/// twice (`sync-agent-credentials.md` § Credential model → *A rejected
+/// credential asks at once*, "any other failure stays on the loop's backoff").
+#[derive(Default)]
+struct ReportAsks {
+    last_asked: Option<zeroize::Zeroizing<String>>,
+    owed: Option<zeroize::Zeroizing<String>>,
+}
+
+impl ReportAsks {
+    /// Whether this pass asks the nest on a report, given the report taken
+    /// this wake (if any) and the slot's `current` bearer. An owed ask about a
+    /// bearer the slot no longer holds lapses.
+    fn asks_now(&mut self, rejection: Option<&crate::bearer::Rejection>, current: &str) -> bool {
+        if self
+            .owed
+            .as_deref()
+            .is_some_and(|owed| owed.as_str() != current)
+        {
+            self.owed = None;
+        }
+        if rejection.is_some_and(|r| {
+            rejection_asks_now(r, current, self.last_asked.as_deref().map(String::as_str))
+        }) {
+            self.last_asked = Some(zeroize::Zeroizing::new(current.to_owned()));
+            self.owed = Some(zeroize::Zeroizing::new(current.to_owned()));
+        }
+        !current.is_empty() && self.owed.is_some()
+    }
+
+    /// The bearer the loop last asked about — the one a mint on a report
+    /// replaces as refused (`adopt_minted`).
+    fn last_asked(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.last_asked.clone()
+    }
+
+    /// The nest answered: a mint succeeded or was refused. Nothing is owed.
+    fn settle(&mut self) {
+        self.owed = None;
+    }
+}
+
 /// What one pass of the loop does — [`decide`]'s answer.
 #[derive(Debug, PartialEq)]
 enum Pass {
@@ -180,8 +227,9 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
         Duration::from_secs(BACKOFF_MAX_SECS),
     );
     // The bearer the loop last asked the nest about on a reader's report —
-    // what bounds those asks to one per distinct slot bearer.
-    let mut last_asked: Option<zeroize::Zeroizing<String>> = None;
+    // what bounds those asks to one per distinct slot bearer — and the ask
+    // still owed after a transient failure or a held wake.
+    let mut asks = ReportAsks::default();
     // Earliest next mint after a transient failure (see the `held` read below).
     let mut retry_after: Option<std::time::Instant> = None;
     loop {
@@ -204,16 +252,7 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
             let cap = state.capability.read().await;
             cap.as_ref().and_then(|c| {
                 let actor_id = c.actor_id_array()?;
-                let asks_now = rejection.as_ref().is_some_and(|r| {
-                    rejection_asks_now(
-                        r,
-                        &c.bearer.token,
-                        last_asked.as_deref().map(String::as_str),
-                    )
-                });
-                if asks_now {
-                    last_asked = Some(zeroize::Zeroizing::new(c.bearer.token.clone()));
-                }
+                let asks_now = asks.asks_now(rejection.as_ref(), &c.bearer.token);
                 Some(Snapshot {
                     nest_url: c.nest_url.clone(),
                     actor_id,
@@ -254,18 +293,28 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                     (Pass::Sleep(d), _) => d,
                     (_, Some(left)) => left,
                     (pass, None) => {
-                        match pass {
-                            Pass::Probe => tracing::info!(
-                                "this machine's enrollment evidence changed since the nest \
-                                 refused its renewal; asking again now"
-                            ),
-                            Pass::AskOnReport => tracing::info!(
-                                "the nest rejected this agent's credential on a live \
-                                 connection; asking for a fresh bearer now rather than at \
-                                 the renewal lead"
-                            ),
-                            _ => {}
-                        }
+                        // On a reader's report, the bearer this mint replaces is
+                        // one the nest refused (`asks.last_asked()`, stamped by the snapshot that
+                        // took the report): an app pushing it again never displaces the
+                        // replacement (`adopt_minted`).
+                        let replaces_refused = match pass {
+                            Pass::Probe => {
+                                tracing::info!(
+                                    "this machine's enrollment evidence changed since the \
+                                     nest refused its renewal; asking again now"
+                                );
+                                None
+                            }
+                            Pass::AskOnReport => {
+                                tracing::info!(
+                                    "the nest rejected this agent's credential on a live \
+                                     connection; asking for a fresh bearer now rather than \
+                                     at the renewal lead"
+                                );
+                                asks.last_asked()
+                            }
+                            _ => None,
+                        };
                         match principal
                             .take()
                             .or_else(|| read_principal(&slot.nest_url, &slot.actor_id))
@@ -284,6 +333,7 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                                             &SlotKey::of_snapshot(&slot),
                                             minted.token,
                                             expires_at,
+                                            replaces_refused.as_deref().map(String::as_str),
                                         )
                                         .await;
                                         tracing::info!(
@@ -296,6 +346,7 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                                         refresh_store_principal_presence(&state).await;
                                         backoff.reset();
                                         retry_after = None;
+                                        asks.settle();
                                         // Immediately re-plan off the fresh expiry.
                                         Duration::from_secs(1)
                                     }
@@ -315,6 +366,7 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: tokio::sync::watch:
                                         .await;
                                         backoff.reset();
                                         retry_after = None;
+                                        asks.settle();
                                         Duration::from_secs(IDLE_RECHECK_SECS)
                                     }
                                     Err(e) => {
@@ -599,6 +651,7 @@ async fn adopt_minted(
     key: &SlotKey,
     token: String,
     expires_at: u64,
+    replaces_refused: Option<&str>,
 ) {
     use zeroize::Zeroize;
     {
@@ -616,6 +669,12 @@ async fn adopt_minted(
         cap.bearer.token.zeroize();
         cap.bearer.token = token;
         cap.bearer.expires_at = expires_at;
+        // A mint on a reader's report replaced a bearer the nest refused:
+        // remember it, so an app pushing it again never displaces this one
+        // (`pipe_server::handle_refresh_bearer`).
+        if let Some(refused) = replaces_refused {
+            state.capability.note_refused_replaced(refused);
+        }
         if let Some(store) = &state.credentials {
             crate::credentials::persist_capability(store, cap);
         }
@@ -793,6 +852,42 @@ mod tests {
         assert!(!rejection_asks_now(&Rejection::Principal, "", None));
     }
 
+    /// A report's ask stays owed until the nest answers it: a mint that failed
+    /// transiently, or a report that arrived while a failed mint's backoff
+    /// held the wake, mints again at the next unheld wake — the readers will
+    /// not report the same bearer again. A mint that succeeded or was refused
+    /// settles it, and a new slot bearer lapses it (that bearer is asked about
+    /// afresh, once).
+    #[test]
+    fn a_report_whose_mint_failed_transiently_stays_owed() {
+        use crate::bearer::Rejection;
+        let bearer = |t: &str| Rejection::Bearer(zeroize::Zeroizing::new(t.to_owned()));
+        let mut asks = ReportAsks::default();
+
+        // The report asks; the mint it drove fails transiently (no settle).
+        assert!(asks.asks_now(Some(&bearer("tok")), "tok"));
+        // Next wake, no report pending: the ask is still owed.
+        assert!(asks.asks_now(None, "tok"));
+        // A held wake keeps it owed too (the loop sleeps the backoff, no settle).
+        assert!(asks.asks_now(None, "tok"));
+        // A fresh report about the same bearer never doubles the ask.
+        assert!(asks.asks_now(Some(&bearer("tok")), "tok"));
+        // The mint succeeded (or was refused): settled, and the bound holds.
+        asks.settle();
+        assert!(!asks.asks_now(None, "tok"));
+        assert!(!asks.asks_now(Some(&bearer("tok")), "tok"));
+
+        // A new bearer while an ask is owed: the owed ask lapses, and the new
+        // bearer is asked about only on its own report.
+        let mut asks = ReportAsks::default();
+        assert!(asks.asks_now(Some(&Rejection::Principal), "tok"));
+        assert!(!asks.asks_now(None, "tok-2"));
+        assert!(!asks.asks_now(None, "tok"));
+        assert!(asks.asks_now(Some(&bearer("tok-2")), "tok-2"));
+        // A refused (empty) slot owes nothing.
+        assert!(!asks.asks_now(None, ""));
+    }
+
     // ── The terminal refusal: `not_registered` on the principal's key ───────
 
     fn principal() -> ed25519_dalek::SigningKey {
@@ -912,7 +1007,7 @@ mod tests {
         crate::credentials::persist_capability(&store, &b);
         *state.capability.write().await = Some(b);
 
-        adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000).await;
+        adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000, None).await;
 
         let cap = state.capability.read().await;
         let cap = cap.as_ref().expect("B's capability");
@@ -963,7 +1058,7 @@ mod tests {
             crate::credentials::persist_capability(&store, &b);
             *state.capability.write().await = Some(b);
 
-            adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000).await;
+            adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000, None).await;
 
             let cap = state.capability.read().await;
             let cap = cap.as_ref().expect("B's capability");
@@ -1107,6 +1202,47 @@ mod tests {
         .await;
         assert!(matches!(pushed, fauna_ipc::sync::ResponseResult::Ok(_)));
         assert!(!loop_was_woken(&state).await);
+    }
+
+    /// **A bearer the nest refused stays replaced** (`sync-agent-credentials.md`
+    /// § Credential model → *A rejected credential asks at once*). A reader's
+    /// `401` had the loop mint a replacement; the app keeps pushing the refused
+    /// bearer on its 30 s tick (a windows app after a nest restart: the
+    /// restarted nest forgot every bearer, and the app's launch machine still
+    /// holds its own until the lead). Were the push to land, every reader
+    /// would present the refused bearer again, and the loop — asking once per
+    /// distinct bearer — would never ask about it again: measured on a Windows
+    /// seat whose agent stayed on `401` for the rest of the nest-down journey.
+    #[tokio::test]
+    async fn a_pushed_bearer_the_nest_refused_never_displaces_its_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state_over(dir.path(), None);
+        *state.capability.write().await = Some(provisioned_capability());
+        let key = slot_key(&state).await;
+        // A reader's 401 to "tok": the loop minted "renewed" in its place.
+        adopt_minted(&state, &key, "renewed".into(), 4_000_000_000, Some("tok")).await;
+
+        let push = |token: &str| {
+            fauna_ipc::sync::RequestMethod::RefreshBearer(fauna_ipc::sync::BearerToken::new(
+                token.into(),
+                u64::MAX,
+            ))
+        };
+        let pushed = request(&state, push("tok")).await;
+        assert!(matches!(pushed, fauna_ipc::sync::ResponseResult::Ok(_)));
+        assert_eq!(
+            state.capability.read().await.as_ref().unwrap().bearer.token,
+            "renewed",
+            "the refused bearer, pushed again, never displaces its replacement"
+        );
+
+        // A bearer the nest never refused lands as before.
+        let pushed = request(&state, push("app-fresh")).await;
+        assert!(matches!(pushed, fauna_ipc::sync::ResponseResult::Ok(_)));
+        assert_eq!(
+            state.capability.read().await.as_ref().unwrap().bearer.token,
+            "app-fresh"
+        );
     }
 
     /// A provision is the other handler that writes a bearer: same rule.
@@ -1258,6 +1394,7 @@ mod tests {
             &slot_key(&state).await,
             "minted".into(),
             4_000_000_000,
+            None,
         )
         .await;
 

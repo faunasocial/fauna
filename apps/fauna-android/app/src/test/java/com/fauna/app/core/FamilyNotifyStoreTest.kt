@@ -1,6 +1,6 @@
 package com.fauna.app.core
 
-import com.fauna.ffi.FfiContentPolicy
+import com.fauna.app.testing.GuardianRulesFixture
 import com.fauna.ffi.FfiFamilyContentNotice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -31,9 +31,6 @@ class FamilyNotifyStoreTest {
     private fun label(category: String, permille: Int) =
         ContentLabelEntry(category = category, confidencePerMille = permille.toUShort())
 
-    private fun floors(nsfw: String = "inherit", spam: String = "inherit", phishing: String = "inherit", commercial: String = "inherit") =
-        FfiContentPolicy(nsfw = nsfw, spam = spam, phishing = phishing, commercial = commercial)
-
     // Raw ArgumentCaptor.capture()/any() return null for reference-typed
     // generics, which crashes against Kotlin's non-null parameter types
     // (familyNotifyReport's List, registerCloser's closer) — this codebase has
@@ -55,7 +52,7 @@ class FamilyNotifyStoreTest {
 
     @Test
     fun `record is a no-op when content_notify is off`() {
-        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = floors(nsfw = "block"), contentNotify = false))
+        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = GuardianRulesFixture.blocking("nsfw"), contentNotify = false))
 
         store.record("post-1", listOf(label("nsfw", 700)))
         store.flushIfDue()
@@ -74,10 +71,11 @@ class FamilyNotifyStoreTest {
     }
 
     @Test
-    fun `record is a no-op when no label trips the guardian floor`() {
-        // "inherit" on every category never triggers guardianEnforcedCategories
-        // (family-safety.md § Guardian Notify: only the GUARDIAN floor counts).
-        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = floors(), contentNotify = true))
+    fun `record is a no-op when no label trips the guardian rules`() {
+        // A rule over a category none of the labels carry never triggers
+        // guardianEnforcedCategories (family-safety.md § Guardian Notify: only the
+        // GUARDIAN rules count).
+        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = GuardianRulesFixture.blocking("spam"), contentNotify = true))
 
         store.record("post-1", listOf(label("nsfw", 900)))
         store.flushIfDue()
@@ -86,8 +84,8 @@ class FamilyNotifyStoreTest {
     }
 
     @Test
-    fun `a tripped guardian floor accumulates and flushes the category count`() = runBlocking {
-        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = floors(nsfw = "block"), contentNotify = true))
+    fun `a tripped guardian rule accumulates and flushes the category count`() = runBlocking {
+        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = GuardianRulesFixture.blocking("nsfw"), contentNotify = true))
 
         store.record("post-1", listOf(label("nsfw", 700)))
         store.flushIfDue()
@@ -99,7 +97,7 @@ class FamilyNotifyStoreTest {
 
     @Test
     fun `the same item's category counts once per local day, not per render`() = runBlocking {
-        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = floors(nsfw = "block"), contentNotify = true))
+        val (store, api, _) = make(ContentPolicyInputs(contentPolicy = GuardianRulesFixture.blocking("nsfw"), contentNotify = true))
 
         // Same post, re-rendered three times (e.g. three snapshot ticks) — the
         // dedup set must count it once, not three (family-safety.md § Guardian
@@ -114,7 +112,7 @@ class FamilyNotifyStoreTest {
 
     @Test
     fun `an account switch drops pending counts and the dedup set`() {
-        val (store, api, accountStores) = make(ContentPolicyInputs(contentPolicy = floors(nsfw = "block"), contentNotify = true))
+        val (store, api, accountStores) = make(ContentPolicyInputs(contentPolicy = GuardianRulesFixture.blocking("nsfw"), contentNotify = true))
 
         // Pull the real closer FamilyNotifyStore registered at construction
         // straight from Mockito's recorded invocation — the exact lambda

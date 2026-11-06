@@ -291,6 +291,7 @@ fn params(
         owed_nests: None,
         peer_transport: None,
         enrollment_target_device_id: device_row(device),
+        enrollment_device_label: None,
     }
 }
 

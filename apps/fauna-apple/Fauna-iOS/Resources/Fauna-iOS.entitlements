@@ -12,5 +12,25 @@
   <array>
     <string>group.social.fauna.shared</string>
   </array>
+  <!-- The three keys below are PROFILE-BACKED (restricted): a signature may
+       claim one only when the embedded profile's App ID carries the matching
+       Developer-portal capability, or the signing fails (installers/ios.md
+       § Signing). The social.fauna.fauna App ID has held all three since
+       2026-10-07, and the App Store profile carries them. Unsigned builds
+       (CODE_SIGNING_ALLOWED=NO, the simulator) do not need the profile. -->
+  <!-- Push Notifications: lets PushManager complete an APNs registration
+       (apps/common.md § Push Notifications). The App Store profile grants
+       `production`; an export re-stamps it from the profile in any case. -->
+  <key>aps-environment</key>
+  <string>production</string>
+  <!-- Declared Age Range: the store-age arm's DeclaredAgeRange read at
+       onboarding (behavior/account-age-band.md D3). -->
+  <key>com.apple.developer.declared-age-range</key>
+  <true/>
+  <!-- App Attest: hardens the age band carried into admission
+       (behavior/account-age-band.md D5). The nest accepts attestations from
+       both environments, so the shipped value is `production`. -->
+  <key>com.apple.developer.devicecheck.appattest-environment</key>
+  <string>production</string>
 </dict>
 </plist>

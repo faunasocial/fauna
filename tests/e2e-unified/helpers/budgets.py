@@ -197,6 +197,14 @@ chain completes and the client re-renders on its result. Several round trips on
 a freshly opened connection, each rate-limited as the public directory oracle it
 is — so meaningfully slower than a single authenticated RPC."""
 
+LAUNCH_VERDICT_S = 90.0
+"""An app's launch machine reaches its verdict — dial, bearer mint and the
+login's cert-binding graduation (whose last act records the nest-identity pin) —
+measured from a shell the app already shows. Zero on the six gating apps (they
+show the shell only after the verdict); the real wait is iOS's, which enters
+optimistically off the stored session and lets the machine catch up
+(`onboarding.md` § App-launch routing)."""
+
 IDENTITY_REFRESH_S = 120.0
 """A post-auth background identity re-challenge (`FaunaClient::silent_sign_in`)
 classifies and, on a genuine change, escalates through
@@ -251,3 +259,25 @@ the generated-password mailbox mint (several provision round trips, each retried
 on a transient) and the three DAV toggles. Sized like the other causal barriers:
 a green run returns the instant the onboarded actor's run is marked completed,
 and only a glue that never runs or never finishes spends it."""
+
+OFFLINE_SEAT_BIND_S = 60.0
+"""The co-present panel paints the bare key, then the addressed code once its
+seat binds (`BackupsActions.offline_share_own_code`). The bind is one nest read
+and a listener, but on a seat whose real conversations session is still building
+it queues behind that work. A green run returns at the first addressed paint."""
+
+CONTAINER_HEALTH_S = 90.0
+"""A freshly started nest container answers its health endpoint (boot, migrations,
+self-signed bootstrap cert). Its own budget: the router-channel wait that follows
+starts its own clock, so a late health answer never starves it."""
+
+ROUTER_CHANNEL_S = 60.0
+"""The container's SNI router logs its sidecar channel to the nest as established,
+after health has answered. The router may be refused once and restarted by s6 before
+the nest has minted its token; a current image that never logs the line is a defect,
+not a reason to carry on."""
+
+SPA_FIRST_PAINT_S = 60.0
+"""The image's bundled web app, loaded in a fresh browser, paints its first
+stateful element (the unlock page's inputs) after the wasm seal chunk has been
+fetched and instantiated. A green run returns at the first paint."""

@@ -56,14 +56,12 @@ from helpers.waiting import describe_photo_backup_funnel, wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # iOS only in THIS module, and by design rather than by lag — see the module
-    # docstring's "Why this module is iOS-only" (macOS runs it from
-    # `tests/real_session/test_photo_backup_macos.py`). android's identical ingress (`PhotoBackupEngine.kt`,
-    # MediaStore) is equally built and equally unwitnessed, but android e2e runs
-    # on no development machine today (the emulator lives on the VM host —
-    # `feature-catalog.md` § Columns today), so its column stays honestly `(none)`
-    # until that is wired; it is a separate, already-tracked gap, not this file's.
+    # iOS and android here; macOS runs it from
+    # `tests/real_session/test_photo_backup_macos.py`. android seeds its gallery
+    # with `AndroidDriver.add_photo_to_library` (adb push + media scan, proved in
+    # MediaStore) and its Photos grant is `pm grant` at launch.
     pytest.mark.ios,
+    pytest.mark.android,
 ]
 
 
@@ -181,8 +179,7 @@ def test_a_photo_in_the_library_reaches_the_nest_and_shows_in_media(
     def _folder_titles():
         MediaActions(driver).navigate()
         app.backups.navigate_folders()
-        return [app.backups.folder_title(i)
-                for i in range(app.backups.folder_count())]
+        return app.backups.folder_titles()
 
     folder_names = wait_until(
         lambda: (_folder_titles() or None),

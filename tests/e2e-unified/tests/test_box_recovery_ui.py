@@ -39,7 +39,6 @@ from __future__ import annotations
 import pytest
 
 from drivers.machine_test_setter import set_handle_check_snapshot, set_recovery_boxes
-from helpers.app_surface import skip_unbuilt
 from helpers.indexed_rows import (
     click_row,
     diagnose_row,
@@ -62,30 +61,6 @@ _BOX_B = "bb" * 32
 _IMPORT_KEY = "1" * 64
 
 
-def _require_recovery_ui(app) -> None:
-    """Skip on clients whose Task E recovery UI has not landed yet.
-
-    The recovery UI shipped on web first (the reference); Task E lifts it to the
-    other apps, widening this guard per client as each lands. Web, linux,
-    windows, cli, android, and apple (macos + ios, 2026-07-31) render the pages
-    today."""
-    if not (
-        app.driver.is_web()
-        or app.driver.is_linux()
-        or app.driver.is_windows()
-        or app.driver.is_tui()
-        or app.driver.is_android()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the box-recovery step-4 recovery UI",
-            detail="built on web + linux + windows + tui + android + apple",
-            tracked="",
-        )
-
-
 # ---------------------------------------------------------------------------
 # Entry CTA + recovery-intent routing (the real flow, no injection)
 # ---------------------------------------------------------------------------
@@ -94,7 +69,6 @@ def _require_recovery_ui(app) -> None:
 @pytest.mark.feature("recover-a-lost-nest")
 def test_identity_choice_shows_recover_lost_box_button(app):
     """identity_choice surfaces the fresh-client recovery entry CTA."""
-    _require_recovery_ui(app)
     app.onboarding.navigate_to_status()
     assert app.is_visible("recover-lost-box-button"), (
         "identity_choice should show the recover-lost-box CTA: "
@@ -107,7 +81,6 @@ def test_recover_lost_box_routes_through_import_to_handle_entry(app):
     identity is loaded, land on handle_entry, NOT nest_recovery directly
     (Q2-A, box-recovery.md § Recovery UI (step 4)): the admin still needs to
     connect to a SURVIVING nest they own before the box list is readable."""
-    _require_recovery_ui(app)
     app.onboarding.navigate_to_status()
     app.click("recover-lost-box-button")
     # Recovery intent routes through identity_import first (the pre-login box
@@ -135,7 +108,6 @@ def test_recovery_handle_already_on_nest_routes_to_nest_recovery(app):
     NOT Done/LoggedIn (Q2-A): reachability + owning the identity is all the
     pre-login resolver's cold read needs — it writes nothing, so no
     registration on this nest."""
-    _require_recovery_ui(app)
     app.onboarding.navigate_to_status()
     app.click("recover-lost-box-button")
     app.driver.wait_for("paste-secret-field", timeout=15)
@@ -178,7 +150,6 @@ def test_recovery_handle_already_on_nest_routes_to_nest_recovery(app):
 def test_nest_recovery_renders_box_list(app):
     """nest_recovery renders one recover-box-item row per custodied box, plus
     the method buttons and the back button."""
-    _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
     wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
     assert row_visible(app.driver, RECOVER_BOX_ITEM, 0), (
@@ -205,7 +176,6 @@ def test_nest_recovery_renders_box_list(app):
 
 def test_nest_recovery_empty_shows_empty_message(app):
     """No custodied boxes → recover-box-empty-message, no rows."""
-    _require_recovery_ui(app)
     set_recovery_boxes(app, [])
     app.driver.wait_for("recover-box-empty-message", timeout=15)
     assert app.is_visible("recover-box-empty-message"), (
@@ -221,7 +191,6 @@ def test_nest_recovery_empty_shows_empty_message(app):
 def test_nest_recovery_method_buttons_gated_on_selection(app):
     """The method buttons are disabled until a box is selected (recover_via_*
     guards require_selected_recovery_box); selecting a row enables them."""
-    _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
     wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
     assert not app.is_enabled("recover-method-cloud-button"), (
@@ -247,7 +216,6 @@ def test_nest_recovery_method_buttons_gated_on_selection(app):
 def test_nest_recovery_cloud_method_advances_to_vps_config(app):
     """Selecting a box then clicking cloud re-provision advances to vps_config
     (recovery mode — reuses the existing provisioning surface)."""
-    _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
     wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
     click_row(app.driver, RECOVER_BOX_ITEM, 0)
@@ -264,7 +232,6 @@ def test_nest_recovery_selfhosted_method_advances_to_instructions(app):
     """Selecting a box then clicking self-hosted advances to
     recover_selfhosted_instructions, which renders the installer command, copy
     button, continue button, and restore CTA."""
-    _require_recovery_ui(app)
     set_recovery_boxes(app, [_BOX_A, _BOX_B])
     wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=15)
     click_row(app.driver, RECOVER_BOX_ITEM, 0)

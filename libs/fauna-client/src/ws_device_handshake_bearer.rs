@@ -334,9 +334,36 @@ async fn gate_opens(gate: ConnectGate, client: &std::sync::Weak<NestClient>) -> 
     }
 }
 
-/// Bring a device-principal client's connection up, retrying until the first
-/// `connect` lands (the reconnect supervisor owns the connection from then
-/// on). The first attempt waits on `gate` ([`ConnectGate`]), so an account
+/// After a `connect` that started a supervisor: wait until the connection
+/// reaches `Connected` (`Some(Ok)`), or the supervisor stops for good first
+/// (`Some(Err)`, its recorded stop), or every owner has let go of the client
+/// (`None`). Holds the client only weakly, re-checked every
+/// [`GATE_OWNER_CHECK`] for the reason [`gate_opens`] does.
+async fn supervised_until_up(
+    client: &std::sync::Weak<NestClient>,
+    mut state: tokio::sync::watch::Receiver<crate::ConnectionState>,
+) -> Option<Result<(), crate::NestClientError>> {
+    loop {
+        if *state.borrow_and_update() == crate::ConnectionState::Connected {
+            return Some(Ok(()));
+        }
+        // A stop is recorded before the supervisor announces it, so it is
+        // read at every transition, never only at `Disconnected`.
+        if let Some(stop) = client.upgrade()?.supervisor_stop() {
+            return Some(Err(stop));
+        }
+        match tokio::time::timeout(GATE_OWNER_CHECK, state.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return None,
+            Err(_) if client.strong_count() == 0 => return None,
+            Err(_) => {}
+        }
+    }
+}
+
+/// Bring a device-principal client's connection up, retrying until a
+/// `connect`'s supervisor reaches `Connected` (it owns the connection from
+/// then on). The first attempt waits on `gate` ([`ConnectGate`]), so an account
 /// runtime's principal never mints before its grant is on the nest; after
 /// that a failure is a retry, never a verdict (an offline nest, a redeploy).
 /// Backoff-paced (`fauna_protocol::reconnect::
@@ -365,9 +392,9 @@ pub fn spawn_connect_retry(
     client: Arc<NestClient>,
     gate: ConnectGate,
 ) -> tokio::task::JoinHandle<()> {
-    let client = Arc::downgrade(&client);
+    let weak = Arc::downgrade(&client);
     tokio::spawn(async move {
-        if !gate_opens(gate, &client).await {
+        if !gate_opens(gate, &weak).await {
             return;
         }
         // The agent renewal loop's ceiling-then-grow idiom (`fauna-sync-agent`
@@ -379,7 +406,7 @@ pub fn spawn_connect_retry(
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let Some(client) = client.upgrade() else {
+            let Some(client) = weak.upgrade() else {
                 tracing::debug!(
                     attempt,
                     "device-principal client: dropped by its owner; retry ends"
@@ -397,12 +424,44 @@ pub fn spawn_connect_retry(
                     return;
                 }
                 Ok(()) => {
-                    tracing::debug!(
-                        attempt,
-                        "device-principal client: connection UP — the account runtime's data \
-                         path (plane writes, and the generation mint's escrow deposit) rides it"
-                    );
-                    return;
+                    // `Ok` starts a supervisor, even over a first mint that
+                    // found no nest; whether the connection comes up is its
+                    // verdict. One it reaches `Connected` owns the connection
+                    // from then on; one that stops for good first (the nest
+                    // answering `not_registered` once it does answer) is a
+                    // failed attempt like any other here.
+                    let state = client.connection_state();
+                    drop(client);
+                    match supervised_until_up(&weak, state).await {
+                        None => return,
+                        Some(Ok(())) => {
+                            tracing::debug!(
+                                attempt,
+                                "device-principal client: connection UP — the account runtime's \
+                                 data path (plane writes, and the generation mint's escrow \
+                                 deposit) rides it"
+                            );
+                            return;
+                        }
+                        Some(Err(e)) => {
+                            tracing::debug!(
+                                attempt,
+                                "device-principal client: the supervisor stopped before the \
+                                 connection came up (retrying): {e}"
+                            );
+                            if warns_at(attempt) {
+                                tracing::warn!(
+                                    attempt,
+                                    "device-principal client: still not connected after \
+                                     {attempt} attempts — the account runtime's data path is \
+                                     DOWN. Retrying at the backoff ceiling; last error: {e}"
+                                );
+                            }
+                            let d = backoff.ceiling();
+                            backoff.grow();
+                            tokio::time::sleep(d).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -463,6 +522,48 @@ mod tests {
             retry.is_finished(),
             "the retry outlived every owner of its client — a dialler nothing can stop"
         );
+    }
+
+    /// A first mint that found no nest starts the supervisor, and a nest that
+    /// then answers `not_registered` stops it for good — the shape of a box
+    /// re-created under a kept identity, before the owner session registers
+    /// this machine's grant. The retry must not end on the first `connect`'s
+    /// `Ok`: it keeps re-connecting, so the grant's registration brings the
+    /// data path up without a relaunch.
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_outlives_a_supervisor_stopped_before_the_connection_came_up() {
+        struct NoNestThenRefused(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl BearerSource for NoNestThenRefused {
+            async fn bearer(&self) -> Result<String, ApiError> {
+                let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(if n == 0 {
+                    ApiError::Transport("dns: no such host".into())
+                } else {
+                    ApiError::SignInRefused
+                })
+            }
+        }
+        let bearer = Arc::new(NoNestThenRefused(Default::default()));
+        let client = NestClient::with_auth(Arc::new(AuthClient::bearer_only(
+            "http://127.0.0.1:1".into(),
+            [3u8; 32],
+            Arc::clone(&bearer) as Arc<dyn BearerSource>,
+            reqwest::Client::new(),
+        )));
+        let retry = spawn_connect_retry(Arc::clone(&client), ConnectGate::Open);
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let mints = bearer.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            mints >= 4,
+            "the retry stopped re-connecting once its first connect returned Ok: {mints} mints \
+             in 60 s (the first connect's, its supervisor's refused one, then nothing)"
+        );
+        assert!(
+            !retry.is_finished(),
+            "the retry ended while the client is owned and down"
+        );
+        drop(client);
     }
 
     /// The signing key is resolved at every mint, never at construction: a

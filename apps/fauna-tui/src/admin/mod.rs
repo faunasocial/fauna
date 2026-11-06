@@ -520,6 +520,7 @@ pub enum MailToggle {
     AliasSubaddressing,
     AliasWildcardPrefix,
     DmarcRufPublish,
+    DmarcOutboundAggregate,
 }
 
 /// The seven mail-policy save groups' editable drafts (`admin-mail`, `admin.md`
@@ -647,6 +648,7 @@ pub struct DmarcDraft {
     pub fo_mode: String,
     pub aggregate_retention: String,
     pub forensic_retention: String,
+    pub outbound_aggregate: bool,
 }
 
 /// The `admin-nest` page's reflective read — the pairing flag (from
@@ -718,21 +720,9 @@ pub enum FeatureLimitsRead {
     Failed(String),
 }
 
-/// The issuer key set's read, as the `admin-nest-oauth-*` section paints it.
-///
-/// Three honest states, never collapsed into an empty list: "we haven't asked"
-/// and "we couldn't find out" must not read like "no keys", and the forced
-/// arm's confirm can only name what it drops once the set has answered.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum OauthKeysRead {
-    /// Not read yet (the default — the reflect always sets one of the other two).
-    #[default]
-    Unread,
-    /// The set answered; the shared fold decides every line.
-    Ready(IssuerKeyView),
-    /// The read failed — already worded, the section's reason line.
-    Failed(String),
-}
+/// The issuer key set's read — one owner in `fauna-client-admin`, re-exported
+/// so every `admin::OauthKeysRead` path stays valid.
+pub use fauna_client_admin::OauthKeysRead;
 
 /// The `admin-users` hub's read data — the whole page in one snapshot
 /// (`admin.md` § 2 Users: the four sections ride one snapshot). Re-read on entry
@@ -1222,9 +1212,9 @@ pub struct AdminState {
     dns: Option<Arc<DnsManagementMachine>>,
     /// The poke that ends this session's auto-renew tick's six-hour wait — empty
     /// in a production build; the e2e agent's `auto_renew_wake` fires it
-    /// ([`crate::loop_wake::LoopWake`]). Fresh at every [`init`], so a departed
+    /// ([`fauna_core::loop_wake::LoopWake`]). Fresh at every [`init`], so a departed
     /// session's lingering tick is never the one woken.
-    pub auto_renew_wake: crate::loop_wake::LoopWake,
+    pub auto_renew_wake: fauna_core::loop_wake::LoopWake,
     /// Last `admin-dns` DNS snapshot the page painted — the per-domain record
     /// matrix + verdicts, the held credentials, and (Phase 2) the cert lifecycle.
     pub dns_snapshot: Option<DnsSnapshot>,
@@ -1528,7 +1518,11 @@ pub fn init(
 /// Fire-and-forget the `fauna.account.am_i_admin` gate check — the **post-auth**
 /// path (no driver ack to honour; the result lands through the channel and folds
 /// via [`apply_outcome`]). Mirrors linux's `check_admin_status()` at AuthSuccess.
-fn spawn_gate_check(state: &AdminState, tx: &UnboundedSender<UiMessage>, session_generation: u64) {
+pub(crate) fn spawn_gate_check(
+    state: &AdminState,
+    tx: &UnboundedSender<UiMessage>,
+    session_generation: u64,
+) {
     let Some(nest) = state.nest.clone() else {
         return;
     };
@@ -1576,10 +1570,9 @@ fn spawn_host_address_report(state: &AdminState) {
 use fauna_client_pair::resolve_this_nest_id;
 
 /// Spawn the hands-off certificate-renewal cadence (`tls-certificates.md` § C.3:
-/// *"Any synced admin device renews … with no admin tap"*). tui is a **native**
-/// app, so like linux/apple/android it owes this loop — web is the only app that
-/// legitimately has none (a browser SPA runs no background timer, so it issues on
-/// page-open instead).
+/// *"Any synced admin device renews … with no admin tap"*). Every app runs this
+/// loop — web's is `apps/fauna-web/src/lib/cert-auto-renew.ts`, for as long as
+/// the signed-in admin's tab is open.
 ///
 /// **Nothing about the tick is decided here.** The cadence, the refresh-then-ask
 /// order, the skip-if-empty rule, the per-domain non-fatal rule and the trailing
@@ -3916,10 +3909,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             if fields.is_empty() || fields.iter().any(|f| f.value.as_str().trim().is_empty()) {
                 return None;
             }
+            // Label = the provider's translated display name, as on the other apps.
+            let label = fauna_provisioning::PROVIDERS
+                .iter()
+                .find(|p| p.id.as_str() == provider_id)
+                .map_or_else(
+                    || provider_id.clone(),
+                    |p| crate::wizard::key(p.display_name_key),
+                );
             let op = dns_op(
                 &app.admin,
                 DnsAction::PutCredentials {
-                    label: provider_id.clone(),
+                    label,
                     provider_id,
                     fields,
                 },
@@ -4102,10 +4103,11 @@ const DEFAULT_RENAME_EXTEND_DAYS: i64 = 7;
 
 /// Wrap one `LocalDomainMachine` dispatch as an [`Op`], or `None` pre-login.
 fn local_domains_op(state: &AdminState, action: LocalDomainAction) -> Option<Op> {
-    state
-        .local_domains
-        .clone()
-        .map(|machine| Op::LocalDomains { machine, action })
+    state.local_domains.clone().map(|machine| Op::LocalDomains {
+        machine,
+        dns: state.dns.clone(),
+        action,
+    })
 }
 
 /// Wrap one `DnsManagementMachine` dispatch as an [`Op`], or `None` when the
@@ -4898,9 +4900,13 @@ pub enum Op {
     /// role address / the rename lifecycle), then re-snapshot. The machine
     /// re-reads the rows itself after every mutation, so no extra `Refresh` rides
     /// along (linux's per-action `Refresh` exists only because it rebuilds the
-    /// machine each time; ours is persistent and already hydrated).
+    /// machine each time; ours is persistent and already hydrated). An action
+    /// that moves the record matrix (`LocalDomainAction::moves_record_matrix`)
+    /// re-checks `dns` too, so both snapshots land in one fold
+    /// (`mail-multidomain.md` § Wizard steps, step 8).
     LocalDomains {
         machine: Arc<LocalDomainMachine>,
+        dns: Option<Arc<DnsManagementMachine>>,
         action: LocalDomainAction,
     },
     /// `admin-dns-cert-issue-button` — run a client-driven DNS-01 order for
@@ -5021,6 +5027,12 @@ pub enum Outcome {
     /// The gate result — folded onto [`App::am_i_admin`] (an app-level field, not
     /// page state: it drives the sidebar even off the admin page).
     GateLoaded { is_admin: bool },
+    /// The gate read reached no nest. Moves nothing: the gate keeps its last
+    /// known answer — `false` at login (fail-closed), and whatever an earlier
+    /// read said once the reconnect re-read (`StaleSurfaces::admin_gate`) runs,
+    /// so a socket that drops again mid-read never hides `admin-tab` from an
+    /// admin who already has it.
+    GateUnreachable(String),
     /// A fresh dashboard snapshot (the shared card set, and a failed read's detail).
     DashboardLoaded(DashboardSnapshot),
     /// A failed dashboard read — lands on the admin page's `error-message`.
@@ -5175,8 +5187,12 @@ pub enum Outcome {
     /// One `admin-dns` DNS-machine dispatch resolved (success or an error already
     /// recorded on the snapshot).
     DnsSnapshotOnly(Box<DnsSnapshot>),
-    /// One `admin-dns` local-domain-machine dispatch resolved.
-    LocalDomainsSnapshotOnly(Box<LocalDomainsSnapshot>),
+    /// One `admin-dns` local-domain-machine dispatch resolved, with the DNS
+    /// snapshot when the action moved the record matrix and it was re-checked.
+    LocalDomainsDispatched {
+        domains: Box<LocalDomainsSnapshot>,
+        dns: Option<Box<DnsSnapshot>>,
+    },
     /// An `admin-dns` action failed **before** any machine dispatch, so no
     /// snapshot carries the reason (today: resolving the cert-delivery target nest
     /// for an issuance). Lands on [`AdminState::dns_action_error`], which the page
@@ -5190,16 +5206,15 @@ impl Op {
     pub async fn run(self) -> Outcome {
         match self {
             Op::CheckGate { nest } => {
-                // Fail-closed (`admin.md` § Where logic lives): a non-admin or
-                // any RPC error all resolve to
-                // "not admin", so the shell is never shown to a non-admin
-                // (§ Don't do these). Linux's `check_admin_status` `unwrap_or(false)`.
-                let is_admin = AccountClient::new(nest)
-                    .am_i_admin()
-                    .await
-                    .map(|r| r.admin)
-                    .unwrap_or(false);
-                Outcome::GateLoaded { is_admin }
+                // Fail-closed (`admin.md` § Where logic lives): a non-admin
+                // reply, and an RPC error at login, both leave the gate "not
+                // admin", so the shell is never shown to a non-admin (§ Don't
+                // do these). An error is no answer, though — it keeps the
+                // last-known one rather than overwriting it with `false`.
+                match AccountClient::new(nest).am_i_admin().await {
+                    Ok(r) => Outcome::GateLoaded { is_admin: r.admin },
+                    Err(e) => Outcome::GateUnreachable(e.to_string()),
+                }
             }
             // The shared card set: the five reads and the one fold. A failed
             // read drops only its own cards and rides the snapshot's `error`.
@@ -5600,9 +5615,24 @@ impl Op {
                 machine.background_recheck().await;
                 Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
             }
-            Op::LocalDomains { machine, action } => {
-                let _ = machine.dispatch(action).await;
-                Outcome::LocalDomainsSnapshotOnly(Box::new(machine.snapshot()))
+            Op::LocalDomains {
+                machine,
+                dns,
+                action,
+            } => {
+                let moves = action.moves_record_matrix();
+                let ok = machine.dispatch(action).await.is_ok();
+                let dns = match dns {
+                    Some(dns) if ok && moves => {
+                        dns.recheck_matrix().await;
+                        Some(Box::new(dns.snapshot()))
+                    }
+                    _ => None,
+                };
+                Outcome::LocalDomainsDispatched {
+                    domains: Box::new(machine.snapshot()),
+                    dns,
+                }
             }
             Op::DnsIssueCert {
                 machine,
@@ -6308,8 +6338,12 @@ fn nest_host(nest_url: &str) -> Option<String> {
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
         Outcome::GateLoaded { is_admin } => {
+            let became_admin = is_admin && !app.am_i_admin;
             app.am_i_admin = is_admin;
-            if is_admin {
+            // On the transition only: the reconnect re-read
+            // (`StaleSurfaces::admin_gate`) confirms an admin it already knew
+            // on every reconnect, and both effects below are once-per-session.
+            if became_admin {
                 // The admin auto-default (`long-term-store.md` § Per-account
                 // re-auth): this session's account is an admin identity, so flip
                 // its re-auth-on-activate flag ON — idempotently, and only if the
@@ -6328,6 +6362,11 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 // avoids a pointless failing RPC for a non-admin.
                 spawn_host_address_report(&app.admin);
             }
+        }
+        Outcome::GateUnreachable(detail) => {
+            tracing::warn!(
+                "[admin] am_i_admin gate read reached no nest; the gate keeps its last answer: {detail}"
+            );
         }
         Outcome::DashboardLoaded(snapshot) => {
             // A failed read surfaces on `error-message` (admin.md § 1.
@@ -6571,10 +6610,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.dns_action_error = None;
             app.admin.dns_snapshot = Some(*snapshot);
         }
-        Outcome::LocalDomainsSnapshotOnly(snapshot) => {
+        Outcome::LocalDomainsDispatched { domains, dns } => {
             app.admin.dns_action_error = None;
-            reseed_dns_rename_target(&mut app.admin, &snapshot);
-            app.admin.local_domains_snapshot = Some(*snapshot);
+            reseed_dns_rename_target(&mut app.admin, &domains);
+            app.admin.local_domains_snapshot = Some(*domains);
+            if let Some(dns) = dns {
+                app.admin.dns_snapshot = Some(*dns);
+            }
         }
         Outcome::DnsActionFailed(message) => {
             app.admin.dns_action_error = Some(message);
@@ -6809,6 +6851,20 @@ mod tests {
         assert!(app.am_i_admin);
         apply_outcome(&mut app, Outcome::GateLoaded { is_admin: false });
         assert!(!app.am_i_admin);
+    }
+
+    /// A gate read that reached no nest moves nothing: at login the gate stays
+    /// at its fail-closed `false`, and the reconnect re-read
+    /// (`StaleSurfaces::admin_gate`) can never hide `admin-tab` from an admin
+    /// who already has it because the socket dropped again mid-read.
+    #[test]
+    fn an_unreachable_gate_read_keeps_the_last_known_answer() {
+        let mut app = crate::app::tests::test_app();
+        apply_outcome(&mut app, Outcome::GateUnreachable("lost".into()));
+        assert!(!app.am_i_admin, "fail-closed at login");
+        apply_outcome(&mut app, Outcome::GateLoaded { is_admin: true });
+        apply_outcome(&mut app, Outcome::GateUnreachable("lost".into()));
+        assert!(app.am_i_admin, "a failed re-read keeps the admin entry");
     }
 
     fn caldav_snapshot(enabled: bool, port: u16, error: Option<&str>) -> CaldavPolicySnapshot {

@@ -12,8 +12,8 @@ became the site; the copy left its historical `short/` subdirectory on
 | `who.md` | `/who` — who's behind it |
 | `features.md` | `/features` — what works where (prose only; the table itself is generated) |
 | `privacy.md` | `/privacy` — the privacy page (no nav entry, by design) |
-| `official-apps.md` | `/official-apps` — which apps are Fauna's (prose only; the identity tables are generated from `installer/official-apps.json`; no nav entry) |
-| `code-signing-policy.md` | `/code-signing-policy` — the code signing policy (no nav entry; linked from the footer and `/official-apps`) |
+| `apps.md` | `/apps` (moved from `/official-apps`, which redirects, 2026-10-24) — the released apps with a direct link per file, where official downloads come from and how to check one (prose; its downloads table and its releases link are filled by page-local tokens, below; no nav entry) |
+| `code-signing-policy.md` | `/code-signing-policy` — the code signing policy (no nav entry; linked from the footer and `/apps`) |
 | `terms.md` | `/terms` — the terms and content guidelines (no nav entry; linked from `/privacy`) |
 
 The pages import this markdown **at build time**, so there is no sync step:
@@ -64,6 +64,11 @@ every frontmatter copy string alike (`sites/fauna-social/src/data/fill.ts` is
 the one filler); `{email}` renders as a working mailto link, `{repo}` as a
 link to the public source repository, and `{maintainer}` as the linked
 account(s) of the code-signing team (`code-signing-policy.md`'s roles table).
+Three page-local tokens, in `apps.md` only, are filled by that page:
+`{releases}`, the releases page link, from `installer/official-apps.json`;
+`{version}`, the newest released version, from the release table; and
+`{downloads}`, alone in its paragraph, the downloads table built from
+`installer/downloads.json`.
 Inline HTML also works in both places (e.g. `<strong>closed alpha</strong>` in
 `index.md`'s `cta`).
 

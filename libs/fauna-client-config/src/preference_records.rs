@@ -5,14 +5,17 @@
 //!
 //! A preference cluster lives on the account plane
 //! (`docs/goal/architecture/config-dissolution.md` § The `__config`
-//! dissolution schedule, the E1 cluster): a plane entry's value is *exactly*
-//! the cluster's sub-record in canonical dag-cbor — `moderation`,
-//! `sync_prefs`, `personalization`, `delegation` (the admitted table in
-//! `fauna_sync_engine::preference_put`).
+//! dissolution schedule, the E1 cluster): for `sync_prefs`,
+//! `personalization` and `delegation` a plane entry's value is *exactly* the
+//! cluster's sub-record in canonical dag-cbor (the admitted table in
+//! `fauna_account_plane::preference_put`); `moderation` is one row per muted
+//! term and one per hidden id, and its sub-record is the fold of those rows
+//! (`fauna_core::moderation_rows`) — the deltas here run on the fold, and the
+//! surface writes the rows they changed.
 //!
 //! The meaning of each gesture is here — one function per gesture, taking
 //! `&mut SubRecord` — and the plane's surfaces
-//! (`fauna_sync_engine::preference_surfaces`) call these directly.
+//! (`fauna_account_plane::preference_surfaces`) call these directly.
 //!
 //! The one rule for anything added here: **no clock, no I/O** — a pure
 //! function of the sub-record it is handed. Anything that needs a timestamp
@@ -98,45 +101,27 @@ pub fn remove_muted_keyword(moderation: &mut ModerationConfig, word: &str) {
     set_muted_keywords(moderation, list);
 }
 
-/// The most report subjects `hidden_content` keeps. A report is rate-capped at
-/// `ABUSE_REPORTS_PER_HOUR`, so this is years of reporting — and it keeps the
-/// `fauna.state.moderation` entry far under its per-entry cap. Past it, the OLDEST
-/// entry leaves first: the newest reports are the ones a user is still
-/// scrolling past.
-pub const MAX_HIDDEN_CONTENT: usize = 2_000;
-
-/// Normalize one report subject id for `hidden_content`: trimmed and
-/// lowercased, so a case-varied hex id is the same entry. `None` for a blank.
-fn normalize_hidden_id(id: &str) -> Option<String> {
-    let id = id.trim().to_ascii_lowercase();
-    (!id.is_empty()).then_some(id)
-}
-
 /// Hide something the user just reported, for them (`moderation.md` §
 /// Corollary — block also hides): append the subject's id to
 /// `hidden_content`. A delta over the record as the update reads it — the
 /// [`add_muted_keyword`] reasoning — so an entry another device stored
-/// meanwhile survives. Re-hiding an id already there is a no-op; past
-/// [`MAX_HIDDEN_CONTENT`] the oldest entry leaves.
+/// meanwhile survives. Re-hiding an id already there is a no-op. The list
+/// has no count cap: each id is its own plane row
+/// (`fauna_core::moderation_rows`), and the report rate cap bounds growth.
 pub fn hide_reported_content(moderation: &mut ModerationConfig, id: &str) {
-    let Some(id) = normalize_hidden_id(id) else {
+    let Some(id) = fauna_core::moderation_rows::normalize_hidden_id(id) else {
         return;
     };
     if moderation.hidden_content.contains(&id) {
         return;
     }
     moderation.hidden_content.push(id);
-    let excess = moderation
-        .hidden_content
-        .len()
-        .saturating_sub(MAX_HIDDEN_CONTENT);
-    moderation.hidden_content.drain(..excess);
 }
 
 /// Show again something the user hid by reporting it — the inverse of
 /// [`hide_reported_content`], same delta reasoning. Unknown ids are a no-op.
 pub fn unhide_reported_content(moderation: &mut ModerationConfig, id: &str) {
-    if let Some(id) = normalize_hidden_id(id) {
+    if let Some(id) = fauna_core::moderation_rows::normalize_hidden_id(id) {
         moderation.hidden_content.retain(|h| *h != id);
     }
 }
@@ -363,7 +348,7 @@ mod tests {
     /// muted words it shares a record with; unhiding removes it; past the cap
     /// the oldest entry leaves first.
     #[test]
-    fn hidden_content_is_a_bounded_case_insensitive_delta_pair() {
+    fn hidden_content_is_a_case_insensitive_delta_pair() {
         let mut m = ModerationConfig {
             muted_keywords: vec!["spoiler".into()],
             ..Default::default()
@@ -376,11 +361,5 @@ mod tests {
         unhide_reported_content(&mut m, "ABCD");
         unhide_reported_content(&mut m, "never-hidden");
         assert!(m.hidden_content.is_empty());
-
-        for i in 0..=MAX_HIDDEN_CONTENT {
-            hide_reported_content(&mut m, &format!("{i:x}"));
-        }
-        assert_eq!(m.hidden_content.len(), MAX_HIDDEN_CONTENT);
-        assert_eq!(m.hidden_content[0], "1", "the oldest left first");
     }
 }

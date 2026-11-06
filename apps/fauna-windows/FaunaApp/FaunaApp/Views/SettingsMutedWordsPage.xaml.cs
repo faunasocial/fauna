@@ -19,7 +19,9 @@ namespace FaunaApp.Views;
 /// directly on the page, mirroring linux <c>settings/muted_words.rs</c>).
 /// Rows are built in code-behind (the BackupsPage <c>RenderDestinations</c>
 /// idiom) so each carries the indexed AutomationId + the
-/// AutomationProperties.Name that keeps it in the UIA content view.
+/// AutomationProperties.Name that keeps it in the UIA content view. Each row
+/// is the term, its level picker and its remove button (settings.md § Muted
+/// words — the level picker).
 /// </summary>
 public sealed partial class SettingsMutedWordsPage : Page
 {
@@ -72,8 +74,8 @@ public sealed partial class SettingsMutedWordsPage : Page
         App.CurrentErrorMessage = string.IsNullOrEmpty(_vm.ErrorMessage) ? null : _vm.ErrorMessage;
 
         WordsContainer.Children.Clear();
-        foreach (var word in _vm.Words)
-            WordsContainer.Children.Add(BuildWordRow(word));
+        foreach (var row in _vm.Rows)
+            WordsContainer.Children.Add(BuildWordRow(row));
         // Two conditions, not one: a read has resolved AND it found nothing
         // (docs/goal/ui/README.md § List pages: loading is not empty). The XAML
         // starts EmptyText Collapsed, so a page still loading — or one whose
@@ -82,10 +84,29 @@ public sealed partial class SettingsMutedWordsPage : Page
         EmptyText.Visibility = _vm.Loaded && _vm.Words.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
+        ApplyBusy();
     }
 
-    private FrameworkElement BuildWordRow(string word)
+    /// <summary>The level picker, the add button and every remove button are
+    /// disabled while any round trip is in flight (settings.md § Muted words —
+    /// the level picker). Set on the controls in place rather than by a
+    /// re-render: a gesture's handler runs on the very control a rebuild would
+    /// tear out from under it.</summary>
+    private void ApplyBusy()
     {
+        var enabled = _vm is not { Busy: true };
+        AddButton.IsEnabled = enabled;
+        foreach (var child in WordsContainer.Children)
+        {
+            if (child is not Panel row) continue;
+            foreach (var control in row.Children)
+                if (control is Control c) c.IsEnabled = enabled;
+        }
+    }
+
+    private FrameworkElement BuildWordRow(MutedWordRow entry)
+    {
+        var word = entry.Word;
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -98,6 +119,8 @@ public sealed partial class SettingsMutedWordsPage : Page
         var text = new TextBlock { Text = word, VerticalAlignment = VerticalAlignment.Center };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(text, Ids.MutedWordText);
         row.Children.Add(text);
+
+        row.Children.Add(BuildLevelSelect(entry));
 
         var remove = new Button
         {
@@ -112,6 +135,60 @@ public sealed partial class SettingsMutedWordsPage : Page
         return row;
     }
 
+    /// <summary>The row's <c>muted-word-level-select</c> (settings.md § Muted
+    /// words — the level picker): its options are the shared catalog's
+    /// (<c>muted_keyword_levels</c>), each item NAMED by its level's token
+    /// (<c>hide</c> | <c>show-less</c>) — the value a driver selects and reads
+    /// back — while painting this app's label. A soft row differs from a hidden
+    /// one by this value alone. Pre-selected BEFORE the handler attaches, so
+    /// painting a row's stored level never fires a save (the FoldersPage
+    /// conflict-policy render-echo guard).</summary>
+    private ComboBox BuildLevelSelect(MutedWordRow entry)
+    {
+        var select = new ComboBox
+        {
+            Tag = entry.Word,
+            MinWidth = 140,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(select, Ids.MutedWordLevelSelect);
+        foreach (var option in MutedWordsViewModel.LevelOptions())
+        {
+            var item = new ComboBoxItem { Content = LevelLabel(option.Level), Tag = option.Token };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, option.Token);
+            select.Items.Add(item);
+            if (option.Token == entry.Level) select.SelectedItem = item;
+        }
+        select.SelectionChanged += LevelSelect_SelectionChanged;
+        return select;
+    }
+
+    /// <summary>The level's label — the only part of the option this app owns.</summary>
+    private static string LevelLabel(uniffi.fauna_core.MutedKeywordLevel level) =>
+        level == uniffi.fauna_core.MutedKeywordLevel.ShowLess
+            ? S.Get("muted_words/level_show_less")
+            : S.Get("muted_words/level_hide");
+
+    /// <summary>A pick is a save at once, like the remove button; the row
+    /// repaints from the record the save returns.</summary>
+    private async void LevelSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_vm is null || _vm.Busy) return;
+        if (sender is not ComboBox { Tag: string word } select
+            || select.SelectedItem is not ComboBoxItem { Tag: string level }) return;
+        var save = _vm.SetLevelAsync(word, level);
+        // The disable goes on the NEXT dispatcher pass, never inside this
+        // handler: a pick made through UI Automation (SelectionItem.Select — a
+        // screen reader, the e2e bridge) is still on the stack while
+        // SelectionChanged runs, and a picker disabled under it reports
+        // ElementNotEnabled for a pick that took (measured 2026-11-04: the save
+        // landed, the caller read a failure). Busy is already set, so a second
+        // gesture is refused meanwhile.
+        DispatcherQueue.TryEnqueue(ApplyBusy);
+        await save;
+        RenderState();
+    }
+
     private async void AddButton_Click(object sender, RoutedEventArgs e) => await SubmitAddAsync();
 
     private async void InputBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -121,17 +198,21 @@ public sealed partial class SettingsMutedWordsPage : Page
 
     private async Task SubmitAddAsync()
     {
-        if (_vm is null) return;
+        if (_vm is null || _vm.Busy) return;
         var term = InputBox.Text;
-        if (await _vm.AddAsync(term))
+        var add = _vm.AddAsync(term);
+        ApplyBusy();
+        if (await add)
             InputBox.Text = string.Empty;
         RenderState();
     }
 
     private async void RemoveButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm is null || sender is not Button btn || btn.Tag is not string word) return;
-        await _vm.RemoveAsync(word);
+        if (_vm is null || _vm.Busy || sender is not Button btn || btn.Tag is not string word) return;
+        var remove = _vm.RemoveAsync(word);
+        ApplyBusy();
+        await remove;
         RenderState();
     }
 }

@@ -92,8 +92,8 @@ pub use instance_lock::{
     InstanceRefusal, ServingBases, ServingMode, SessionInstanceHolder, SessionInstanceOutcome,
     account_instance_token, become_process_session_instance, bind_session_launch_to,
     choosable_accounts, process_session_account, rebind_session_launch_after_succession,
-    refuse_if_bound_from_onboarding, resolve_focus_existing, session_account,
-    session_launch_binding,
+    refuse_if_bound_from_onboarding, release_process_session_instance, resolve_focus_existing,
+    session_account, session_launch_binding, with_platform_serving_bases,
 };
 
 /// The sign-out/remove-account guard: which accounts another live instance is
@@ -114,8 +114,9 @@ pub use sole_instance::{
 mod sign_out_residue;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign_out_residue::{
-    FINGERPRINT_MAX_ENTRIES, ResiduePath, ResidueRetry, SIGN_OUT_RESIDUE_FILE, SignOutResidue,
-    TreeFingerprint, retry_sign_out_residue,
+    FINGERPRINT_MAX_ENTRIES, ResiduePath, ResidueRetry, ResidueSurface, SIGN_OUT_RESIDUE_FILE,
+    SignOutResidue, TreeFingerprint, log_residue, persist_residue, report_residue,
+    retry_sign_out_residue, settle_residue_retry,
 };
 
 /// Web's sign-out record: the durable decision a browser sign-out (and a
@@ -325,6 +326,38 @@ fn per_actor_keys(actor_id: &str) -> impl Iterator<Item = String> + '_ {
     PER_ACTOR_KEY_BUILDERS
         .iter()
         .map(move |build| build(actor_id))
+}
+
+/// Which devices a logical key's row belongs on, for a platform whose store
+/// can copy a row across a person's devices (`apps/ios.md` § Credential
+/// Storage → *What the copy carries*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySyncScope {
+    /// The identity and where it lives: a copy may travel with the person.
+    Identity,
+    /// This install's own row: exactly one copy, on this device.
+    Device,
+}
+
+/// The sync scope of logical key `key`, a pure function of the string.
+///
+/// **Device-scoped by default:** nothing leaves the device unless it is named
+/// here as identity material, so a slot added later, a foreign-arm row
+/// (`fauna-account-store/<actor hex>`) and any key this crate has never heard
+/// of all stay put.
+pub fn key_sync_scope(key: &str) -> KeySyncScope {
+    let identity = key == INDEX_KEY
+        || key
+            .strip_prefix("fauna/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(actor, slot)| {
+                !actor.is_empty() && matches!(slot, "secret" | "nest_url")
+            });
+    if identity {
+        KeySyncScope::Identity
+    } else {
+        KeySyncScope::Device
+    }
 }
 
 /// A per-platform key/value secret store, addressed by *logical* keys.
@@ -5074,5 +5107,65 @@ mod tests {
             reg.set_require_confirm(&a, true),
             Err(AccountError::UnknownActor(_))
         ));
+    }
+
+    /// Every slot the registry owns, classified on purpose: a slot added to
+    /// `PER_ACTOR_KEY_BUILDERS` fails here until it has a row in this table,
+    /// so a new key's scope is a decision, never the default by accident.
+    #[test]
+    fn every_key_the_crate_defines_has_a_chosen_sync_scope() {
+        let actor = "ab".repeat(32);
+        let scope_of = |suffix: &str| match suffix {
+            "fauna/{a}/secret" | "fauna/{a}/nest_url" => Some(KeySyncScope::Identity),
+            "fauna/{a}/device_id"
+            | "fauna/{a}/reach_ipv4"
+            | "fauna/{a}/pending_invite"
+            | "fauna/{a}/awaiting_dns"
+            | "fauna/{a}/pending_factory_reset"
+            | "fauna/{a}/pending_aftermath_ceremony"
+            | "fauna/{a}/supervision_snapshot"
+            | "{a}/device-auth"
+            | "{a}/backup-key"
+            | "{a}/generation-keys"
+            | "{a}/grant-registered"
+            | "{a}/enrollment-refused"
+            | "{a}/writer-unstamped"
+            | "{a}/pending-fleet-removals"
+            | "{a}" => Some(KeySyncScope::Device),
+            _ => None,
+        };
+        for key in per_actor_keys(&actor) {
+            let shape = key.replace(&actor, "{a}");
+            let chosen =
+                scope_of(&shape).unwrap_or_else(|| panic!("{shape} has no chosen sync scope"));
+            assert_eq!(key_sync_scope(&key), chosen, "{shape}");
+        }
+
+        assert_eq!(key_sync_scope(INDEX_KEY), KeySyncScope::Identity);
+        for key in [INSTALL_DEVICE_SECRET, SIGN_OUT_RECORD_KEY] {
+            assert_eq!(key_sync_scope(key), KeySyncScope::Device, "{key}");
+        }
+    }
+
+    /// The default is the safety property: what the function does not name
+    /// never leaves the device, however close it looks to a name it does.
+    #[test]
+    fn an_unnamed_key_is_device_scoped() {
+        let actor = "ab".repeat(32);
+        for key in [
+            format!("fauna-account-store/{actor}"),
+            format!("fauna-account-store/{actor}/device-auth"),
+            format!("fauna-account-store/fauna/{actor}/secret"),
+            format!("fauna/{actor}/secret/extra"),
+            format!("fauna/{actor}/unknown_slot"),
+            format!("fauna/{actor}"),
+            "fauna//secret".to_string(),
+            "fauna/secret".to_string(),
+            "icloud_backup_enabled".to_string(),
+            "secret_key".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(key_sync_scope(&key), KeySyncScope::Device, "{key:?}");
+        }
     }
 }

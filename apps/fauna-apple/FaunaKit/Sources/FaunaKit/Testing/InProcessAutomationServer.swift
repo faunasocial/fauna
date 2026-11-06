@@ -36,9 +36,17 @@ public final class InProcessAutomationServer: @unchecked Sendable {
 
     /// State-protocol bridges (set by the app shell, mirroring `TestAgent`):
     /// `/app/state` reads `stateProvider`; `/app/commands` forwards to
-    /// `commandHandler`.
+    /// `commandHandler`. Both stay nil until the app's RENDERED scene binds
+    /// them (`TestAgentBootstrap.bindInProcessAgent`, from its first `.task`):
+    /// the server starts in `App.init()` so `/health` answers at once, but
+    /// closures built there may read an `AppState` the app never renders.
+    /// Until the bind, `/app/state` answers 503 and commands are held in
+    /// `pendingCommands` — so a driver that polls state after a (re)launch
+    /// cannot see a state, or land a command, on the pre-render instance.
+    /// Main-actor only.
     private var stateProvider: (() -> [String: Any])?
     private var commandHandler: (([String: Any]) async -> Void)?
+    private var pendingCommands: [[String: Any]] = []
     /// Command-ack bookkeeping, accessed **only on the main actor** (written by
     /// the command Task, read by `/app/state`). Mirrors `TestAgent`'s
     /// `lastCommandId` + `ready`: the id becomes visible when a command starts,
@@ -59,13 +67,18 @@ public final class InProcessAutomationServer: @unchecked Sendable {
 
     private init() {}
 
-    /// Configure the state-protocol callbacks (same shape as `TestAgent.configure`).
+    /// Bind the state-protocol callbacks (same shape as `TestAgent.configure`)
+    /// and release any command that arrived before the bind, in arrival order.
+    @MainActor
     public func configure(
         stateProvider: @escaping () -> [String: Any],
         commandHandler: @escaping ([String: Any]) async -> Void
     ) {
         self.stateProvider = stateProvider
         self.commandHandler = commandHandler
+        let held = pendingCommands
+        pendingCommands = []
+        for command in held { dispatchCommand(command) }
     }
 
     /// Start the server on `port` (from `FAUNA_E2E_AGENT_PORT`). Idempotent.
@@ -357,6 +370,14 @@ public final class InProcessAutomationServer: @unchecked Sendable {
         let scopeSteps = Self.scopeSteps(query, body)
         let leafIndex = Int(query["index"] ?? "") ?? (body["index"] as? Int) ?? 0
 
+        // Every element read or drive answers from a SETTLED frame (registration
+        // rule 12, apple-e2e-automation.md): while UIKit animates a view-controller
+        // transition both the outgoing and the incoming page are really on screen,
+        // and their slots share one scope path.
+        if path.hasPrefix("/element/") || path == "/registry" {
+            waitForTransitionSettle()
+        }
+
         switch (method, path) {
         case ("GET", "/health"):
             return (200, ["ok": true])
@@ -484,6 +505,11 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                         default: v = nil
                         }
                     }
+                case "oracle_ops":
+                    // Present exactly on a roster row the oracle served; null on
+                    // any other — never the `default` arm's text read, which would
+                    // read an unserved row as served.
+                    v = e.attributes?()["oracle_ops"]
                 default:
                     // A named attribute the entry publishes wins (`Entry.attributes`);
                     // anything else keeps the generic value-then-text read.
@@ -607,14 +633,20 @@ public final class InProcessAutomationServer: @unchecked Sendable {
             // `ready` reflects the in-flight command honestly (no torn read with
             // the command Task that writes them).
             let (cmdId, isReady, state) = onMainActor {
-                (self.lastCommandId, self.ready, self.stateProvider?() ?? [:])
+                (self.lastCommandId, self.ready, self.stateProvider?())
+            }
+            guard let state else {
+                // Not bound yet (see `stateProvider`): no state is not an empty
+                // state, so a driver's "the app serves a state" poll keeps waiting.
+                return (503, ["error": "the app has not rendered its scene yet — "
+                    + "the state protocol is bound from its first .task"])
             }
             return (200, ["last_command_id": cmdId, "ready": isReady, "state": state])
         case ("POST", "/app/commands"):
             // The id + ready flag are set inside the dispatched main-actor Task
             // (not here), so `ready` can only flip true after the handler and
             // the resulting render have settled.
-            dispatchCommand(body)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.dispatchCommand(body) } }
             return (200, ["ok": true])
 
         // --- targeted scroll (real; linux serves this too) ---
@@ -647,6 +679,33 @@ public final class InProcessAutomationServer: @unchecked Sendable {
                     return (200, reply)
                 case .noScrollableAncestor:
                     return (200, ["error": "no scrollable ancestor"])
+                case .detached:
+                    return (200, ["error": "sentinel not realized (detached or no sentinel)"])
+                }
+            }
+
+        // Place an element so `fraction` of its height shows above its scroll
+        // view's bottom edge, and answer the fraction measured after the move
+        // (`e2e-conventions.md` § Driver primitives → *Placing an element at a
+        // measured fraction*). Reply shape is linux's 1:1
+        // (`automation/agent.rs::scroll_to_bottom_fraction`).
+        case ("POST", "/element/scroll-to-bottom-fraction"):
+            guard let fraction = (body["fraction"] as? NSNumber)?.doubleValue,
+                  (0.0...1.0).contains(fraction) else {
+                return (400, ["error": "fraction must be a number in 0...1"])
+            }
+            return onMainActor {
+                guard let place = AutomationRegistry.shared.resolvedScrollToBottomFraction(
+                    id, scope: scopeSteps, leafIndex: leafIndex) else {
+                    return self.notFound(id, leafIndex)
+                }
+                switch place(CGFloat(fraction)) {
+                case .placed(let measured):
+                    return (200, ["found": true, "fraction": measured])
+                case .noScrollableAncestor:
+                    return (200, ["error": "no scrollable ancestor"])
+                case .noHeight:
+                    return (200, ["error": "the element has no height to place"])
                 case .detached:
                     return (200, ["error": "sentinel not realized (detached or no sentinel)"])
                 }
@@ -772,6 +831,66 @@ public final class InProcessAutomationServer: @unchecked Sendable {
         (409, ["error": "\(route): \(id) is not actuable", "id": id, "index": index])
     }
 
+    /// Ceiling on how long an element request waits out a view-controller
+    /// transition. A push or pop animates in well under a second; past this the
+    /// request answers from the frame as it stands, so a wedged coordinator turns
+    /// into the caller's own assertion failure, never a hung server.
+    private static let transitionSettleBudget: TimeInterval = 5
+    /// How often the server thread re-reads the transition state while waiting.
+    private static let transitionPollInterval: useconds_t = 20_000
+
+    /// Block this (server) thread until no UIKit view-controller transition is
+    /// in flight — registration rule 12 (apple-e2e-automation.md). During a
+    /// `NavigationStack` push or pop the outgoing page's elements are genuinely
+    /// on screen and leave one at a time as each frame slides out, and both
+    /// pages' slots resolve under the same scope path, so a read or drive during
+    /// the animation lands on either page. Waiting here reads the app's own
+    /// transition state, never the clock (convention 14), and holds for every
+    /// sub-page change, whether a `set_state` or a click started it. macOS has
+    /// no animated stack transition and returns at once.
+    private func waitForTransitionSettle() {
+        #if os(iOS)
+        let deadline = Date().addingTimeInterval(Self.transitionSettleBudget)
+        var waited = false
+        while onMainActor({ Self.viewControllerTransitionInFlight() }) {
+            waited = true
+            guard Date() < deadline else {
+                NSLog("[InProcessAutomation] transition still in flight after %.0fs; answering anyway",
+                      Self.transitionSettleBudget)
+                return
+            }
+            usleep(Self.transitionPollInterval)
+        }
+        // The coordinator ends inside the completion pass; the outgoing page's
+        // `.onDisappear` and sentinel detach run on the pass after it. One more
+        // main-actor hop lets them land before the read.
+        if waited { onMainActor { () } }
+        #endif
+    }
+
+    #if os(iOS)
+    /// Whether any view controller in the app's visible windows is in the
+    /// middle of an animated transition (a push, pop, present or dismiss).
+    @MainActor private static func viewControllerTransitionInFlight() -> Bool {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows where !window.isHidden {
+                var next = window.rootViewController
+                while let vc = next {
+                    if subtreeTransitioning(vc) { return true }
+                    next = vc.presentedViewController
+                }
+            }
+        }
+        return false
+    }
+
+    @MainActor private static func subtreeTransitioning(_ vc: UIViewController) -> Bool {
+        if vc.transitionCoordinator != nil { return true }
+        return vc.children.contains { subtreeTransitioning($0) }
+    }
+    #endif
+
     /// Run `work` on the main actor (the registry + SwiftUI state are main-only).
     /// The server runs on its own thread, so `.sync` to main never self-deadlocks.
     private func onMainActor<T>(_ work: @MainActor () -> T) -> T {
@@ -795,30 +914,41 @@ public final class InProcessAutomationServer: @unchecked Sendable {
     /// `ready=false`-while-processing discipline (the hosted server lost it when
     /// it hard-coded `ready:true`, which is what made conditionally-shown
     /// controls go stale across the reused driver — known limitation (d)).
+    ///
+    /// The handler is resolved HERE, on the main actor, never captured where
+    /// the request was read: a command read before the bind but run after it
+    /// would otherwise still reach the pre-render closures. Before the bind the
+    /// command is held, not dropped (convention 11), and `configure` runs it.
+    @MainActor
     private func dispatchCommand(_ command: [String: Any]) {
-        guard let handler = commandHandler else { return }
+        guard let handler = commandHandler else {
+            pendingCommands.append(command)
+            return
+        }
         let cmdId = command["id"] as? String ?? ""
         let action = command["action"] as? String ?? "patch"
-        DispatchQueue.main.async {
-            Task { @MainActor in
-                self.lastCommandId = cmdId
-                self.ready = false
-                switch action {
-                case "patch":
-                    if let state = command["state"] as? [String: Any] { await handler(state) }
-                case "reset": await handler(["__action": "reset"])
-                case "logout": await handler(["__action": "logout"])
-                default:
-                    var fwd = command
-                    fwd["__action"] = action
-                    await handler(fwd)
-                }
-                // Yield the main actor so SwiftUI flushes the re-render this
-                // state change triggers (registering any newly-shown control)
-                // before we ack.
-                try? await Task.sleep(for: .milliseconds(Self.renderSettleMs))
-                self.ready = true
+        Task { @MainActor in
+            self.lastCommandId = cmdId
+            self.ready = false
+            switch action {
+            case "patch":
+                if let state = command["state"] as? [String: Any] { await handler(state) }
+            case "reset":
+                TestAgentBootstrap.faultAtResetIfAsked()
+                await handler(["__action": "reset"])
+            case "logout":
+                TestAgentBootstrap.faultAtResetIfAsked()
+                await handler(["__action": "logout"])
+            default:
+                var fwd = command
+                fwd["__action"] = action
+                await handler(fwd)
             }
+            // Yield the main actor so SwiftUI flushes the re-render this
+            // state change triggers (registering any newly-shown control)
+            // before we ack.
+            try? await Task.sleep(for: .milliseconds(Self.renderSettleMs))
+            self.ready = true
         }
     }
 }

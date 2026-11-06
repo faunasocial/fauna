@@ -722,10 +722,10 @@ fn is_mls_conflict<E: RpcErrorClass>(e: &E) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_tracing::capture_tracing_at_info;
     use fauna_client_testkit::block_on;
     use fauna_protocol::RpcError;
     use fauna_protocol::mls_replica::CODE_CONFLICT;
+    use fauna_test_tracing::capture_tracing_at_info;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 

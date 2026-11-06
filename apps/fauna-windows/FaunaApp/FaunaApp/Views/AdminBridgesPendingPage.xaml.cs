@@ -32,9 +32,6 @@ public sealed partial class AdminBridgesPendingPage : Page
     private readonly ObservableCollection<PendingBridgeItem> _cards = new();
     private readonly ObservableCollection<ApprovedBridgeItem> _approved = new();
 
-    /// <summary>Pubkey of the approved bridge the open rotate-confirm overlay acts on.</summary>
-    private string? _rotateTarget;
-
     public AdminBridgesPendingPage()
     {
         this.InitializeComponent();
@@ -148,6 +145,10 @@ public sealed partial class AdminBridgesPendingPage : Page
         }
         ApprovedEmptyText.Visibility = _approved.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
+        // The open dialog is the shared machine's `armed` (one at a time).
+        RejectOverlay.Visibility = snap.armed is BridgeConfirm.Reject ? Visibility.Visible : Visibility.Collapsed;
+        RotateOverlay.Visibility = snap.armed is BridgeConfirm.Rotate ? Visibility.Visible : Visibility.Collapsed;
+
         if (snap.error is { } err)
         {
             ShowError(err);
@@ -180,59 +181,52 @@ public sealed partial class AdminBridgesPendingPage : Page
         }
     }
 
-    private async void RejectButton_Click(object sender, RoutedEventArgs e)
+    /// <summary>Open the `admin-bridges-reject-confirm` overlay for this card: arm the
+    /// shared machine's <c>BridgeConfirm.Reject</c> (sync, so the overlay paints in the
+    /// click's own frame; mail-bridge-lifecycle.md § Pending approval).</summary>
+    private void RejectButton_Click(object sender, RoutedEventArgs e)
     {
         if (_machine is null) return;
         if ((sender as FrameworkElement)?.DataContext is not PendingBridgeItem item) return;
-        ((Button)sender).IsEnabled = false;
-        try
-        {
-            await _machine.Dispatch(new BridgeApprovalAction.Reject(item.PubkeyHex));
-            RenderSnapshot(_machine.Snapshot());
-        }
-        catch (Exception ex)
-        {
-            ShowError(Strings.Error(ex));
-        }
+        _machine.Arm(new BridgeConfirm.Reject(item.PubkeyHex));
+        RenderSnapshot(_machine.Snapshot());
     }
 
     /// <summary>Open the `admin-bridges-rotate-confirm` overlay for this card
-    /// (mail-bridge-lifecycle.md § Service-user re-keying). Mirrors linux
-    /// open_rotate_confirm.</summary>
+    /// (mail-bridge-lifecycle.md § Service-user re-keying) by arming the shared
+    /// machine's <c>BridgeConfirm.Rotate</c>.</summary>
     private void RotateButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_machine is null) return;
         if ((sender as FrameworkElement)?.DataContext is not ApprovedBridgeItem item) return;
-        _rotateTarget = item.PubkeyHex;
-        RotateOverlay.Visibility = Visibility.Visible;
+        _machine.Arm(new BridgeConfirm.Rotate(item.PubkeyHex));
+        RenderSnapshot(_machine.Snapshot());
     }
 
-    private void RotateCancel_Click(object sender, RoutedEventArgs e)
+    /// <summary>Cancel either open confirm: the shared machine disarms.</summary>
+    private void ConfirmCancel_Click(object sender, RoutedEventArgs e)
     {
-        CloseRotateOverlay();
+        if (_machine is null) return;
+        _machine.Disarm();
+        RenderSnapshot(_machine.Snapshot());
     }
 
-    /// <summary>Confirm the rotation: dispatch the shared machine's Rotate action
-    /// (→ `fauna.bridges.revoke_service_user`), which re-refreshes, so the rotated
-    /// bridge drops out of the approved roster.</summary>
-    private async void RotateConfirm_Click(object sender, RoutedEventArgs e)
+    /// <summary>Confirm the open dialog: the shared machine's <c>Confirm</c> disarms and
+    /// runs the armed act (reject → `fauna.bridges.reject_pending_bridge`; rotate →
+    /// `fauna.bridges.revoke_service_user`), then re-reads, so the card drops out.</summary>
+    private async void ConfirmButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_machine is null || _rotateTarget is not { } pubkeyHex) return;
-        CloseRotateOverlay();
+        if (_machine is null) return;
         try
         {
-            await _machine.Dispatch(new BridgeApprovalAction.Rotate(pubkeyHex));
-            RenderSnapshot(_machine.Snapshot());
+            await _machine.Dispatch(new BridgeApprovalAction.Confirm());
         }
         catch (Exception ex)
         {
             ShowError(Strings.Error(ex));
+            return;
         }
-    }
-
-    private void CloseRotateOverlay()
-    {
-        RotateOverlay.Visibility = Visibility.Collapsed;
-        _rotateTarget = null;
+        RenderSnapshot(_machine.Snapshot());
     }
 
     private void ShowError(string msg)

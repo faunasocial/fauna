@@ -1276,7 +1276,7 @@ where
                 manifest_bytes,
                 manifest_hash: entry.manifest_hash,
                 chunks,
-                content_key_version: None,
+                content_stamp: None,
             };
 
             if !budget.admits(sealed.stored_bytes(), self.cap_bytes) {
@@ -2377,10 +2377,7 @@ mod tests {
         }
         let old = std::time::SystemTime::now()
             - std::time::Duration::from_secs(crate::segment_backup::STALE_STAGING_SECS + 3_600);
-        std::fs::File::open(&stale)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
+        crate::segment_backup::backdate_dir(&stale, old);
 
         rig.pull(None).run_once("mail", 0).await.unwrap();
 

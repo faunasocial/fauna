@@ -68,8 +68,13 @@ public struct LogsView: View {
     public enum Source {
         /// The process-global client ring (`logSnapshot()` + `logClear()`).
         case clientRing
-        /// The nest ring, fetched over `fauna.admin.logs` (`FfiAdminClient.logs()`).
-        case admin(load: () async throws -> [LogEntry])
+        /// The nest ring, fetched over `fauna.admin.logs` (`FfiAdminClient.logs()`),
+        /// plus — when `audit` is given — the admin audit log section below the
+        /// log lines (`admin.md` § The admin audit log on `admin-logs`): the rows,
+        /// the chain-check line and the cursor all come from the shared
+        /// `FfiAuditLog` (`fauna_client_admin::audit_log_view`), never re-derived.
+        case admin(load: () async throws -> [LogEntry],
+                   audit: (() async throws -> FfiAuditLog?)? = nil)
     }
 
     private let source: Source
@@ -80,6 +85,9 @@ public struct LogsView: View {
     @State private var entries: [LogEntry] = []
     @State private var filterLabel: String = L.logs.filterAll
     @State private var errorText: String?
+    /// The audit section's state, held in Rust; fetched once per page entry.
+    @State private var auditLog: FfiAuditLog?
+    @State private var auditView: FfiAuditLogView?
 
     public init(source: Source, headingId: String? = nil) {
         self.source = source
@@ -133,17 +141,29 @@ public struct LogsView: View {
                 ErrorBanner(message: errorText)
             }
 
-            if rows.isEmpty {
+            if rows.isEmpty && !hasAuditSection {
                 Text(L.logs.empty)
                     .foregroundStyle(.secondary)
                     .padding(.top, 8)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    // Eager, not lazy: the automation registry registers a row when
+                    // its view is built, so a lazy stack hides every row below the
+                    // fold from `log-entry` queries (the older planted line in
+                    // admin-logs 3 sits past the nest's startup lines).
+                    VStack(alignment: .leading, spacing: 0) {
+                        if rows.isEmpty {
+                            Text(L.logs.empty)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 8)
+                        }
                         // `rows` is already newest-first (shared `format::rows`).
                         ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                             entryRow(row)
                             Divider()
+                        }
+                        if hasAuditSection {
+                            auditSection
                         }
                     }
                 }
@@ -152,6 +172,54 @@ public struct LogsView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var hasAuditSection: Bool {
+        if case .admin(_, let audit) = source { return audit != nil }
+        return false
+    }
+
+    /// The admin audit log section (`admin-audit-section`): heading, one
+    /// `admin-audit-entry` per shared view row (absolute local time, then the
+    /// resolved text), the one integrity line, and `admin-audit-more-button`
+    /// (enabled iff the view still holds a cursor).
+    private var auditSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            automationText(Ids.adminAuditSection, L.admin.logsPage.auditTitle)
+                .font(.headline)
+                .padding(.top, 16)
+            if let view = auditView {
+                ForEach(Array(view.rows.enumerated()), id: \.offset) { _, row in
+                    auditEntryRow(row)
+                    Divider()
+                }
+                automationText(Ids.adminAuditIntegrityStatus, renderLocalizedText(view.integrityText))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            let canPageOlder = auditView?.moreBeforeId != nil
+            Button(L.admin.logsPage.auditMore) {
+                Task { await auditMore() }
+            }
+            .disabled(!canPageOlder)
+            .accessibilityIdentifier(Ids.adminAuditMoreButton)
+            .automationActivate(Ids.adminAuditMoreButton, isEnabled: { canPageOlder }) {
+                Task { await auditMore() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func auditEntryRow(_ row: FfiAuditLogRow) -> some View {
+        let line = "\(ValueFormat.absoluteDate(epochMs: row.tsMs, withTime: true))  \(renderLocalizedText(row.text))"
+        return Text(line)
+            .font(.callout)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier(Ids.adminAuditEntry)
+            .accessibilityLabel(line)
+            .automationValue(Ids.adminAuditEntry, text: { line })
     }
 
     private var controls: some View {
@@ -225,13 +293,33 @@ public struct LogsView: View {
         switch source {
         case .clientRing:
             entries = logSnapshot()
-        case .admin(let loader):
+        case .admin(let loader, let auditLoader):
             do {
                 entries = try await loader()
                 errorText = nil
             } catch {
                 errorText = error.localizedDescription
             }
+            // A failed audit read lands on the same banner and keeps the rows held.
+            guard let auditLoader else { return }
+            do {
+                guard let log = try await auditLoader() else { return }
+                auditLog = log
+                auditView = try await log.load()
+            } catch {
+                errorText = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func auditMore() async {
+        guard let log = auditLog else { return }
+        do {
+            auditView = try await log.more()
+            errorText = nil
+        } catch {
+            errorText = error.localizedDescription
         }
     }
 }

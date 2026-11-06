@@ -692,6 +692,21 @@ impl NestApi for WsNestApi {
             .lock_account_with_seed(secret_hex)
             .await
     }
+
+    async fn read_nest_rules(&self, base_url: &str) -> Result<NestRulesAnswer, NestRulesError> {
+        self.core(base_url)
+            .await
+            .map_err(|e| match e {
+                CoreError::IdentityMismatch { reason, .. } => {
+                    NestRulesError::IdentityMismatch { reason }
+                }
+                CoreError::Transient { reason } | CoreError::AppOutdated { reason } => {
+                    NestRulesError::Transient { cause: reason }
+                }
+            })?
+            .read_nest_rules()
+            .await
+    }
 }
 
 #[cfg(test)]

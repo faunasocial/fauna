@@ -219,3 +219,37 @@ internal sealed class DisabledActuationException : Exception
         Index = index;
     }
 }
+
+/// <summary><c>select</c> was asked for an option the picker never painted —
+/// convention 11's twin rule (a picker refuses a value the frame did not offer).
+/// <c>Program</c> answers it 409, as tui, linux and web do, so
+/// <c>drivers/http_bridge.py::select</c> raises <c>SelectOptionNotOffered</c> and a
+/// caller that polls for an option to appear (<c>actions/media.py</c>'s
+/// <c>set_filter</c>, <c>actions/feed.py</c>'s <c>wait_for_audience_option</c>)
+/// retries instead of dying on a 500.
+///
+/// <para>⚠ The wording must never contain the disabled-actuation text
+/// (<see cref="ActuationGate.RefusalMessage"/>): both refusals answer 409 on this
+/// route, and the driver tells them apart on that substring alone. It names the
+/// value, the picker and what the popup did paint, so the failure diagnoses
+/// itself (convention 6).</para></summary>
+internal sealed class SelectOptionNotOfferedException : Exception
+{
+    public string Id { get; }
+    public int Index { get; }
+    public string Value { get; }
+
+    public SelectOptionNotOfferedException(string id, int index, string value, string painted)
+        : base(NotOfferedMessage(id, index, value, painted))
+    {
+        Id = id;
+        Index = index;
+        Value = value;
+    }
+
+    /// <summary>Pure, so <see cref="SelfTest.ActuationGateChecks"/> pins it with no
+    /// popup. The shape of tui's and linux's own not-offered refusal.</summary>
+    public static string NotOfferedMessage(string id, int index, string value, string painted)
+        => $"select target \"{value}\" is not offered by \"{id}\"[{index}] — "
+         + $"this frame painted [{painted}]";
+}

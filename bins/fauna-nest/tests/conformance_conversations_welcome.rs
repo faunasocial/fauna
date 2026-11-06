@@ -671,6 +671,64 @@ async fn deliver_dm_flows_for_an_accepted_contact_under_every_mode() {
 }
 
 #[tokio::test]
+async fn deliver_dm_from_the_acceptor_to_the_requester_flows_under_allow_knock() {
+    // A knocks B, B accepts: the accept writes A's edge too (`ui/contacts.md`
+    // § Persistence → *The accept makes the edge mutual*), so B's DM Welcome
+    // to A delivers under A's default `allow_knock` — B is no stranger to the
+    // person who asked to hear from B.
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db));
+    let mut b = RpcRouter::builder();
+    conversations_handlers::register_conversations_handlers(&mut b);
+    fauna_nest::contacts_handlers::register_contacts_handlers(&mut b);
+    let router = b.build();
+    let requester = [0xF1u8; 32];
+    let acceptor = [0xF2u8; 32];
+    state
+        .db
+        .create_user_with_handle(&requester, "free", "req", None)
+        .await
+        .unwrap();
+    state
+        .db
+        .push_knock(&acceptor, &requester, b"n", "knock", &[])
+        .await
+        .unwrap();
+
+    dispatch(
+        &router,
+        state.clone(),
+        acceptor,
+        "fauna.knocks.accept",
+        Bytes::from(
+            encode_canonical(&fauna_protocol::contacts::KnockActionRequest {
+                peer_id: hex::encode(requester),
+                extra: std::collections::BTreeMap::new(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect("accept ok");
+
+    dispatch(
+        &router,
+        state,
+        acceptor,
+        "fauna.conversations.welcome.deliver",
+        deliver_payload(
+            &hex::encode(requester),
+            &"ab".repeat(32),
+            vec![0x05],
+            WelcomeKind::Dm,
+        ),
+    )
+    .await
+    .expect("the acceptor's DM Welcome to the requester must deliver");
+}
+
+#[tokio::test]
 async fn deliver_folder_share_by_the_channels_claimant_is_not_mode_gated() {
     // The recipient-side pending-share gate stages a stranger's share
     // (folders.md § Sharing), so the mode gate must not pre-empt it. What

@@ -73,7 +73,7 @@ from helpers.scheduling_inbox import (
 )
 from helpers.succession import register_recovery_kit, succeed_identity
 from helpers.waiting import wait_until
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from i18n.strings import S
 from tests.api import conv_api
 
@@ -161,7 +161,7 @@ def test_mailbox_less_attendee_gets_sealed_scheduling_through_real_mda(
     #       published real key packages but NO mail alias. Self-service registration
     #       (`create_user_with_handle`) is the e2e mirror of the conformance test's
     #       `register_addressable` (db.create_user_with_handle). ──
-    carol = register_handled_actor(nest["port"], handle=_ATTENDEE_HANDLE, domain=domain)
+    carol = admit_adult(nest, _ATTENDEE_HANDLE, domain=domain, token=True)
     attendee_addr = f"{_ATTENDEE_HANDLE}@{domain}"  # carol@fauna.test
     stored = conv_api.keypackage_upload(
         nest["port"], carol, conv_api.mint_key_packages(bytes(carol["signing_key"]), _KP_COUNT)
@@ -591,7 +591,7 @@ def test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page(
     #       as a contact — a stranger's scheduling Welcome is held to carol's
     #       inbox mode like any other (only the MDA gateway's rail is exempt), and
     #       the point here is what happens AFTER delivery. ──
-    mallory = register_handled_actor(nest["port"], handle="mallory", domain=domain)
+    mallory = admit_adult(nest, "mallory", domain=domain, token=True)
     conv_api.accept_contact(nest["port"], carol, mallory["actor_id_hex"])
 
     # ── 8. mallory forges the organizer's CANCEL: fetch one of carol's key
@@ -700,7 +700,7 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
     # ── 5. dana: a Fauna account carol has accepted as a contact (a Welcome from
     #       a non-contact is held to carol's inbox mode, like mallory's in the
     #       forged-CANCEL journey), holding a registered RecoveryKey. ──
-    dana = register_handled_actor(nest["port"], handle="dana", domain=domain)
+    dana = admit_adult(nest, "dana", domain=domain, token=True)
     conv_api.accept_contact(nest["port"], carol, dana["actor_id_hex"])
     dana_seed = bytes(dana["signing_key"]).hex()
     kit_secret = register_recovery_kit(
@@ -745,7 +745,7 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
 
     # ── 8. A stranger's CANCEL, after the succession: still refused — the walk
     #       ends at the heir, not at mallory. ──
-    mallory = register_handled_actor(nest["port"], handle="mallory", domain=domain)
+    mallory = admit_adult(nest, "mallory", domain=domain, token=True)
     conv_api.accept_contact(nest["port"], carol, mallory["actor_id_hex"])
     _deliver_as_fauna_app(nest, mallory, carol, _cancel_imip(invite, attendee_addr))
     wait_until(
@@ -801,6 +801,11 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
 # conditional — an invisible skip, which e2e convention 7 exists to forbid. So
 # the column set is declared in the markers, where the ratchet can see it, and
 # grows as each app lands its render.
+# android-marked 2026-10-28, TEST level: android renders
+# the list (`EventsScreen.kt`'s `RefusedChangeList`, the six `refused-change-*`
+# ids), repaints it on the store-change tick with the page open
+# (`EventsVMStoreChangeTest`), and takes carol's seat on this rail exactly as the
+# android-marked siblings above do.
 @pytest.mark.feature("calendar-and-events")
 @pytest.mark.tui
 @pytest.mark.linux
@@ -808,6 +813,7 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 def test_a_refused_cancel_is_listed_on_the_events_page(
     app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,
@@ -849,7 +855,7 @@ def test_a_refused_cancel_is_listed_on_the_events_page(
     # mallory forges the organizer's CANCEL and delivers it herself, exactly as
     # the sibling does: the two calls a Fauna app makes, with the nest attesting
     # HER as the poster.
-    mallory = register_handled_actor(nest["port"], handle="mallory", domain=domain)
+    mallory = admit_adult(nest, "mallory", domain=domain, token=True)
     conv_api.accept_contact(nest["port"], carol, mallory["actor_id_hex"])
     _deliver_as_fauna_app(nest, mallory, carol, _cancel_imip(invite, attendee_addr))
 

@@ -46,6 +46,16 @@ const SET_P2P_PARTICIPATION_ERROR_KEY: &str = "devices.error_set_p2p_participati
 /// device's peer transfers on — enabling is local consent on that device
 /// (`behavior/p2p.md` § Per-device participation), so nothing is sent.
 const P2P_REMOTE_ENABLE_KEY: &str = "devices.error_p2p_remote_enable";
+/// i18n key for a `rename_device` failure at the nest (`{message}`).
+const RENAME_DEVICE_ERROR_KEY: &str = "devices.error_rename_device";
+/// i18n key for the refusal `rename_device` makes before any call: no seal
+/// could be minted, and the wire carries no plaintext name.
+const RENAME_NEEDS_KEY_ERROR_KEY: &str = "devices.error_rename_needs_key";
+/// i18n key for the refusal `rename_device` makes before any call: the typed
+/// name is one of the machine-authored app defaults
+/// (`label_custody::is_synthetic_device_label`), which never names a row by
+/// the user's hand and so cannot seal.
+const RENAME_RESERVED_NAME_ERROR_KEY: &str = "devices.error_rename_reserved_name";
 /// i18n key for `remove_device`'s fleet-scope leg failing (the nest deletion
 /// already succeeded — see [`DevicesMachine::remove_device`]).
 const REMOVE_FLEET_DEVICE_ERROR_KEY: &str = "devices.error_remove_fleet_device";
@@ -285,6 +295,12 @@ pub trait P2pParticipation: fauna_core::MaybeSendSync {
 /// Internal page state. In-memory only; clients read snapshots via the getter.
 struct State {
     devices: Vec<DeviceSummary>,
+    /// Each listed row's NAME by `device_id` — the opened name, before rule
+    /// (c)'s ` · code` composition overwrote `DeviceSummary::label`
+    /// (`devices.md` § Device names). What the rename editor opens on and
+    /// what [`DevicesMachine::rename_device`] compares an unchanged confirm
+    /// against. Replaced with `devices` on every good roster read.
+    device_names: std::collections::HashMap<String, String>,
     folders: Vec<FolderSummary>,
     /// Followed public folders — their own row kind, their own list.
     followed: Vec<FollowedFolderSummary>,
@@ -294,8 +310,13 @@ struct State {
     website_address_enabled: Option<bool>,
     /// The open folder wizard, if any. Surfaced as `DevicesSnapshot.wizard`.
     wizard: Option<Arc<FolderWizardMachine>>,
-    /// Last page-level error (the `error-message` element); `None` when clear.
-    error: Option<LocalizedText>,
+    /// The last gesture's error, with the `refresh_started` count when it was
+    /// raised — a `refresh` already in flight then read the page before this
+    /// gesture, and leaves it standing. Only a later `refresh` retires it,
+    /// never a `resync` ([`State::page_error`]).
+    gesture_error: Option<(LocalizedText, u64)>,
+    /// The last re-read's own failure; every re-read replaces it.
+    read_error: Option<LocalizedText>,
     /// The member door's read — `DevicesSnapshot::{members, own_fleet_id,
     /// own_fingerprint}`; empty/`None` until a wired door answers.
     members: Vec<FleetMemberSummary>,
@@ -312,18 +333,29 @@ impl State {
     fn new() -> Self {
         Self {
             devices: Vec::new(),
+            device_names: std::collections::HashMap::new(),
             folders: Vec::new(),
             followed: Vec::new(),
             conflicts: Vec::new(),
             website_address_enabled: None,
             wizard: None,
-            error: None,
+            gesture_error: None,
+            read_error: None,
             members: Vec::new(),
             own_fleet_id: None,
             own_fingerprint: None,
             own_p2p_participation: None,
             p2p_own_row: OwnRowAnswer::NoDoor,
         }
+    }
+
+    /// The page-level error (the `error-message` element), `None` when clear:
+    /// a gesture's own answer first, else the last re-read's failure.
+    fn page_error(&self) -> Option<&LocalizedText> {
+        self.gesture_error
+            .as_ref()
+            .map(|(error, _)| error)
+            .or(self.read_error.as_ref())
     }
 }
 
@@ -820,7 +852,39 @@ impl DevicesMachine {
     /// user may need to revoke — the one outcome worse than an unnamed row. Same
     /// reasoning as conflict `details`, which degrades to `None` rather than
     /// dropping the conflict.
-    async fn render_devices(&self, rows: Vec<SyncDevice>) -> Vec<DeviceSummary> {
+    ///
+    /// Also answers each row's opened name by `device_id` — what the label
+    /// read before the composition ([`State::device_names`]).
+    async fn render_devices(
+        &self,
+        rows: Vec<SyncDevice>,
+    ) -> (
+        Vec<DeviceSummary>,
+        std::collections::HashMap<String, String>,
+    ) {
+        let mut summaries = self.open_device_labels(rows).await;
+        let opened = summaries
+            .iter()
+            .map(|d| (d.device_id.clone(), d.label.clone()))
+            .collect();
+        // Rule (c) of `devices.md` § Device names: over the OPENED names, on
+        // both of `open_device_labels`' paths — two unrenamed phones rest their
+        // plaintext app default with no seal, which is exactly the all-unsealed
+        // skip, and exactly the case the rule exists for.
+        let names = fauna_core::format::device_roster_names(
+            summaries
+                .iter()
+                .map(|d| (d.label.as_str(), d.device_id.as_str())),
+        );
+        for (summary, name) in summaries.iter_mut().zip(names) {
+            summary.label = name;
+        }
+        (summaries, opened)
+    }
+
+    /// [`Self::render_devices`]' first half: each row's label opened under the
+    /// owner's read custody, then transcribed.
+    async fn open_device_labels(&self, rows: Vec<SyncDevice>) -> Vec<DeviceSummary> {
         let rows = self.render_device_places(rows).await;
         // The ONLY safe skip, exactly as in `render_conflicts`: nothing on this
         // page is sealed. Deliberately NOT "custody is empty" — a keyless reader
@@ -1213,7 +1277,7 @@ impl DevicesMachine {
             conflicts: s.conflicts.clone(),
             website_address_enabled: s.website_address_enabled,
             wizard: s.wizard.as_ref().map(|w| w.snapshot()),
-            error: s.error.clone(),
+            error: s.page_error().cloned(),
             members: s.members.clone(),
             own_fleet_id: s.own_fleet_id.clone(),
             own_fingerprint: s.own_fingerprint.clone(),
@@ -1231,10 +1295,23 @@ impl DevicesMachine {
 
     // ── Gestures ────────────────────────────────────────────────────────
 
-    /// Re-read the device / folder / conflict lists. On a read failure the
-    /// prior data is kept and the page error is set; on success the error
-    /// clears. Notifies once.
+    /// Re-read the device / folder / conflict lists for a page visit or after
+    /// a gesture. On a read failure the prior data is kept and the page error
+    /// is set; on success the error clears, a gesture's included — unless that
+    /// gesture landed after this refresh began. Notifies once.
     pub async fn refresh(&self) {
+        self.reread(true).await
+    }
+
+    /// The same re-read for a background cause (a store-change notice, a push,
+    /// a poll, a reconnect): it answers no gesture, so it replaces only the
+    /// error a re-read put up and leaves a gesture's standing (`ui/devices.md`
+    /// § Errors & edge cases).
+    pub async fn resync(&self) {
+        self.reread(false).await
+    }
+
+    async fn reread(&self, retires_gesture_error: bool) {
         // The barrier generation, claimed synchronously at the first statement
         // (convention 14's "initiated synchronously" corollary): a refresh that
         // began after a reader's baseline always carries a larger one.
@@ -1250,8 +1327,13 @@ impl DevicesMachine {
         // the *event*, per observability.md § Log on the event, not the paint.
         tracing::debug!(target: "fauna_devices", "refresh: reading devices");
         // Sealed-first at ingest, same as the conflict rows below.
+        let mut device_names = std::collections::HashMap::new();
         let devices = match self.nest_api.list_devices().await {
-            Ok(rows) => Ok(self.render_devices(rows).await),
+            Ok(rows) => {
+                let (rendered, names) = self.render_devices(rows).await;
+                device_names = names;
+                Ok(rendered)
+            }
             Err(e) => Err(e),
         };
         tracing::debug!(
@@ -1426,7 +1508,10 @@ impl DevicesMachine {
             let mut s = self.state.lock().unwrap();
             let mut error: Option<LocalizedText> = None;
             match devices {
-                Ok(d) => s.devices = d,
+                Ok(d) => {
+                    s.devices = d;
+                    s.device_names = device_names;
+                }
                 Err(e) => error = Some(error_text(REFRESH_ERROR_KEY, e.detail())),
             }
             if let Some(view) = members {
@@ -1466,7 +1551,14 @@ impl DevicesMachine {
             if let Some(err) = &error {
                 tracing::warn!(target: "fauna_devices", "{}", err.log_line());
             }
-            s.error = error;
+            s.read_error = error;
+            if retires_gesture_error
+                && s.gesture_error
+                    .as_ref()
+                    .is_some_and(|(_, raised_at)| *raised_at < generation)
+            {
+                s.gesture_error = None;
+            }
             // The completion line the stage trace above is bracketed by: its
             // ABSENCE (with an entry line present) is the positive signal that a
             // read never came back, which no snapshot read can ever show. INFO,
@@ -1478,7 +1570,7 @@ impl DevicesMachine {
                 devices = s.devices.len(),
                 folders = s.folders.len(),
                 conflicts = s.conflicts.len(),
-                error = s.error.is_some(),
+                error = s.page_error().is_some(),
                 "refresh: snapshot committed"
             );
         }
@@ -1679,6 +1771,83 @@ impl DevicesMachine {
                 Err(e) => self.set_error(error_text(SET_P2P_PARTICIPATION_ERROR_KEY, e.detail())),
             }
         }
+    }
+
+    /// Name the listed device `device_id` `label` — the user-chosen name of
+    /// `devices.md` § Device names, rule (1), from any of the owner's apps on
+    /// any of their rows. Keyed by the row's id, never a list position: the
+    /// user types between choosing the row and confirming, and a refresh in
+    /// that window must not retarget the name (the
+    /// [`Self::remove_member_by_id`] reasoning).
+    ///
+    /// The name is sealed here under the owner's root through the one seal
+    /// site the provisioner's register shares
+    /// (`label_custody::seal_owner_device_label`) and sent as
+    /// `fauna.sync.devices.rename`. **Nothing is sent without a seal** — the
+    /// wire carries no plaintext: a reader holding no owner key, a label the
+    /// seal declines (a machine-authored one, which never names a row by the
+    /// user's hand) or a failed seal refuses on `error-message` with no call.
+    /// Success re-reads the roster; a nest failure paints the page error and
+    /// changes nothing. A blank label and an id no longer listed are ignored,
+    /// and so is the row's own current name ([`Self::device_name`]) — the
+    /// editor confirmed unchanged, an unrenamed row's app default included.
+    /// A different app default typed by hand is refused with its own reason.
+    pub async fn rename_device(&self, device_id: String, label: String) {
+        let label = label.trim();
+        let current = {
+            let s = self.state.lock().unwrap();
+            s.devices
+                .iter()
+                .any(|d| d.device_id == device_id)
+                .then(|| s.device_names.get(&device_id).cloned().unwrap_or_default())
+        };
+        let Some(current) = current else {
+            return;
+        };
+        if label.is_empty() || label == current {
+            return;
+        }
+        if fauna_core::label_custody::is_synthetic_device_label(label) {
+            self.set_error(LocalizedText::key(RENAME_RESERVED_NAME_ERROR_KEY));
+            return;
+        }
+        let owner = self.label_custody.lock().unwrap().owner_key();
+        let sealed = owner.and_then(|owner| {
+            fauna_core::label_custody::seal_owner_device_label(&owner, &device_id, label)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        target: "fauna_devices",
+                        error = %e,
+                        "sealing the device name failed; nothing sent"
+                    );
+                })
+                .ok()
+                .flatten()
+        });
+        let Some(sealed) = sealed else {
+            self.set_error(LocalizedText::key(RENAME_NEEDS_KEY_ERROR_KEY));
+            return;
+        };
+        tracing::info!(target: "fauna_devices", %device_id, "rename_device");
+        match self.nest_api.rename_device(&device_id, sealed).await {
+            Ok(()) => self.refresh().await,
+            Err(e) => self.set_error(error_text(RENAME_DEVICE_ERROR_KEY, e.detail())),
+        }
+    }
+
+    /// The NAME of the listed row `device_id` — the opened name, without
+    /// rule (c)'s ` · code` the roster paints beside an alike name
+    /// (`devices.md` § Device names). `device-rename-input` opens prefilled
+    /// with it (`ui/devices.md` § Device names), so a confirm left unchanged
+    /// is recognised as such. `None` for an id the last roster read did not
+    /// list.
+    pub fn device_name(&self, device_id: String) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .device_names
+            .get(&device_id)
+            .cloned()
     }
 
     /// `device-member-remove-confirm-button` — remove the signed-in device
@@ -2149,7 +2318,8 @@ impl DevicesMachine {
     /// metadata, never plaintext bodies). Shared Rust → all seven apps.
     fn set_error(&self, err: LocalizedText) {
         tracing::warn!(target: "fauna_devices", "{}", err.log_line());
-        self.state.lock().unwrap().error = Some(err);
+        let raised_at = self.refresh_started.load(Ordering::SeqCst);
+        self.state.lock().unwrap().gesture_error = Some((err, raised_at));
         self.observer.on_changed();
     }
 }

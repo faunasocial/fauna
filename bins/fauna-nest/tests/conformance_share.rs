@@ -998,6 +998,31 @@ async fn an_unregistered_private_link_serves_nothing() {
     }
 }
 
+/// A static dir built without the viewer entry (an older SPA build, version
+/// skew, a skipped second Vite config) fails CLOSED: the navigation answers a
+/// non-200 without the app shell, never `index.html` beside a link key in the
+/// address bar (`share-links.md` § The private-file extension, rules 3 and
+/// 4).
+#[tokio::test]
+async fn a_missing_viewer_entry_never_falls_back_to_the_app_shell() {
+    let nest = private_nest().await;
+    let token = nest.private_token();
+    nest.register(&token, Some(nest.sealed_envelope.clone()))
+        .await
+        .unwrap();
+    let static_dir = nest.state.config.nest.static_dir.clone().unwrap();
+    std::fs::remove_file(std::path::Path::new(&static_dir).join("share-viewer.html")).unwrap();
+    let (status, headers, body) = nest.get(&format!("/share/{token}"), true).await;
+    assert_ne!(status, axum::http::StatusCode::OK);
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!String::from_utf8_lossy(&body).contains(APP_SHELL_MARKER));
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    // `/app/` itself still serves its page for an unknown path.
+    let (status, _, body) = nest.get("/app/some/route", true).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains(APP_SHELL_MARKER));
+}
+
 /// In central web-app-origin mode the viewer navigation takes the same `302`
 /// the `/app/` rule gives: the path carried over, no fragment in the target —
 /// so the browser keeps the link key across the hop and sends it nowhere.

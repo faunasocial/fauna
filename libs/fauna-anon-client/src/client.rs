@@ -56,6 +56,12 @@ pub struct AnonymousNestClient {
     /// handshake to graduate the channel binding (`crate::trust`). Default
     /// (no cert) on a plain `ws://` dev nest.
     captured: crate::tls_verify::CaptureHandle,
+    /// Whether the socket went to a reach hint rather than to the URL's own
+    /// host — an explicit [`Self::connect_resolving`] address, or the
+    /// process reach table's fallback after the domain failed to connect
+    /// (`fauna_ws_substrate::reach_hint`). Diagnostic: the connection is
+    /// identical either way, since the request named the domain on both.
+    carried_by_hint: bool,
     /// Drives the inbound stream for the connection's lifetime; aborted by this
     /// type's [`Drop`] (so dropping the client closes the WS).
     ///
@@ -125,7 +131,8 @@ impl AnonymousNestClient {
         kind_registry: Arc<KindRegistry>,
         resolve: Option<std::net::SocketAddr>,
     ) -> Result<Self, AnonClientError> {
-        let (adapter, captured) = crate::ws::connect_anonymous(nest_url, resolve).await?;
+        let (adapter, captured, carried_by_hint) =
+            crate::ws::connect_anonymous(nest_url, resolve).await?;
         let close = adapter.close_signal();
         let (dispatcher, driver) = RpcDispatcher::new(adapter);
         // The wire `replay_forbidden` hint comes off this registry; a fresh
@@ -138,6 +145,7 @@ impl AnonymousNestClient {
             close,
             kind_registry,
             captured,
+            carried_by_hint,
             driver,
         })
     }
@@ -147,6 +155,11 @@ impl AnonymousNestClient {
     /// to verify the channel binding (`crate::trust::graduate_handshake`).
     pub fn captured_cert(&self) -> crate::tls_verify::CapturedCert {
         self.captured.lock().unwrap().clone()
+    }
+
+    /// Whether a reach hint's socket carried this connection (see the field).
+    pub fn carried_by_hint(&self) -> bool {
+        self.carried_by_hint
     }
 
     /// Authenticate the nest's identity on this **pre-identity** connection —

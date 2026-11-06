@@ -16,4 +16,13 @@ namespace FaunaApp.Helpers;
 public interface IHashImageLoader
 {
     Task<BitmapImage?> LoadAsync(string hash);
+
+    /// <summary>
+    /// Load <paramref name="hash"/> from the nest the post's own bytes rest on —
+    /// <paramref name="home"/> is the post's shared <c>post_blob_home</c>, passed through
+    /// UNCHANGED (typed <c>object</c> because the generated record is internal to
+    /// <c>FaunaApp.Core</c> and a public signature cannot name it). <c>null</c> = this
+    /// nest. A loader whose blobs are never a post's own bytes ignores it.
+    /// </summary>
+    Task<BitmapImage?> LoadAsync(string hash, object? home) => LoadAsync(hash);
 }

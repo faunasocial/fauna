@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using uniffi.fauna_feed;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core;
@@ -69,6 +70,20 @@ internal static class FeedManagerHost
     /// <see cref="GetOrBuildAsync"/>); replaced on rebuild, cleared at an actor change.</summary>
     private static Action? _offPageReconnectUnsub;
 
+    /// <summary>The cached manager's cue hydrate (<see cref="HydrateCuesOnceAsync"/>),
+    /// once started; dropped with the manager.</summary>
+    private static readonly OnceTask CueHydrate = new();
+
+    /// <summary>Guards <see cref="_cueTracker"/> and <see cref="_cueTrackerManager"/>:
+    /// the capture reads them on the UI thread, a player's reading and the test
+    /// agent may arrive from elsewhere.</summary>
+    private static readonly object CueTrackerLock = new();
+
+    /// <summary>The engagement-cue capture tracker of <see cref="_cueTrackerManager"/>
+    /// (<see cref="CueTrackerFor"/>).</summary>
+    private static FfiCueTracker? _cueTracker;
+    private static FfiFeedManager? _cueTrackerManager;
+
     /// <summary>
     /// The session's live manager, or <c>null</c> before the Feed page has built
     /// one (a state-protocol deep link straight to Settings can reach the e2e
@@ -104,6 +119,7 @@ internal static class FeedManagerHost
             var built = await build();
             _offPageReconnectUnsub?.Invoke();
             _offPageReconnectUnsub = null;
+            CueHydrate.Reset();
             _current = built;
             _builtOver = transport;
             if (transport is Services.INestRpcClient rpc)
@@ -128,6 +144,61 @@ internal static class FeedManagerHost
         finally
         {
             Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Fetch-on-session-start for the sealed <c>cues:v1</c> rollup
+    /// (<c>engagement-cues.md</c> § At rest) — ONCE per manager, the twin of web's
+    /// <c>hydrateCuesOnce</c> (linux and tui get the same by construction: their
+    /// hydrate runs where the manager is built). <c>HydrateCues</c> replaces the
+    /// live engine, so a second call would discard every verdict folded since the
+    /// first and not yet put; the Feed page loading again must not re-run it. A
+    /// failed hydrate is forgotten, so the next load retries, and throws: the
+    /// caller surfaces it (an unopenable rollup is a reported error, never a
+    /// silent fresh start).
+    /// </summary>
+    public static Task HydrateCuesOnceAsync(FfiFeedManager manager)
+        => ReferenceEquals(manager, _current)
+            ? CueHydrate.RunAsync(() => manager.HydrateCues())
+            // A manager this host no longer holds (an actor change mid-load) is
+            // hydrated where it stands and cached nowhere.
+            : manager.HydrateCues();
+
+    /// <summary>
+    /// The ONE engagement-cue capture tracker of <paramref name="manager"/> — one per
+    /// auth, never one per Feed-page mount, so what the tracker holds (its frozen test
+    /// clock included, <c>fauna_feed::CueTracker</c> § The test clock) outlives a trip
+    /// off the page, as on tui, linux, web (<c>cueTrackerFor</c>), android
+    /// (<c>FeedManagerHost.cueTracker</c>) and apple (<c>FeedVM.cueTracker()</c>). A
+    /// rebuilt manager (a re-auth or an account switch) gets a fresh tracker, and
+    /// <see cref="ResetForActorChange"/> drops it with the manager. The page's
+    /// <c>Feed.CueViewportObserver</c> drains it when the page is left, so a later
+    /// mount still starts with nothing tracked.
+    ///
+    /// <para>Only the host's <see cref="Current"/> manager has a kept tracker, the rule
+    /// <see cref="HydrateCuesOnceAsync"/> follows: a manager this host no longer holds
+    /// (a page left after an actor change, whose teardown runs after the reset) gets a
+    /// throwaway one, empty, so it records nothing for the outgoing identity and keeps
+    /// no reference to its manager.</para>
+    ///
+    /// <para>windows' <c>PostsList</c> is a non-virtualizing <c>StackPanel</c>: every
+    /// card stays realized wherever the list is scrolled, so a card the sample could
+    /// not read is held, not ended — <see cref="LeaveModel.HoldUnmeasured"/>, linux's
+    /// and apple's model; android's virtualized list takes the opposite one.</para>
+    /// </summary>
+    public static FfiCueTracker CueTrackerFor(FfiFeedManager manager)
+    {
+        lock (CueTrackerLock)
+        {
+            if (!ReferenceEquals(manager, _current)) return new FfiCueTracker(LeaveModel.HoldUnmeasured);
+            if (_cueTracker is { } live && ReferenceEquals(_cueTrackerManager, manager)) return live;
+            // The replaced tracker is not disposed here: a sample or a player's
+            // reading may still hold it, and the binding's finalizer frees it once
+            // nothing does.
+            _cueTracker = new FfiCueTracker(LeaveModel.HoldUnmeasured);
+            _cueTrackerManager = manager;
+            return _cueTracker;
         }
     }
 
@@ -159,7 +230,33 @@ internal static class FeedManagerHost
     {
         _offPageReconnectUnsub?.Invoke();
         _offPageReconnectUnsub = null;
+        CueHydrate.Reset();
         _current = null;
         _builtOver = null;
+        lock (CueTrackerLock)
+        {
+            _cueTracker = null;
+            _cueTrackerManager = null;
+        }
     }
+}
+
+/// <summary>
+/// A task run at most once until it succeeds: the first <see cref="RunAsync"/>
+/// starts it and every later call shares that same run, in flight or done; a run
+/// that faulted or was cancelled is replaced by the next call's fresh one.
+/// <see cref="Reset"/> forgets a run outright (the thing it ran for was
+/// replaced). Callers are on the UI thread, so no lock guards the slot.
+/// </summary>
+internal sealed class OnceTask
+{
+    private Task? _run;
+
+    public Task RunAsync(Func<Task> start)
+    {
+        if (_run is { IsFaulted: false, IsCanceled: false } running) return running;
+        return _run = start();
+    }
+
+    public void Reset() => _run = null;
 }

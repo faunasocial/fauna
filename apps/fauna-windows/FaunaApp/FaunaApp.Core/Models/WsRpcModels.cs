@@ -38,6 +38,28 @@ public enum ContactStatus : uint
     // now so the shared contact_status_label renders it correctly (contacts.md
     // § Where logic lives → Status badge text).
     Confirmed = 3,
+    // A relationship status this build does not name (a newer nest's). It is no
+    // longer filed under Accepted: that painted a confirm button and the "Accepted"
+    // label on it, and put it in the accepted section. Its wire string rides
+    // ContactInfo.WireStatus, which the label and the roster grouping read
+    // (contacts.md § Where logic lives → Roster status grouping).
+    Other = 4,
+}
+
+/// <summary>The <c>FfiContactItem.status</c> wire string → <see cref="ContactStatus"/>.
+/// The four statuses this build names map 1:1; any other is
+/// <see cref="ContactStatus.Other"/>, its string kept on
+/// <see cref="ContactInfo.WireStatus"/>.</summary>
+public static class ContactStatusWire
+{
+    public static ContactStatus Parse(string wire) => wire switch
+    {
+        "pending" => ContactStatus.Pending,
+        "accepted" => ContactStatus.Accepted,
+        "confirmed" => ContactStatus.Confirmed,
+        "blocked" => ContactStatus.Blocked,
+        _ => ContactStatus.Other,
+    };
 }
 
 // ── Data records ──
@@ -73,20 +95,37 @@ public record ContactInfo(string ActorId, string? Handle, ContactStatus Status, 
     /// Init-only; only the Find User result sets it.</summary>
     public string? NestUrl { get; init; }
 
+    /// <summary>The peer's home nest (<c>FfiContactItem.home_nest_url</c>, a roster
+    /// row) — the contact-row door carries it into the profile opener so a follow
+    /// from that page reaches the contact's own nest. Init-only.</summary>
+    public string? HomeNestUrl { get; init; }
+
+    /// <summary>The relationship status as the wire spelled it
+    /// (<c>FfiContactItem.status</c>, lowercased) — the string the shared status
+    /// functions take. Defaults to the enum name lowercased, which IS the wire string
+    /// for the four statuses this build names; <c>NestRpcClient.ContactsListAsync</c>
+    /// sets it from the wire, so a status this build does not name
+    /// (<see cref="ContactStatus.Other"/>) keeps its own string, label and roster
+    /// section. Init-only.</summary>
+    public string WireStatus { get; init; } = Status.ToString().ToLowerInvariant();
+
     /// <summary>
-    /// Localized status badge text (pending/accepted/confirmed/blocked) off the
-    /// shared <c>fauna_core::format::contact_status_label</c> via the value-format
-    /// FFI wrapper — the single source of truth across clients (contacts.md
-    /// § Where logic lives → Status badge text; priority #1/#2/#4). Replaces the
-    /// per-app <c>StatusToLabel</c> switch, which lacked a <c>Confirmed</c> arm
-    /// and rendered "Unknown". The enum name lowercases to the canonical wire
-    /// status string the shared fn expects. Computed get-only (no backing field) so
-    /// the record's synthesized equality is unaffected. The status <b>color</b>
-    /// stays the per-app <c>StatusToBrush</c> map (not lifted, per the goal doc).
+    /// Localized status badge text (pending/accepted/confirmed/blocked, or an unnamed
+    /// status's own text) off the shared <c>fauna_core::format::contact_status_label</c>
+    /// via the value-format FFI wrapper — the single source of truth across clients
+    /// (contacts.md § Where logic lives → Status badge text; priority #1/#2/#4).
+    /// Replaces the per-app <c>StatusToLabel</c> switch, which lacked a
+    /// <c>Confirmed</c> arm and rendered "Unknown". Computed get-only (no backing
+    /// field) so the record's synthesized equality is unaffected. The status
+    /// <b>color</b> stays the per-app <c>StatusToBrush</c> map (not lifted, per the
+    /// goal doc).
     /// </summary>
-    public string StatusLabel =>
-        Strings.Resolve(
-            uniffi.fauna_ffi.FaunaFfiMethods.ContactStatusLabel(Status.ToString().ToLowerInvariant()));
+    public string StatusLabel => ContactStatusHeading(WireStatus);
+
+    /// <summary>The shared label for a wire status string, resolved — a row's badge
+    /// and a roster section's heading read the same text.</summary>
+    public static string ContactStatusHeading(string wireStatus) =>
+        Strings.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.ContactStatusLabel(wireStatus));
 }
 
 /// <summary>One painted roster row: the wire row plus the names the shared overlay
@@ -105,6 +144,53 @@ public sealed record ContactRow(ContactInfo Contact, string Name, string? Public
     public string ActorId => Contact.ActorId;
     public ContactStatus Status => Contact.Status;
     public string StatusLabel => Contact.StatusLabel;
+    public string? HomeNestUrl => Contact.HomeNestUrl;
+
+    /// <summary>Phase two's affordances on this row (<c>archive-import.md</c> § Linking
+    /// and merging, ruling 8) — one paint per asked or linked pair, empty for every
+    /// other row. Built by <c>ArchiveLinksHost.RowPaints</c> from the shared views.</summary>
+    public IReadOnlyList<ArchiveLinkRowPaint> ArchiveLinks { get; init; } = Array.Empty<ArchiveLinkRowPaint>();
+}
+
+/// <summary>One section of the grouped contacts roster (contacts.md § Where logic
+/// lives → Roster status grouping): the rows holding one relationship
+/// <see cref="Status"/> (the wire string), in the roster's own order, under
+/// <see cref="Heading"/> — the shared <c>contact_status_label</c>, the text each row's
+/// badge reads too. The roster's sections come in the shared
+/// <c>contact_roster_group_order</c>; the page paints them as a grouped
+/// <c>ListView</c>, so the indexed <c>contact-row</c> ids count across sections in
+/// paint order. The heading carries no element id (ui.yaml scopes none). Built only
+/// by <c>ContactsViewModel</c>. Public with public members because a WinUI
+/// <c>x:Bind</c> to an internal type reads null.</summary>
+public sealed class ContactRosterSection : List<ContactRow>
+{
+    public ContactRosterSection(string status, IEnumerable<ContactRow> rows) : base(rows)
+    {
+        Status = status;
+        Heading = ContactInfo.ContactStatusHeading(status);
+    }
+
+    public string Status { get; }
+    public string Heading { get; }
+}
+
+/// <summary>Which of the two archive-link shapes a Contacts row paints.</summary>
+public enum ArchiveLinkRowKind { Asked, Linked }
+
+/// <summary>What one Contacts row paints for phase two of archive import
+/// (<c>archive-import.md</c> § Linking and merging, ruling 8; <c>contacts.md</c> § User
+/// actions): <see cref="ArchiveLinkRowKind.Asked"/> — <c>contact-archive-link-prompt</c>
+/// (<see cref="Text"/>) with <c>contact-archive-link-yes</c> / <c>-no</c>;
+/// <see cref="ArchiveLinkRowKind.Linked"/> — <c>contact-archive-linked</c>
+/// (<see cref="Text"/>) with <c>contact-archive-unlink</c>. <see cref="Text"/> is the
+/// machine crate's composer resolved through the localizer, never worded here;
+/// <see cref="Contact"/> and <see cref="Platform"/> are the view's own, carried into the
+/// shared answer and unlink calls. Public with public members because a WinUI
+/// <c>x:Bind</c> to an internal type reads null.</summary>
+public sealed record ArchiveLinkRowPaint(ArchiveLinkRowKind Kind, string Text, string Contact, string Platform)
+{
+    public bool IsAsked => Kind == ArchiveLinkRowKind.Asked;
+    public bool IsLinked => Kind == ArchiveLinkRowKind.Linked;
 }
 
 /// <summary>A pending incoming knock. <c>fauna.knocks.list</c> carries the sender's
@@ -114,8 +200,10 @@ public record KnockInfo(string ActorId, string? Summary, ulong Timestamp);
 /// <summary>One painted knock card: the <c>knock-sender</c> text is the shared
 /// resolver's answer for the sender (the viewer's nickname, else the canonical short
 /// id — <c>peer_label(None, None, id)</c>), never empty because it is also the
-/// <c>knock-card</c> root's <c>AutomationProperties.Name</c>.</summary>
-public sealed record KnockRow(KnockInfo Knock, string SenderLabel)
+/// <c>knock-card</c> root's <c>AutomationProperties.Name</c>.
+/// <paramref name="AwaitsGuardian"/> paints the card's <c>knock-guardian-pending</c>
+/// (<c>WardAsksCache.KnocksAwaitGuardian</c> when the row was built).</summary>
+public sealed record KnockRow(KnockInfo Knock, string SenderLabel, bool AwaitsGuardian = false)
 {
     public string ActorId => Knock.ActorId;
     public string? Summary => Knock.Summary;

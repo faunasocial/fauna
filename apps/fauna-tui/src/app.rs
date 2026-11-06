@@ -342,10 +342,17 @@ pub enum DataMessage {
     /// handler runs one background `drive_ceremonies` pass
     /// (`custody_glue::spawn_drive`), the record-then-act "act" half.
     CustodyCeremonyMoved,
+    /// The archive links moved (`archive-import.md` § Linking and merging):
+    /// a drive pass or an announce round finished, or the sink captured a
+    /// signal. The handler re-reads the Contacts rows while that page shows.
+    ArchiveLinksMoved,
     /// The sync-agent folder model's rendered binding set changed (a reconcile
     /// adopted or pushed a binding) — re-read + redraw, the payload-free observer
     /// tick shape (`FeedChanged` / `MediaChanged`).
     SyncAgentChanged,
+    /// The agent refused *use the other version* on a group set's review row:
+    /// nothing was written and the row stands. The reason, for `error-message`.
+    RetainedRestoreRefused(String),
     /// A user's bind of a location under the named set confirmed agent-side.
     /// The agent's bind enrols this device's place when it held none
     /// (`file-sync.md` § 4, *A local presence writes the place it needs*), so
@@ -460,6 +467,30 @@ macro_rules! spawn_nav_refresh {
 }
 pub(crate) use spawn_nav_refresh;
 
+/// Declare a payload-free tick observer: a `{ tx }` struct whose trait's
+/// `on_changed` sends one fixed [`UiMessage`] onto the render loop's channel —
+/// the shape the media, feed, search, conversations and critical-alerts
+/// observers each hand-copied (shared-Rust lift sweep, the tui twin of
+/// linux's `snapshot_wake_observer!`). A closed channel means the app is
+/// shutting down, so the send result is dropped. Doc comments go INSIDE the
+/// invocation (they pass through as attributes).
+macro_rules! tick_observer {
+    ($(#[$attr:meta])* $vis:vis $Name:ident, $Trait:path, $msg:expr) => {
+        $(#[$attr])*
+        $vis struct $Name {
+            tx: tokio::sync::mpsc::UnboundedSender<$crate::app::UiMessage>,
+        }
+
+        impl $Trait for $Name {
+            fn on_changed(&self) {
+                // A closed channel means the app is shutting down — nothing to notify.
+                let _ = self.tx.send($msg);
+            }
+        }
+    };
+}
+pub(crate) use tick_observer;
+
 impl PageOp {
     /// Whether this op's work deliberately **outlives the click that started
     /// it**, so the agent path must spawn it rather than await it.
@@ -537,6 +568,30 @@ impl PageOp {
                     ..
                 })
         ) || self.waits_on_the_other_person()
+            || self.reads_into_a_connection_gap()
+    }
+
+    /// A folder row's expand-edge reads, issued while the nest has no live
+    /// connection, outlive the click — the reads, not the gesture, are what a
+    /// gap makes long. The op carries five sequential reads, and in a gap each
+    /// waits out its whole deadline for a reconnect (`request_inner`'s
+    /// in-gap wait; the destination read adds `ready_connection_id`'s own), so
+    /// awaited they outlast any agent reply budget — `test_folder_row_read_error_retires`
+    /// answered 504 on the click itself. Spawned, they fail exactly as before
+    /// and fold through [`apply_page_outcome`], so each failure still paints as
+    /// its own row read error (`folders.md` § Errors & edge cases) and the
+    /// reconnect sweep's re-read retires it; that test polls the error bar,
+    /// never the click. Same shape as the arms above: tui's keyboard path
+    /// already spawns ([`App::spawn_gesture`]). With a live connection the
+    /// read stays awaited, so the one-awaited-op-per-gesture contract
+    /// (`Action::ToggleFolderRow`) still lets the agent read the roster on its
+    /// very next query.
+    fn reads_into_a_connection_gap(&self) -> bool {
+        matches!(
+            self,
+            PageOp::Settings(crate::settings::Op::LoadFolderRoster { nest, .. })
+                if nest.live_connection().is_none()
+        )
     }
 
     /// The co-present ceremony's two blocking halves, split out because their
@@ -616,7 +671,14 @@ pub fn apply_page_outcome(app: &mut App, outcome: PageOutcome) {
         PageOutcome::Events(o) => crate::events::apply_outcome(app, o),
         PageOutcome::Settings(o) => crate::settings::apply_outcome(app, o),
         PageOutcome::Search(o) => crate::search::apply_outcome(app, o),
-        PageOutcome::Media(o) => crate::media::apply_outcome(app, o),
+        PageOutcome::Media(o) => {
+            crate::media::apply_outcome(app, o);
+            // A version a connected app deposited is named from the roster
+            // (`folder-deposit.md` ruling 3); read it once if it never was.
+            if let Some(op) = crate::media::depositor_roster_op(app) {
+                app.spawn_page_op(PageOp::Settings(op));
+            }
+        }
         PageOutcome::Nostr(o) => crate::nostr::apply_outcome(app, o),
         PageOutcome::Admin(o) => crate::admin::apply_outcome(app, o),
         PageOutcome::Bridges(o) => crate::bridges::apply_outcome(app, o),
@@ -859,10 +921,18 @@ pub fn gesture_work(app: &mut App, gesture: crate::element::Gesture) -> GestureW
 /// always awaits the returned op to completion before its next single-shot
 /// read/command, so a same-visit mutation is strictly sequenced *after* the
 /// nav-edge fetch folds, never concurrent with it (the Privacy sub-page's
-/// `Op::FetchPrivacy` proved the shape; Contacts/Notifications/Nostr/Admin/
-/// Settings/Media all refresh on this same edge with no guard beyond it).
-/// Events now rides the identical shape (`events::nav_enter_op`) — the
-/// dedicated no-fetch carve-out this comment used to document is retired.
+/// `Op::FetchPrivacy` proved the shape; every page below refreshes on this
+/// same edge). Events now rides the identical shape (`events::nav_enter_op`) —
+/// the dedicated no-fetch carve-out this comment used to document is retired.
+///
+/// Awaiting orders the agent's own reads, but not a read **spawned** beside
+/// them — a post-auth hydration, a push or reconnect resync, the store-ready
+/// edge's re-ask — which can land on either side of the awaited one. A page
+/// whose state such a spawn also replaces therefore claims a read generation
+/// at dispatch and drops a superseded reply at commit: the
+/// `ContactsState::roster_gen` / `NotificationsState::read_gen` shape (also
+/// family, nostr and events), or the shared machine's own counter (media's
+/// `refresh_gen`, the feed's `reload_gen`).
 ///
 /// Exhaustive, no `_` arm: a new page must decide what entering it refreshes.
 fn on_nav_enter(app: &mut App, page: Page) -> Option<PageOp> {
@@ -1055,9 +1125,17 @@ impl PageErrors {
     /// call site's own `.into()` inferring the same way it always did — a
     /// generic bound here left several of them "type annotations needed"
     /// ambiguous instead.
+    ///
+    /// This is tui's display funnel for page errors: a message that changes a
+    /// page's error is logged once (`observability.md` § What must be logged,
+    /// category 1); a background re-read re-inserting the same text logs
+    /// nothing — per change, not per paint, as web's `MessageBanner` does.
     pub fn insert(&mut self, page: Page, message: String) -> Option<String> {
         if page == Page::Settings && self.stolen_failed_pending {
             return self.map.get(&page).cloned();
+        }
+        if !message.is_empty() && self.map.get(&page) != Some(&message) {
+            crate::wizard::log_displayed_error(&message);
         }
         self.map.insert(page, message)
     }
@@ -1603,6 +1681,13 @@ pub struct App {
     /// out. Applied once through [`Self::apply_route`] by
     /// [`Self::apply_pending_route`], never during the launch flow.
     pub pending_route: Option<fauna_core::app_route::AppRoute>,
+    /// The nest hint on the command line (`crate::routes::first_nest_hint_arg`),
+    /// raw, waiting for the first launch decision: applied once by
+    /// [`Self::apply_pending_nest_hint`] when that decision lands on the
+    /// onboarding wizard, dropped by [`Self::drop_pending_nest_hint`] when it
+    /// lands on a signed-in session (`apps/tui.md` § System integration →
+    /// *The nest hint*). Never persisted; an add-account wizard never sees it.
+    pub pending_nest_hint: Option<String>,
     pub should_quit: bool,
 }
 
@@ -1721,6 +1806,7 @@ impl App {
             focus: 0,
             last_wizard_step: None,
             pending_route: None,
+            pending_nest_hint: None,
             should_quit: false,
         }
     }
@@ -1809,6 +1895,22 @@ impl App {
     /// screen to the wizard; on the wizard's `LoggedIn` outcome
     /// `wizard::handle_wizard_done` adopts + switches to the new identity, and
     /// Escape ([`Self::abandon_add_account`]) returns to the live session.
+    /// Hand the held nest hint, once, to the shared onboarding machine — whose
+    /// `set_nest_hint` is the whole gate (a hint that does not classify is
+    /// dropped there silently). Called by `launch::route` when the first
+    /// launch decision lands on the wizard, after its identity seeding.
+    pub fn apply_pending_nest_hint(&mut self) {
+        if let Some(raw) = self.pending_nest_hint.take() {
+            self.wizard.machine.set_nest_hint(raw);
+        }
+    }
+
+    /// Forget the held nest hint: the first launch decision landed on a
+    /// signed-in session, so no later wizard may be prefilled from it.
+    pub fn drop_pending_nest_hint(&mut self) {
+        self.pending_nest_hint = None;
+    }
+
     pub fn enter_add_account(&mut self) {
         self.adding_account = true;
         self.wizard.reset();
@@ -2503,7 +2605,7 @@ impl App {
     /// happens, makes the edge check see the real prior page every time,
     /// regardless of which path (ring preview, click, or a committed `apply`)
     /// triggers it.
-    fn set_page(&mut self, page: Page) {
+    pub(crate) fn set_page(&mut self, page: Page) {
         let edge = self.page != page;
         // The report sheet and its acknowledgement belong to the page they
         // opened over; leaving it closes the one and retires the other.
@@ -2538,8 +2640,26 @@ impl App {
         // so without this the tab is no way back at all and only Esc is.
         // Search and profile open a thread by writing `self.page` themselves,
         // never through here, so their deep links are not undone.
+        // Re-read the folded archive comments, so an import that finished
+        // since the last visit folds its comments under the owner's posts
+        // (`archive-import.md` § What each category becomes).
+        if page == Page::Feed
+            && let Some(manager) = self.feed.manager.as_ref()
+        {
+            crate::feed::refresh_archive_comments(manager);
+        }
         if page == Page::Conversations {
             crate::conversations::show_list(&mut self.conversations);
+            // Re-read the `Archive` rail, so an import that finished since the
+            // last visit lists its threads (`archive-import.md` § What each
+            // category becomes). The projection re-emits when it lands.
+            if let Some(session) = self.conversations.real_session.clone() {
+                tokio::spawn(async move {
+                    if let Err(e) = session.manager().refresh_archive_threads().await {
+                        tracing::warn!("conversations: archive threads: {e}");
+                    }
+                });
+            }
         }
         self.page = page;
     }
@@ -2909,6 +3029,10 @@ impl App {
         // feature-only clear out, and a module's sign-ins spent the burst.
         #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
         fauna_ws_substrate::dial_budget::clear_for_test();
+        // A new device holds no launch's reach decision either
+        // (`fauna_ws_substrate::reach_hint`).
+        #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+        fauna_ws_substrate::reach_hint::clear_all_for_test();
         // A refused-command banner is scoped to ONE test, and `reset()` is what the
         // `app` fixture calls before each test body — so this is the clear point
         // that stops a refusal leaking into the next test of a reused app process
@@ -2970,6 +3094,14 @@ impl App {
             &crate::session::registry(self),
             &self.credentials,
         );
+        // The window serves no account now: put down the process holder's
+        // instance lock and its shared-root serving lock, AFTER the erase (the
+        // erase guard's probe already put our own down around itself). A
+        // holder kept past here made this signed-out window a "sibling" to
+        // every later sign-out of the account it left (`account-scoping.md`
+        // § Concurrent instances → *An erase refuses while a sibling serves
+        // the account*).
+        fauna_client_accounts::release_process_session_instance();
         // The erase is best-effort BY DESIGN — a sign-out completes even when a
         // scope or a credential will not go (`account-scoping.md` § Erasure
         // follows scope), and that must not be reversed. What it must not do is
@@ -3732,6 +3864,15 @@ impl App {
             UiMessage::Data(DataMessage::CustodyCeremonyMoved) => {
                 self.spawn_custody_drive();
             }
+            // The rows' link prompts are a read of the archive folders: re-read
+            // them only while the Contacts page is the one painted.
+            UiMessage::Data(DataMessage::ArchiveLinksMoved) => {
+                if self.page == Page::Contacts
+                    && let Some(op) = crate::contacts::archive_views_op(&self.contacts)
+                {
+                    self.spawn_page_op(PageOp::Contacts(op));
+                }
+            }
             // The store changed — a sibling same-account process committed, or
             // this runtime's own pump changed an entry: re-drive the open
             // surface's own load (`account-runtime.md` § Multi-instance
@@ -3795,7 +3936,15 @@ impl App {
             // the top of the loop re-reads it (Slice 3's Folders binding section).
             // Re-seat the focus ring in case the row list grew/shrank.
             UiMessage::Data(DataMessage::SyncAgentChanged) => {
+                let conflicts = self.sync_agent.rendered_set_conflicts();
+                self.settings.set_group_conflicts(conflicts);
                 self.clamp_focus();
+            }
+            UiMessage::Data(DataMessage::RetainedRestoreRefused(reason)) => {
+                self.errors.insert(
+                    Page::Settings,
+                    fauna_i18n::strings::devices::error_use_other_version(&reason),
+                );
             }
             // Same page-scoping as the device-activity resync above; the op's
             // own guards cover the row match.
@@ -4468,6 +4617,11 @@ impl App {
         // what every later paint reads, and a consent request is minutes-lived,
         // so refreshing only on a visit would mean the card the user navigated
         // to was already stale on arrival.
+        if r.devices {
+            for op in crate::settings::devices_stale_ops(&self.settings) {
+                self.spawn_page_op(PageOp::Settings(op));
+            }
+        }
         if r.atproto
             && let Some(op) = crate::settings::atproto_resync_op(&self.settings)
         {
@@ -4552,6 +4706,15 @@ impl App {
         // re-fire for the same reason: a failed read keeps the loaded thresholds.
         if r.own_thresholds {
             crate::content_policy::spawn_spam_preferences_check(self, &self.tx);
+        }
+        // The nest-admin gate — the same `fauna.account.am_i_admin` read
+        // `admin::init` fires post-auth. A login read that found no nest (a
+        // first mint before the nest's name resolved) failed closed, and
+        // without this re-read the admin had no `admin-tab` for the session
+        // (`StaleSurfaces::admin_gate`). Safe to re-fire: an unreachable read
+        // is `Outcome::GateUnreachable`, which keeps the last answer.
+        if r.admin_gate {
+            crate::admin::spawn_gate_check(&self.admin, &self.tx, self.session_generation);
         }
         // The nest's self-description, past the per-connection memo: an
         // accepted rules write pushes `fauna.nest.info_changed`, and a change
@@ -6619,6 +6782,49 @@ pub(crate) mod tests {
         assert_eq!(app.pending_route, None, "applied once, then gone");
         assert_eq!(app.page, Page::Settings);
         assert_eq!(app.settings.sub, crate::settings::SubPage::ConnectedApps);
+    }
+
+    /// The command line's nest hint prefills the handle once, on the wizard
+    /// landing, and is spent (`apps/tui.md` § System integration → *The nest
+    /// hint*).
+    #[test]
+    fn the_nest_hint_is_applied_once_on_the_wizard_landing() {
+        let mut app = test_app();
+        app.pending_nest_hint = Some("localhost:1".into());
+        app.apply_pending_nest_hint();
+        assert_eq!(app.wizard.field(WizardField::Handle), "@localhost:1");
+        assert_eq!(app.pending_nest_hint, None, "applied once, then gone");
+
+        app.wizard.reset();
+        app.apply_pending_nest_hint();
+        assert_eq!(app.wizard.field(WizardField::Handle), "");
+    }
+
+    /// A hint the shared machine does not classify is dropped there, silently.
+    #[test]
+    fn a_junk_nest_hint_leaves_the_handle_empty() {
+        let mut app = test_app();
+        app.pending_nest_hint = Some("evil.example/path?x=1".into());
+        app.apply_pending_nest_hint();
+        assert_eq!(app.wizard.field(WizardField::Handle), "");
+        assert_eq!(app.pending_nest_hint, None);
+    }
+
+    /// A signed-in landing drops the hint; a later add-account wizard never
+    /// sees it, nor does an add-account entered while it is still held.
+    #[test]
+    fn the_nest_hint_never_reaches_an_add_account_wizard() {
+        let mut app = authed_app();
+        app.pending_nest_hint = Some("localhost:1".into());
+        app.enter_add_account();
+        assert_eq!(app.wizard.field(WizardField::Handle), "");
+
+        app.drop_pending_nest_hint();
+        assert_eq!(app.pending_nest_hint, None);
+        app.abandon_add_account();
+        app.enter_add_account();
+        app.apply_pending_nest_hint();
+        assert_eq!(app.wizard.field(WizardField::Handle), "");
     }
 
     /// A share route has no producer on tui: dropped, nothing held.

@@ -13,20 +13,9 @@
 
 use std::sync::Arc;
 
-use async_channel::Sender;
 use fauna_conversations::{ConversationsManager, SnapshotObserver};
 
-pub struct GtkConversationsObserver {
-    tx: Sender<()>,
-}
-
-impl SnapshotObserver for GtkConversationsObserver {
-    fn on_changed(&self) {
-        // try_send so the mutator path never blocks; a full channel is a wake
-        // already owed (`async_helper::snapshot_wake_channel`).
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(pub GtkConversationsObserver, SnapshotObserver);
 
 /// Register a `GtkConversationsObserver` against `manager`, returning the
 /// receiver end of its coalescing wake channel. Consume `rx` with

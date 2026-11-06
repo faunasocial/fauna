@@ -38,3 +38,13 @@ else
 fi
 
 sh "$dir/uv-installer.sh"
+
+# On a Windows runner the installer, run under Git Bash, adds the MSYS form of
+# its directory (`/c/Users/runneradmin/.local/bin`) to $GITHUB_PATH. Bash finds
+# uv through it, but a native child does not: `build-if-stale.py` starting
+# `uv run …` through Python's subprocess died `FileNotFoundError [WinError 2]`
+# in the Store workflow's first recipe-calling run (2026-11-06). Add the
+# Windows form as well, which both resolve.
+if [ -n "${GITHUB_PATH:-}" ] && command -v cygpath >/dev/null 2>&1; then
+  cygpath -w "${UV_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"
+fi

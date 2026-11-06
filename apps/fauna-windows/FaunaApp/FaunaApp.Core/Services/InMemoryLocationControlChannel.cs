@@ -7,6 +7,7 @@ using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.Services;
 
+#if DEBUG || FAUNA_E2E_AGENT
 /// <summary>
 /// In-memory <see cref="ILocationControlChannel"/> — the app-side E2E backend for the
 /// Folders page's nested local-folder binding (the production-side twin of the unit
@@ -14,7 +15,8 @@ namespace FaunaApp.Core.Services;
 /// <c>sync_inject_locations</c> TestAgent command (<see cref="FromJson"/>) and swaps the page
 /// VM onto it, so the page renders and dispatches over a deterministic fake instead of a
 /// live agent: the real add flow opens a native OS folder picker the drivers can't drive.
-/// Only wired when the TestAgent is active; production never uses it.
+/// Only wired when the TestAgent is active; production never uses it, so the whole
+/// class compiles out of a Release build with the agent (convention 15).
 /// (on-demand-files.md § On-Demand Files; ui.yaml § folders.)
 ///
 /// <para><b>A pure render fixture.</b> The page pairs it with a throwaway
@@ -25,7 +27,19 @@ namespace FaunaApp.Core.Services;
 /// </summary>
 internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
 {
-    private sealed record Location(string Path, string Folder, string FolderId, string Mode);
+    /// <summary>One bound folder. <c>OnDeviceBytes</c> of <c>TotalBytes</c> are on this
+    /// device, held by <c>OnDeviceFiles</c> files; <c>FreeSpace</c> is the latest
+    /// <i>Free up space</i> sweep (<c>null</c> until one has run) — the readings the real
+    /// agent reports on <c>ListLocations</c>.</summary>
+    private sealed record Location(
+        string Path,
+        string Folder,
+        string FolderId,
+        string Mode,
+        ulong TotalBytes = 0,
+        ulong OnDeviceBytes = 0,
+        ulong OnDeviceFiles = 0,
+        FfiFreeSpaceRun? FreeSpace = null);
 
     private readonly List<Location> _locations = new();
 
@@ -36,24 +50,30 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
     /// <para>A binding is keyed by its set's <c>FolderRef</c>, so every seeded row carries
     /// one: <paramref name="folderId"/> when the fixture names it, else a stable synthetic
     /// <c>local:</c> ref per distinct folder name — this fake reaches no agent and no
-    /// nest, so the ref only has to be well-formed and consistent.</para></summary>
-    public void Seed(string path, string? folder, string? mode, string? folderId = null)
+    /// nest, so the ref only has to be well-formed and consistent.</para>
+    ///
+    /// <para><paramref name="onDeviceBytes"/> of <paramref name="totalBytes"/>, held by
+    /// <paramref name="onDeviceFiles"/> files (one when only bytes are given), are on this
+    /// device — what a <see cref="FreeLocationSpaceAsync"/> press frees.</para></summary>
+    public void Seed(
+        string path,
+        string? folder,
+        string? mode,
+        string? folderId = null,
+        ulong totalBytes = 0,
+        ulong onDeviceBytes = 0,
+        ulong? onDeviceFiles = null)
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
         _locations.Add(new Location(
             path,
             folder,
             string.IsNullOrWhiteSpace(folderId) ? SyntheticRef(folder) : folderId,
-            string.IsNullOrWhiteSpace(mode) ? FreshBindingMode : mode));
+            string.IsNullOrWhiteSpace(mode) ? LocationBindingsController.FreshBindingMode : mode,
+            Math.Max(totalBytes, onDeviceBytes),
+            onDeviceBytes,
+            onDeviceFiles ?? (onDeviceBytes > 0 ? 1ul : 0ul)));
     }
-
-    /// <summary>The mode a fresh windows binding starts in — <c>"on-demand"</c>, the
-    /// agent's windows default (<c>LocationMode::fresh_binding_default</c> in
-    /// <c>bins/fauna-sync-agent/src/config.rs</c>; user ruling 2026-09-26,
-    /// on-demand-files.md § On-Demand Files → <em>The choice is the user's</em>). This
-    /// fake stands in for that agent under e2e, so a seeded row lacking <c>mode</c> and a
-    /// <see cref="BindLocationAsync"/> both start where the real agent would.</summary>
-    public const string FreshBindingMode = "on-demand";
 
     private string SyntheticRef(string folder)
     {
@@ -63,9 +83,9 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
     }
 
     /// <summary>Build a seeded fake from a <c>sync_inject_locations</c> command's
-    /// <c>folders</c> array (<c>[{path, folder, mode?, folder_id?}]</c> — the shape
-    /// actions/sync_locations.py sends). Entries with no <c>path</c> or no
-    /// <c>folder</c> are skipped.</summary>
+    /// <c>folders</c> array (<c>[{path, folder, mode?, folder_id?, total_bytes?,
+    /// on_device_bytes?, on_device_files?}]</c> — the shape actions/sync_locations.py
+    /// sends). Entries with no <c>path</c> or no <c>folder</c> are skipped.</summary>
     public static InMemoryLocationControlChannel FromJson(JsonElement folders)
     {
         var fake = new InMemoryLocationControlChannel();
@@ -76,7 +96,14 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
                 if (f.ValueKind != JsonValueKind.Object) continue;
                 var path = Str(f, "path");
                 if (string.IsNullOrEmpty(path)) continue;
-                fake.Seed(path, Str(f, "folder"), Str(f, "mode"), Str(f, "folder_id"));
+                fake.Seed(
+                    path,
+                    Str(f, "folder"),
+                    Str(f, "mode"),
+                    Str(f, "folder_id"),
+                    Num(f, "total_bytes") ?? 0,
+                    Num(f, "on_device_bytes") ?? 0,
+                    Num(f, "on_device_files"));
             }
         }
         return fake;
@@ -87,10 +114,16 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
             ? v.GetString()
             : null;
 
+    private static ulong? Num(JsonElement obj, string key) =>
+        obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number
+            && v.TryGetUInt64(out var n)
+            ? n
+            : null;
+
     public Task BindLocationAsync(string path, string folder, string folderId)
     {
         _locations.RemoveAll(f => f.Path == path);
-        _locations.Add(new Location(path, folder, folderId, FreshBindingMode));
+        _locations.Add(new Location(path, folder, folderId, LocationBindingsController.FreshBindingMode));
         return Task.CompletedTask;
     }
 
@@ -110,7 +143,17 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
     public Task<IReadOnlyList<FfiAgentLocation>> ListLocationsAsync()
     {
         IReadOnlyList<FfiAgentLocation> list = _locations
-            .Select(f => new FfiAgentLocation(f.Path, f.Folder, f.FolderId, f.Mode, false))
+            .Select(f => new FfiAgentLocation(
+                f.Path,
+                f.Folder,
+                f.FolderId,
+                f.Mode,
+                false,
+                totalBytes: f.TotalBytes,
+                // The agent reports the bytes here for an on-demand binding alone: a
+                // resident one keeps every file.
+                onDeviceBytes: f.Mode == "on-demand" ? f.OnDeviceBytes : null,
+                freeSpace: f.FreeSpace))
             .ToList();
         return Task.FromResult(list);
     }
@@ -119,4 +162,38 @@ internal sealed class InMemoryLocationControlChannel : ILocationControlChannel
     /// nothing applied, nothing remaining, no floor engaged.</summary>
     public Task<FfiHeldDeletesApplied> ApplyHeldDeletesAsync(string folder) =>
         Task.FromResult(new FfiHeldDeletesApplied(0, 0, false));
+
+    /// <summary>The agent's sweep, settled at once: every seeded byte on this device is
+    /// freed (this fixture holds no unrecorded change and no pin) and the outcome is what
+    /// the next <see cref="ListLocationsAsync"/> reports. Refused, as the agent refuses it,
+    /// for a path that is no bound folder and for a resident one.</summary>
+    public Task FreeLocationSpaceAsync(string path)
+    {
+        var i = _locations.FindIndex(f => f.Path == path);
+        if (i < 0)
+            return Task.FromException(new InvalidOperationException($"{path} is not a bound location's root"));
+        var location = _locations[i];
+        if (location.Mode != "on-demand")
+            return Task.FromException(new InvalidOperationException(
+                $"{path} keeps every file on this device (always-resident): there is nothing to free"));
+        _locations[i] = location with
+        {
+            OnDeviceBytes = 0,
+            OnDeviceFiles = 0,
+            FreeSpace = new FfiFreeSpaceRun(false, location.OnDeviceFiles, location.OnDeviceBytes, 0, 0),
+        };
+        return Task.CompletedTask;
+    }
+
+    /// <summary>A pure render fixture has no group set and no engine underneath, so there
+    /// is never a review row to read: nothing moved.</summary>
+    public Task<bool> RefreshSetConflictsAsync(FfiLocationBindingsModel model) =>
+        Task.FromResult(false);
+
+    /// <summary>Refused, as the agent refuses a row it does not hold: this fixture holds
+    /// none.</summary>
+    public Task RestoreRetainedVersionAsync(string folderId, long conflictId) =>
+        Task.FromException(new InvalidOperationException(
+            $"{folderId} has no review row {conflictId}"));
 }
+#endif

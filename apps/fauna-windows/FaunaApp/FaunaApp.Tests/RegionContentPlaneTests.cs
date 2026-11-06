@@ -110,6 +110,36 @@ public class RegionContentPlaneTests
         Assert.Equal("Hidden in XZ under the policy of Synthetic Test Authority — select to show", collapse.NoticeText);
     }
 
+    // ── The sealed-item sentence (region-blocking.md § Implementation status today) ──
+
+    private static readonly RegionPlaceholderModel BlockPlaceholder =
+        new("block", "XZ", "Synthetic Test Authority", "reason");
+
+    [Fact]
+    public void A_sealed_thread_bubble_the_region_blocked_owes_the_sentence()
+    {
+        var decision = new RegionRenderDecision("block", BlockPlaceholder);
+        Assert.True(decision.SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.E2e, notifyCounted: false));
+        Assert.True(new RegionRenderDecision("collapse", BlockPlaceholder with { Verb = "collapse" })
+            .SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.E2e, notifyCounted: false));
+    }
+
+    [Fact]
+    public void The_sentence_is_withheld_where_it_would_be_untrue()
+    {
+        var region = new RegionRenderDecision("block", BlockPlaceholder);
+        // A transport-only thread is read by its bridge: nothing is sealed.
+        Assert.False(region.SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.TransportOnly, notifyCounted: false));
+        // Guardian Notify counted it, so "nothing was reported" would be false.
+        Assert.False(region.SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.E2e, notifyCounted: true));
+        // The viewer's own report hid it — the region did not drive the placeholder.
+        Assert.False(new RegionRenderDecision("block", BlockPlaceholder, Reported: true)
+            .SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.E2e, notifyCounted: false));
+        // No region placeholder at all (a family or own-threshold verdict).
+        Assert.False(new RegionRenderDecision("block", null)
+            .SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption.E2e, notifyCounted: false));
+    }
+
     // ── The settings section ───────────────────────────────────────────────
 
     [Fact]

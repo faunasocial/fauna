@@ -1,17 +1,19 @@
 //! The e2e ACME directory seed — a **test-capable build only** switch that points
 //! the client's DNS-01 orders — manual and managed alike — at the harness's pebble
-//! CA instead of production Let's Encrypt (`e2e-automation-surface-gating.md`
-//! § The ACME directory seed).
+//! CA instead of production Let's Encrypt (`e2e-gated-seeds.md` § The ACME
+//! directory seed).
 //!
 //! The CA is a constant no human chooses (`tls-certificates.md` § ACME settings —
 //! constants, not choices), so a walk that must open a real order cannot reach
 //! one through any app or nest setting: there is none, and there must not be
-//! one. This module is the one door. It reads three variables, all compiled out
-//! of every release artifact (the whole module is gated in `lib.rs`), and turns
-//! them into the [`AcmeOrderTestSeam`] the shared native
-//! machine builder installs — so every native app that builds its admin-dns
-//! machine through `build_dns_management_machine_with_credentials` honours it
-//! with no per-app glue.
+//! one. This module is the one door. It is compiled out of every release
+//! artifact (the whole module is gated in `lib.rs`) and has two readings.
+//!
+//! **Native** reads three variables from the launch environment and turns them
+//! into the [`AcmeOrderTestSeam`] the shared native machine builder installs —
+//! so every native app that builds its admin-dns machine through
+//! `build_dns_management_machine_with_credentials` honours it with no per-app
+//! glue.
 //!
 //! - [`E2E_ACME_DIRECTORY_ENV`] — the pebble directory URL. `https://` only: a
 //!   plaintext directory is refused even under the gate. Unset or empty → no
@@ -25,35 +27,94 @@
 //!   set (`AuthoritativeNsProbe::with_nameservers`); unset → the gate is skipped,
 //!   exactly as the seam's `probe: None` documents. The same name server is
 //!   where the e2e fake DNS provider writes every TXT it publishes or
-//!   withdraws, as an RFC 2136 UPDATE over TCP ([`mirror_fake_txt`]), so a
+//!   withdraws, as an RFC 2136 UPDATE over TCP (`mirror_fake_txt`), so a
 //!   MANAGED order's challenge is really served; unset → the fake keeps its
 //!   records in-process only.
+//!
+//! **Web** (*The web order*, ruled 2026-10-31) has no environment: the page's
+//! `localStorage` carries the directory alone under [`E2E_ACME_DIRECTORY_ENV`]'s
+//! own name (`fauna-wasm` reads it), and [`web_seam_from_directory`] turns it
+//! into the wasm seam, which holds nothing else — the browser's fetch is the
+//! ACME client (pebble's certificate trusted by the browser context, as every
+//! self-signed nest is), the gate is always the nest-relayed probe (the nest
+//! reads the name server from its own environment), and the fake provider's
+//! mirror rides the nest too (`fauna.dns.e2e_mirror_txt`). So
+//! [`E2E_ACME_CA_PEM_ENV`] and [`E2E_ACME_NAMESERVER_ENV`] have no wasm reader.
 //!
 //! A malformed value panics: only the harness sets these, so it is a harness bug,
 //! and a loud failure beats an issuance error that reads like an app bug (the
 //! source-IMAP seed's rule).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 
-use crate::{AcmeOrderTestSeam, AuthoritativeNsProbe};
+use crate::AcmeOrderTestSeam;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::AuthoritativeNsProbe;
 
-/// The pebble ACME directory URL both order paths open against.
+/// The pebble ACME directory URL both order paths open against — on web, the
+/// `localStorage` key it is seeded under.
 pub const E2E_ACME_DIRECTORY_ENV: &str = "FAUNA_E2E_ACME_DIRECTORY_URL";
-/// PEM text of the directory's CA (pebble's `pebble.minica.pem`).
+/// PEM text of the directory's CA (pebble's `pebble.minica.pem`). Native only.
 pub const E2E_ACME_CA_PEM_ENV: &str = "FAUNA_E2E_ACME_CA_PEM";
 /// `ip:port` of the fake authoritative name server the propagation gate polls.
+/// Native only — on web the NEST reads it from its own environment.
 pub const E2E_ACME_NAMESERVER_ENV: &str = "FAUNA_E2E_ACME_NAMESERVER";
 
 /// The `User-Agent` the seeded ACME client sends (pebble rejects a request with
 /// none — RFC 8555 § 6.1).
+#[cfg(not(target_arch = "wasm32"))]
 const USER_AGENT: &str = "fauna-e2e-acme-seed/0";
 
+/// The seeded directory, checked: `https://` only, on both readings.
+fn directory_from_value(directory_url: String) -> Result<String, String> {
+    if directory_url.starts_with("https://") {
+        Ok(directory_url)
+    } else {
+        Err(format!(
+            "{E2E_ACME_DIRECTORY_ENV} must be an https:// URL, got {directory_url:?}"
+        ))
+    }
+}
+
+fn harness_bug(e: String) -> ! {
+    panic!(
+        "the e2e ACME directory seed is set but unusable: {e}. Only the e2e \
+         harness sets {E2E_ACME_DIRECTORY_ENV}, so this is a harness bug."
+    )
+}
+
+/// The web seam the page's seeded directory describes (`fauna-wasm` reads the
+/// value from `localStorage`), or `None` when the value is blank. A plaintext
+/// directory panics, as on native. Builds a seam on wasm only; native has no
+/// web seam to build and answers `None` once the value has passed the shared
+/// check (its unit test exercises the refusal).
+pub fn web_seam_from_directory(directory_url: &str) -> Option<AcmeOrderTestSeam> {
+    let directory_url = directory_url.trim();
+    if directory_url.is_empty() {
+        return None;
+    }
+    let directory_url =
+        directory_from_value(directory_url.to_string()).unwrap_or_else(|e| harness_bug(e));
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(AcmeOrderTestSeam { directory_url })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = directory_url;
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn non_empty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// The seam the launch environment describes, or `None` when the directory is
-/// not seeded.
+/// not seeded. Native only.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn acme_order_test_seam_from_env() -> Option<AcmeOrderTestSeam> {
     let directory_url = non_empty(E2E_ACME_DIRECTORY_ENV)?;
     seam_from_values(
@@ -62,24 +123,16 @@ pub fn acme_order_test_seam_from_env() -> Option<AcmeOrderTestSeam> {
         non_empty(E2E_ACME_NAMESERVER_ENV),
     )
     .map(Some)
-    .unwrap_or_else(|e| {
-        panic!(
-            "the e2e ACME directory seed is set but unusable: {e}. Only the e2e \
-             harness sets {E2E_ACME_DIRECTORY_ENV}, so this is a harness bug."
-        )
-    })
+    .unwrap_or_else(|e| harness_bug(e))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn seam_from_values(
     directory_url: String,
     ca_pem: Option<String>,
     nameserver: Option<String>,
 ) -> Result<AcmeOrderTestSeam, String> {
-    if !directory_url.starts_with("https://") {
-        return Err(format!(
-            "{E2E_ACME_DIRECTORY_ENV} must be an https:// URL, got {directory_url:?}"
-        ));
-    }
+    let directory_url = directory_from_value(directory_url)?;
     let ca_pem = ca_pem.ok_or_else(|| {
         format!("{E2E_ACME_CA_PEM_ENV} is required once {E2E_ACME_DIRECTORY_ENV} is set")
     })?;
@@ -122,6 +175,7 @@ fn seam_from_values(
 /// directory seed → *The name server's reach*). A failure is logged, never
 /// raised — the order then fails at its propagation gate with the gate's own
 /// error, which names the record nobody served.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn mirror_fake_txt(published: &[(String, String)], withdrawn: &[(String, String)]) {
     let Some(ns) = non_empty(E2E_ACME_NAMESERVER_ENV) else {
         return;
@@ -140,40 +194,15 @@ pub async fn mirror_fake_txt(published: &[(String, String)], withdrawn: &[(Strin
     }
 }
 
+/// The per-zone UPDATEs, in the shared shape the `test-hooks` nest's
+/// `fauna.dns.e2e_mirror_txt` sends too (web's mirror, one RPC hop away).
+#[cfg(not(target_arch = "wasm32"))]
 async fn mirror_to(
     server: SocketAddr,
     published: &[(String, String)],
     withdrawn: &[(String, String)],
 ) -> Result<(), String> {
-    type Pairs = Vec<(String, String)>;
-    let mut zones: std::collections::BTreeMap<String, (Pairs, Pairs)> = Default::default();
-    for (name, value) in published {
-        zones
-            .entry(parent_zone(name))
-            .or_default()
-            .0
-            .push((name.clone(), value.clone()));
-    }
-    for (name, value) in withdrawn {
-        zones
-            .entry(parent_zone(name))
-            .or_default()
-            .1
-            .push((name.clone(), value.clone()));
-    }
-    for (zone, (added, deleted)) in zones {
-        fauna_core::authoritative_dns::send_txt_update(server, &zone, &added, &deleted).await?;
-    }
-    Ok(())
-}
-
-/// `_acme-challenge.renew.test.` → `renew.test`: the zone an UPDATE for a
-/// challenge name names.
-fn parent_zone(name: &str) -> String {
-    let name = name.trim_end_matches('.');
-    name.split_once('.')
-        .map_or(name, |(_, parent)| parent)
-        .to_ascii_lowercase()
+    fauna_core::authoritative_dns::send_txt_updates_by_zone(server, published, withdrawn).await
 }
 
 #[cfg(test)]
@@ -306,6 +335,18 @@ mod tests {
     // A shape-only stand-in, never parsed (the client factory is not called);
     // spelled in pieces so no literal PEM block sits in the source.
     const PEM: &str = concat!("BEGIN", " CERTIFICATE", " placeholder");
+
+    #[test]
+    fn the_web_reading_refuses_plaintext_and_reads_blank_as_unset() {
+        assert!(web_seam_from_directory("  ").is_none(), "blank is unset");
+        let plaintext = std::panic::catch_unwind(|| web_seam_from_directory("http://x/dir"));
+        assert!(
+            plaintext.is_err(),
+            "a plaintext seed panics as a harness bug"
+        );
+        let https = std::panic::catch_unwind(|| web_seam_from_directory("https://x/dir"));
+        assert!(https.is_ok(), "an https seed passes the shared check");
+    }
 
     #[test]
     fn a_plaintext_directory_is_refused() {

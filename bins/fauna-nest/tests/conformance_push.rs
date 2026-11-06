@@ -50,6 +50,81 @@ async fn router_and_state() -> (RpcRouter, Arc<AppState>) {
 
 // ── subscribe / unsubscribe (touch CacheDb only — a plain User actor is OK) ─
 
+/// Each field one byte over its cap is refused at the handler, before the
+/// store: `invalid_request`, and the actor holds no row afterwards
+/// (`apps/common.md` § Registration, the field-length bound). The handler is
+/// the pin, not only `check_field_lengths`: a caller that stopped consulting
+/// the predicate would store the row and redden this test.
+#[tokio::test]
+async fn subscribe_refuses_each_over_cap_field_and_stores_nothing() {
+    use fauna_nest::db::push::{
+        MAX_PUSH_DEVICE_ID_BYTES, MAX_PUSH_ENDPOINT_BYTES, MAX_PUSH_KEY_AUTH_BYTES,
+        MAX_PUSH_KEY_P256DH_BYTES,
+    };
+    let base = || SubscribeRequest {
+        device_id: "dev-cap".into(),
+        endpoint: "https://push.example.com/abc".into(),
+        key_p256dh: Some("p256dh".into()),
+        key_auth: Some("auth".into()),
+        transport: Some("web-push".into()),
+        extra: Default::default(),
+    };
+    let over = |cap: usize| "a".repeat(cap + 1);
+    let cases: [(&str, SubscribeRequest); 4] = [
+        (
+            "endpoint",
+            SubscribeRequest {
+                endpoint: format!("https://push.example.com/{}", over(MAX_PUSH_ENDPOINT_BYTES)),
+                ..base()
+            },
+        ),
+        (
+            "device_id",
+            SubscribeRequest {
+                device_id: over(MAX_PUSH_DEVICE_ID_BYTES),
+                ..base()
+            },
+        ),
+        (
+            "key_p256dh",
+            SubscribeRequest {
+                key_p256dh: Some(over(MAX_PUSH_KEY_P256DH_BYTES)),
+                ..base()
+            },
+        ),
+        (
+            "key_auth",
+            SubscribeRequest {
+                key_auth: Some(over(MAX_PUSH_KEY_AUTH_BYTES)),
+                ..base()
+            },
+        ),
+    ];
+    for (i, (field, req)) in cases.into_iter().enumerate() {
+        let (router, state) = router_and_state().await;
+        let actor = [40u8 + i as u8; 32];
+        let err = dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.push.subscribe",
+            encode(&req),
+        )
+        .await
+        .expect_err("over-cap field refused");
+        assert_eq!(err.code, "fauna.push.invalid_request", "{field}");
+        assert!(
+            state
+                .db
+                .list_push_subscriptions(&actor)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{field}: an over-cap subscribe stored a row"
+        );
+    }
+}
+
 #[tokio::test]
 async fn subscribe_then_unsubscribe_ok() {
     let (router, state) = router_and_state().await;

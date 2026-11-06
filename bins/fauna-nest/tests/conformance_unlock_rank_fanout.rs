@@ -242,6 +242,8 @@ async fn pay_and_approve(
         valid_until_secs,
         external_ref: external_ref.into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     payment_core::apply_payment(state, &entitlement)
         .await
@@ -560,6 +562,8 @@ async fn a_payment_grant_enqueues_the_fanout_with_the_paid_request() {
         valid_until_secs: None,
         external_ref: "pay_gold_1".into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     let applied = payment_core::apply_payment(&state, &entitlement)
         .await
@@ -620,6 +624,8 @@ async fn buying_one_unlock_tier_does_not_unlock_another() {
         valid_until_secs: None,
         external_ref: "pay_unlock_a".into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     payment_core::apply_payment(&state, &entitlement)
         .await
@@ -1271,6 +1277,8 @@ async fn a_buyer_of_a_sold_post_becomes_a_follower() {
         valid_until_secs: None,
         external_ref: "pay_unlock_a".into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
     payment_core::apply_payment(&state, &entitlement)
         .await

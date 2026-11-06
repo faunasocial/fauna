@@ -662,6 +662,28 @@ class AtprotoSettingsContentTest {
     }
 
     /**
+     * The row is gated on the DELEGATION, not the level (`ui/atproto.md` §
+     * Layout & flow, ruled 2026-10-23): a held delegation renders whole below
+     * full PDS (Re-authorize and Stop included), while the empty state and its
+     * first-grant `-authorize` stay full-PDS-only.
+     */
+    @Test
+    fun aHeldDelegationRendersBelowFullPdsAndTheEmptyStateDoesNot() {
+        render(snapshot = emptySnapshot.copy(level = "hosted_visible", hostedAllowed = true, delegation = delegation()))
+        composeTestRule.onNodeWithTag("atproto-delegation-row").assertExists()
+        composeTestRule.onNodeWithTag("atproto-delegation-authorize").assertExists()
+        composeTestRule.onNodeWithTag("atproto-delegation-revoke").assertExists()
+    }
+
+    @Test
+    fun noDelegationRowOrEmptyStateRendersBelowFullPdsWhenNothingIsHeld() {
+        render(snapshot = emptySnapshot.copy(level = "hosted_visible", hostedAllowed = true, delegation = null))
+        composeTestRule.onNodeWithTag("atproto-delegation-row").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("atproto-delegation-authorize").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("atproto-delegation-revoke").assertDoesNotExist()
+    }
+
+    /**
      * A live delegation renders all four leaves — and `-authorize` STAYS,
      * because re-authorizing IS the renewal gesture (provisioning overwrites the
      * cert). A page that hid it once authorized would force the

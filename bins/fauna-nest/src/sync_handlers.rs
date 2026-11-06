@@ -30,9 +30,10 @@ use fauna_protocol::sync::{
     SyncBackupStatusRequest, SyncChange, SyncChangeRecordReply, SyncChangeRecordRequest,
     SyncChangesListReply, SyncChangesListRequest, SyncChangesSupersedeReply,
     SyncChangesSupersedeRequest, SyncDevice, SyncDeviceDeleteReply, SyncDeviceDeleteRequest,
-    SyncDeviceP2pParticipationSetReply, SyncDeviceP2pParticipationSetRequest, SyncDevicesListReply,
-    SyncDevicesListRequest, SyncFile, SyncFilesReply, SyncFilesRequest, SyncRegisterReply,
-    SyncRegisterRequest, SyncStatusReply, SyncStatusRequest,
+    SyncDeviceP2pParticipationSetReply, SyncDeviceP2pParticipationSetRequest,
+    SyncDeviceRenameReply, SyncDeviceRenameRequest, SyncDevicesListReply, SyncDevicesListRequest,
+    SyncFile, SyncFilesReply, SyncFilesRequest, SyncRegisterReply, SyncRegisterRequest,
+    SyncStatusReply, SyncStatusRequest,
 };
 use fauna_protocol::{RpcError, decode_strict as decode, encode_canonical};
 
@@ -293,6 +294,7 @@ pub(crate) fn change_to_wire(c: &crate::db::SyncChangeRow) -> SyncChange {
         path: c.path.clone(),
         device_id: c.device_id.as_ref().map(hex::encode),
         content_key_version: c.content_key_version.map(|v| v as u64),
+        content_generation: None,
         thumbnail_hash: c.thumbnail_hash.clone(),
         // Nest-stamped attribution (multi-writer Phase 1): the row's actor_id
         // IS the recorder — for every pre-multi-writer row that was the owner,
@@ -307,6 +309,9 @@ pub(crate) fn change_to_wire(c: &crate::db::SyncChangeRow) -> SyncChange {
         derived_through: c.derived_through,
         is_resolution: c.is_resolution,
         is_retention: c.is_retention,
+        // The depositor of an adopted deposit — a covered field of the owner's
+        // statement, echoed verbatim (`folder-deposit.md` ruling 3).
+        deposited_by: c.deposited_by.as_ref().map(hex::encode),
         // W2.3 (account-data-plane.md § Workstreams) generalized-feed coordinates. All four are `None` on every file
         // row, which is exactly the shipped semantics — the generalized row
         // EXTENDS this one (`account-sync-plane.md` § Feeds and cursors →
@@ -325,6 +330,78 @@ pub(crate) fn change_to_wire(c: &crate::db::SyncChangeRow) -> SyncChange {
         signature: c.signature.clone().map(fauna_protocol::ByteBuf::from),
         signer_key: c.signer_key.clone().map(fauna_protocol::ByteBuf::from),
     }
+}
+
+/// Cut a page of change rows at the serve frame budget
+/// ([`crate::segments::take_page_within_budget`]), each row costed at the
+/// exact canonical-CBOR length of the wire row [`change_to_wire`] makes of it.
+///
+/// Measured, never estimated: the wire row hex-encodes every hash and id
+/// (doubling it), carries `origin_writer` and the field names of a CBOR map,
+/// so a sum of the stored fields' raw lengths under-counts each row by a few
+/// hundred bytes. On a feed paged by bytes alone (the class-2 account-state
+/// feed has no row cap) a page of thousands of small entries then encoded
+/// past the 2 MiB WS message cap: the app's socket refused the frame, the app
+/// dropped its own connection, and every reconnect walked into the same page,
+/// so the scope was never listed. `pub(crate)`: the public-folder and
+/// federated folder reads page the same rows.
+pub(crate) fn take_change_page(
+    rows: Vec<crate::db::SyncChangeRow>,
+) -> (Vec<crate::db::SyncChangeRow>, Vec<crate::db::SyncChangeRow>) {
+    crate::segments::take_page_within_budget(rows, change_wire_len)
+}
+
+/// The exact encoded length of the wire row `c` becomes. An encode failure
+/// (unreachable for this plain struct) costs the row the whole budget, so the
+/// page closes before it and the caller's frozen-head log names it.
+fn change_wire_len(c: &crate::db::SyncChangeRow) -> usize {
+    encode_canonical(&change_to_wire(c))
+        .map_or(crate::segments::SERVE_PAGE_BUDGET_BYTES, |b| b.len())
+}
+
+/// The largest wire encoding a change row may have and still be served: a row
+/// costs [`change_wire_len`] + `RECORD_WIRE_OVERHEAD` on a page, and a page holds
+/// [`crate::segments::SERVE_PAGE_BUDGET_BYTES`].
+pub(crate) const MAX_SERVABLE_CHANGE_WIRE_BYTES: usize =
+    crate::segments::SERVE_PAGE_BUDGET_BYTES - crate::segments::RECORD_WIRE_OVERHEAD;
+
+/// Refuse a change row no page could ever serve (`transport.md` § Max frame,
+/// *count-paged serve replies are byte-budgeted*).
+///
+/// A row over [`MAX_SERVABLE_CHANGE_WIRE_BYTES`] still fits the 2 MiB inbound
+/// frame, but when it heads a reader's page [`take_change_page`] returns an
+/// empty page, and every reader takes an empty page for a drained log: the
+/// walk of every co-member and every other device stops at that seq for good,
+/// silently, deletes and supersedes after it included. So every door that
+/// lands a `sync_changes` row measures the row it is about to store, exactly
+/// as the readers will be served it, and refuses it at the door — the shape of
+/// `fauna.conversations.channel.send`'s envelope cap.
+///
+/// `row` is the row as the door will store it; its nest-stamped integers
+/// (`seq`, `created_at`) and the retention marker are measured at their widest
+/// encodings, so the measure bounds every row the door can mint from it.
+/// Returns the measured length when the row is refused.
+pub(crate) fn unservable_change_len(row: crate::db::SyncChangeRow) -> Option<usize> {
+    let len = minted_change_wire_len(row);
+    (len > MAX_SERVABLE_CHANGE_WIRE_BYTES).then_some(len)
+}
+
+/// [`change_wire_len`] bound over every row a door can mint from `row`: the
+/// nest-stamped integers and the retention marker at their widest encodings.
+fn minted_change_wire_len(mut row: crate::db::SyncChangeRow) -> usize {
+    row.seq = i64::MIN;
+    row.created_at = i64::MIN;
+    row.is_retention = Some(true);
+    change_wire_len(&row)
+}
+
+/// The detail every door's `change_too_large` refusal carries.
+pub(crate) fn change_too_large_detail(len: usize) -> String {
+    format!(
+        "the change row encodes to {len} bytes, over the {MAX_SERVABLE_CHANGE_WIRE_BYTES}-byte \
+         serve-page limit (it would end every reader's walk of the folder's change log — \
+         transport.md § Max frame)"
+    )
 }
 
 /// The `signer_certs` side table for a page of rows (`mls-group-key-material.md`
@@ -347,6 +424,104 @@ pub(crate) async fn signer_certs_for(
     signer_certs_for_signers(db, signers)
         .await
         .map_err(internal)
+}
+
+/// Room a change-log reply keeps, beside its rows and its `signer_certs`, for
+/// everything else it carries: the field names, the cross-nest access and
+/// residency stamps, the watermark echoes, the replica id.
+const CHANGE_REPLY_FIXED_ROOM: usize = 8 * 1024;
+
+/// [`take_change_page`] for a reply that also carries the page's
+/// `signer_certs` side table (`fauna.sync.changes.list`'s folder arm,
+/// `fauna.federation.folder.changes.fetch`): the page, the rows left behind,
+/// and the side table — which together fit the WS message cap.
+///
+/// The row cut leaves the frame's 64 KiB headroom for the rest of the reply,
+/// and the side table rides in it: one cert per distinct DELEGATED signer in
+/// the page, a few hundred bytes each. A page whose signers' certs would pass
+/// that headroom (a set written by hundreds of delegated devices) closes
+/// earlier still — rows are given back from the tail until the certs of the
+/// page that remains fit — so the page stays a contiguous prefix: close early,
+/// never skip (`transport.md` § Max frame). A single row is always served,
+/// whatever its certs weigh: its one cert is far under the headroom.
+pub(crate) async fn take_signed_change_page(
+    db: &crate::db::CacheDb,
+    rows: Vec<crate::db::SyncChangeRow>,
+) -> Result<
+    (
+        Vec<crate::db::SyncChangeRow>,
+        Vec<crate::db::SyncChangeRow>,
+        Vec<fauna_core::encoding::EmbedAsBytes>,
+    ),
+    RpcError,
+> {
+    use crate::segments::RECORD_WIRE_OVERHEAD;
+    let cost = |row: &crate::db::SyncChangeRow| change_wire_len(row) + RECORD_WIRE_OVERHEAD;
+    let (mut page, mut rest) = take_change_page(rows);
+    loop {
+        let certs = signer_certs_for(db, &page).await?;
+        let certs_len: usize = certs
+            .iter()
+            .map(|c| {
+                encode_canonical(c).map_or(crate::segments::SERVE_PAGE_BUDGET_BYTES, |b| b.len())
+                    + RECORD_WIRE_OVERHEAD
+            })
+            .sum();
+        let rows_len: usize = page.iter().map(cost).sum();
+        let total = rows_len + certs_len + CHANGE_REPLY_FIXED_ROOM;
+        if total <= fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE || page.len() <= 1 {
+            return Ok((page, rest, certs));
+        }
+        let mut excess = total - fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE;
+        let mut given_back = Vec::new();
+        while excess > 0 && page.len() > 1 {
+            let row = page.pop().expect("page holds more than one row");
+            excess = excess.saturating_sub(cost(&row));
+            given_back.push(row);
+        }
+        given_back.reverse();
+        given_back.append(&mut rest);
+        rest = given_back;
+    }
+}
+
+/// The most rows a folder change-log page ever loads: one page's worth plus
+/// one. [`crate::segments::take_page_within_budget`] costs every row at least
+/// [`crate::segments::RECORD_WIRE_OVERHEAD`] beside its own bytes, so no page
+/// holds more than `SERVE_PAGE_BUDGET_BYTES / RECORD_WIRE_OVERHEAD` rows; the
+/// one extra row lets the cut see that the log goes on. A cap at the query
+/// bounds the load under `CacheDb`'s single connection lock — without it a
+/// walk of N rows in P pages loaded O(N·P) rows, and any reader of a set
+/// could repeat `since = 0` at will.
+pub(crate) const FOLDER_CHANGE_PAGE_MAX_ROWS: i64 =
+    (crate::segments::SERVE_PAGE_BUDGET_BYTES / crate::segments::RECORD_WIRE_OVERHEAD) as i64 + 1;
+
+/// One signed page of a set's change log above `since`: at most `max_rows`
+/// rows loaded (clamped to [`FOLDER_CHANGE_PAGE_MAX_ROWS`]), then cut to the
+/// frame by [`take_signed_change_page`]. Shared by `fauna.sync.changes.list`'s
+/// folder arm and `fauna.federation.folder.changes.fetch`. Returns the page,
+/// the loaded rows the cut left behind (the next page's by the `since`
+/// cursor — close early, never skip) and the page's `signer_certs`.
+pub(crate) async fn folder_change_page(
+    db: &crate::db::CacheDb,
+    folder_id: i64,
+    since: i64,
+    exclude_device_id: Option<&[u8; 32]>,
+    max_rows: i64,
+) -> Result<
+    (
+        Vec<crate::db::SyncChangeRow>,
+        Vec<crate::db::SyncChangeRow>,
+        Vec<fauna_core::encoding::EmbedAsBytes>,
+    ),
+    RpcError,
+> {
+    let max_rows = max_rows.clamp(1, FOLDER_CHANGE_PAGE_MAX_ROWS);
+    let rows = db
+        .get_sync_changes_for_folder_page(folder_id, since, exclude_device_id, max_rows)
+        .await
+        .map_err(internal)?;
+    take_signed_change_page(db, rows).await
 }
 
 /// The side table for a set of `(signed actor, signer key)` pairs — the one
@@ -913,29 +1088,48 @@ fn changes_list_handler() -> RpcHandler {
             // stop sending the cleartext name. Reading it only inside the
             // `folder.is_some()` arm answered a one-set question with every set
             // the caller owns.
-            let changes = if req.folder.is_some() || name_hash.is_some() || req.folder_id.is_some()
-            {
-                // Read (S2-P3): the owner OR a member of a group-bound shared set.
-                // The row when carried, else hash-first, so the empty name is
-                // never read.
-                let fs = readable_folder(&state, &actor_id, &req).await?;
-                let exclude = req.device_id.as_deref().and_then(parse_device_id);
-                state
-                    .db
-                    .get_sync_changes_for_folder(fs.id, req.since, exclude.as_ref())
-                    .await
-                    .map_err(internal)?
-            } else {
-                // No selector at all. There is no actor-wide feed: every
-                // caller names its folder (by name or by hash), its item
-                // class, or its cross-nest route.
-                return Err(coded(
-                    "invalid_request",
-                    "a change-log read names its folder (`folder` or `name_hash`)",
-                ));
-            };
+            let (changes, signer_certs) =
+                if req.folder.is_some() || name_hash.is_some() || req.folder_id.is_some() {
+                    // Read (S2-P3): the owner OR a member of a group-bound shared set.
+                    // The row when carried, else hash-first, so the empty name is
+                    // never read.
+                    let fs = readable_folder(&state, &actor_id, &req).await?;
+                    let exclude = req.device_id.as_deref().and_then(parse_device_id);
+                    // A bounded load (`FOLDER_CHANGE_PAGE_MAX_ROWS`), then
+                    // frame-budgeted like every other change-log read — close
+                    // early, never skip: each consumer walks this log by its
+                    // `since` cursor until a page comes back empty
+                    // (`devices.md` § fetch-paging completeness), so the rows
+                    // left behind are the next page's.
+                    let (page, rest, signer_certs) = folder_change_page(
+                        &state.db,
+                        fs.id,
+                        req.since,
+                        exclude.as_ref(),
+                        FOLDER_CHANGE_PAGE_MAX_ROWS,
+                    )
+                    .await?;
+                    if page.is_empty()
+                        && let Some(head) = rest.first()
+                    {
+                        tracing::error!(
+                            folder_id = fs.id,
+                            seq = head.seq,
+                            "folder change log: a single change row exceeds the WS \
+                         frame budget — a reader's walk cannot advance"
+                        );
+                    }
+                    (page, signer_certs)
+                } else {
+                    // No selector at all. There is no actor-wide feed: every
+                    // caller names its folder (by name or by hash), its item
+                    // class, or its cross-nest route.
+                    return Err(coded(
+                        "invalid_request",
+                        "a change-log read names its folder (`folder` or `name_hash`)",
+                    ));
+                };
 
-            let signer_certs = signer_certs_for(&state.db, &changes).await?;
             encode_reply(&SyncChangesListReply {
                 // Same-nest: `access` already rides the member `FolderSummary`
                 // this caller lists from; the stamp is the cross-nest relay's.
@@ -1133,24 +1327,45 @@ pub(crate) async fn serve_account_state_feed(
         ),
     };
 
+    let item_key: Option<[u8; 32]> = match req.item_key.as_ref() {
+        None => None,
+        Some(bytes) => Some(
+            bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| coded("invalid_request", "item_key must be 32 bytes"))?,
+        ),
+    };
+
     let frontier = req.frontier.clone().unwrap_or_default();
+    // A page read loads a page of rows: the read stops at
+    // the first served row that overflows the frame budget, measured exactly
+    // as the cut below measures it — every row costs at least
+    // `RECORD_WIRE_OVERHEAD`, so this also bounds the row count.
+    let mut page_bytes = 0usize;
+    let mut page_full = |row: &crate::db::SyncChangeRow| {
+        page_bytes += change_wire_len(row) + crate::segments::RECORD_WIRE_OVERHEAD;
+        page_bytes > crate::segments::SERVE_PAGE_BUDGET_BYTES
+    };
     let read = state
         .db
-        .get_account_state_changes(
+        .get_account_state_page(
             fs_id,
-            req.since,
-            &frontier,
-            req.held_through_seq,
-            sealed_under.as_ref(),
+            &crate::db::account_state::StateFeedFilter {
+                since: req.since,
+                frontier: &frontier,
+                held_through_seq: req.held_through_seq,
+                sealed_under: sealed_under.as_ref(),
+                item_key: item_key.as_ref(),
+            },
+            &mut page_full,
         )
         .await
         .map_err(internal)?;
 
     // Frame-budget the page the way every other feed does — close early, never
     // skip, so the caller's frontier walk stays a contiguous prefix per writer.
-    let (rows, rest) = crate::segments::take_page_within_budget(read.rows, |c| {
-        c.wire_len() + crate::segments::RECORD_WIRE_OVERHEAD
-    });
+    let (rows, rest) = take_change_page(read.rows);
     if rows.is_empty()
         && let Some(head) = rest.first()
     {
@@ -1169,8 +1384,9 @@ pub(crate) async fn serve_account_state_feed(
     // never from the one the read computed: complete through its last row when
     // the frame budget closed it early, and through the read's tip when it
     // left nothing behind — an empty page included, which is how a converged
-    // walk banks the whole log. A cut that carried no row claims nothing.
-    let complete_through_seq = if rest.is_empty() {
+    // walk banks the whole log. A cut that carried no row claims nothing, and
+    // a read that stopped on a full page claims only what it loaded.
+    let complete_through_seq = if rest.is_empty() && !read.more {
         read.tip
     } else {
         rows.last().map(|row| row.seq)
@@ -1918,6 +2134,7 @@ fn changes_record_handler() -> RpcHandler {
                     req.path_sealed.clone(),
                     req.derived_through,
                     req.is_resolution,
+                    req.deposited_by.clone(),
                     req.signature.clone(),
                     req.signer_key.clone(),
                     signer_cert,
@@ -2006,7 +2223,8 @@ fn changes_record_handler() -> RpcHandler {
                 crate::change_signature::CarriedSignature::new(
                     req.signature.as_ref(),
                     req.signer_key.as_ref(),
-                ),
+                )
+                .with_deposited_by(parse_deposited_by(req.deposited_by.as_deref())?),
                 // Same-nest: the signer's cert is resolved by reference over
                 // this actor's grants (a carried `signer_cert` is ignored).
                 crate::change_signature::CertCarriage::ByReference,
@@ -2019,6 +2237,18 @@ fn changes_record_handler() -> RpcHandler {
             })
         })
     })
+}
+
+/// The depositor a record request names (`folder-deposit.md` ruling 3), parsed
+/// from its hex — refused `invalid_request` when malformed, never dropped, so
+/// a record cannot store a statement other than the one it signed. Shared by
+/// the same-nest door and the cross-nest relay's home side.
+pub(crate) fn parse_deposited_by(hex: Option<&str>) -> Result<Option<[u8; 32]>, RpcError> {
+    hex.map(|h| {
+        fauna_core::hex32::decode(h)
+            .map_err(|_| coded("invalid_request", "deposited_by must be 32-byte hex"))
+    })
+    .transpose()
 }
 
 /// The record body shared by the same-nest `fauna.sync.changes.record` handler
@@ -2316,6 +2546,35 @@ pub(crate) async fn record_change_core(
     // with the recorder as its signed actor and the set's STORED nonce as its
     // binding: a record signed for another set, or for a deleted predecessor
     // of this one, fails here.
+    // A row no page could serve is refused before anything is verified,
+    // charged or written ([`unservable_change_len`]).
+    if let Some(len) = unservable_change_len(crate::db::SyncChangeRow {
+        seq: 0,
+        path_hash: path_hash.to_vec(),
+        manifest_hash: manifest_hash.map(|m| m.to_vec()),
+        size_bytes,
+        change_type: change_type.to_string(),
+        created_at: 0,
+        path: rest_path.map(str::to_string),
+        device_id: Some(device_id.to_vec()),
+        content_key_version: content_key_version.map(|v| v as i64),
+        thumbnail_hash: thumbnail_hash.map(str::to_string),
+        actor_id: recorder.to_vec(),
+        path_sealed: path_sealed.map(<[u8]>::to_vec),
+        derived_through,
+        is_resolution,
+        is_retention: None,
+        item_class: None,
+        origin_writer: None,
+        origin_seq: None,
+        entry_sealed: None,
+        signature: carried.signature.map(<[u8]>::to_vec),
+        signer_key: carried.signer_key.map(<[u8]>::to_vec),
+        deposited_by: carried.deposited_by.map(|d| d.to_vec()),
+    }) {
+        return Err(coded("change_too_large", change_too_large_detail(len)));
+    }
+
     let refuse = |r: crate::change_signature::IngestRefusal| r.into_rpc(SYNC);
     if carried.is_unsigned() {
         return Err(refuse(crate::change_signature::IngestRefusal::Required));
@@ -2341,11 +2600,13 @@ pub(crate) async fn record_change_core(
             change_type: change_type.to_string(),
             size_bytes,
             content_key_version,
+            content_generation: None,
             path_sealed: path_sealed.map(<[u8]>::to_vec),
             thumbnail_hash,
             derived_through,
             is_resolution: is_resolution.unwrap_or(false),
             is_retention: false,
+            deposited_by: carried.deposited_by,
         };
         crate::change_signature::verify_carried(&state.db, &statement, carried, carriage)
             .await
@@ -2737,7 +2998,9 @@ fn devices_list_handler() -> RpcHandler {
                 // `online` = a WS-RPC connection bound to the device is open
                 // (`devices.md` § Listing Devices → *The binding*): one
                 // upgraded with a bearer the row's granted key minted, which
-                // is what every app seat and per-user sync agent holds. A row
+                // is what every native app seat and per-user sync agent
+                // holds — or, for web's one seed-minted socket, one bound in
+                // band by `fauna.auth.device_bind`. A row
                 // with no principal (never enrolled, or its grant retired)
                 // has nothing to bind to and reads offline.
                 let online = device
@@ -2989,6 +3252,60 @@ fn devices_delete_handler() -> RpcHandler {
     })
 }
 
+// ── fauna.sync.devices.rename ────────────────────────────────────────────────
+
+/// `devices.md` § Device names, rule (1): the owner names one of their own
+/// rows. Writes the label pair only (`rename_sync_device`) — never the
+/// register upsert, which also rewrites `capabilities` and `registered_at`.
+fn devices_rename_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(
+                &state,
+                &actor_id,
+                fauna_protocol::sync::KIND_SYNC_DEVICES_RENAME,
+            )
+            .await?;
+            let req: SyncDeviceRenameRequest = decode(&payload).map_err(malformed)?;
+
+            let device_id = parse_device_id(&req.device_id)
+                .ok_or_else(|| coded("invalid_request", "invalid device_id hex"))?;
+            // The two nest-authored pseudo-devices are never the user's to
+            // name — `register_handler` refuses them at its door the same way.
+            if device_id == fauna_core::label_custody::webdav_pseudo_device_id(&actor_id)
+                || device_id == fauna_core::label_custody::reseed_pseudo_device_id(&actor_id)
+            {
+                return Err(coded(
+                    "invalid_request",
+                    "device_id is reserved for a nest-authored pseudo-device",
+                ));
+            }
+            // The nest holds no key, so it cannot open the seal — but it can
+            // refuse bytes that are not a sealed-label envelope at all, which
+            // would otherwise rest as a name no app can render.
+            if fauna_core::path_crypto::SealedLabel::from_bytes(&req.label_sealed).is_err() {
+                return Err(coded(
+                    "invalid_request",
+                    "label_sealed is not a sealed-label envelope",
+                ));
+            }
+
+            // Actor-scoped: another actor's row matches nothing and answers
+            // `not_found`, exactly as `devices.delete`'s ownership check does.
+            if state
+                .db
+                .rename_sync_device(&actor_id, &device_id, &req.label_sealed)
+                .await
+                .map_err(internal)?
+            {
+                encode_reply(&SyncDeviceRenameReply::default())
+            } else {
+                Err(coded("not_found", "device not found"))
+            }
+        })
+    })
+}
+
 // ── Registration entry point ─────────────────────────────────────────────────
 
 // ── fauna.sync.serve.announce (relay serving, ruled 2026-10-01) ─────────────
@@ -3077,7 +3394,7 @@ fn serve_announce_handler() -> RpcHandler {
                     .iter()
                     .map(|(f, _)| FolderRef::Foreign(f.channel_id).to_wire()),
             );
-            let lease_secs = foreign.iter().map(|(_, l)| *l).min();
+            let renewal = foreign_renewal_period(foreign.iter().map(|(_, l)| *l));
             let foreign: Vec<crate::ws::ForeignServing> =
                 foreign.into_iter().map(|(f, _)| f).collect();
 
@@ -3115,7 +3432,7 @@ fn serve_announce_handler() -> RpcHandler {
                     .collect();
                 withdraw_foreign(&state, &actor_id, &previous.device_id, dropped);
             }
-            if let Some(lease_secs) = lease_secs {
+            if let Some(period) = renewal {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 *conn.foreign_renewal.lock().unwrap() = Some(cancel.clone());
                 // spawn-ok(connection-scoped): ends with the connection (revoked or closed) or the next announce's cancel
@@ -3125,7 +3442,7 @@ fn serve_announce_handler() -> RpcHandler {
                     actor_id,
                     device_id,
                     foreign,
-                    lease_secs,
+                    period,
                     cancel,
                 ));
             }
@@ -3137,67 +3454,174 @@ fn serve_announce_handler() -> RpcHandler {
     })
 }
 
+/// The most distinct home nests one announce forwards to.
+/// A member's foreign folders live on the few nests its shares came from;
+/// entries naming a home nest past this many are left out of the reply, so an
+/// announce cannot aim the nest at hundreds of hosts of the caller's choosing
+/// (`deployment-threat-model.md` concern 2, item 3).
+pub const SERVE_ANNOUNCE_MAX_FOREIGN_NESTS: usize = 8;
+
+/// The per-actor meter on forwarded home nests: one event per distinct home
+/// nest an announce dials, 32 over ten minutes — a reconnecting device with
+/// its shares on a few nests stays far inside it, while a caller rotating
+/// hosts reaches at most 32 a window. An entry whose home nest the meter
+/// refuses is left out of the reply, never failing the announce. A constant
+/// (an abuse bound the binary sets, not an admin preference).
+pub const FOREIGN_FORWARD_METER: crate::bridge_rate_limit::LimiterConfig =
+    crate::bridge_rate_limit::LimiterConfig {
+        window: std::time::Duration::from_secs(600),
+        max_events: 32,
+    };
+
+/// The meter's bucket key (the limiter's credential axis).
+const FOREIGN_FORWARD_BUCKET: &str = "serve_announce_forward";
+
+/// The shortest lease a home nest's reply is believed at:
+/// the member's nest renews every entry at half the shortest lease, so a
+/// hostile home nest answering `1` would have it renew every honest nest's
+/// seat each second. Half of it is the fastest renewal any reply can cause.
+pub const FOREIGN_LEASE_FLOOR_SECS: u64 = 60;
+
+/// A home nest's granted lease, clamped to `[FOREIGN_LEASE_FLOOR_SECS,
+/// FOREIGN_SEAT_LEASE]`: below the floor would renew
+/// every entry too often; above the hard-coded lease would stretch the
+/// renewal period past what honest home nests grant, so their seats lapse.
+pub fn clamp_peer_lease(lease_secs: u64) -> u64 {
+    lease_secs.clamp(
+        FOREIGN_LEASE_FLOOR_SECS,
+        crate::chunk_relay::FOREIGN_SEAT_LEASE.as_secs(),
+    )
+}
+
+/// The renewal period's guard, in a module of its own so its type cannot be
+/// built anywhere else: [`keep_foreign_seats`] demands a [`RenewalPeriod`] and
+/// only [`foreign_renewal_period`] mints one, so a period computed from the raw
+/// leases does not compile (`review-method.md` § *A guard
+/// whose failure is silent lives inside the consumer, not the callers*).
+mod renewal {
+    /// How often a connection renews its foreign seats — always half of a
+    /// clamped lease. The field is private to this module.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct RenewalPeriod(std::time::Duration);
+
+    impl RenewalPeriod {
+        pub(super) fn get(self) -> std::time::Duration {
+            self.0
+        }
+    }
+
+    /// How often a connection renews its foreign seats, from the leases the
+    /// home nests granted: half the shortest, each clamped first
+    /// ([`super::clamp_peer_lease`]), so no reply can make the nest renew
+    /// faster than every `FOREIGN_LEASE_FLOOR_SECS / 2` or slower than an
+    /// honest seat's lease allows. `None` when nothing was admitted. The one
+    /// place a [`RenewalPeriod`] comes from.
+    pub(super) fn foreign_renewal_period(
+        leases: impl IntoIterator<Item = u64>,
+    ) -> Option<RenewalPeriod> {
+        leases
+            .into_iter()
+            .map(super::clamp_peer_lease)
+            .min()
+            .map(|l| RenewalPeriod(std::time::Duration::from_secs(l / 2)))
+    }
+}
+use renewal::{RenewalPeriod, foreign_renewal_period};
+
+/// The foreign entries an announce forwards, by home nest: each channel once,
+/// a non-foreign ref or an empty URL left out, at most
+/// [`SERVE_ANNOUNCE_MAX_FOREIGN_NESTS`] distinct home nests in the order they
+/// are first named, and only the home nests `meter` admits for `actor_id` —
+/// each spends one event, reached or not.
+fn select_foreign_forwards(
+    meter: &crate::bridge_rate_limit::Limiter,
+    actor_id: &[u8; 32],
+    entries: &[fauna_protocol::sync::SyncServeForeignEntry],
+) -> Vec<(String, Vec<[u8; 32]>)> {
+    use fauna_core::folder_keys::FolderRef;
+
+    let mut seen: Vec<[u8; 32]> = Vec::new();
+    let mut by_nest: Vec<(String, Vec<[u8; 32]>)> = Vec::new();
+    for e in entries {
+        let Some(FolderRef::Foreign(channel_id)) = FolderRef::parse(&e.folder) else {
+            continue;
+        };
+        if e.nest_url.is_empty() || seen.contains(&channel_id) {
+            continue;
+        }
+        if let Some((_, channels)) = by_nest.iter_mut().find(|(u, _)| *u == e.nest_url) {
+            seen.push(channel_id);
+            channels.push(channel_id);
+            continue;
+        }
+        if by_nest.len() >= SERVE_ANNOUNCE_MAX_FOREIGN_NESTS {
+            continue;
+        }
+        seen.push(channel_id);
+        by_nest.push((e.nest_url.clone(), vec![channel_id]));
+    }
+    by_nest
+        .into_iter()
+        .filter(|_| meter.check(actor_id, actor_id, FOREIGN_FORWARD_BUCKET))
+        .collect()
+}
+
 /// Forward each foreign entry of an announce to its home nest
-/// (`fauna.federation.folder.serve.announce`, serving), concurrently, and keep
-/// the ones it admitted, each once, with the lease it granted. A refusal, an
-/// unknown kind, an unparseable or non-foreign ref and a transport error alike
-/// leave the entry out — never failing the rest of the announce.
+/// (`fauna.federation.folder.serve.announce`, serving) and keep the ones it
+/// admitted, each once, with the lease it granted. The home nests are bounded
+/// and metered ([`select_foreign_forwards`]) and dialed concurrently; one
+/// home nest's entries go in order, and a home nest that is not reached at
+/// all is not dialed again for the rest of them. A refusal, an unknown kind,
+/// an unparseable or non-foreign ref and a transport error alike leave the
+/// entry out — never failing the rest of the announce.
 async fn forward_foreign_announces(
     state: &std::sync::Arc<AppState>,
     actor_id: &[u8; 32],
     device_id: &[u8; 32],
     entries: &[fauna_protocol::sync::SyncServeForeignEntry],
 ) -> Vec<(crate::ws::ForeignServing, u64)> {
-    use fauna_core::folder_keys::FolderRef;
-
-    let mut wanted: Vec<([u8; 32], String)> = Vec::new();
-    for e in entries {
-        let Some(FolderRef::Foreign(channel_id)) = FolderRef::parse(&e.folder) else {
-            continue;
-        };
-        if e.nest_url.is_empty() || wanted.iter().any(|(c, _)| *c == channel_id) {
-            continue;
-        }
-        wanted.push((channel_id, e.nest_url.clone()));
-    }
+    let wanted = select_foreign_forwards(&state.sync.foreign_forward_meter, actor_id, entries);
     let actor_hex = hex::encode(actor_id);
     let device_hex = hex::encode(device_id);
-    let forwards = wanted.into_iter().map(|(channel_id, nest_url)| {
+    let forwards = wanted.into_iter().map(|(nest_url, channels)| {
         let actor_hex = &actor_hex;
         let device_hex = &device_hex;
         async move {
-            match crate::federation_pool::originate_folder_serve_announce(
-                &state.federation_pool,
-                state,
-                &nest_url,
-                actor_hex,
-                &hex::encode(channel_id),
-                device_hex,
-                true,
-            )
-            .await
-            {
-                Ok(Ok((lease_secs, home_nest_id))) if lease_secs > 0 => Some((
-                    crate::ws::ForeignServing {
-                        channel_id,
-                        nest_url,
-                        home_nest_id,
-                    },
-                    lease_secs,
-                )),
-                Ok(Ok(_)) => None,
-                Ok(Err(refused)) => {
-                    tracing::debug!(
-                        "serve.announce: the home nest admitted no seat: {}",
-                        refused.code
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::debug!("serve.announce: the home nest was not reached: {e}");
-                    None
+            let mut admitted = Vec::new();
+            for channel_id in channels {
+                match crate::federation_pool::originate_folder_serve_announce(
+                    &state.federation_pool,
+                    state,
+                    &nest_url,
+                    actor_hex,
+                    &hex::encode(channel_id),
+                    device_hex,
+                    true,
+                )
+                .await
+                {
+                    Ok(Ok((lease_secs, home_nest_id))) if lease_secs > 0 => admitted.push((
+                        crate::ws::ForeignServing {
+                            channel_id,
+                            nest_url: nest_url.clone(),
+                            home_nest_id,
+                        },
+                        lease_secs,
+                    )),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(refused)) => {
+                        tracing::debug!(
+                            "serve.announce: the home nest admitted no seat: {}",
+                            refused.code
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!("serve.announce: the home nest was not reached: {e}");
+                        break;
+                    }
                 }
             }
+            admitted
         }
     });
     futures_util::future::join_all(forwards)
@@ -3239,8 +3663,9 @@ fn withdraw_foreign(
     });
 }
 
-/// Keep a connection's foreign seats leased: renew each at half the lease the
-/// home nests granted while the connection stands, and say *no longer serving*
+/// Keep a connection's foreign seats leased: renew each every `period` (half
+/// the shortest lease the home nests granted, [`foreign_renewal_period`])
+/// while the connection stands, and say *no longer serving*
 /// when it closes or is revoked (§ Relay serving → *A member on another nest*,
 /// step (2)). Cancelled by the next announce on the connection, which withdraws
 /// what it drops and renews the rest itself.
@@ -3250,10 +3675,10 @@ async fn keep_foreign_seats(
     actor_id: [u8; 32],
     device_id: [u8; 32],
     entries: Vec<crate::ws::ForeignServing>,
-    lease_secs: u64,
+    period: RenewalPeriod,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    let period = std::time::Duration::from_secs((lease_secs / 2).max(1));
+    let period = period.get();
     let mut revoked = conn.subscribe_revoked();
     let actor_hex = hex::encode(actor_id);
     let device_hex = hex::encode(device_id);
@@ -3311,6 +3736,10 @@ pub fn register_sync_handlers(b: &mut RpcRouterBuilder) {
         ("fauna.sync.backup_status", backup_status_handler()),
         ("fauna.sync.devices.list", devices_list_handler()),
         ("fauna.sync.devices.delete", devices_delete_handler()),
+        (
+            fauna_protocol::sync::KIND_SYNC_DEVICES_RENAME,
+            devices_rename_handler(),
+        ),
         (
             fauna_protocol::sync::KIND_SYNC_DEVICES_P2P_PARTICIPATION_SET,
             devices_p2p_participation_set_handler(),
@@ -3956,6 +4385,616 @@ mod changes_record_size_tests {
                 .unwrap()
                 .is_empty(),
             "and landed no row"
+        );
+    }
+}
+
+#[cfg(test)]
+mod change_page_budget_tests {
+    //! The change-row serve page fits the WS message cap the app's socket
+    //! enforces (`transport.md` § Max frame). The class-2 account-state feed
+    //! pages by bytes alone, so a page of many small entries is the case an
+    //! estimated row cost breaks.
+    use super::*;
+    use crate::db::SyncChangeRow;
+
+    fn state_entry(seq: i64, entry_len: usize) -> SyncChangeRow {
+        SyncChangeRow {
+            seq,
+            path_hash: vec![0xab; 32],
+            manifest_hash: None,
+            size_bytes: 0,
+            change_type: "put".into(),
+            created_at: 1_790_000_000_000 + seq,
+            path: None,
+            device_id: Some(vec![0xcd; 32]),
+            content_key_version: None,
+            thumbnail_hash: None,
+            actor_id: vec![0xef; 32],
+            path_sealed: None,
+            derived_through: Some(seq),
+            is_resolution: None,
+            is_retention: None,
+            item_class: Some("state-entry".into()),
+            origin_writer: Some(vec![0x12; 32]),
+            origin_seq: Some(seq),
+            entry_sealed: Some(vec![0x34; entry_len]),
+            signature: Some(vec![0x56; 64]),
+            signer_key: Some(vec![0x78; 32]),
+            deposited_by: None,
+        }
+    }
+
+    fn encoded_reply_len(rows: &[SyncChangeRow]) -> usize {
+        encode_reply(&SyncChangesListReply {
+            caller_access: None,
+            residency: None,
+            changes: rows.iter().map(change_to_wire).collect(),
+            complete_through_seq: Some(i64::MAX),
+            retirable_through_seq: Some(i64::MAX),
+            replica_id: Some(fauna_protocol::ByteBuf::from(vec![0u8; 32])),
+            extra: Default::default(),
+            signer_certs: Vec::new(),
+        })
+        .expect("encode")
+        .len()
+    }
+
+    #[test]
+    fn a_page_of_small_state_entries_encodes_within_the_ws_message_cap() {
+        for entry_len in [64, 300, 1_000, 4_000, 16_000, 64 * 1024] {
+            let rows: Vec<_> = (1..=8_000).map(|s| state_entry(s, entry_len)).collect();
+            let (page, rest) = take_change_page(rows);
+            assert!(
+                !page.is_empty() && !rest.is_empty(),
+                "entry {entry_len}: the budget, not the row supply, closed the page"
+            );
+            let len = encoded_reply_len(&page);
+            assert!(
+                len <= fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE,
+                "entry {entry_len}: a {}-row page encodes to {len} bytes, over the {}-byte WS cap",
+                page.len(),
+                fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE
+            );
+            // A real page, not a starved one: the walk still advances in
+            // large steps.
+            assert!(
+                len > crate::segments::SERVE_PAGE_BUDGET_BYTES / 2,
+                "entry {entry_len}: a {}-row page of {len} bytes is under half the budget",
+                page.len()
+            );
+        }
+    }
+
+    /// The folder arm of `fauna.sync.changes.list` pages a log that encodes
+    /// past the WS cap: every reply fits the cap, and a walk by the `since`
+    /// cursor until an empty page sees every row exactly once, in order.
+    #[tokio::test]
+    async fn the_folder_arm_pages_a_log_past_the_cap_and_a_walk_sees_every_row_once() {
+        use std::sync::Arc;
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
+        let state = Arc::new(AppState::for_test(db));
+        let actor = [0x41u8; 32];
+        state.db.create_user(&actor, "free", "owner").await.unwrap();
+        let folder_id = state
+            .db
+            .create_folder_with_options("photos", &actor, Default::default())
+            .await
+            .unwrap();
+        // ~4 KiB of path per row: 1,200 rows encode to ~5 MiB, two and a half
+        // frames' worth.
+        let total = 1_200usize;
+        let mut recorded = Vec::with_capacity(total);
+        for i in 0..total {
+            let mut path_hash = [0u8; 32];
+            path_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let path = format!("{i:06}/{}", "p".repeat(4_000));
+            recorded.push(
+                state
+                    .db
+                    .record_sync_change(
+                        &actor,
+                        &path_hash,
+                        Some(&[0xC1u8; 32]),
+                        1,
+                        "create",
+                        Some(folder_id),
+                        None,
+                        Some(&path),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let mut seen = Vec::new();
+        let mut since = 0i64;
+        let mut pages = 0;
+        loop {
+            let req = SyncChangesListRequest {
+                folder: Some("photos".into()),
+                since,
+                ..Default::default()
+            };
+            let payload = Bytes::from(encode_canonical(&req).expect("encode req").to_vec());
+            let reply_bytes = changes_list_handler()(state.clone(), actor, payload)
+                .await
+                .expect("the folder arm answers");
+            assert!(
+                reply_bytes.len() <= fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE,
+                "page {pages}: a {}-byte reply is over the {}-byte WS cap",
+                reply_bytes.len(),
+                fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE
+            );
+            let reply: SyncChangesListReply =
+                fauna_cbor::decode_strict(&reply_bytes).expect("decode reply");
+            let Some(top) = reply.changes.last().map(|c| c.seq) else {
+                break;
+            };
+            assert!(top > since, "the walk advances");
+            seen.extend(reply.changes.iter().map(|c| c.seq));
+            since = top;
+            pages += 1;
+            assert!(pages <= total, "the walk terminates");
+        }
+        assert!(pages >= 3, "a ~5 MiB log takes several pages, got {pages}");
+        assert_eq!(seen, recorded, "every row once, in seq order");
+    }
+
+    /// A page read of a log far larger than one page loads a
+    /// bounded number of rows — the cap rides the query, so the rows a page
+    /// leaves behind are at most the cap's remainder, never the whole tail —
+    /// and the cap never binds before the frame: no page could hold more rows
+    /// than it loads.
+    #[tokio::test]
+    async fn a_folder_page_read_loads_a_bounded_number_of_rows() {
+        let db = crate::db::CacheDb::open_in_memory().expect("in-memory db");
+        let actor = [0x42u8; 32];
+        db.create_user(&actor, "free", "owner").await.unwrap();
+        let folder_id = db
+            .create_folder_with_options("notes", &actor, Default::default())
+            .await
+            .unwrap();
+        let cap = FOLDER_CHANGE_PAGE_MAX_ROWS as usize;
+        let total = cap + 2_000;
+        let mut recorded = Vec::with_capacity(total);
+        for i in 0..total {
+            let mut path_hash = [0u8; 32];
+            path_hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            recorded.push(
+                db.record_sync_change(
+                    &actor,
+                    &path_hash,
+                    None,
+                    0,
+                    "delete",
+                    Some(folder_id),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+
+        // The default page: one page's worth plus one loaded, of a log the
+        // cap leaves 2,000 rows short of.
+        let (page, rest, _) =
+            folder_change_page(&db, folder_id, 0, None, FOLDER_CHANGE_PAGE_MAX_ROWS)
+                .await
+                .expect("page");
+        assert!(!page.is_empty(), "the walk advances");
+        assert_eq!(
+            page.len() + rest.len(),
+            cap,
+            "the load stops at the cap, not at the end of the log"
+        );
+        let loaded: Vec<i64> = page.iter().chain(rest.iter()).map(|r| r.seq).collect();
+        assert_eq!(loaded, recorded[..cap], "a contiguous prefix of the log");
+
+        // A smaller asked-for page loads that many, and a walk by the cursor
+        // still sees every row once, in order: close early, never skip.
+        let mut seen = Vec::new();
+        let mut since = 0i64;
+        loop {
+            let (page, rest, _) = folder_change_page(&db, folder_id, since, None, 4_000)
+                .await
+                .expect("page");
+            assert!(page.len() + rest.len() <= 4_000, "the asked-for cap binds");
+            let Some(top) = page.last().map(|r| r.seq) else {
+                break;
+            };
+            seen.extend(page.iter().map(|r| r.seq));
+            since = top;
+        }
+        assert_eq!(seen, recorded, "every row once, in seq order");
+
+        // The cap never closes a page the frame would have let grow: rows
+        // costing nothing but their framing overhead fill a page short of it.
+        let (page, _) = crate::segments::take_page_within_budget(vec![(); cap + 10], |_| 0);
+        assert!(
+            page.len() < cap,
+            "a page of {} rows reached the {cap}-row load cap",
+            page.len()
+        );
+    }
+
+    /// A page whose delegated signers' certs would pass the frame's headroom
+    /// closes earlier: rows go back from the tail, never skipped, until the
+    /// page and its side table fit the cap together.
+    #[tokio::test]
+    async fn a_page_heavy_with_signer_certs_closes_early_to_fit_the_cap() {
+        use std::sync::Arc;
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
+        let actor = [0xefu8; 32];
+        let rows = || -> Vec<SyncChangeRow> {
+            (1..=8_000)
+                .map(|s| {
+                    let mut row = state_entry(s, 300);
+                    // A distinct delegated signer per row, each with a 2 KiB cert:
+                    // a full row page's certs alone are megabytes.
+                    let mut key = [0u8; 32];
+                    key[..8].copy_from_slice(&(s as u64).to_be_bytes());
+                    row.actor_id = actor.to_vec();
+                    row.signer_key = Some(key.to_vec());
+                    row
+                })
+                .collect()
+        };
+        for row in &rows() {
+            let key: [u8; 32] = row.signer_key.as_deref().unwrap().try_into().unwrap();
+            let cert = fauna_core::encoding::EmbedAsBytes {
+                envelope: vec![0x11; 100],
+                bytes: vec![0x22; 2_048],
+                signer_auth: None,
+            };
+            db.upsert_sync_signer_cert(
+                &actor,
+                &key,
+                &actor,
+                &encode_canonical(&cert).expect("encode cert"),
+            )
+            .await
+            .unwrap();
+        }
+        let (plain_page, _) = take_change_page(rows());
+        let (page, rest, certs) = take_signed_change_page(&db, rows()).await.expect("cut");
+        assert!(
+            page.len() < plain_page.len(),
+            "the certs closed the page earlier than the rows alone"
+        );
+        assert_eq!(
+            certs.len(),
+            page.len(),
+            "one cert per delegated signer in the page"
+        );
+        // Contiguous prefix: page then rest is the input, nothing skipped.
+        let walked: Vec<i64> = page.iter().chain(rest.iter()).map(|r| r.seq).collect();
+        assert_eq!(walked, (1..=8_000).collect::<Vec<i64>>());
+        let len = encode_reply(&SyncChangesListReply {
+            caller_access: None,
+            residency: None,
+            changes: page.iter().map(change_to_wire).collect(),
+            complete_through_seq: None,
+            retirable_through_seq: None,
+            replica_id: None,
+            extra: Default::default(),
+            signer_certs: certs,
+        })
+        .expect("encode")
+        .len();
+        assert!(
+            len <= fauna_core::transport::MAX_RPC_WS_MESSAGE_SIZE,
+            "a {}-row page with its certs encodes to {len} bytes, over the cap",
+            page.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod unservable_change_tests {
+    //! The record door refuses a change row no change-log page could serve
+    //! (`transport.md` § Max frame, *count-paged serve replies are
+    //! byte-budgeted*): one byte over the cap is refused
+    //! `change_too_large` and writes nothing; a row at the cap lands and is
+    //! served on a page of its own, so the walk never freezes behind it.
+    use super::*;
+
+    use fauna_core::identity::ActorKeypair;
+
+    const SET_NONCE: [u8; 32] = [0x6a; 32];
+    const DEVICE: [u8; 32] = [0xd8; 32];
+    const MANIFEST: [u8; 32] = [0x22; 32];
+
+    /// The signed record request a writer engine sends for `path`, its label
+    /// `seal` being the variable field an oversized row grows.
+    fn signed_request(
+        recorder: &ActorKeypair,
+        fs: &crate::db::FolderRow,
+        path: &str,
+        seal: &[u8],
+    ) -> SyncChangeRecordRequest {
+        let mut req = SyncChangeRecordRequest {
+            folder: fs.name.clone(),
+            device_id: hex::encode(DEVICE),
+            path: path.into(),
+            manifest_hash: Some(hex::encode(MANIFEST)),
+            size_bytes: 10,
+            change_type: "create".into(),
+            path_sealed: Some(fauna_protocol::ByteBuf::from(seal.to_vec())),
+            ..Default::default()
+        };
+        fauna_protocol::sync_writer_sig::ChangeSigner::direct(recorder)
+            .sign_record(&mut req, SET_NONCE)
+            .expect("the fixture record signs");
+        req
+    }
+
+    async fn record(
+        state: &AppState,
+        recorder: &ActorKeypair,
+        fs: &crate::db::FolderRow,
+        req: &SyncChangeRecordRequest,
+    ) -> Result<i64, RpcError> {
+        record_change_core(
+            state,
+            &recorder.actor_id().0,
+            fs,
+            &req.path,
+            req.manifest_hash.as_deref(),
+            req.size_bytes,
+            &req.change_type,
+            None,
+            None,
+            &DEVICE,
+            req.path_sealed.as_ref().map(|b| &b[..]),
+            None,
+            None,
+            crate::change_signature::CarriedSignature::new(
+                req.signature.as_ref(),
+                req.signer_key.as_ref(),
+            ),
+            crate::change_signature::CertCarriage::ByReference,
+        )
+        .await
+    }
+
+    /// What the door measures for `req`: the row it would store.
+    fn measured(recorder: &ActorKeypair, req: &SyncChangeRecordRequest) -> usize {
+        minted_change_wire_len(crate::db::SyncChangeRow {
+            seq: 0,
+            path_hash: fauna_core::sync::path_hash(&req.path).to_vec(),
+            manifest_hash: Some(MANIFEST.to_vec()),
+            size_bytes: req.size_bytes,
+            change_type: req.change_type.clone(),
+            created_at: 0,
+            path: None,
+            device_id: Some(DEVICE.to_vec()),
+            content_key_version: None,
+            thumbnail_hash: None,
+            actor_id: recorder.actor_id().0.to_vec(),
+            path_sealed: req.path_sealed.as_ref().map(|b| b.to_vec()),
+            derived_through: None,
+            is_resolution: None,
+            is_retention: None,
+            item_class: None,
+            origin_writer: None,
+            origin_seq: None,
+            entry_sealed: None,
+            signature: req.signature.as_ref().map(|b| b.to_vec()),
+            signer_key: req.signer_key.as_ref().map(|b| b.to_vec()),
+            deposited_by: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_row_over_the_serve_cap_is_refused_and_one_at_it_is_served_alone() {
+        let state = crate::test_support::fixture_state();
+        let owner_kp = ActorKeypair::from_secret([0xe4u8; 32]);
+        let owner = owner_kp.actor_id().0;
+        state.db.create_user(&owner, "free", "test").await.unwrap();
+        state
+            .db
+            .create_folder_with_options(
+                "big",
+                &owner,
+                crate::db::FolderOptions {
+                    set_nonce: Some(SET_NONCE.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let fs = state
+            .db
+            .get_folder("big")
+            .await
+            .unwrap()
+            .expect("set exists");
+
+        // The label length that puts the row exactly at the cap: past 64 KiB a
+        // byte string's head is a fixed five bytes, so the measure grows one
+        // byte per label byte from a probe of 1 MiB.
+        let probe = 1 << 20;
+        let probe_req = signed_request(&owner_kp, &fs, "a.bin", &vec![7; probe]);
+        let at_cap = probe + (MAX_SERVABLE_CHANGE_WIRE_BYTES - measured(&owner_kp, &probe_req));
+
+        let over = signed_request(&owner_kp, &fs, "a.bin", &vec![7; at_cap + 1]);
+        assert_eq!(
+            measured(&owner_kp, &over),
+            MAX_SERVABLE_CHANGE_WIRE_BYTES + 1
+        );
+        let err = record(&state, &owner_kp, &fs, &over)
+            .await
+            .expect_err("a row one byte over the cap is refused");
+        assert_eq!(err.code, "fauna.sync.change_too_large");
+        let rows = state
+            .db
+            .get_sync_changes_for_folder(fs.id, 0, None)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "the refusal writes nothing");
+
+        let at = signed_request(&owner_kp, &fs, "a.bin", &vec![7; at_cap]);
+        assert_eq!(measured(&owner_kp, &at), MAX_SERVABLE_CHANGE_WIRE_BYTES);
+        let big_seq = record(&state, &owner_kp, &fs, &at)
+            .await
+            .expect("a row at the cap is recorded");
+        let small = signed_request(&owner_kp, &fs, "b.bin", b"small-seal");
+        let small_seq = record(&state, &owner_kp, &fs, &small)
+            .await
+            .expect("a small row after it is recorded");
+
+        // The reader's walk: the cap row is served on a page of its own, and
+        // the row after it is the next page's — never an empty page.
+        let rows = state
+            .db
+            .get_sync_changes_for_folder(fs.id, 0, None)
+            .await
+            .unwrap();
+        let (page, rest, _certs) = take_signed_change_page(&state.db, rows).await.unwrap();
+        let seqs =
+            |rows: &[crate::db::SyncChangeRow]| rows.iter().map(|r| r.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(&page), vec![big_seq]);
+        assert_eq!(seqs(&rest), vec![small_seq]);
+        let (page, rest, _certs) = take_signed_change_page(&state.db, rest).await.unwrap();
+        assert_eq!(seqs(&page), vec![small_seq]);
+        assert!(rest.is_empty());
+    }
+}
+
+/// The bounds on relay serving across nests
+/// (`deployment-threat-model.md` concern 2, item 3).
+#[cfg(test)]
+mod foreign_forward_bound_tests {
+    use super::*;
+    use fauna_core::folder_keys::FolderRef;
+    use fauna_protocol::sync::SyncServeForeignEntry;
+
+    fn entry(channel: u8, nest: usize) -> SyncServeForeignEntry {
+        SyncServeForeignEntry {
+            folder: FolderRef::Foreign([channel; 32]).to_wire(),
+            nest_url: format!("https://home-{nest}.example"),
+            extra: Default::default(),
+        }
+    }
+
+    fn meter() -> crate::bridge_rate_limit::Limiter {
+        crate::bridge_rate_limit::Limiter::with_config(FOREIGN_FORWARD_METER)
+    }
+
+    /// An announce naming more distinct home nests than the cap forwards to
+    /// the cap's first-named nests only; several channels of one admitted
+    /// nest all go, each once.
+    #[test]
+    fn an_announce_forwards_to_at_most_the_cap_of_home_nests() {
+        let mut entries: Vec<_> = (0..200u8).map(|i| entry(i, i as usize)).collect();
+        entries.push(entry(250, 0));
+        entries.push(entry(250, 0));
+        let picked = select_foreign_forwards(&meter(), &[0x11; 32], &entries);
+        assert_eq!(picked.len(), SERVE_ANNOUNCE_MAX_FOREIGN_NESTS);
+        assert_eq!(picked[0].0, "https://home-0.example");
+        assert_eq!(picked[0].1, vec![[0u8; 32], [250u8; 32]]);
+        let channels: usize = picked.iter().map(|(_, c)| c.len()).sum();
+        assert_eq!(channels, SERVE_ANNOUNCE_MAX_FOREIGN_NESTS + 1);
+    }
+
+    /// Bursts that spend the actor's meter are refused inside the window; the
+    /// meter is per actor, so another actor still forwards.
+    #[test]
+    fn a_burst_past_the_meter_inside_the_window_is_refused() {
+        let meter = meter();
+        let actor = [0x11; 32];
+        let bursts = FOREIGN_FORWARD_METER.max_events as usize / SERVE_ANNOUNCE_MAX_FOREIGN_NESTS;
+        for b in 0..bursts {
+            let entries: Vec<_> = (0..SERVE_ANNOUNCE_MAX_FOREIGN_NESTS)
+                .map(|i| entry(i as u8, b * 100 + i))
+                .collect();
+            assert_eq!(
+                select_foreign_forwards(&meter, &actor, &entries).len(),
+                SERVE_ANNOUNCE_MAX_FOREIGN_NESTS,
+                "burst {b} is inside the meter"
+            );
+        }
+        let entries: Vec<_> = (0..SERVE_ANNOUNCE_MAX_FOREIGN_NESTS)
+            .map(|i| entry(i as u8, 9000 + i))
+            .collect();
+        assert!(
+            select_foreign_forwards(&meter, &actor, &entries).is_empty(),
+            "the next burst inside the window forwards nothing"
+        );
+        assert_eq!(
+            select_foreign_forwards(&meter, &[0x22; 32], &entries).len(),
+            SERVE_ANNOUNCE_MAX_FOREIGN_NESTS,
+            "another actor has its own meter"
+        );
+    }
+
+    /// A peer's lease reply is clamped: `1` cannot make the nest renew each
+    /// second, `u64::MAX` cannot stop renewals so honest seats lapse.
+    #[test]
+    fn a_peer_lease_reply_is_clamped() {
+        let lease = crate::chunk_relay::FOREIGN_SEAT_LEASE.as_secs();
+        assert_eq!(clamp_peer_lease(1), FOREIGN_LEASE_FLOOR_SECS);
+        assert_eq!(clamp_peer_lease(0), FOREIGN_LEASE_FLOOR_SECS);
+        assert_eq!(clamp_peer_lease(u64::MAX), lease);
+        assert_eq!(clamp_peer_lease(lease), lease);
+        assert!(FOREIGN_LEASE_FLOOR_SECS < lease);
+        // The renewal period both lease sites take: the shortest of several
+        // replies, each clamped.
+        let half = |secs: u64| Some(std::time::Duration::from_secs(secs / 2));
+        let foreign_renewal_period =
+            |leases: &[u64]| foreign_renewal_period(leases.iter().copied()).map(RenewalPeriod::get);
+        assert_eq!(
+            foreign_renewal_period(&[lease, 1]),
+            half(FOREIGN_LEASE_FLOOR_SECS)
+        );
+        assert_eq!(foreign_renewal_period(&[0]), half(FOREIGN_LEASE_FLOOR_SECS));
+        assert_eq!(
+            foreign_renewal_period(&[lease, u64::MAX]),
+            half(lease),
+            "an honest 120 s seat renews before it lapses"
+        );
+        assert_eq!(foreign_renewal_period(&[u64::MAX]), half(lease));
+        assert_eq!(foreign_renewal_period(&[]), None);
+    }
+
+    /// The announce path spends the nest's ONE shared meter: bursts forwarded
+    /// through [`forward_foreign_announces`] against one `AppState` leave the
+    /// actor's meter in `state.sync` spent, so a fresh per-call meter (which
+    /// never accumulates) turns this red. The home
+    /// nests are unparseable URLs, refused before any dial; each still spends
+    /// its event, as a home nest that was not reached does.
+    #[tokio::test]
+    async fn the_announce_path_spends_the_shared_meter() {
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
+        // The production federation kinds, so the forward reaches the dial.
+        let mut router = crate::federation_router::FederationRouter::builder();
+        crate::federation_handlers::register_federation_handlers(&mut router);
+        let state = std::sync::Arc::new(AppState {
+            federation_router: std::sync::Arc::new(router.build()),
+            ..AppState::for_test(db)
+        });
+        let actor = [0x33; 32];
+        let device = [0x44; 32];
+        let burst = |b: usize| -> Vec<SyncServeForeignEntry> {
+            (0..SERVE_ANNOUNCE_MAX_FOREIGN_NESTS)
+                .map(|i| SyncServeForeignEntry {
+                    folder: FolderRef::Foreign([i as u8; 32]).to_wire(),
+                    nest_url: format!("not a url {b} {i}"),
+                    extra: Default::default(),
+                })
+                .collect()
+        };
+        let bursts = FOREIGN_FORWARD_METER.max_events as usize / SERVE_ANNOUNCE_MAX_FOREIGN_NESTS;
+        for b in 0..bursts {
+            let admitted = forward_foreign_announces(&state, &actor, &device, &burst(b)).await;
+            assert!(admitted.is_empty(), "no home nest is reached");
+        }
+        assert!(
+            select_foreign_forwards(&state.sync.foreign_forward_meter, &actor, &burst(bursts))
+                .is_empty(),
+            "the announces spent the actor's meter in the nest's state"
         );
     }
 }

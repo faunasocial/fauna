@@ -89,7 +89,7 @@ public struct AdminCalendarView: View {
                         .accessibilityIdentifier(Ids.adminCalendarCaldavPortInput)
                         .automationField(Ids.adminCalendarCaldavPortInput, text: $caldavPortText)
                 }
-                Text(L.admin.calendarPage.caldavPortDesc)
+                automationText(Ids.adminCalendarCaldavPortHelpText, L.admin.calendarPage.caldavPortDesc)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack {

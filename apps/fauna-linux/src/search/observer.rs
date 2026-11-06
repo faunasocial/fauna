@@ -10,22 +10,11 @@
 
 use std::sync::Arc;
 
-use async_channel::Sender;
 use fauna_client_search::SearchSnapshotObserver;
 
 use crate::search::host::LinuxSearchManager;
 
-pub struct GtkSearchObserver {
-    tx: Sender<()>,
-}
-
-impl SearchSnapshotObserver for GtkSearchObserver {
-    fn on_changed(&self) {
-        // try_send so the mutator path never blocks; a full channel is a wake
-        // already owed (`async_helper::snapshot_wake_channel`).
-        let _ = self.tx.try_send(());
-    }
-}
+crate::async_helper::snapshot_wake_observer!(pub GtkSearchObserver, SearchSnapshotObserver);
 
 /// Register a `GtkSearchObserver` against `manager`, returning the receiver
 /// end of its coalescing wake channel. Consume `rx` with

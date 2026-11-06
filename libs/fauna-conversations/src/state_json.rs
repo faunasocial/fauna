@@ -55,6 +55,40 @@ pub fn mls_folded_commits_json_for_session(
     }
 }
 
+/// Build the top-level `mls_bound_channels` state value — the sorted hex ids of
+/// every channel the session's live [`FaunaMlsBackend`] has bound a thread to
+/// ([`FaunaMlsBackend::bound_channels`]). The shared derivation behind
+/// `fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`, which owns the contract.
+///
+/// A bound channel is not a listed thread: a direct thread born from a Welcome
+/// and holding no message yet is bound — its receive poll runs — but held off
+/// every rail (`archive-import.md` § Linking and merging (phase two), ruling
+/// 1), so `data.conversation_threads` cannot witness it. Pre-session callers
+/// publish `[]`, never `null`, for [`mls_folded_commits_json`]'s reason.
+pub fn mls_bound_channels_json(backend: &FaunaMlsBackend) -> Value {
+    bound_channels_value(backend.bound_channels())
+}
+
+/// The pure half of [`mls_bound_channels_json`]: sorted, so the published
+/// value does not churn with the backend's map order.
+fn bound_channels_value(channels: impl IntoIterator<Item = fauna_mls::types::ChannelId>) -> Value {
+    let mut hexes: Vec<String> = channels.into_iter().map(|c| c.to_string()).collect();
+    hexes.sort();
+    json!(hexes)
+}
+
+/// [`mls_bound_channels_json`] over an app's `Option<Arc<ConversationsSession>>`
+/// — the whole native leg, as [`mls_folded_commits_json_for_session`] is for
+/// its key. `None` ⇒ `[]`, never `null`.
+pub fn mls_bound_channels_json_for_session(
+    session: Option<&std::sync::Arc<crate::session::ConversationsSession>>,
+) -> Value {
+    match session {
+        Some(s) => mls_bound_channels_json(&s.backend()),
+        None => json!([]),
+    }
+}
+
 /// Build the top-level `conv_receive_cycles` state value —
 /// `{"started": N, "completed": M, "exit": null | "closed" | "retired" |
 /// "panicked"}` — from the session's live counters. The shared derivation behind
@@ -291,6 +325,19 @@ mod tests {
     };
     use fauna_core::identity::ActorKeypair;
     use std::sync::Arc;
+
+    /// The bound-channels value is the hex ids, sorted — one shape whatever
+    /// order the backend's map yields them in, and `[]` for none.
+    #[test]
+    fn bound_channels_publish_as_sorted_hex() {
+        use fauna_mls::types::ChannelId;
+        assert_eq!(bound_channels_value(Vec::<ChannelId>::new()), json!([]));
+        let (hi, lo) = (ChannelId([0xbb; 32]), ChannelId([0x0a; 32]));
+        assert_eq!(
+            bound_channels_value([hi, lo]),
+            json!(["0a".repeat(32), "bb".repeat(32)]),
+        );
+    }
 
     fn inbound(sender_seed: u8, message_id: &str) -> RailInboundMessage {
         let actor_id = ActorKeypair::from_secret([sender_seed; 32]).actor_id();

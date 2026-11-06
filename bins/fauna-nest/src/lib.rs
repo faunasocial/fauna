@@ -95,6 +95,7 @@ pub mod challenge_auth;
 pub mod channel_refusal_test_hook;
 pub mod chunk_relay;
 pub mod chunk_routes;
+pub mod dav_pre_split;
 pub mod rpc_hold_test_hook;
 // Moving a sealed mail body across the bulk-byte plane when it is too large for the
 // 2 MiB RPC frame (smtp-server.md § Message size limits): resolve an upward
@@ -187,6 +188,8 @@ pub mod content_seal_test_hook;
 pub mod files_handlers;
 pub mod filesync_handlers;
 pub mod generation_escrow_handlers;
+#[cfg(feature = "test-hooks")]
+pub mod generation_escrow_test_hook;
 pub mod host_maintenance;
 pub mod http_range;
 pub mod identity_domain_core;
@@ -213,6 +216,7 @@ pub mod mail_dkim_key;
 pub mod mail_enable;
 pub mod mail_export_blobs;
 pub(crate) mod mail_from_ownership;
+pub mod mail_import_tunnel;
 pub(crate) mod mail_submitter_proof;
 #[cfg(feature = "test-hooks")]
 pub mod mass_mailing_test_hook;
@@ -877,6 +881,13 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         // Anonymous (pre-identity) WS — no actor_id, no bearer; routes only the
         // pre-identity allowlist. transport.md § Pre-identity (anonymous) connection.
         .route("/api/v1/ws", get(routes::ws_anonymous_handler))
+        // The web mail-import tunnel — a blind byte tunnel to a source IMAP
+        // host or the Microsoft authority (`mailbox-migration.md` § Where the
+        // IMAP client runs → *The web tunnel*).
+        .route(
+            fauna_protocol::mail_import_tunnel::ROUTE,
+            get(mail_import_tunnel::tunnel_handler),
+        )
         // The principal session — a third-party principal's token-bearing
         // WS-RPC upgrade (`transport-connection.md` § *The principal session*).
         .route(
@@ -1340,6 +1351,8 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
     let router = router.merge(membership_lapse_test_hook::routes());
     #[cfg(feature = "test-hooks")]
     let router = router.merge(account_lock_test_hook::routes());
+    #[cfg(feature = "test-hooks")]
+    let router = router.merge(generation_escrow_test_hook::routes());
     #[cfg(all(feature = "test-hooks", feature = "bluesky"))]
     let router = router.merge(bluesky::feed_test_hook::routes());
     #[cfg(all(feature = "test-hooks", feature = "bluesky"))]
@@ -1703,6 +1716,42 @@ fn refuse_plain_http_for_public_domain(domain: Option<&str>, tls_enabled: bool) 
         );
     }
     Ok(())
+}
+
+/// The running nest's loopback-peer affordance ([`AppState::peer_fetch_loopback`]).
+/// `None` on every shipped nest, so a peer-declared loopback address is never
+/// recorded or dialled (`ssrf::peer_declared_origin`). The e2e harness's
+/// `test-hooks` build — never compiled into a production binary (Cargo.toml) —
+/// is test state like [`AppState::for_test`]: its tier_3 nests serve on loopback
+/// literals, so without it a home could never learn its follower's nest and the
+/// cross-nest `follow.state` push had no address to dial.
+#[cfg(feature = "test-hooks")]
+fn harness_peer_fetch_loopback() -> Option<reqwest::Client> {
+    Some(reqwest::Client::new())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn harness_peer_fetch_loopback() -> Option<reqwest::Client> {
+    None
+}
+
+#[cfg(test)]
+mod harness_peer_fetch_loopback_tests {
+    /// The loopback-peer affordance follows the `test-hooks` feature and
+    /// nothing else: a shipped build's
+    /// state carries no loopback client, so a peer-declared loopback address
+    /// is refused before the address directory's write; the e2e harness's
+    /// build carries one. Both arms are compiled by the lib test runs
+    /// (`nest-lib-test-check` turns the feature on for `--lib`), so a build
+    /// arm that changes fails here.
+    #[test]
+    fn follows_the_test_hooks_feature_alone() {
+        assert_eq!(
+            super::harness_peer_fetch_loopback().is_some(),
+            cfg!(feature = "test-hooks"),
+            "the loopback-peer client is set exactly on the test-hooks build"
+        );
+    }
 }
 
 /// Whether this nest's client-facing listener is fronted by a separate proxy
@@ -2336,19 +2385,26 @@ pub async fn start_server(
     // 2026-10-19; the `[update] check` file switch is gone). Its answer is what
     // `fauna.nest.info` tells every app at sign-in (`installers/README.md`
     // § Knowing a newer version is out → *The nest's newest-release field*), so
-    // a switch here would silently blind every app's security-fix notice.
-    let update_config = fauna_update::UpdateConfig {
-        github_repo: fauna_core::version::RELEASE_REPO,
-        current_version: env!("CARGO_PKG_VERSION"),
-        artifact_prefix: "fauna-nest",
-        check_interval: std::time::Duration::from_secs(86400),
-        auto_apply: false,
-        install_dir: std::path::PathBuf::from("/usr/local/bin"),
+    // a switch here would silently blind every app's security-fix notice. An
+    // e2e build with no harness origin runs no check at all: its receiver stays
+    // `None`, so `newest_release` is absent until a test seeds it.
+    let update_rx = match crate::update_channel::release_feed_origin() {
+        Some(feed_origin) => {
+            let update_config = fauna_update::UpdateConfig {
+                feed_origin,
+                current_version: env!("CARGO_PKG_VERSION"),
+                artifact_prefix: "fauna-nest",
+                check_interval: std::time::Duration::from_secs(86400),
+                auto_apply: false,
+                install_dir: std::path::PathBuf::from("/usr/local/bin"),
+            };
+            // The generation token IS the update loop's shutdown signal: an old
+            // generation's checker dies at teardown instead of surviving as a
+            // duplicate (its cadence is 24 h, so tracker coverage is not needed).
+            fauna_update::spawn_update_loop(update_config, serve_generation.clone())
+        }
+        None => tokio::sync::watch::channel(None).1,
     };
-    // The generation token IS the update loop's shutdown signal: an old
-    // generation's checker dies at teardown instead of surviving as a
-    // duplicate (its cadence is 24 h, so tracker coverage is not needed).
-    let update_rx = fauna_update::spawn_update_loop(update_config, serve_generation.clone());
 
     let payload_store = backup_service.as_ref().map(|svc| {
         Arc::new(crate::payload_store::PayloadStore::new(
@@ -2644,7 +2700,7 @@ pub async fn start_server(
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("failed to build HTTP client"),
-        peer_fetch_loopback: None,
+        peer_fetch_loopback: harness_peer_fetch_loopback(),
         tls_enabled: tls_config.is_some(),
         cors_origins: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_cors_origins)),
         web_app_origin: Arc::new(arc_swap::ArcSwap::from_pointee(resolved_web_app_origin)),
@@ -2678,7 +2734,7 @@ pub async fn start_server(
             age_nonce_store: std::sync::Arc::new(age_attest::AgeNonceStore::new()),
             registration,
         },
-        sync: state::SyncState { chunk_resolver },
+        sync: state::SyncState::with_resolver(chunk_resolver),
         email: state::EmailState {
             inbound_deliver_key: std::env::var("FAUNA_INBOUND_DELIVER_KEY").ok(),
             tlsrpt_aggregator: tlsrpt_aggregator.clone(),
@@ -2718,6 +2774,7 @@ pub async fn start_server(
             // claim-refreshed `identity_domain` cache (`ActivityPubState` docs).
             inbox_limiter: Some(activitypub::inbox_routes::new_inbox_limiter()),
             actor_fetch_limiter: Some(activitypub::inbox_routes::new_actor_fetch_limiter()),
+            dm_recipient_limiter: Some(activitypub::dm_leg::new_dm_recipient_limiter()),
         },
         web_content_service,
         host_resolver,
@@ -2809,7 +2866,7 @@ pub async fn start_server(
         #[cfg(feature = "test-hooks")]
         post_fanout_initiations: Arc::new(Default::default()),
         #[cfg(feature = "test-hooks")]
-        account_lock_refusals: Arc::new(Default::default()),
+        account_lock_hook: Arc::new(Default::default()),
         #[cfg(feature = "test-hooks")]
         epoch_sealing_test_override: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         custody_hosting_brakes: Arc::default(),
@@ -2853,6 +2910,7 @@ pub async fn start_server(
         // per-actor limiter in both prod and the e2e build; the `test-hooks`
         // fixture override below is what lets the e2e resolve a served OG page.
         link_preview: crate::link_preview::LinkPreviewState::new(),
+        mail_import_tunnel: crate::mail_import_tunnel::TunnelState::new(),
         #[cfg(feature = "test-hooks")]
         link_preview_override: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         #[cfg(feature = "test-hooks")]
@@ -2881,6 +2939,12 @@ pub async fn start_server(
     // cert lifecycle, and the succession commit, which re-runs this same seed.
     // (web-content-hosting.md § Routing — boot population of the resolver.)
     seed_host_resolver(&state).await;
+
+    // Schema 158's boot pass: tombstone the calendar and card records still
+    // sealed as `mail-record`s from before the key split, once per nest and
+    // before DAV serving (`owner-key-material.md` § Path B-sibling-5 →
+    // *Migration*). A no-op unless the migration left its pending mark.
+    crate::dav_pre_split::run_at_boot(&state).await;
 
     // Bridge rate-limiter bucket sweeper. Drops empty buckets every
     // 5 × window so a long-lived deployment can't grow the DashMap
@@ -2968,6 +3032,12 @@ pub async fn start_server(
     // per-actor DashMap can't grow unboundedly from a churn of distinct actors.
     state.scope_handle(crate::bridge_rate_limit::spawn_sweeper(
         state.link_preview.rate_limiter.clone(),
+        std::time::Duration::from_secs(300),
+    ));
+    // Serve-announce forward meter sweeper (same cadence): per-actor buckets of
+    // the home nests a `fauna.sync.serve.announce` dials.
+    state.scope_handle(crate::bridge_rate_limit::spawn_sweeper(
+        state.sync.foreign_forward_meter.clone(),
         std::time::Duration::from_secs(300),
     ));
     // D4 link-preview by-url cache sweeper. 1 h TTL ⇒ a 30 min cadence keeps the

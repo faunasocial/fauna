@@ -113,9 +113,24 @@ class WebSettingsContentTest {
         render(
             SubdomainView(enabled = false, url = null, disabledReason = null),
             onSetEnabled = { captured = it },
+            hydrated = true,
         )
         composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").performClick()
         assertEquals(true, captured)
+    }
+
+    /** Before the nest-confirmed view is in, the toggle paints disabled so an
+     *  early flip is refused loudly rather than dropped (lift of tui:3796). */
+    @Test
+    fun toggleReadsDisabledUntilHydrated() {
+        render(SubdomainView(enabled = false, url = null, disabledReason = null), hydrated = false)
+        composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").assertIsNotEnabled()
+    }
+
+    @Test
+    fun toggleReadsEnabledOnceHydrated() {
+        render(SubdomainView(enabled = false, url = null, disabledReason = null), hydrated = true)
+        composeTestRule.onNodeWithTag("web-settings-subdomain-toggle").assertIsEnabled()
     }
 
     // ── Published-posts management section ─────────────────────────────────

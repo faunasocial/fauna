@@ -83,6 +83,17 @@
                     IsChecked="{Binding HandleControlCheckboxChecked, Mode=TwoWay}"
                     Visibility="{x:Bind local:HandleEntryView.BoolToVisibility(ViewModel.HandleControlCheckboxVisible), Mode=OneWay}" />
 
+                <!-- Only while Continue signs in (snapshot terms_notice_visible);
+                     Collapsed keeps it out of the automation tree. Joining is
+                     acceptance (nest-rules.md § Acceptance at joining): the nest's
+                     rules sit directly above the notice in the same branch, painted
+                     from the shared machine's joining_nest_rules in code-behind. -->
+                <StackPanel Spacing="12"
+                            Visibility="{x:Bind local:HandleEntryView.BoolToVisibility(ViewModel.HandleTermsNoticeVisible), Mode=OneWay}">
+                    <controls:JoiningNestRules x:Name="JoiningRules" />
+                    <controls:TermsNotice />
+                </StackPanel>
+
                 <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Stretch" Margin="0,16,0,0">
                     <Button
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.HandleEntryBackButton}"

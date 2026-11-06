@@ -59,7 +59,7 @@ from helpers.scheduling_inbox import (
     utc_offset,
     wait_scheduling_welcomes,
 )
-from common.auth import register_handled_actor
+from helpers.admin_wire import admit_adult
 from tests.api import conv_api
 
 # windows added 2026-07-18 (was a stale exclusion): the only client mutation is
@@ -140,9 +140,7 @@ def test_cross_nest_mailbox_less_attendee_gets_sealed_scheduling_through_real_md
     #       Her handle domain IS nest B's loopback authority, so the MDA's anon
     #       by_handle on nest B reaches her and resolve_handle_domain maps the rail
     #       back to nest B. ──
-    carol = register_handled_actor(
-        peer["port"], handle=_ATTENDEE_HANDLE, domain=peer_authority, base_url=peer["url"]
-    )
+    carol = admit_adult(peer, _ATTENDEE_HANDLE, domain=peer_authority, token=True)
     attendee_addr = f"{_ATTENDEE_HANDLE}@{peer_authority}"  # carol@127.0.0.1:<portB>
     stored = conv_api.keypackage_upload(
         peer["port"], carol, conv_api.mint_key_packages(bytes(carol["signing_key"]), _KP_COUNT),

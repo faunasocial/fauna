@@ -94,7 +94,7 @@ def start_consent_nest(nest_binary, tmp_path_factory, extra_env=None):
     ``consent_nest_env`` fixture's value, which a module overrides.
     Returns ``(nest, cleanup)``."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest
 
     nest, cleanup = _make_nest(
@@ -103,9 +103,7 @@ def start_consent_nest(nest_binary, tmp_path_factory, extra_env=None):
     )
     from common.auth import open_registration
     open_registration(nest)
-    alice = register_handled_actor(
-        nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"],
-    )
+    alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
     alice_ws = WsRpcAdminClient(
         nest["url"],
         actor_id=alice["actor_id_bytes"],

@@ -8,8 +8,12 @@
        names match the windows shell-submenu vocabulary (windows.md § Shell
        Extension) — one context-menu vocabulary on both desktop shells.
        The versions activation rule mirrors FileProviderAction.hiddenForFolder:
-       a single selected non-folder item; Share is unconditional (a set is the
-       natural share target, folders included). -->
+       a single selected non-folder item. Share is one selected item carrying
+       the userInfo `faunaShare` entry the FP appex projects ("link" on a file
+       that can carry a share link, "folder" on the set's root), so Finder and
+       the Files app hide it wherever Share has no meaning (macos.md § Sync →
+       Finder's Share entry; pinned by FaunaKitTests). One plist serves the
+       macOS and iOS action extensions alike. -->
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
@@ -38,7 +42,7 @@
         <key>NSExtensionFileProviderActionName</key>
         <string>Share</string>
         <key>NSExtensionFileProviderActionActivationRule</key>
-        <string>TRUEPREDICATE</string>
+        <string>fileproviderItems.@count == 1 AND SUBQUERY(fileproviderItems, $item, $item.userInfo.faunaShare != nil).@count == 1</string>
       </dict>
       <dict>
         <key>NSExtensionFileProviderActionIdentifier</key>

@@ -16,6 +16,7 @@ import Testing
 /// not read, not copied forward, not parked, and left untouched by a delete. Each case
 /// here is red against the pre-sweep store, which read those spellings forward.
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainRetiredServiceTests {
     private static let secret = String(repeating: "ab", count: 32)
 

@@ -1013,29 +1013,49 @@ impl GroupAuthority {
         authorization: &[u8],
         asserted_at_ms: i64,
     ) -> Result<DeviceAuthorization, String> {
-        let wire: EmbedAsBytes = canonical_decode(authorization)
-            .map_err(|e| format!("{what} is not an EmbedAsBytes carriage: {e}"))?;
-        let (cert_bytes, cert_env) = wire
-            .into_signed()
-            .map_err(|e| format!("{what} envelope malformed: {e}"))?;
-        let cert: DeviceAuthorization = decode_signed_bytes(&cert_bytes)
-            .map_err(|e| format!("{what} bytes are not a DeviceAuthorization: {e}"))?;
-        verify_envelope(&cert, &cert_bytes, &cert_env)
-            .map_err(|_| format!("{what} signature invalid"))?;
+        let cert = verify_device_cert_carriage(what, authorization, asserted_at_ms)?;
         if cert.actor_id != self.root && !self.prior.contains(&cert.actor_id) {
             return Err(format!(
                 "{what} is signed by neither the authority root nor a prior identity"
             ));
         }
-        // Expiry anchors to the asserted instant (the authoring-twin
-        // pattern). Cert timestamps are seconds; plane stamps are millis.
-        if let Some(expires_at) = cert.expires_at
-            && expires_at.0.saturating_mul(1_000) < u64::try_from(asserted_at_ms).unwrap_or(0)
-        {
-            return Err(format!("{what} expired before the asserted instant"));
-        }
         Ok(cert)
     }
+}
+
+/// **The carriage half of every device check on this plane** — the one
+/// decoder both [`GroupAuthority`]'s chain checks and a member's own chain
+/// (`fauna.group.file`'s writer check, [`crate::group_file`]) go through:
+/// `authorization` must be a `DeviceAuthorization` in the [`EmbedAsBytes`]
+/// carriage, self-signed by the actor it names, and not expired before
+/// `asserted_at_ms`. Which actor it must name is the caller's half — the
+/// authority line for an authority device, a wrapped member for a member's
+/// device. `what` names the carriage in the refusal text.
+///
+/// # Errors
+/// A malformed, mis-signed or expired authorization.
+pub fn verify_device_cert_carriage(
+    what: &str,
+    authorization: &[u8],
+    asserted_at_ms: i64,
+) -> Result<DeviceAuthorization, String> {
+    let wire: EmbedAsBytes = canonical_decode(authorization)
+        .map_err(|e| format!("{what} is not an EmbedAsBytes carriage: {e}"))?;
+    let (cert_bytes, cert_env) = wire
+        .into_signed()
+        .map_err(|e| format!("{what} envelope malformed: {e}"))?;
+    let cert: DeviceAuthorization = decode_signed_bytes(&cert_bytes)
+        .map_err(|e| format!("{what} bytes are not a DeviceAuthorization: {e}"))?;
+    verify_envelope(&cert, &cert_bytes, &cert_env)
+        .map_err(|_| format!("{what} signature invalid"))?;
+    // Expiry anchors to the asserted instant (the authoring-twin pattern).
+    // Cert timestamps are seconds; plane stamps are millis.
+    if let Some(expires_at) = cert.expires_at
+        && expires_at.0.saturating_mul(1_000) < u64::try_from(asserted_at_ms).unwrap_or(0)
+    {
+        return Err(format!("{what} expired before the asserted instant"));
+    }
+    Ok(cert)
 }
 
 /// One verified roster member — a wrap target.
@@ -1076,7 +1096,8 @@ pub struct RosterMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RosterView {
     members: BTreeMap<[u8; 32], RosterMember>,
-    removed: BTreeMap<[u8; 32], ()>,
+    /// Each excluded entry's earliest honoured removal instant.
+    removed: BTreeMap<[u8; 32], i64>,
     invalid: Vec<(String, String)>,
 }
 
@@ -1203,7 +1224,10 @@ impl RosterView {
                         // Honored: the line does not refuse the remover, so
                         // the entry is excluded across every writer's cell.
                         Ok(_) => {
-                            view.removed.insert(entry_id, ());
+                            view.removed
+                                .entry(entry_id)
+                                .and_modify(|at| *at = (*at).min(removed_at_ms))
+                                .or_insert(removed_at_ms);
                         }
                         Err(reason) => view.invalid.push((key.to_string(), reason)),
                     }
@@ -1233,6 +1257,17 @@ impl RosterView {
     /// `true` here; a since-revoked authority device's still does.
     pub fn is_excluded_entry(&self, entry_id: &[u8; 32]) -> bool {
         self.removed.contains_key(entry_id)
+    }
+
+    /// The instant an honoured removal excluded `entry_id` — the EARLIEST
+    /// `removed_at_ms` over the honoured `Removed` cells at that entry (one
+    /// per removing device), or `None` when none excludes it. The removal
+    /// bound a writer check reads (`group-set.md` decision 5, rule (i)): a
+    /// removed member is honoured as of its removal, and this is the
+    /// authority's signed instant for it, a pure function of the merged
+    /// roster rows.
+    pub fn excluded_since(&self, entry_id: &[u8; 32]) -> Option<i64> {
+        self.removed.get(entry_id).copied()
     }
 
     /// The entry ids an honored `Removed` excludes, ascending — the

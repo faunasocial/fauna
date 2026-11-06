@@ -340,20 +340,15 @@ impl MediaState {
     }
 }
 
-/// Forward machine notifications into the render loop's `UiMessage` channel.
-///
-/// `on_changed` fires **synchronously on whatever thread mutated**, so it must
-/// not touch `App`; the tick carries no payload because the observer contract is
-/// "read a fresh snapshot off the machine" — coalescing duplicates loses nothing.
-struct TuiMediaObserver {
-    tx: UnboundedSender<UiMessage>,
-}
-
-impl MediaObserver for TuiMediaObserver {
-    fn on_changed(&self) {
-        // A closed channel means the app is shutting down — nothing to notify.
-        let _ = self.tx.send(UiMessage::Data(DataMessage::MediaChanged));
-    }
+crate::app::tick_observer! {
+    /// Forward machine notifications into the render loop's `UiMessage` channel.
+    ///
+    /// `on_changed` fires **synchronously on whatever thread mutated**, so it must
+    /// not touch `App`; the tick carries no payload because the observer contract is
+    /// "read a fresh snapshot off the machine" — coalescing duplicates loses nothing.
+    TuiMediaObserver,
+    MediaObserver,
+    UiMessage::Data(DataMessage::MediaChanged)
 }
 
 /// Build the media machine over the authed transport, attach the observer, and
@@ -1817,6 +1812,41 @@ fn media_item(item: &MediaItemSummary, index: usize, thumbnails: &ImageCache) ->
 /// The `media-item-detail` surface: the item's name, the tui-only external-open
 /// trigger for an audio/video item, its `file-version-history` rows, and the
 /// confirms when armed.
+/// A version row's author line — the shared connected-apps machine composes it
+/// (`folder-deposit.md` ruling 3: "<app> via <owner>" for a version a connected
+/// app deposited), so no app re-derives the depositor wording. A session with
+/// no machine reads the recorder alone, or the generic depositor wording.
+fn version_author(app: &App, version: &FileVersionSummary) -> String {
+    match app.settings.connected_apps.machine.as_ref() {
+        Some(apps) => crate::wizard::localized(
+            &apps.version_author(version.author_display.clone(), version.deposited_by.clone()),
+        ),
+        None if version.deposited_by.is_some() => {
+            t::version_author_deposited_unknown(&version.author_display)
+        }
+        None => t::version_author(&version.author_display),
+    }
+}
+
+/// The roster read a version list needs before its depositors can be named:
+/// some version names a depositor the connected-apps machine's roster cannot
+/// name yet — never read (the page is read on a visit, and the user may never
+/// have opened it), or read before that app's principal row existed. The
+/// machine asks once per key (`ConnectedAppsMachine::depositor_read_wanted`).
+pub fn depositor_roster_op(app: &App) -> Option<crate::settings::Op> {
+    let versions = app.media.detail.as_ref()?.versions.as_ref()?;
+    let machine = app.settings.connected_apps.machine.as_ref()?;
+    machine
+        .depositor_read_wanted(
+            versions
+                .iter()
+                .filter_map(|v| v.deposited_by.clone())
+                .collect(),
+        )
+        .then(|| crate::settings::connected_apps_resync_op(&app.settings))
+        .flatten()
+}
+
 fn detail_elements(app: &App, snapshot: &MediaPageSnapshot, detail: &DetailState) -> Vec<Element> {
     let mut els = vec![
         Element::label(ids::PAGE_HEADING, t::TITLE),
@@ -1960,11 +1990,8 @@ fn detail_elements(app: &App, snapshot: &MediaPageSnapshot, detail: &DetailState
             .within(ids::FILE_VERSION_ITEM, index),
         );
         els.push(
-            Element::label(
-                ids::FILE_VERSION_AUTHOR,
-                t::version_author(&version.author_display),
-            )
-            .within(ids::FILE_VERSION_ITEM, index),
+            Element::label(ids::FILE_VERSION_AUTHOR, version_author(app, version))
+                .within(ids::FILE_VERSION_ITEM, index),
         );
         // A soft-pruned row (only an include_pruned listing carries one)
         // says so and offers its recovery verb — badge + undelete, present
@@ -2302,6 +2329,8 @@ mod tests {
             pruned: false,
             purge_after: None,
             folder_id: None,
+            thumbnail_hash: None,
+            deposited_by: None,
         }
     }
 
@@ -2314,7 +2343,7 @@ mod tests {
             items,
             ..Default::default()
         });
-        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None, None);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
         // A fixed placeholder owner key, mirroring production's post-login
         // `refresh(Some(backup_key))`; these fixtures carry no `path_sealed`, so
         // `render_sealed_paths` short-circuits before ever touching it.
@@ -2536,7 +2565,6 @@ mod tests {
         app.media.machine = Some(MediaMachine::new(
             Arc::new(NullObserver),
             api,
-            None,
             None,
             None,
             None,
@@ -3013,7 +3041,7 @@ mod tests {
             ..Default::default()
         });
         api.set_folders(sets);
-        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None, None);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
         machine.refresh(Some(vec![0u8; 32])).await;
         app.media.machine = Some(machine);
         app.media.device_id = Some("de".repeat(32));
@@ -3068,7 +3096,7 @@ mod tests {
             ..Default::default()
         });
         api.set_folders(sets);
-        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None, None);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None);
         machine.set_mls_query(Arc::new(JoinedEverything));
         machine.refresh(Some(vec![0u8; 32])).await;
         app.media.machine = Some(machine);
@@ -3551,6 +3579,45 @@ mod tests {
         assert_eq!(author_of(1), t::version_author("bob"));
     }
 
+    /// `folder-deposit.md` ruling 3: a version a connected app deposited reads
+    /// the depositor beside the recorder — "a connected app via ‹owner›" while
+    /// no roster row names its writer key — and asks for the roster read that
+    /// can name it; a list with no deposited version asks for nothing.
+    #[tokio::test]
+    async fn a_deposited_version_names_its_depositor_beside_the_owner() {
+        let mut app = app_with(vec![item("photos", "photos/a.jpg", 10)]).await;
+        apply_local(&mut app, Action::OpenDetail(0));
+        apply_outcome(&mut app, Outcome::Versions(vec![version(1, 10)]));
+        assert!(
+            depositor_roster_op(&app).is_none(),
+            "no depositor, no roster read"
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::Versions(vec![FileVersionSummary {
+                author_display: "alice".to_string(),
+                deposited_by: Some(hex::encode([0x5d; 32])),
+                ..version(1, 10)
+            }]),
+        );
+        let author = elements(&app)
+            .into_iter()
+            .find(|e| e.id == "file-version-author")
+            .expect("the row renders its author")
+            .text;
+        assert_eq!(author, t::version_author_deposited_unknown("alice"));
+        if app.settings.connected_apps.machine.is_some() {
+            assert!(
+                depositor_roster_op(&app).is_some(),
+                "an unread roster is read to name the depositor"
+            );
+            assert!(
+                depositor_roster_op(&app).is_none(),
+                "the read is asked once per depositor, never on every outcome"
+            );
+        }
+    }
+
     /// Restore is a TWO-step gesture: the per-row button only ARMS the confirm,
     /// and only the confirm returns the restore Op. A single click must never
     /// mutate the file.
@@ -3981,8 +4048,7 @@ mod tests {
             set_row(2, "docs"),
         ]);
         api.set_versions(vec![version(1, 10)]);
-        let machine =
-            MediaMachine::new(Arc::new(NullObserver), api.clone(), None, None, None, None);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api.clone(), None, None, None);
         machine.set_share_author(vec![5u8; 32], "http://127.0.0.1:1".into());
         machine.refresh(Some(vec![0u8; 32])).await;
         app.media.machine = Some(machine);
@@ -4024,8 +4090,7 @@ mod tests {
             owner_only: true,
             ..set_row(3, "vault")
         }]);
-        let machine =
-            MediaMachine::new(Arc::new(NullObserver), api.clone(), None, None, None, None);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api.clone(), None, None, None);
         machine.set_share_author(vec![5u8; 32], "http://127.0.0.1:1".into());
         machine.refresh(Some(vec![0u8; 32])).await;
         app.media.machine = Some(machine);

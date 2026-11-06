@@ -47,6 +47,31 @@ use fauna_protocol::scope::{FolderScope, GroupScope};
 /// the markers and makes every future up the call chain unspawnable.
 pub trait SetMembership: Send + Sync {
     fn is_member(&self, channel_id: &[u8; 32], actor: &ActorId) -> bool;
+
+    /// The POSITIVE reading a deletion needs (`p2p.md` § Cross-user
+    /// shared-set transfer → *A departed member's cached endpoint*, ruling
+    /// 2): [`Self::is_member`]'s fail-closed boolean folds "not listed" and
+    /// "could not read" into one `false`, right for refusing a dial and
+    /// wrong for erasing a row. The default answers
+    /// [`RosterReading::Unreadable`], so an evaluator that does not
+    /// implement it — every fake, every wrapper that forgets to forward —
+    /// authorises no deletion, ever.
+    fn roster_reading(&self, _channel_id: &[u8; 32], _actor: &ActorId) -> RosterReading {
+        RosterReading::Unreadable
+    }
+}
+
+/// [`SetMembership::roster_reading`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterReading {
+    /// The set's roster, as this evaluator holds it, lists the actor.
+    Listed,
+    /// The evaluator holds the set, read its roster, and the actor is not on
+    /// it — the one answer that authorises a tombstone.
+    NotListed,
+    /// Not held, not readable, or not current enough to vouch for an absence
+    /// (an engine error, a group this device was evicted from).
+    Unreadable,
 }
 
 /// The canonical folder-scope string for a set — the vocabulary admission
@@ -276,7 +301,7 @@ pub fn verdict_for_group_membership(
 /// design), so a data arm consuming this MUST also re-consult the live
 /// roster per request — `GroupRosterState::is_entry_removed` for the
 /// verdict's admitted entry — exactly as the M2 data arms re-consult
-/// [`SetMembership`] (`ShareServer::admitted_for_set`) and the peer-sync
+/// [`SetMembership`] (`ShareServer::admits_named_set`) and the peer-sync
 /// twin re-consults its served registry. Without the re-consult, eviction
 /// never reaches an open connection.
 pub fn verdict_admits_group(

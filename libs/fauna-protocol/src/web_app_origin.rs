@@ -154,13 +154,9 @@ pub fn central_redirect_location(path_and_query: &str, nest_domain: &str) -> Str
 /// RFC 3986 query-value encoding: unreserved characters pass, everything else
 /// is `%XX`. A handle domain is plain DNS text, so this is belt and braces.
 fn percent_encode_query_value(value: &str, out: &mut String) {
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
+    out.push_str(&fauna_core::format::percent_encode_except(value, |b| {
+        matches!(b, b'-' | b'.' | b'_' | b'~')
+    }));
 }
 
 /// `fauna.admin.web_app_origin.get` — no parameters; the answer is about this

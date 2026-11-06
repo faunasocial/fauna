@@ -68,7 +68,7 @@ import Foundation
                            isRead: false, createdAt: 1_700_000_000_000_000,
                            body: LocalizedText(key: "notifications.row_like",
                                                 args: ["sender": "alice"]))
-    let item = NotificationItem(ffi: ffi)
+    let item = NotificationItem(ffi: ffi, overlays: FfiContactOverlays(manager: ConversationsManager()))
     #expect(item.id == "7")
     // The catalog sentence wins over the summary — `notifications.md` §
     // Localized body, compat table's third row.
@@ -94,7 +94,7 @@ import Foundation
                            isRead: false, createdAt: 1_700_000_000_000_000,
                            body: LocalizedText(key: "notifications.row_not_minted_yet",
                                                 args: ["sender": "alice"]))
-    let item = NotificationItem(ffi: ffi)
+    let item = NotificationItem(ffi: ffi, overlays: FfiContactOverlays(manager: ConversationsManager()))
     #expect(item.body == "english fallback for a key this app lacks")
     #expect(!item.body.contains("row_not_minted"))
     #expect(item.summary == item.body, "no real body: summary and the fallback body agree")
@@ -114,7 +114,7 @@ import Foundation
                            summary: "alice liked your post",
                            isRead: false, createdAt: 1_700_000_000_000_000,
                            body: nil)
-    let item = NotificationItem(ffi: ffi)
+    let item = NotificationItem(ffi: ffi, overlays: FfiContactOverlays(manager: ConversationsManager()))
     #expect(item.subjectUri == "at://did:plc:xyz/app.bsky.feed.post/3kpost")
     #expect(notificationDestination(for: item, hasFamily: false)
             == .external(url: "https://bsky.app/profile/did:plc:xyz/post/3kpost"))
@@ -159,6 +159,21 @@ private let knockSenderId = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293
 @Test func knockToastBodyFallsBackToTheSendersEightHexPrefixWithNoBody() {
     let knock = FfiKnock(senderId: knockSenderId, summary: "hi, it's me", body: nil)
     #expect(knockToastBody(for: knock) == "a1b2c3d4 wants to connect")
+}
+
+// `notifications.md` § Localized body → the knock toast: one notification id
+// per app, never one per sender, so a flood of fresh keys replaces one toast
+// instead of stacking. The sender still travels in `userInfo`, which is what
+// the tap hand-off reads.
+@Test func knockToastsFromDifferentSendersShareOneRequestIdentifier() {
+    let other = String(repeating: "cd", count: 32)
+    let first = NotificationManager.knockRequest(
+        for: FfiKnock(senderId: knockSenderId, summary: "hi", body: nil))
+    let second = NotificationManager.knockRequest(
+        for: FfiKnock(senderId: other, summary: "hello", body: nil))
+    #expect(first.identifier == second.identifier)
+    #expect(first.content.userInfo[NotificationManager.knockSenderIdKey] as? String == knockSenderId)
+    #expect(second.content.userInfo[NotificationManager.knockSenderIdKey] as? String == other)
 }
 
 @Test func notificationGlyphClassifiesTheWireTypeInSharedRust() {

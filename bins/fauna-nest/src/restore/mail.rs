@@ -72,6 +72,33 @@ pub fn replay_mail_manifest_into_sqlite(
         .context("INSERT bridge_imap_messages")?;
     }
 
+    // No mailbox leaves the restore with its UID counter behind its own
+    // placements. A journal whose mailboxes were seeded without their `Create`
+    // records folds to placements with no (or a stale) mailbox state; written
+    // verbatim, the next arrival is allocated a UID a restored row already
+    // holds, its placement fails on the primary key and rolls back, and every
+    // later arrival does the same — the account's inbound mail is put off for
+    // good. A missing row takes the seeded `uid_validity = 1`, the value the
+    // database's own seeding gives a mailbox it creates.
+    tx.execute(
+        "INSERT OR IGNORE INTO bridge_imap_mailbox_state
+            (actor_id, mailbox, uid_validity, uid_next, highestmodseq)
+         SELECT actor_id, mailbox, 1, MAX(uid) + 1, MAX(modseq)
+         FROM bridge_imap_messages WHERE actor_id = ?1 GROUP BY mailbox",
+        rusqlite::params![actor.as_slice()],
+    )
+    .context("seed a placed mailbox's missing state")?;
+    tx.execute(
+        "UPDATE bridge_imap_mailbox_state AS s
+         SET uid_next = MAX(s.uid_next, p.max_uid + 1),
+             highestmodseq = MAX(s.highestmodseq, p.max_modseq)
+         FROM (SELECT mailbox, MAX(uid) AS max_uid, MAX(modseq) AS max_modseq
+               FROM bridge_imap_messages WHERE actor_id = ?1 GROUP BY mailbox) AS p
+         WHERE s.actor_id = ?1 AND s.mailbox = p.mailbox",
+        rusqlite::params![actor.as_slice()],
+    )
+    .context("put a mailbox's counters past its placements")?;
+
     // bridge_imap_expunged: (actor_id, mailbox, uid, modseq, expunged_at)
     // expunged_at from the tombstone's `deleted_at`.
     for t in &manifest.tombstones {
@@ -136,6 +163,94 @@ mod tests {
         });
         manifest.subscriptions.push("INBOX".to_string());
         manifest
+    }
+
+    /// Read `(uid_next, highestmodseq)` of `(actor, mailbox)`, `None` when
+    /// the restore wrote no state row for it.
+    async fn state_of(db: &CacheDb, actor: &[u8; 32], mailbox: &str) -> Option<(i64, i64)> {
+        use rusqlite::OptionalExtension;
+        db.conn()
+            .await
+            .query_row(
+                "SELECT uid_next, highestmodseq FROM bridge_imap_mailbox_state \
+                 WHERE actor_id = ?1 AND mailbox = ?2",
+                rusqlite::params![actor.as_slice(), mailbox],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .expect("read mailbox state")
+    }
+
+    fn inbox_placement(uid: u32, modseq: u64, seed: u8) -> RecordPlacement {
+        RecordPlacement {
+            mailbox: "INBOX".to_string(),
+            uid,
+            modseq,
+            flags: vec!["\\Seen".to_string()],
+            content_record_id: vec![seed; 32],
+            internal_date: 1_700_000_500,
+        }
+    }
+
+    /// **A restore never leaves a mailbox's UID counter behind its own
+    /// placements.** A journal whose mailboxes were seeded without a `Create`
+    /// record (a read path bootstrapping them) folds to a manifest carrying
+    /// INBOX placements but no INBOX state. Restored verbatim, the next
+    /// arrival seeded INBOX at `uid_next = 1`, collided with the restored
+    /// UID 1 and rolled back — every inbound mail to that account was put
+    /// off with a 451 for good. The same holds for a state row the manifest
+    /// does carry but behind its placements.
+    /// Mutation pinned: replaying the manifest's mailbox rows verbatim.
+    #[tokio::test]
+    async fn restore_puts_every_counter_past_the_mailboxs_own_placements() {
+        let db = CacheDb::open_in_memory().expect("in-memory CacheDb");
+        let actor = [0x71u8; 32];
+        let mut manifest = MailPlacementManifest::new();
+        // INBOX: four placements, no state row in the manifest at all.
+        for (uid, modseq) in [(1, 2), (2, 3), (3, 4), (4, 5)] {
+            manifest
+                .placements
+                .push(inbox_placement(uid, modseq, uid as u8));
+        }
+        // Sent: a state row the manifest carries, but behind its placement.
+        manifest.mailboxes.push(MailboxState {
+            name: "Sent".to_string(),
+            uid_validity: 1,
+            uid_next: 1,
+            highestmodseq: 1,
+            attrs: vec![],
+            pruned_modseq: 0,
+        });
+        manifest.placements.push(RecordPlacement {
+            mailbox: "Sent".to_string(),
+            ..inbox_placement(3, 9, 0x33)
+        });
+
+        {
+            let conn = db.conn().await;
+            let tx = conn.unchecked_transaction().expect("tx");
+            replay_mail_manifest_into_sqlite(&tx, &actor, &manifest).expect("replay");
+            tx.commit().expect("commit");
+        }
+
+        assert_eq!(state_of(&db, &actor, "INBOX").await, Some((5, 5)));
+        assert_eq!(state_of(&db, &actor, "Sent").await, Some((4, 9)));
+
+        // The arrival that used to fail for good now places at the next UID.
+        db.ensure_bridge_imap_mailboxes(&actor).await.expect("seed");
+        let placed = db
+            .place_inbound_mail(
+                &actor,
+                &[0xA5u8; 32],
+                "INBOX",
+                1_700_000_900,
+                "",
+                "external.test",
+                true,
+            )
+            .await
+            .expect("an arrival after a restore places");
+        assert_eq!(placed.map(|(uid, _)| uid), Some(5));
     }
 
     #[tokio::test]

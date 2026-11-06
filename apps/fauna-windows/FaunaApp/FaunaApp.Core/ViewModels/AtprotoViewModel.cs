@@ -190,6 +190,11 @@ public partial class AtprotoViewModel : ViewModelBase
 
     [ObservableProperty] private bool _showHistoryBackfill;
     [ObservableProperty] private bool _historyBackfill;
+    /// <summary>The <c>atproto-history-backfill</c> checkbox's text: the card's composed
+    /// <c>history_backfill_label</c> ("Also publish my N existing public posts."),
+    /// resolved verbatim — never a count-less static string (atproto-pds-bridge.md
+    /// § Projection &amp; backfill). Empty while no card is staged.</summary>
+    [ObservableProperty] private string _historyBackfillLabel = string.Empty;
 
     /// <summary>False while the confirm is in flight, so a double-confirm cannot
     /// stage two transitions.</summary>
@@ -210,6 +215,11 @@ public partial class AtprotoViewModel : ViewModelBase
     [ObservableProperty] private bool _showDidMethodRadio;
     [ObservableProperty] private bool _didMethodPlc = true;
     [ObservableProperty] private bool _didMethodWeb;
+
+    /// <summary>Each radio's own selection, in the depth rungs' vocabulary — the
+    /// wire spelling every app answers on <c>state</c>.</summary>
+    public string DidMethodPlcState => DidMethodPlc ? "active" : "inactive";
+    public string DidMethodWebState => DidMethodWeb ? "active" : "inactive";
 
     /// <summary>The "your handle is @you.yourdomain either way" line.</summary>
     [ObservableProperty] private string _handlePreview = string.Empty;
@@ -259,10 +269,6 @@ public partial class AtprotoViewModel : ViewModelBase
     // ── The full-PDS (F1 login-plane) panel — gated on level = hosted_full ────
 
     [ObservableProperty] private bool _showFullPds;
-    [ObservableProperty] private bool _externalAppsEnabled = true;
-
-    /// <summary>The <c>state</c> attr the e2e reads off the kill-switch.</summary>
-    public string ExternalAppsState => ExternalAppsEnabled ? "on" : "off";
 
     // ── The D10 authoring-delegation row (atproto-pds-full.md § App surface) ────
     //
@@ -322,6 +328,12 @@ public partial class AtprotoViewModel : ViewModelBase
     /// <summary>The <c>-authorize</c> button's own label - "authorize" with no row,
     /// "re-authorize" with one. One control either way (the ruling); only the wording
     /// follows the state.</summary>
+    /// <summary>The delegation group renders when a verified delegation exists (at ANY
+    /// level) or at full PDS (the empty state + first grant). Gated on the delegation,
+    /// not the level (ui/atproto.md § Layout &amp; flow, ruled 2026-10-23): a grant the
+    /// user could neither see nor stop below full PDS is the failure this prevents.</summary>
+    public bool ShowDelegationPanel => ShowFullPds || ShowDelegationRow;
+
     public string DelegationAuthorizeText => ShowDelegationRow
         ? Strings.Get("atproto_settings/delegation_reauthorize_button")
         : Strings.Get("atproto_settings/delegation_authorize_button");
@@ -350,11 +362,16 @@ public partial class AtprotoViewModel : ViewModelBase
         /// <c>set_sensitive(false)</c> / web's <c>disabled</c>; a disabled button that
         /// already shows the secret needs no re-click.</summary>
         public bool CanReveal => Revealable && RevealedSecret is null;
+
+        /// <summary>Whether the row renders <c>atproto-app-credential-reveal</c> at all
+        /// — only for a secret this device can read back or has already shown (linux
+        /// <c>settings/atproto.rs</c> / web <c>AtprotoSettingsSection.svelte</c> / apple
+        /// <c>AtprotoSettingsView.swift</c>). A row without one is a credential whose
+        /// secret this device does not hold, never a disabled button.</summary>
+        public bool ShowReveal => Revealable || RevealedSecret is not null;
     }
 
     public ObservableCollection<CredentialRowVm> Credentials { get; } = new();
-
-    partial void OnExternalAppsEnabledChanged(bool value) => OnPropertyChanged(nameof(ExternalAppsState));
 
     // ── Load + render ────────────────────────────────────────────────────────
 
@@ -472,12 +489,16 @@ public partial class AtprotoViewModel : ViewModelBase
             ShowCard = true;
             foreach (var line in card.@lines) CardLines.Add(Strings.Resolve(line));
             ShowHistoryBackfill = card.@showHistoryBackfill;
+            // The opt-in names how many posts a backfill would publish — composed in
+            // shared Rust with the nest's count (the count is part of the consent).
+            HistoryBackfillLabel = Strings.Resolve(card.@historyBackfillLabel);
             CardActionsEnabled = !card.@inProgress;
         }
         else
         {
             ShowCard = false;
             ShowHistoryBackfill = false;
+            HistoryBackfillLabel = string.Empty;
             CardActionsEnabled = true;
         }
         HistoryBackfill = snap.@historyBackfill;
@@ -548,7 +569,6 @@ public partial class AtprotoViewModel : ViewModelBase
 
         // Full-PDS panel — the deepest level's own panel.
         ShowFullPds = snap.@level == "hosted_full";
-        ExternalAppsEnabled = snap.@externalAppsEnabled;
         Credentials.Clear();
         foreach (var c in snap.@credentials)
         {
@@ -760,17 +780,6 @@ public partial class AtprotoViewModel : ViewModelBase
         if (_machine is null) return;
         _machine.SetHistoryBackfill(enabled);
         Render();
-    }
-
-    public async Task SetExternalAppsEnabledAsync(bool enabled)
-    {
-        if (_machine is null) return;
-        try
-        {
-            await _machine.SetExternalAppsEnabled(enabled);
-            Render();
-        }
-        catch (Exception ex) { ShowError(ex); }
     }
 
     /// <summary>Mint an app credential. The secret is served exactly ONCE — the nest

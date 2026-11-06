@@ -22,7 +22,9 @@ the shared ``ShareClient::create_link`` (``fauna_ffi.harness_create_link``).
 
 from __future__ import annotations
 
+import base64
 import secrets
+from pathlib import Path
 
 import blake3
 import pytest
@@ -303,3 +305,63 @@ def test_a_link_to_a_file_removed_under_a_legal_order_answers_unavailable_for_le
     )
     assert restored.get("status") == "restored", restored
     assert get(url) == (200, content), "the overturn serves the file again"
+
+
+def _nest_files(db_path: str) -> dict[str, bytes]:
+    """The nest's whole database as bytes on disk — the main file and its WAL,
+    where a fresh write rests until a checkpoint."""
+    files = {}
+    for suffix in ("", "-wal"):
+        path = Path(db_path + suffix)
+        if path.exists():
+            files[path.name] = path.read_bytes()
+    return files
+
+
+@pytest.mark.feature("share-links")
+def test_a_links_name_rests_sealed_and_a_link_without_its_sealed_name_is_refused(
+    nest_instance,
+):
+    """Outcome 2 (`share-links.md` § The filename rests sealed): the author's
+    sealed copy is the only form a link's file name rests in on the nest, and
+    ``fauna.share.create`` refuses a registration that carries no sealed name.
+
+    The name is unique to this test, so a byte scan of the nest's database
+    (main file and WAL) finds it nowhere unless the nest wrote it in the
+    clear. The scan's control: the same name IS readable inside the link's own
+    token, which the nest received — the needle is real, and only what rests
+    is blind to it."""
+    nest = nest_instance
+    owner = _make_user(nest)
+    secret = bytes(owner["signing_key"])
+    name = f"memo-{secrets.token_hex(6)}.txt"
+
+    _, _, plain_hash = _plaintext_file(nest, owner, text_content(200))
+    record, url = fauna_ffi.harness_create_link(
+        nest["url"], secret, bytes.fromhex(plain_hash), name, LONG_LIFETIME_S
+    )
+    token = url.split("/share/", 1)[1].split("?", 1)[0].split("#", 1)[0]
+    padded = token + "=" * (-len(token) % 4)
+    assert name.encode() in base64.urlsafe_b64decode(padded), (
+        "control: the public link's token carries the name the scan looks for"
+    )
+    assert get(url)[0] == 200, "control: the link opens"
+
+    # The author's own list carries the sealed copy, never the name.
+    with _actor_client(nest["url"], owner) as ws:
+        shares = ws.call("fauna.share.list", {}).get("shares", [])
+    listed = [s for s in shares if s.get("token_id") == record.get("token_id")]
+    assert len(listed) == 1, shares
+    sealed = bytes(listed[0]["filename_sealed"])
+    assert sealed and name.encode() not in sealed, "the listed name is sealed"
+
+    leaked = [f for f, body in _nest_files(nest["db_path"]).items() if name.encode() in body]
+    assert not leaked, f"the link's file name rests in the clear in {leaked}"
+
+    # A registration with no sealed name is refused: the same token the nest
+    # just accepted, so the empty name is the only thing that differs.
+    with _actor_client(nest["url"], owner) as ws:
+        with pytest.raises(RpcCallError) as refused:
+            ws.call("fauna.share.create", {"token": token, "filename_sealed": b""})
+    assert refused.value.code.endswith("invalid_request"), refused.value.code
+    assert "sealed filename" in str(refused.value), refused.value

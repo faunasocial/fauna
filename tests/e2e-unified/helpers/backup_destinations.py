@@ -34,7 +34,7 @@ from __future__ import annotations
 import secrets
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.waiting import wait_until
+from helpers.waiting import retry_through_first_listing, wait_until
 
 # A destination row appears after the add's own reload; the same ceiling the
 # action layer's count wait uses (`actions/backups.py::DESTINATION_COUNT_WAIT_S`).
@@ -90,11 +90,18 @@ class DestinationEnrollment:
             if any(n in b.destination_text(i) for n in self.names) == mine
         ]
 
-    def _wait_for_row(self, name: str) -> None:
+    def _enroll(self, name: str, gesture) -> None:
+        """Make the enrollment `gesture` until the page lists `name`, repeating it
+        only over a first-listing refusal. A refused enrollment has registered on
+        the source nest already, so a repeat may leave a second registration; both
+        are this test's own, and `mine()` deregisters them."""
         b = self.app.backups
-        wait_until(
+        retry_through_first_listing(
+            gesture,
             lambda: any(name in b.destination_text(i) for i in range(b.destination_count())),
-            ROW_WAIT_S,
+            self.app.error_text,
+            settle=ROW_WAIT_S,
+            reopen=b.navigate,
             diagnose=lambda: (
                 f"the Backups page never listed the destination {name!r} this test "
                 f"enrolled: rows={[b.destination_text(i) for i in range(b.destination_count())]!r} "
@@ -114,20 +121,22 @@ class DestinationEnrollment:
         name it enrolled under."""
         unique = self._unique(name)
         self.app.backups.navigate()
-        self.app.backups.add_destination(url, name=unique)
-        self._settle(unique)
+        self._enroll(unique, lambda: self.app.backups.add_destination(url, name=unique))
+        self._settle()
         return unique
 
     def add_custodian_destination(self, name: str, capacity: str = "") -> str:
         """`add_destination`'s twin for the client-device kind."""
         unique = self._unique(name)
         self.app.backups.navigate()
-        self.app.backups.add_custodian_destination(name=unique, capacity=capacity)
-        self._settle(unique)
+        self._enroll(
+            unique,
+            lambda: self.app.backups.add_custodian_destination(name=unique, capacity=capacity),
+        )
+        self._settle()
         return unique
 
-    def _settle(self, unique: str) -> None:
-        self._wait_for_row(unique)
+    def _settle(self) -> None:
         if len(self.names) == 1:
             self._isolate()
 

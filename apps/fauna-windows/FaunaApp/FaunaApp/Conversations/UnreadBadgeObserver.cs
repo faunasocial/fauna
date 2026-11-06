@@ -9,7 +9,7 @@ namespace FaunaApp.Conversations;
 /// Feeds windows' home-screen widget — the taskbar badge (<see cref="TaskbarBadgeService"/>,
 /// apps/windows.md § Home-screen widget) — from the shared conversations fold on every
 /// conversations-plane change: the windows twin of the linux tray-toast loop's
-/// <c>manager().unread_total()</c> read (<c>apps/fauna-linux/src/main.rs</c>). Registered
+/// <c>manager().unread_total()</c> read (<c>apps/fauna-linux/src/lib.rs</c>). Registered
 /// once per manager inside <see cref="ConversationsManagerHost"/>'s own factory, like
 /// <see cref="RoomsRefreshObserver"/>, so it lives for the manager's whole lifetime with
 /// no <c>ConversationsPage</c> open — the badge must move with the window hidden to the

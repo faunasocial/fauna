@@ -83,6 +83,25 @@ pub fn synthesize_self_signed_pem(
     synthesize_self_signed_pem_with_key(common_name, san_list, &cert_key)
 }
 
+/// The admin-synthesized per-mail-domain cert's PEM pair (`domain` as CN, SANs
+/// `domain` + `additional_dns_sans`), signed by the persisted **floor key**
+/// ([`load_or_create_floor_key`]). This cert replaces the nest's own served
+/// `fullchain.pem`/`privkey.pem`, so a fresh key here would rotate the SPKI
+/// every pinned native client, click-through MUA and published TLSA rides —
+/// an admin re-provision is a validity/SAN refresh, never a key rotation
+/// (`tls-certificates.md` § A, *Use a stable keypair*). The floor key reaches
+/// no one it did not already: the floor it signs is sealed to the same bridges.
+pub(crate) fn synthesize_admin_self_signed_pem(
+    acme_dir: &std::path::Path,
+    domain: &str,
+    additional_dns_sans: Vec<String>,
+) -> Result<(String, String), String> {
+    let mut san_list = vec![domain.to_string()];
+    san_list.extend(additional_dns_sans);
+    let floor_key = load_or_create_floor_key(acme_dir)?;
+    synthesize_self_signed_pem_with_key(domain, san_list, &floor_key)
+}
+
 /// Synthesize a self-signed cert (CN = `common_name`, SANs = `san_list`) signed
 /// by the **provided** keypair, returning `(cert_pem, key_pem)`. The floor path
 /// passes its persisted stable key ([`load_or_create_floor_key`]) so re-synthesis
@@ -503,18 +522,16 @@ pub(crate) async fn synthesize_and_seal_self_signed_cert(
         Err(e) => return Err(SelfSignedCertError::Db(format!("{e:#}"))),
     }
 
-    // (2) Generate the self-signed cert. CN = the domain; SANs = the domain
-    //     plus any extras. `rcgen` 0.13 is already a direct dep for the ACME
-    //     CSR path. Validity is pinned to the 90-day fetch cadence the bridge
-    //     sees in the sealed bundle so the reported expiry aligns.
-    let mut san_list = vec![domain.to_string()];
-    san_list.extend(additional_dns_sans);
-
+    // (2) Generate the self-signed cert (CN = the domain; SANs = the domain
+    //     plus any extras) on the stable floor key — see
+    //     [`synthesize_admin_self_signed_pem`]. The reported expiry is the
+    //     90-day fetch cadence the bridge sees in the sealed bundle.
     let now_unix = fauna_core::data::Timestamp::now_secs_or_zero();
     let expires_at_unix = now_unix + (SELF_SIGNED_VALID_DAYS * 24 * 3600);
 
     let (cert_pem, key_pem) =
-        synthesize_self_signed_pem(domain, san_list).map_err(SelfSignedCertError::Synthesis)?;
+        synthesize_admin_self_signed_pem(&state.acme_dir, domain, additional_dns_sans)
+            .map_err(SelfSignedCertError::Synthesis)?;
 
     // (3) Snapshot the approved-bridge set BEFORE fan-out so we can report
     //     which bridges received the seal and which were skipped (no x25519).
@@ -574,6 +591,49 @@ mod tests {
             .expect("a leaf cert")
             .expect("parse leaf cert");
         crate::acme::spki_sha256_of_cert_der(der.as_ref()).expect("spki of leaf")
+    }
+
+    fn pem_leaf_spki(cert_pem: &str) -> [u8; 32] {
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+        let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+            .next()
+            .expect("a leaf cert")
+            .expect("parse leaf cert");
+        crate::acme::spki_sha256_of_cert_der(der.as_ref()).expect("spki of leaf")
+    }
+
+    /// The admin-synthesized per-mail-domain cert
+    /// (`fauna.bridges.provision_self_signed_cert`) REPLACES the nest's own
+    /// served `fullchain.pem`/`privkey.pem`, so it must be signed by the stable
+    /// floor key: a fresh key there rotates the SPKI every pinned native client,
+    /// every click-through MUA and the published TLSA ride — the docker
+    /// mail venue's re-provision once left the sync agent refusing every bearer
+    /// dial with "served cert SPKI does not match the pinned nest identity". `tls-certificates.md` § A, *Use a stable
+    /// keypair*.
+    #[test]
+    fn admin_synthesized_cert_reuses_the_floor_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_self_signed_bootstrap(dir.path(), None).expect("boot floor");
+        let floor_spki = leaf_spki(dir.path());
+
+        let (first, _) =
+            synthesize_admin_self_signed_pem(dir.path(), "fauna.test", vec![]).expect("first");
+        let (second, _) = synthesize_admin_self_signed_pem(
+            dir.path(),
+            "fauna.test",
+            vec!["extra.fauna.test".into()],
+        )
+        .expect("second");
+        assert_eq!(
+            pem_leaf_spki(&first),
+            floor_spki,
+            "the admin-synthesized cert must carry the floor's SPKI"
+        );
+        assert_eq!(
+            pem_leaf_spki(&second),
+            floor_spki,
+            "re-provisioning must never churn the served SPKI"
+        );
     }
 
     /// The floor's SPKI must be **stable** across re-synthesis (a routine

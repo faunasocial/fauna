@@ -176,6 +176,11 @@ struct State {
     /// [`LabelerCatalogSnapshot::loaded`], which owns the full rationale. Set in
     /// the `Ok` arm of [`LabelerCatalogMachine::refresh`] and never cleared.
     loaded: bool,
+    /// Tickets of [`LabelerCatalogMachine::refresh`]: the last one handed to a
+    /// read as it started, and the newest one whose result was applied. A read
+    /// that returns older than what the page already shows is dropped.
+    reads_started: u64,
+    read_applied: u64,
 }
 
 impl State {
@@ -185,6 +190,8 @@ impl State {
             inspecting: None,
             error: None,
             loaded: false,
+            reads_started: 0,
+            read_applied: 0,
         }
     }
 }
@@ -269,19 +276,43 @@ impl LabelerCatalogMachine {
     /// Re-read the full catalog (`fauna.labelers.list`). On a read failure the
     /// prior data is kept and the page error is set; on success the error
     /// clears. Notifies once.
+    ///
+    /// **A read older than the page is dropped.** Two refreshes can be in
+    /// flight at once — a page's arrival read and the one a gesture runs after
+    /// its write — and they may return in either order. One that STARTED
+    /// before a newer one already applied answered from before that one's
+    /// state (the nest may not yet have seen the gesture's write), so painting
+    /// it would undo a subscribe or unsubscribe with nothing left to re-read:
+    /// the toggle would never flip.
     pub async fn refresh(&self) {
-        match self.nest_api.list().await {
-            Ok(entries) => {
-                let mut s = self.state.lock().unwrap();
-                s.entries = entries;
-                s.error = None;
-                // The one place the page becomes loaded. Only a read that
-                // RETURNED may license an empty state; the `Err` arm below
-                // deliberately leaves this alone (see the field's doc on
-                // `LabelerCatalogSnapshot`).
-                s.loaded = true;
+        let ticket = {
+            let mut s = self.state.lock().unwrap();
+            s.reads_started += 1;
+            s.reads_started
+        };
+        let result = self.nest_api.list().await;
+        let failure = {
+            let mut s = self.state.lock().unwrap();
+            if ticket < s.read_applied {
+                return;
             }
-            Err(e) => self.set_error(REFRESH_ERROR_KEY, e.detail()),
+            s.read_applied = ticket;
+            match result {
+                Ok(entries) => {
+                    s.entries = entries;
+                    s.error = None;
+                    // The one place the page becomes loaded. Only a read that
+                    // RETURNED may license an empty state; the `Err` arm below
+                    // deliberately leaves this alone (see the field's doc on
+                    // `LabelerCatalogSnapshot`).
+                    s.loaded = true;
+                    None
+                }
+                Err(e) => Some(e),
+            }
+        };
+        if let Some(e) = failure {
+            self.set_error(REFRESH_ERROR_KEY, e.detail());
         }
         self.observer.on_changed();
     }
@@ -1140,6 +1171,84 @@ mod tests {
         assert!(snap.entries[1].subscribed);
         assert!(snap.error.is_none());
         assert_eq!(observer.count(), 1);
+    }
+
+    /// Start a refresh whose `list` the nest answers NOW but which returns only
+    /// when the handle is released — a page's arrival read still in flight when
+    /// the user taps.
+    async fn refresh_held_in_flight(
+        m: &Arc<LabelerCatalogMachine>,
+        api: &FakeLabelerCatalogNestApi,
+    ) -> (crate::nest_api::ListHold, tokio::task::JoinHandle<()>) {
+        let hold = api.hold_next_list();
+        let task = tokio::spawn({
+            let m = m.clone();
+            async move { m.refresh().await }
+        });
+        while !hold.started() {
+            tokio::task::yield_now().await;
+        }
+        (hold, task)
+    }
+
+    /// A read the nest answered BEFORE a subscribe's write, returning AFTER the
+    /// gesture's own refresh, must not paint the row back to unsubscribed —
+    /// nothing re-reads after it, so the flip would never land.
+    #[tokio::test]
+    async fn a_read_older_than_a_subscribe_never_paints_over_its_flip() {
+        let (m, api, _observer) = machine();
+        api.set_entries(vec![entry(0xAA, false)]);
+        m.refresh().await;
+        let (hold, stale) = refresh_held_in_flight(&m, &api).await;
+
+        api.set_entries(vec![entry(0xAA, true)]);
+        m.subscribe(0).await;
+        assert!(m.snapshot().entries[0].subscribed);
+        hold.release();
+        stale.await.unwrap();
+
+        assert!(
+            m.snapshot().entries[0].subscribed,
+            "the older read must not undo the subscribe's flip"
+        );
+    }
+
+    /// The same for unsubscribe: a read from before the drop must not bring
+    /// the subscribed row back.
+    #[tokio::test]
+    async fn a_read_older_than_an_unsubscribe_never_paints_over_its_flip() {
+        let (m, api, _observer) = machine();
+        api.set_entries(vec![entry(0xAA, true)]);
+        m.refresh().await;
+        let (hold, stale) = refresh_held_in_flight(&m, &api).await;
+
+        api.set_entries(vec![entry(0xAA, false)]);
+        m.unsubscribe(0).await;
+        assert!(!m.snapshot().entries[0].subscribed);
+        hold.release();
+        stale.await.unwrap();
+
+        assert!(
+            !m.snapshot().entries[0].subscribed,
+            "the older read must not undo the unsubscribe's flip"
+        );
+    }
+
+    /// A newer read still wins over an older one that lands FIRST: only a
+    /// result older than the one already painted is dropped.
+    #[tokio::test]
+    async fn an_older_read_that_lands_first_is_still_painted_then_replaced() {
+        let (m, api, _observer) = machine();
+        api.set_entries(vec![entry(0xAA, false)]);
+        let (hold, older) = refresh_held_in_flight(&m, &api).await;
+        hold.release();
+        older.await.unwrap();
+        assert!(m.snapshot().loaded);
+        assert!(!m.snapshot().entries[0].subscribed);
+
+        api.set_entries(vec![entry(0xAA, true)]);
+        m.refresh().await;
+        assert!(m.snapshot().entries[0].subscribed);
     }
 
     /// The defect this field exists to kill: a page that has not finished its

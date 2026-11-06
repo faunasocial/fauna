@@ -489,6 +489,24 @@ pub struct ServingBases<'a> {
     pub store_root: Option<&'a Path>,
 }
 
+/// Run `f` with [`ServingBases`] naming this app's `state_base` and the
+/// platform account-store root (`StoreRoot::platform()`). An unresolvable
+/// store root is logged and degrades to `None` (no cross-app presence), never
+/// a failure. The one place tui and linux build the production pair, so an
+/// erase's question and the holder's declaration cannot drift apart.
+pub fn with_platform_serving_bases<T>(
+    state_base: Option<&Path>,
+    f: impl FnOnce(ServingBases<'_>) -> T,
+) -> T {
+    let store_root = fauna_account_store::root::StoreRoot::platform()
+        .inspect_err(|e| tracing::error!("[account-scope] no account-store root: {e:#}"))
+        .ok();
+    f(ServingBases {
+        state_base,
+        store_root: store_root.as_ref().map(|root| root.base()),
+    })
+}
+
 impl<'a> From<Option<&'a Path>> for ServingBases<'a> {
     fn from(state_base: Option<&'a Path>) -> Self {
         Self {
@@ -564,6 +582,13 @@ impl SessionInstanceHolder {
     /// for tests and diagnostics.
     pub fn holds_lock(&self) -> bool {
         self.held.as_ref().is_some_and(|h| h.lock.is_some())
+    }
+
+    /// Stop serving: drop both locks and forget the account, so the holder is
+    /// [`Self::new`]'s empty one again. For a holder that outlives the session
+    /// it guarded (a platform object other references still hold).
+    pub fn release(&mut self) {
+        self.held = None;
     }
 
     /// The account this holder serves — recorded on a degraded acquire too,
@@ -957,6 +982,24 @@ pub fn become_process_session_instance(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .become_session_instance(bases, actor_id_hex, bound.as_deref(), mode)
+}
+
+/// Stop serving: [`SessionInstanceHolder::release`] over the process-global
+/// holder — both locks (the install base's instance lock and the shared root's
+/// serving lock) go down and the process serves no account.
+///
+/// Called by each process-holder seat at every erasing gesture that keeps the
+/// process alive — sign-out, reset — **after** the erase: a signed-out window
+/// still holding the account it left is a sibling to every later sign-out
+/// probe of it (`account-scoping.md` § Concurrent instances → *An erase
+/// refuses while a sibling serves the account*). Never at a remove-account of
+/// another account: the window goes on serving its own. The process's launch
+/// binding is untouched — a bound seat's next sign-in still answers to it.
+pub fn release_process_session_instance() {
+    PROCESS_SESSION_INSTANCE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .release();
 }
 
 #[cfg(test)]
@@ -1996,5 +2039,61 @@ mod tests {
             ours.holds_lock(),
             "and A's lock was never in question, so it was never put down"
         );
+    }
+
+    /// A sign-out lets go of the process-global holder: after
+    /// [`release_process_session_instance`] a sibling's exclusive probe finds
+    /// the account free at BOTH bases — the install base's instance lock and
+    /// the shared root's serving lock — and the process serves no account.
+    /// Without it a signed-out tui/linux/windows window stays a "sibling" to
+    /// every later sign-out of that account (`account-scoping.md` § Concurrent
+    /// instances → *An erase refuses while a sibling serves the account*).
+    #[test]
+    fn releasing_the_process_holder_frees_both_bases() {
+        let _serial = SESSION_LAUNCH_BINDING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_session_launch_binding_for_tests(Some(None));
+        let base = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor(b'9');
+        assert_eq!(
+            become_process_session_instance(
+                ServingBases {
+                    state_base: Some(base.path()),
+                    store_root: Some(root.path()),
+                },
+                &actor,
+                ServingMode::Concurrent
+            ),
+            SessionInstanceOutcome::Acquired
+        );
+        assert!(AccountInstanceLock::is_served(base.path(), &actor));
+        assert!(fauna_account_store::locks::ServingLock::is_served(
+            root.path(),
+            &actor
+        ));
+
+        release_process_session_instance();
+
+        assert_eq!(
+            process_session_account(),
+            None,
+            "a signed-out process serves no account"
+        );
+        assert!(
+            reads_free(base.path(), &actor),
+            "the install base's instance lock outlived the release"
+        );
+        let deadline = std::time::Instant::now() + RELEASE_OBSERVABLE_BUDGET;
+        while fauna_account_store::locks::ServingLock::is_served(root.path(), &actor) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shared root's serving lock outlived the release"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Idempotent: a second sign-out (or a reset after one) is a no-op.
+        release_process_session_instance();
     }
 }

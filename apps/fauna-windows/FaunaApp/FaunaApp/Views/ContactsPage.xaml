@@ -10,6 +10,14 @@
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
+    <Page.Resources>
+        <!-- The grouped roster (contacts.md § Where logic lives → Roster status
+             grouping): its Source is ContactsViewModel.Sections, or the filtered
+             FilterSections snapshot while contacts-search-field holds a query — set
+             in the code-behind; ContactsList binds this view. -->
+        <CollectionViewSource x:Name="RosterSource" IsSourceGrouped="True" />
+    </Page.Resources>
+
     <!-- The page root is a ScrollViewer (the shared windows page idiom — e.g.
          AdminCalendarPage / SettingsAccountPage), so every region — including the
          Add-contact panel below the lists — is reachable on a short window. The
@@ -84,6 +92,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
 
                                 <TextBlock
@@ -98,6 +107,22 @@
                                     Opacity="0.6"
                                     TextTrimming="CharacterEllipsis"
                                     MaxLines="1" />
+
+                                <!-- knock-guardian-pending (family-safety.md § App surface):
+                                     while the ward is supervised with contact approval on,
+                                     every knock is the guardian's to decide, so every card
+                                     says so. KnockRow.AwaitsGuardian is the shared
+                                     knocks_await_guardian answer (WardAsksCache); a
+                                     Collapsed TextBlock is absent from UI Automation, so
+                                     the mark counts once per marked card. -->
+                                <TextBlock
+                                    Grid.Row="2" Grid.Column="0"
+                                    Text="{loc:Localize Key=contacts/knock_guardian_pending}"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.KnockGuardianPending}"
+                                    Visibility="{x:Bind local:ContactsPage.BoolToVisibility(AwaitsGuardian)}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Opacity="0.7"
+                                    TextWrapping="Wrap" />
 
                                 <Button
                                     Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
@@ -163,12 +188,26 @@
                  resolves the row by that container actor-id. The per-row buttons
                  (confirm / copy) still handle their own taps. MaxHeight bounds the
                  list so it scrolls internally inside the page ScrollViewer instead of
-                 measuring to infinity. -->
+                 measuring to infinity. The list is grouped: one section per relationship
+                 status in the shared order (RosterSource), headed by the shared status
+                 label. A heading carries no AutomationId (ui.yaml scopes none), and the
+                 indexed contact-row ids keep counting across sections in paint order. -->
             <ListView
                 x:Name="ContactsList"
                 MaxHeight="480"
                 SelectionChanged="ContactsList_SelectionChanged"
                 ContainerContentChanging="ContactsList_ContainerContentChanging">
+                <ListView.GroupStyle>
+                    <GroupStyle>
+                        <GroupStyle.HeaderTemplate>
+                            <DataTemplate x:DataType="models:ContactRosterSection">
+                                <TextBlock
+                                    Text="{x:Bind Heading}"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            </DataTemplate>
+                        </GroupStyle.HeaderTemplate>
+                    </GroupStyle>
+                </ListView.GroupStyle>
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="models:ContactRow">
                         <!-- Name must never be empty, or UI Automation prunes this Grid
@@ -232,6 +271,60 @@
                                     Visibility="Collapsed"
                                     Opacity="0.6"
                                     FontSize="10" />
+
+                                <!-- Phase two of archive import (archive-import.md § Linking
+                                     and merging, ruling 8; contacts.md § User actions): one
+                                     paint per asked or linked pair, empty on every other row.
+                                     DESCENDANTS of this row, so the scoped contact-row[i] reads
+                                     resolve them by nesting. The words are the machine crate's
+                                     composers (ContactRow.ArchiveLinks, built by
+                                     ArchiveLinksHost.RowPaints) — nothing here decides or words
+                                     anything; the half a paint does not use is Collapsed and so
+                                     absent from UI Automation. The two text lines carry an
+                                     AutomationId ONLY, no static Name: they are get_text
+                                     targets. -->
+                                <ItemsControl ItemsSource="{x:Bind ArchiveLinks}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:ArchiveLinkRowPaint">
+                                            <StackPanel Spacing="4" Margin="0,4,0,0">
+                                                <StackPanel Spacing="4"
+                                                            Visibility="{x:Bind local:ContactsPage.BoolToVisibility(IsAsked)}">
+                                                    <TextBlock
+                                                        Text="{x:Bind Text}"
+                                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactArchiveLinkPrompt}"
+                                                        TextWrapping="Wrap" />
+                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        <Button
+                                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactArchiveLinkYes}"
+                                                            Content="{loc:Localize Key=archive_import/link_yes}"
+                                                            Tag="{x:Bind}"
+                                                            Click="ArchiveLinkYes_Click" />
+                                                        <Button
+                                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactArchiveLinkNo}"
+                                                            Content="{loc:Localize Key=archive_import/link_no}"
+                                                            Tag="{x:Bind}"
+                                                            Click="ArchiveLinkNo_Click" />
+                                                    </StackPanel>
+                                                </StackPanel>
+                                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                                            Visibility="{x:Bind local:ContactsPage.BoolToVisibility(IsLinked)}">
+                                                    <TextBlock
+                                                        Text="{x:Bind Text}"
+                                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactArchiveLinked}"
+                                                        VerticalAlignment="Center"
+                                                        Opacity="0.7"
+                                                        FontSize="12" />
+                                                    <Button
+                                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactArchiveUnlink}"
+                                                        Content="{loc:Localize Key=archive_import/unlink}"
+                                                        Tag="{x:Bind}"
+                                                        Click="ArchiveUnlink_Click"
+                                                        Padding="6,2" FontSize="12" />
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </StackPanel>
 
                             <TextBlock
@@ -320,6 +413,7 @@
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
@@ -333,6 +427,11 @@
                                                FontSize="11" Opacity="0.4"
                                                TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
+                                <Button Grid.Column="2"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactActorIdOpenProfileButton}"
+                                        Content="{loc:Localize Key=contacts/find_user/open_profile}" Click="OpenFoundProfile_Click"
+                                        Tag="{x:Bind}"
+                                        VerticalAlignment="Center" />
                                 <Button Grid.Column="1"
                                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactsAddButton}"
                                         Content="{loc:Localize Key=contacts/knock}" Click="AddFoundContact_Click"
@@ -350,7 +449,7 @@
                                      VM's render verdict — the template decides nothing, and
                                      re-tests no supervision (rule (h)). The label carries an
                                      AutomationId ONLY, no static Name: it is a get_text target. -->
-                                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Spacing="4"
+                                <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Spacing="4"
                                             Orientation="Horizontal">
                                     <Button x:Name="AskGuardianButton"
                                             AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRequestGuardianButton}"

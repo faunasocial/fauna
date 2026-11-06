@@ -569,24 +569,8 @@ pub(crate) async fn run_reseed(
     // enrolled with SyncWrite) or no resolution → the leg cannot sign, and the
     // driver holds each folder set `rehome_unsigned`.
     crate::content_keys::refresh_now(state).await;
-    let nonces = state
-        .content_keys
-        .read()
-        .await
-        .as_ref()
-        .filter(|r| r.is_for(inputs.actor_id))
-        .map(|r| r.set_lineages_by_name());
-    let signer = fauna_sync_engine::principal_bundle::load_change_signer(
-        &fauna_sync_engine::account_runtime::production_credential_store(),
-        &inputs.actor_id,
-    );
-    if let (Some(nonces), Some(signer)) = (nonces, signer) {
-        leg = leg.with_record_signing(fauna_client_sync::RecordSigning {
-            signer: Arc::new(signer),
-            // The full lineage, serve window included — the one source every
-            // agent reader takes (ruling (7)(b)(ii) rule (2)).
-            set_nonce: fauna_client_sync::SetNonceSource::ByFolder(Arc::new(nonces)),
-        });
+    if let Some(signing) = state.record_signing(inputs.actor_id).await {
+        leg = leg.with_record_signing(signing);
     }
 
     tracing::info!("custodian: re-seeding the provisioned nest from this device's copy");

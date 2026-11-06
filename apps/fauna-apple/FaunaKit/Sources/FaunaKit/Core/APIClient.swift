@@ -37,6 +37,19 @@ public class APIClient {
     public init(nodeUrl: URL) {
         self.nodeUrl = nodeUrl
         self.session = NestCertTrust.makeSession(nestUrl: nodeUrl)
+        StoreChangeNotice.registerOnce()
+    }
+
+    /// The test seam for the residual-HTTP leg: a FaunaKit test hands in a
+    /// session whose configuration installs a `URLProtocol` stub, so the blob
+    /// POSTs' reply handling (the echo check) is pinned at the call site —
+    /// the twin of windows' `DirectNestClient` handler seam and android's
+    /// OkHttp interceptor fake. Production builds only through
+    /// ``init(nodeUrl:)``, which keeps the cert-trust session. Both stay
+    /// designated: test doubles subclass through `super.init(nodeUrl:)`.
+    init(nodeUrl: URL, session: URLSession) {
+        self.nodeUrl = nodeUrl
+        self.session = session
         // The store-change notice's FFI listener is process-wide and outlives
         // sign-out and account switch, so it is set here — before any runtime
         // can start — and never cleared (account-runtime.md § Multi-instance
@@ -178,7 +191,10 @@ public class APIClient {
         }
         let responseData = try await postMultipartBlob(sidecarCbor: payload.primary.sidecarCbor,
                                                        sealedBytes: payload.primary.bytes)
-        return try JSONDecoder().decode(BlobResponse.self, from: responseData)
+        // The caller signs over this hash (profile image), so it is the one this
+        // client computed over the primary's bytes; a reply naming another blob
+        // throws. The thumbnail POST above stays unchecked.
+        return try checkedBlobResponse(reply: responseData, primaryBytes: payload.primary.bytes)
     }
 
 #if !FAUNA_KIDS
@@ -201,7 +217,9 @@ public class APIClient {
         }
         let responseData = try await postMultipartBlob(sidecarCbor: primary.sidecarCbor,
                                                        sealedBytes: primary.bytes)
-        return try JSONDecoder().decode(BlobResponse.self, from: responseData).hash
+        // Returns the locally computed hash; a differing echo throws (see
+        // ``uploadBlob(data:audience:)``).
+        return try checkedBlobResponse(reply: responseData, primaryBytes: primary.bytes).hash
     }
 #endif
 
@@ -519,8 +537,8 @@ public class APIClient {
     /// `recipientNestUrl` is where the knock must go when the peer lives on ANOTHER
     /// nest: `nil` delivers on this nest, `Some(peer)` makes the home nest originate
     /// the federation leg. The Contacts page passes none (its lookup already resolved
-    /// the peer on this nest); the profile page passes ``knockRoute(actorId:profileBody:)``
-    /// — the shared rule over the profile the page already fetched.
+    /// the peer on this nest); the profile page passes its
+    /// actor-home slot (``actorHomeSlot(carried:actorId:profileBody:)``).
     public func sendKnock(actorId: String, peerId: String, recipientNestUrl: String? = nil) async throws {
         guard let secret else { throw APIError.ffiError("No secret for knock") }
         let payload = try buildKnockPayload(
@@ -533,17 +551,20 @@ public class APIClient {
             payloadBytes: payload)
     }
 
-    /// Where a knock sent from `actorId`'s PROFILE page must go — `sendKnock`'s
-    /// `recipientNestUrl` (`profile.md` § Where logic lives → *Request contact
-    /// routing*). Pure shared-Rust rule over the profile `body` the page's open
-    /// already fetched (`profileGet`): the profile's own home nest when it is a
-    /// different nest from this one, else `nil` (local delivery). No Swift
-    /// URL-authority compare, no second fetch.
+    /// The profile page's ACTOR-HOME slot — the nest the viewed actor is homed on,
+    /// carried by the follow, the knock (`sendKnock`'s `recipientNestUrl`, `profile.md`
+    /// § Where logic lives → *Request contact routing*) and the remote header read
+    /// alike (`profile.md` § Where logic lives → *The actor's home*). Pure
+    /// shared-Rust rule (`actor_home`): the opener's `carried` home first, then the
+    /// home the actor's own profile `profileBody` names (seed the slot at open with
+    /// `nil`, replace it after the header read), else `nil` (this nest). Never a
+    /// Swift URL compare, no second fetch.
     ///
-    /// (Named `knockRoute` rather than after the FFI free function it wraps, so the
-    /// call inside cannot resolve back to this method.)
-    public func knockRoute(actorId: String, profileBody: Data) -> String? {
-        knockRecipientNestUrl(
+    /// (Named `actorHomeSlot` rather than after the FFI free function it wraps, so
+    /// the call inside cannot resolve back to this method.)
+    public func actorHomeSlot(carried: String?, actorId: String, profileBody: Data?) -> String? {
+        actorHome(
+            carried: carried,
             actorId: hex_to_data(actorId),
             profileBody: profileBody,
             ownNestUrl: nodeUrl.absoluteString)
@@ -867,13 +888,13 @@ public class APIClient {
 
     // MARK: - Notifications
 
-    public func getNotifications(actorId: String, limit: Int = 50) async throws -> (items: [NotificationItem], unread: Int) {
+    public func getNotifications(actorId: String, overlays: FfiContactOverlays, limit: Int = 50) async throws -> (items: [NotificationItem], unread: Int) {
         // The deleted HTTP twin returned the page + `unread_count` in one
         // response; `fauna.notifications.*` splits them into `list` + `count`.
         let client = try await notificationsClient()
         let reply = try await client.list(cursor: nil, limit: Int64(limit))
         let unread = try await client.count()
-        return (items: reply.notifications.map(NotificationItem.init(ffi:)), unread: Int(unread))
+        return (items: reply.notifications.map { NotificationItem(ffi: $0, overlays: overlays) }, unread: Int(unread))
     }
 
     /// `fauna.notifications.count` alone — the app-global unread count the shells
@@ -886,6 +907,19 @@ public class APIClient {
     public func markNotificationsRead(actorId: String) async throws {
         // `up_to = nil` ⇒ mark everything up to now (the twin's behavior).
         _ = try await notificationsClient().markRead(upTo: nil)
+    }
+
+    /// `fauna.notifications.dismiss` — delete one of the caller's rows
+    /// (`notifications.md` § Retention rule 2). A `security.notice` inside its
+    /// window is refused by the nest with `fauna.notifications.retained`.
+    public func dismissNotification(id: Int64) async throws {
+        _ = try await notificationsClient().dismiss(id: id)
+    }
+
+    /// `fauna.notifications.clear` — delete every row created at or before
+    /// `upTo` (micros); retained security notices are skipped, not counted.
+    public func clearNotifications(upTo: Int64) async throws {
+        _ = try await notificationsClient().clear(upTo: upTo)
     }
 
     // MARK: - Bridge Feeds
@@ -923,10 +957,11 @@ public class APIClient {
     @discardableResult
     public func createEmailFilter(name: String, rules: [FfiEmailFilterRule],
                            combination: String, action: FfiEmailFilterAction,
-                           priority: Int) async throws -> Int64 {
+                           priority: Int, continueOnMatch: Bool = false) async throws -> Int64 {
         try await emailClient().filtersCreate(name: name, rules: rules,
                                               combination: combination, action: action,
-                                              priority: Int32(priority))
+                                              priority: Int32(priority),
+                                              continueOnMatch: continueOnMatch)
     }
 
     /// A fresh fetch (not the cached list row) — the edit form pre-populates
@@ -938,10 +973,11 @@ public class APIClient {
 
     public func updateEmailFilter(id: Int64, name: String, rules: [FfiEmailFilterRule],
                            combination: String, action: FfiEmailFilterAction,
-                           priority: Int) async throws {
+                           priority: Int, continueOnMatch: Bool = false) async throws {
         try await emailClient().filtersUpdate(id: id, name: name, rules: rules,
                                               combination: combination, action: action,
-                                              priority: Int32(priority))
+                                              priority: Int32(priority),
+                                              continueOnMatch: continueOnMatch)
     }
 
     public func deleteEmailFilter(id: Int64) async throws {
@@ -1502,12 +1538,87 @@ public class APIClient {
         return onlyIfDue ? await plane.refreshIfDue(nest: nest) : await plane.refresh(nest: nest)
     }
 
+    /// Read the session nest's self-description past the connection's memo and
+    /// fold it into the member's rules book (`nest-rules.md` § Acceptance at
+    /// joining, and a change of rules) — `NestRulesStore`'s one door onto the
+    /// connection. Throws when the connect or the read fails; the store keeps
+    /// the last-known rules in force.
+    public func refreshNestRules(_ book: FfiNestRulesBook) async throws -> FfiNestRulesRefresh {
+        try await book.refresh(nest: try await ensureNestConnected())
+    }
+
+    /// `fauna.admin.content_policy.get` — the admin's published nest rules
+    /// document (`admin.md` § N. Nest → *Nest rules*).
+    public func adminContentPolicy() async throws -> FfiAdminContentPolicy {
+        try await adminClient().contentPolicy()
+    }
+
+    /// `fauna.admin.content_policy.set` — publish the admin's rules document.
+    public func adminSetContentPolicy(document: Data) async throws -> FfiAdminContentPolicy {
+        try await adminClient().setContentPolicy(document: document)
+    }
+
+    /// The caller's subscribed `wasm` labelers over posts, as hex ids — the
+    /// `subscribed` argument of `FfiRuleEditor.labelerChoices` (the shared rule
+    /// editor's labeler picker).
+    public func ruleLabelers() async throws -> [String] {
+        try await buildRuleLabelersClient(nest: try await ensureNestConnected()).ruleLabelers()
+    }
+
+    /// One subscribed labeler's module for a rule to bundle, by its hex id;
+    /// `nil` when it is not a `wasm` module over posts.
+    public func ruleModule(labelerIdHex: String) async throws -> Data? {
+        try await buildRuleLabelersClient(nest: try await ensureNestConnected())
+            .ruleModule(labelerId: hex_to_data(labelerIdHex))
+    }
+
+    /// `fauna.family.policy.update` for the content pillar only — the guardian
+    /// rule editor's save (`family-safety.md` § App surface → *Content rules*).
+    /// `nil` when the caller no longer guards the ward and nothing was written.
+    public func familySaveContentRules(ward: Data, document: Data) async throws -> FfiFamilyWardInfo? {
+        try await familyClient().saveContentRules(ward: ward, document: document)
+    }
+
+    /// The once-per-sign-in newer-version look, over this session's nest
+    /// connection (`installers/README.md` § The nest's newest-release field):
+    /// the newest release the nest reports on `fauna.nest.info`, never the
+    /// release host. `nil` when the nest names nothing newer, says nothing, or
+    /// the connect fails — silent in every case.
+    public func lookForNewerReleaseAtSignIn() async -> NewerRelease? {
+        guard let nest = try? await ensureNestConnected() else { return nil }
+        return await nest.lookForNewerReleaseAtSignIn()
+    }
+
+    /// Retire this client for good — for a session being torn down. Stops its
+    /// WS-RPC connection (whose supervisor would otherwise keep redialling with
+    /// its secret: dropping the reference does not stop it, see
+    /// ``adoptActor(_:)``) AND refuses every later connect, because the dropped
+    /// session's in-flight work (its `start()` chain, the account runtime's
+    /// wait) still holds this client and would otherwise dial again — each
+    /// dial a sign-in with the identity the app just left. Measured on a lock
+    /// verdict: two fresh mints 30 s after the teardown, inside the lock window.
+    public func retire() async {
+        retired = true
+        guard let outgoing = nestClient else { return }
+        nestClient = nil
+        nestClientSecret = nil
+        await outgoing.disconnect()
+    }
+
+    /// Set by ``retire()``; ``ensureNestConnected()`` refuses from then on.
+    private var retired = false
+
     private func ensureNestConnected() async throws -> FfiNestClient {
         if let nestClient { return nestClient }
+        guard !retired else { throw APIError.ffiError("WS-RPC connection: this session was torn down") }
         guard let secret else { throw APIError.ffiError("No secret for WS-RPC connection") }
         let stillThisActor = sameActorSince()
         let client = try FfiNestClient(nestUrl: nodeUrl.absoluteString, secret: hex_to_data(secret))
         try await client.connect()
+        guard !retired else {
+            await client.disconnect()
+            throw APIError.ffiError("WS-RPC connection: this session was torn down while connecting")
+        }
         guard stillThisActor() else {
             await client.disconnect()
             throw APIError.ffiError("WS-RPC connection: actor changed while connecting")
@@ -1519,6 +1630,15 @@ public class APIClient {
         nestClient = client
         nestClientSecret = secret
         return client
+    }
+
+    /// Start the shared mail connect-time refresh on the session's `FfiNestClient`:
+    /// once now and again after every reconnect, for the client's life
+    /// (`mail-credentials.md` § Hard revoke → *Published before the nest moves*,
+    /// rule (4)). Returns at once; best-effort and log-only. Call ONCE per client
+    /// (`FaunaClient.startMailEpochRefreshOnEveryConnect` guards that).
+    public func startMailEpochRefreshOnEveryConnect() async throws {
+        await FaunaFFISwift.startMailEpochRefreshOnEveryConnect(nest: try await ensureNestConnected())
     }
 
     /// Subscribe to WS-RPC reconnect bumps over the shared `FfiNestClient`. The
@@ -1563,11 +1683,11 @@ public class APIClient {
     /// socket the same lazy way.
     public func startAccountRuntime(
         appDataDir: String, storeContainer: FfiStoreContainer?, ownDeviceId: Data?,
-        accounts: FfiAccountRegistry?
+        deviceLabel: String, accounts: FfiAccountRegistry?
     ) async throws {
         try await ensureNestConnected().startAccountRuntime(
             appDataDir: appDataDir, storeContainer: storeContainer,
-            ownDeviceId: ownDeviceId, accounts: accounts)
+            ownDeviceId: ownDeviceId, deviceLabel: deviceLabel, accounts: accounts)
     }
 
     // EXCISED BY `FAUNA_EXCISE_P2P_SHARE`: the store-safe FFI exports no share plane
@@ -1694,6 +1814,24 @@ public class APIClient {
         nestClient?.accountPumpCyclesJson()
     }
 
+    #if DEBUG
+    /// The `custody_ceremony_ingest` e2e state value as raw JSON
+    /// (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`) — the host's tally of
+    /// ceremony deliveries it took in versus refused. `nil` with no connected
+    /// client: the serializer then publishes no key (convention 11). A plain
+    /// atomic read, so non-`async`. `test-helpers` flavor only.
+    public func custodyCeremonyIngestJson() -> String? {
+        nestClient?.custodyCeremonyIngestJson()
+    }
+
+    /// The owner's send-again poke (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`).
+    /// `false` when there is no custody runtime to poke. `test-helpers` only.
+    public func custodyOwnerResendNow() async -> Bool {
+        guard let nestClient else { return false }
+        return await nestClient.custodyOwnerResendNow()
+    }
+    #endif
+
     /// The member-side succession report for `data.succession_witness`, as
     /// raw JSON — `nil` before a conversations session has been built
     /// (`succession-propagation.md` § Implementation status today: this
@@ -1718,6 +1856,16 @@ public class APIClient {
     public func accountPumpNow() async -> Bool {
         guard let nestClient else { return false }
         return await nestClient.accountPumpNow()
+    }
+
+    /// Restore from the custodian NEST at `url` (`nests.md` § Trust facet —
+    /// restore from a custodian nest) — the FFI's `accountRestoreFromCustodian`,
+    /// the one shared runtime command both of the page's entries dispatch. The
+    /// shell holds no dial, handshake or walk logic; with no client yet the
+    /// gesture could not run, which is `Failed`, never a silent drop.
+    public func restoreFromCustodian(url: String) async -> FfiCustodianRestoreOutcome {
+        guard let nestClient else { return .failed(reason: "not connected to a nest") }
+        return await nestClient.accountRestoreFromCustodian(url: url)
     }
 
     /// The standing device-cap refusal notice (`devices.md` § Errors & edge
@@ -1762,6 +1910,20 @@ public class APIClient {
         return await nestClient.readMarkerStateJson(channelIdHex: channelIdHex)
     }
 
+    /// The recovery-kit let-go journey's staging read — the account-level escrow
+    /// wrap coordinates of THIS app's own account runtime
+    /// (`fleet-scope-reclamation.md` § Fleet-scope reclamation, clause (3)(j)),
+    /// JSON-encoded. `nil` when there is no connected client to ask; the caller
+    /// reports that as the same quiet "not found" the shared reader answers for a
+    /// missing store. `#if DEBUG` for the same reason as `deviceSetStateJson`
+    /// above (a `test-helpers` UniFFI export; pinned by
+    /// `test_apple_seam_gating.py`). Only `EscrowWrapCoordinatesTestCommand`
+    /// calls it.
+    public func escrowWrapCoordinatesJson() async -> String? {
+        guard let nestClient else { return nil }
+        return await nestClient.escrowWrapCoordinatesJson()
+    }
+
     /// The `reconnect_backoff` e2e seam on the live connection
     /// (`FfiNestClient.setReconnectBackoffForTest`, a `test-helpers` export —
     /// hence `#if DEBUG`, like `deviceSetStateJson` above). `false` when there is
@@ -1803,6 +1965,15 @@ public class APIClient {
     /// socket eagerly at startup, which is required to observe the live state.
     public func subscribeConnectionState() async throws -> FfiConnectionStateSubscription {
         try await ensureNestConnected().subscribeConnectionState()
+    }
+
+    /// Subscribe to who the shared `FfiNestClient`'s bearer mint confirmed this
+    /// session is signed in as — every successful silent-challenge mint's
+    /// `LaunchIdentity`, the current one at once and each change after
+    /// (`transport-connection.md` § The dial budget). `nil` when the client's
+    /// bearer source cannot say. `FaunaClient.startSelfIdentityFollow` drives it.
+    public func subscribeSelfIdentity() async throws -> FfiSelfIdentitySubscription? {
+        try await ensureNestConnected().subscribeSelfIdentity()
     }
 
     /// Why the WS-RPC supervisor stopped for good, when the reason is a
@@ -1859,6 +2030,51 @@ public class APIClient {
             deviceId: deviceId,
             deviceLabel: deviceLabel
         )
+    }
+
+    // ── Settings → Sessions (`docs/goal/ui/sessions.md`) ────────────────────
+    //
+    // The four calls of the UniFFI sessions face (`libs/fauna-ffi/src/
+    // sessions.rs`). Each runs the shared act → re-read → fold pass and answers
+    // the page to paint and whether the lock landed; `previous` is the page
+    // painted last (a failed read keeps its rows). Only "not connected" throws.
+
+    /// The nav-edge hydrate.
+    public func sessionsLoad(
+        devices: DevicesMachine?, ownDeviceId: String?, previous: FfiSessionsSnapshot?
+    ) async throws -> FfiSessionsPage {
+        await FaunaFFISwift.sessionsLoad(
+            nest: try await ensureNestConnected(), devices: devices,
+            ownDeviceId: ownDeviceId, previous: previous)
+    }
+
+    /// `session-revoke-button[i]`.
+    public func sessionsRevoke(
+        devices: DevicesMachine?, ownDeviceId: String?, previous: FfiSessionsSnapshot?,
+        tokenId: String
+    ) async throws -> FfiSessionsPage {
+        await FaunaFFISwift.sessionsRevoke(
+            nest: try await ensureNestConnected(), devices: devices,
+            ownDeviceId: ownDeviceId, previous: previous, tokenId: tokenId)
+    }
+
+    /// `sessions-revoke-others-confirm-button` — the confirm's second press.
+    public func sessionsRevokeOthers(
+        devices: DevicesMachine?, ownDeviceId: String?, previous: FfiSessionsSnapshot?
+    ) async throws -> FfiSessionsPage {
+        await FaunaFFISwift.sessionsRevokeOthers(
+            nest: try await ensureNestConnected(), devices: devices,
+            ownDeviceId: ownDeviceId, previous: previous)
+    }
+
+    /// `sessions-lockout-button` — `confirmWord` verbatim; the face re-checks it.
+    public func sessionsLockout(
+        devices: DevicesMachine?, ownDeviceId: String?, previous: FfiSessionsSnapshot?,
+        confirmWord: String
+    ) async throws -> FfiSessionsPage {
+        await FaunaFFISwift.sessionsLockout(
+            nest: try await ensureNestConnected(), devices: devices,
+            ownDeviceId: ownDeviceId, previous: previous, confirmWord: confirmWord)
     }
 
     /// Build the in-process **sync engine host** — construct-run-drop engine
@@ -2008,16 +2224,19 @@ public class APIClient {
     /// the caller resolves it (see `FaunaClient.makeSyncAgentProvisioner`) since
     /// this wrapper has no actor id of its own. `predecessorActorIds` is its
     /// attested-ids sibling (`FfiAccountRegistry.attestedPredecessorActorIds(actorId:)`),
-    /// same caller-resolves contract. The caller supplies the two
-    /// genuinely platform-specific hooks: how to spawn the agent and where the
-    /// app's live bearer comes from ([`APIClientProvisioningBearerSource`]).
+    /// same caller-resolves contract. The caller supplies the one genuinely
+    /// platform-specific hook: how to spawn the agent. The bearer the agent is
+    /// pushed is the session client's own cache, read in Rust — the shared
+    /// `AgentBearerSource` tui and linux use — never a token cached here: one
+    /// cached at sign-in outlived a nest restart and kept overwriting the
+    /// bearers the agent minted on its `401` (`p2p.md` § Same-account nest-down
+    /// folder transfer).
     public func syncAgentProvisioner(
         deviceId: String,
         deviceLabel: String,
         predecessorBackupKeys: [Data],
         predecessorActorIds: [Data],
         spawner: FfiAgentSpawner,
-        bearerSource: FfiProvisioningBearerSource,
         reachabilityObserver: FfiAgentReachabilityObserver? = nil
     ) async throws -> FfiSyncAgentProvisioner {
         guard let secret else { throw APIError.ffiError("No secret for the sync-agent provisioner") }
@@ -2029,7 +2248,7 @@ public class APIClient {
             deviceId: deviceId,
             deviceLabel: deviceLabel,
             spawner: spawner,
-            bearerSource: bearerSource,
+            bearerSource: nil,
             reachabilityObserver: reachabilityObserver,
             // The registry, from which Rust resolves the capability's
             // `predecessor_keys_by_actor` — each retired key PAIRED with its
@@ -2039,19 +2258,6 @@ public class APIClient {
             accounts: FaunaAccounts.registry()
         )
         return provisioner
-    }
-
-    /// The app's current minted bearer + its unix-seconds refresh deadline, for
-    /// the sync-agent provisioning loop (`FfiProvisioningBearerSource`). The
-    /// deadline is `authenticate()`'s early-refresh point (mint expiry − 60 s),
-    /// on this device's clock: `mintBearer`'s `expiresAt` is anchored at receipt
-    /// (`login.md` § Token lifetime on the client's clock). Conservative is
-    /// correct here — the agent renews off it via its own grant. A token without
-    /// a deadline (never set apart, but not provable from here) reads as no
-    /// bearer, so the tick skips rather than hand the agent a guess.
-    public func currentBearerForProvisioning() -> (token: String, expiresAt: UInt64) {
-        guard let token = currentToken, let deadline = tokenExpiresAt else { return ("", 0) }
-        return (token, UInt64(max(0, deadline.timeIntervalSince1970)))
     }
 
     /// Build the page-level Devices state machine (`DevicesMachine`, shared Rust)
@@ -2289,6 +2495,20 @@ public class APIClient {
         guard let secret else { throw APIError.ffiError("No secret for the offline-share seat") }
         return try offlineShareDropConnectionsForTest(ownerSecret: hex_to_data(secret))
     }
+
+    /// `offline_share_probe_set`'s door — dial a peer's share plane as this
+    /// session's identity and report what came back. Routes through the FFI's
+    /// process-wide session-seat slot, like `dropOfflineShareConnectionsForTest`;
+    /// the FFI throws when no seat is bound. `#if DEBUG` (a `test-helpers`
+    /// export); only `OfflineShareTestCommand` calls it.
+    public func offlineShareProbeSetForTest(
+        peerCode: String, groupIdHex: String, manifestHashes: [String]
+    ) async throws -> FfiShareProbeReport {
+        guard let secret else { throw APIError.ffiError("No secret for the offline-share probe") }
+        return try await offlineShareProbeSet(
+            ownerSecret: hex_to_data(secret), peerCode: peerCode,
+            groupIdHex: groupIdHex, manifestHashes: manifestHashes)
+    }
     #endif
 
     #endif  // !FAUNA_EXCISE_P2P_SHARE
@@ -2487,6 +2707,14 @@ public class APIClient {
         if let secret {
             try? wireMediaFollowedFolders(
                 media: machine, nest: nest, ownerSecret: hex_to_data(secret))
+        }
+        // The devices-MLS twin (`devicesMachine`): the machine reads the shared
+        // sets' rows (value `local:<id>`, owner-labelled) through the one
+        // per-actor `ConversationsSession`. Unwired, the page drops every
+        // shared set's row (fail-safe) — so best-effort on the session, awaited
+        // rather than raced (`awaitSharedConversationsSession()`'s doc).
+        if let session = try? await awaitSharedConversationsSession() {
+            wireMediaMlsQuery(media: machine, session: session)
         }
         return machine
     }
@@ -2699,6 +2927,16 @@ public class APIClient {
         try await ensureNestConnected().draftsSync(rail: rail)
     }
 
+    /// Register the nest's contact roster on a `manager` no conversations
+    /// session serves (the plain-e2e seat, whose mock rails stand in for the
+    /// real session that registers it in production), so the shared
+    /// projection can name a handle-less surface — the OTHER Profile header —
+    /// by the roster's handle (`value-formatting.md` § Peer display label →
+    /// *the roster handle*). Shared by macOS + iOS.
+    public func registerContactRoster(on manager: ConversationsManager) async throws {
+        try await ensureNestConnected().registerContactRoster(manager: manager)
+    }
+
     /// Build the **events-rail** draft autosync, typed rather than raw bytes —
     /// the events twin of `draftsSync(rail:)` above (`rail = "events"`,
     /// pre-bound). The Events page has no manager to hold the canonical
@@ -2736,13 +2974,20 @@ public class APIClient {
     /// the actor's 32-byte ed25519 signing secret (needed to build + sign posts on
     /// `submit_post`); also primes `self.secret` for the silent-challenge launch path,
     /// exactly as `conversationsSession` does.
-    public func feedManager(secret secretHex: String) async throws -> FfiFeedManager {
+    ///
+    /// `deviceIdHex` is this client's sync device id (`FaunaClient.deviceId`, the
+    /// one `conversationsSession` takes): with it the factory registers the folded
+    /// archive comments' source (`archive-import.md` § What each category becomes →
+    /// *Placement under the owner's own post*); `nil` or empty folds nothing.
+    public func feedManager(secret secretHex: String, deviceIdHex: String? = nil) async throws -> FfiFeedManager {
         // `adoptActor` rather than the old `if secret == nil` priming: it primes
         // the same way on a fresh client, but ALSO drops a cached connection
         // belonging to a different actor, so the manager's keypair and the socket
         // its writes are attributed to can never disagree (see `adoptActor`).
         adoptActor(secretHex)
-        return try await ensureNestConnected().feedManager(secret: hex_to_data(secretHex))
+        let device = deviceIdHex.flatMap { $0.isEmpty ? nil : $0 }
+        return try await ensureNestConnected().feedManager(
+            secret: hex_to_data(secretHex), recordingDevice: device)
     }
 #endif
 
@@ -2847,6 +3092,50 @@ public class APIClient {
         try await FaunaFFISwift.forwardPerHourSet(nest: try await ensureNestConnected(), value: value)
     }
 
+    // The per-account receive / send switches, the automatic reply and the
+    // mailbox quota (`mail-policy-config.md` § Tier 3; `email-filters.md` § The
+    // auto-respond setting; `imap-server.md` § Composition with submission
+    // quota) — the same thin-accessor shape. The automatic reply rides the
+    // `fauna-client-email` facade over `FfiEmailClient`; it has no nest state of
+    // its own.
+
+    /// The account's receive / send switches.
+    public func mailSwitchesGet() async throws -> MailSwitches {
+        try await FaunaFFISwift.mailSwitchesGet(nest: try await ensureNestConnected())
+    }
+
+    /// Write one switch (`nil` keeps the other's stored value); returns the
+    /// re-read switches.
+    public func mailSwitchesSet(receive: Bool?, send: Bool?) async throws -> MailSwitches {
+        try await FaunaFFISwift.mailSwitchesSet(
+            nest: try await ensureNestConnected(), receiveEnabled: receive, sendEnabled: send)
+    }
+
+    /// Write the per-account "show the scan-result row" switch; returns the
+    /// re-read switches (`mail-content-scanning.md` § Per-account opt-out).
+    public func mailScanResultVisibleSet(_ visible: Bool) async throws -> MailSwitches {
+        try await FaunaFFISwift.mailScanResultVisibleSet(
+            nest: try await ensureNestConnected(), scanResultVisible: visible)
+    }
+
+    /// The mailbox's storage and message-count figures.
+    public func mailQuotasGet() async throws -> MailQuotas {
+        try await FaunaFFISwift.mailQuotasGet(nest: try await ensureNestConnected())
+    }
+
+    public func autorespondGet() async throws -> FfiAutoRespond {
+        try await emailClient().autorespondGet()
+    }
+
+    /// Turn the automatic reply on with `message` (or change its words).
+    public func autorespondSet(_ message: String) async throws {
+        try await emailClient().autorespondSet(message: message)
+    }
+
+    public func autorespondClear() async throws {
+        try await emailClient().autorespondClear()
+    }
+
     /// Build the user-tier `MailSettingsMachine` (mail-settings page). Needs the
     /// actor secret (to sign submission tokens + key the account plane) and the
     /// deployment node URL (to derive MUA connection details), both private to
@@ -2883,6 +3172,16 @@ public class APIClient {
                 machine: machine, nest: nest, secret: hex_to_data(secret))
         }
         return machine
+    }
+#endif
+
+#if !FAUNA_KIDS
+    /// A connected-apps machine for a caller that re-reads after each gesture
+    /// and so needs no push (the plugin cards, the media detail's depositor
+    /// roster): `connectedAppsMachine` with the shared inert observer and no
+    /// mail machine.
+    func connectedAppsMachineWithoutPush() async throws -> ConnectedAppsMachine {
+        try await connectedAppsMachine(observer: ConnectedAppsNoObserver(), mail: nil)
     }
 #endif
 
@@ -3206,6 +3505,20 @@ public class APIClient {
         try await FaunaFFISwift.adminSetWebAppOrigin(nest: try await ensureNestConnected(), mode: mode)
     }
 
+    /// `fauna.admin.update_channel.get` folded through the shared update-channel
+    /// view (nest/update-channel.md § The UI) — the one read
+    /// `admin-nest-update-channel-section` paints from. Every sentence, the
+    /// option labels and `can_set` are already decided; this hop decides nothing.
+    public func adminUpdateChannelStatus() async throws -> FfiAdminUpdateChannelView {
+        try await FaunaFFISwift.adminUpdateChannelStatus(nest: try await ensureNestConnected())
+    }
+
+    /// `fauna.admin.update_channel.set` — `admin-nest-update-channel-save-button`.
+    /// Answers the fold of a fresh read, so the save repaints with no second call.
+    public func adminSetUpdateChannel(_ channel: UpdateChannel) async throws -> FfiAdminUpdateChannelView {
+        try await FaunaFFISwift.adminSetUpdateChannel(nest: try await ensureNestConnected(), channel: channel)
+    }
+
     /// `fauna.oauth.issuer_key_status` folded through the shared
     /// `issuer_key_view` (authorization-server.md § The issuer) — the one read
     /// `admin-nest-oauth-section` paints its key rows from. Throws on failure:
@@ -3307,6 +3620,16 @@ public class APIClient {
     /// gone is a success no-op (convergence, not an error).
     public func mutedKeywordsRemove(word: String) async throws -> MutedWordsSnapshot {
         let page = try await FaunaFFISwift.removeMutedWord(word: word)
+        await MutedWordsHolder.shared.publish(page.keywords)
+        return page
+    }
+
+    /// Set one stored term's level (`hide` | `show-less`) as a DELTA — the
+    /// shared seam re-reads the list inside its own CAS update and maps the
+    /// level to its weight (`fauna_core::scoring::MutedKeywordLevel`); the app
+    /// never spells a weight. Returns the normalized page record.
+    public func mutedKeywordsSetLevel(word: String, level: MutedKeywordLevel) async throws -> MutedWordsSnapshot {
+        let page = try await FaunaFFISwift.setMutedWordLevel(word: word, level: level)
         await MutedWordsHolder.shared.publish(page.keywords)
         return page
     }
@@ -3521,12 +3844,24 @@ public class APIClient {
         try await ensureNestConnected().subscriptions().mineList()
     }
 
-    /// `fauna.subscriptions.unsubscribe` — drop the caller's subscription to
-    /// `authorId` (thin). Encrypted mode returns `Queued` (the row stays until the
-    /// author commits the removal); the consumer page re-reads `mine.list` after.
+    /// The leave, across nests — drop the caller's subscription to `authorId` at
+    /// `tier` (thin over the shared `subscriptions_unsubscribe_across_nests`).
+    /// `homeNestUrl` is the `mine.list` row's home (`FfiMineSubscription.homeNestUrl`):
+    /// `nil` = a creator on this nest, else the leave reaches the creator's home
+    /// (`federated-follow.md` § Decision 2). Encrypted mode returns `Queued` (the
+    /// row stays until the author commits the removal); the consumer page re-reads
+    /// `mine.list` after.
     @discardableResult
-    public func subscriptionUnsubscribe(authorId: Data) async throws -> FfiUnsubscribeReply {
-        try await ensureNestConnected().subscriptions().unsubscribe(authorId: authorId)
+    public func subscriptionUnsubscribe(
+        authorId: Data, tier: String, homeNestUrl: String?
+    ) async throws -> FfiUnsubscribeReply {
+        guard let secret else { throw APIError.ffiError("No secret for unsubscribe") }
+        return try await subscriptionsUnsubscribeAcrossNests(
+            nest: try await ensureNestConnected(),
+            subscriberSecret: hex_to_data(secret),
+            authorId: authorId,
+            tier: tier,
+            homeNestUrl: homeNestUrl)
     }
 
     // MARK: - Payment providers (Pillar 3 — monetization.md § Pillars 2+3 — app UX)
@@ -3602,6 +3937,14 @@ public class APIClient {
     public func listPaymentClaims() async throws -> [FfiClaimItem] {
         try await ensureNestConnected().payments().claimsList()
     }
+
+    /// `fauna.payments.claims.void` — the author voids one of their own claim
+    /// codes (§5 Void verb; idempotent nest-side, `claim_not_found` when the
+    /// code is not theirs).
+    @discardableResult
+    public func voidPaymentClaim(code: String) async throws -> UInt64 {
+        try await ensureNestConnected().payments().claimsVoid(code: code)
+    }
     #endif
 
     // MARK: - Profile (publish/edit — profile.md § Where logic lives → Profile publish/edit)
@@ -3622,6 +3965,37 @@ public class APIClient {
         try await ensureNestConnected().profile().profileGet(actorId: actorId)
     }
 
+    /// The OTHER profile's header read — this nest first, the relay to `home` (the
+    /// page's actor-home slot) on its `not_found`: the composed shared read
+    /// `ProfileClient::profile_get_or_relay` (`profile.md` § Where logic lives →
+    /// *The remote read*), never a Swift fall-through. Throws when neither leg
+    /// holds a profile — the header's actor-id fallback, never `error-message`.
+    public func profileGetOrRelay(actorId: String, home: String?) async throws -> Data {
+        try await ensureNestConnected().profile().profileGetOrRelay(actorId: actorId, home: home)
+    }
+
+    /// The OTHER profile's header read with its provenance — the shared
+    /// `ProfileClient::profile_header_read`: the stored bytes, the home they were
+    /// relayed from (`nil` = this nest served them) and that home's stamped
+    /// identity, which the header's pictures are fetched against
+    /// (``ProfileHeaderPictures/home(for:)``). `nil` on any failure — the header's
+    /// actor-id fallback, never `error-message`.
+    public func profileHeaderRead(actorId: String, home: String?) async -> FfiProfileHeaderRead? {
+        guard let client = try? await ensureNestConnected() else { return nil }
+        return try? await client.profile().profileHeaderRead(actorId: actorId, home: home)
+    }
+
+    #if !FAUNA_KIDS  // rides the post-blob plane, which the kids flavor lacks
+    /// One header picture's bytes (`avatar` / `banner` hash) from the nest that
+    /// served the profile, through the post-blob plane (`profile.md` § Where logic
+    /// lives → *Bytes direct, as for a relayed post*). `nil` on any failure: the
+    /// picture stays empty, never an error.
+    public func fetchProfilePicture(read: FfiProfileHeaderRead?, hash: String) async -> Data? {
+        guard let hosts = try? await postBlobHosts() else { return nil }
+        return try? await hosts.get(home: ProfileHeaderPictures.home(for: read), hash: hash)
+    }
+    #endif
+
     /// `fauna.profile.set` — publish/replace the caller's own profile. `body` is
     /// the signed `EmbedAsBytes` wire from `buildEditedProfile`.
     public func profileSet(body: Data) async throws {
@@ -3636,13 +4010,26 @@ public class APIClient {
     /// never races the per-sign-in aftermath hop (profile.md § After an
     /// identity succession → the linkless bullet). `accounts` is the same
     /// registry `runSuccessionAftermath` hands the FFI. `nil` means a
-    /// never-published profile, i.e. a first publish — not an error. The base's
-    /// `lastDirectBody` (the owner's last identity-signed row) is not threaded
-    /// on apple yet, so a save over an external app's edit degrades as before.
-    public func loadProfileEditBase() async throws -> Data? {
+    /// never-published profile, i.e. a first publish — not an error. The base
+    /// carries the owner's `lastDirectBody` (the owner's last identity-signed
+    /// row) beside a delegated `body`; both go to ``decodeOwnProfile`` and to the
+    /// save (`profile.md` § Where logic lives → *Profile publish/edit* → *Edit
+    /// surface*).
+    public func loadProfileEditBase() async throws -> FfiProfileEditBase? {
         guard let secret else { throw APIError.ffiError("No secret for the profile edit base") }
         return try await ensureNestConnected().profile().loadEditBase(
-            ownerSecret: hex_to_data(secret), accounts: FaunaAccounts.registry())?.body
+            ownerSecret: hex_to_data(secret), accounts: FaunaAccounts.registry())
+    }
+
+    /// The OWN edit form's projection of the base `loadProfileEditBase` read — the
+    /// display fields with `audienceEveryone` resolved exactly as the save will
+    /// sign it (shared `decode_own_profile_display`). Plain throwing wrapper.
+    public func decodeOwnProfile(base: FfiProfileEditBase) throws -> FfiProfileDisplay {
+        guard let actorId = boundActorIdHex else {
+            throw APIError.ffiError("No bound actor for the own profile projection")
+        }
+        return try decodeOwnProfileDisplay(
+            ownActorIdHex: actorId, body: base.body, lastDirectBody: base.lastDirectBody)
     }
 
     /// Project a stored profile `body` to the three editable display fields
@@ -3684,16 +4071,22 @@ public class APIClient {
     /// `ProfileEditVM.save()` always calls this (never the text-only
     /// `buildEditedProfile`) since Keep/Keep reproduces the text-only behavior
     /// exactly.
+    ///
+    /// `lastDirectBody` is the edit base's owner-signed row
+    /// (``loadProfileEditBase``); `audienceEveryone` is
+    /// `profile-edit-audience-toggle`'s press — `nil` while the toggle is
+    /// untouched, so an untouched save re-signs the base's own audience.
     public func buildEditedProfileWithImages(
-        baseBody: Data?, displayName: String?, bio: String?, links: [FfiProfileLink],
-        avatar: FfiProfileImageEdit, banner: FfiProfileImageEdit
+        baseBody: Data?, lastDirectBody: Data? = nil, displayName: String?, bio: String?,
+        links: [FfiProfileLink], avatar: FfiProfileImageEdit, banner: FfiProfileImageEdit,
+        audienceEveryone: Bool? = nil
     ) throws -> Data {
         guard let secret else { throw APIError.ffiError("No secret for profile edit") }
         return try FaunaFFISwift.buildEditedProfileWithImages(
-            secret: hex_to_data(secret), baseBody: baseBody, lastDirectBody: nil,
+            secret: hex_to_data(secret), baseBody: baseBody, lastDirectBody: lastDirectBody,
             predecessors: profilePredecessors(),
             displayName: displayName, bio: bio, links: links,
-            avatar: avatar, banner: banner, audienceEveryone: nil)
+            avatar: avatar, banner: banner, audienceEveryone: audienceEveryone)
     }
 
     // MARK: - Subscriptions (OTHER-profile subscriber browse — monetization.md § Pillar 1)
@@ -3725,17 +4118,35 @@ public class APIClient {
     /// ML-KEM ek (surface B, S4b) unconditionally (no capability token), so the
     /// author can later wrap hybrid `KeyBlob`s to this subscriber. Plaintext +
     /// auto-approve grants inline (`Approved`); encrypted mode enqueues for the
-    /// author's mint (`Queued`). The native twin
-    /// of the wasm `subscriptionsSubscribePublishingEk`; mirrors linux
+    /// author's mint (`Queued`). `homeNestUrl` is the page's actor-home slot: `nil`
+    /// or blank = the local follow (the shared `subscriptions_subscribe_across_nests`
+    /// falls through to the publishing-ek subscribe), else the follow carries the
+    /// home and the subscriber's signed intent (`federated-follow.md` § Decision 2).
+    /// The native twin of the wasm `subscriptionsSubscribeAcrossNests`; mirrors linux
     /// `offers.rs::subscribe_to` / `mod.rs::follow`.
     @discardableResult
-    public func subscriptionSubscribe(authorIdHex: String, tier: String) async throws -> FfiSubscribeReply {
+    public func subscriptionSubscribe(
+        authorIdHex: String, tier: String, homeNestUrl: String? = nil
+    ) async throws -> FfiSubscribeReply {
         guard let secret else { throw APIError.ffiError("No secret for subscribe") }
-        return try await subscriptionsSubscribePublishingEk(
+        return try await subscriptionsSubscribeAcrossNests(
             nest: try await ensureNestConnected(),
             subscriberSecret: hex_to_data(secret),
             authorId: hex_to_data(authorIdHex),
-            tier: tier)
+            tier: tier,
+            homeNestUrl: homeNestUrl)
+    }
+
+    /// Publish the account's subscriber encapsulation-key registry entry
+    /// (`post-quantum.md` § surface B) through the shared
+    /// `SubscriptionsClient::publish_encaps_key` — idempotent, every device
+    /// derives the same bytes. Called at every session start by
+    /// `FaunaClient.publishSubscriberEncapsKey`.
+    public func subscriptionsPublishEncapsKey() async throws {
+        guard let secret else { throw APIError.ffiError("No secret for encaps-key publish") }
+        try await FaunaFFISwift.subscriptionsPublishEncapsKey(
+            nest: try await ensureNestConnected(),
+            subscriberSecret: hex_to_data(secret))
     }
 #endif
 
@@ -3802,6 +4213,41 @@ public class APIClient {
         return try await FaunaFFISwift.backupRecoverFromDestination(
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
             deviceIdHex: deviceIdHex, destinationId: destinationId, statePath: statePath)
+    }
+
+    /// The pull-back's **preflight**, run on the press of a nest row's
+    /// `backup-destination-reseed-button` (`ui/backups.md` § Restore after
+    /// losing the nest): the shared host reads this account's audit ledger
+    /// (`statePath`, actor-scoped like the recovery gesture's) against the
+    /// holder's reserved sets and answers the confirm's body lines plus the
+    /// `acceptance` the run hands back. A stop comes back in `stopped`, never
+    /// as a throw; no confirm opens on one.
+    public func backupPullBackPreflight(
+        destinationId: String, statePath: String
+    ) async throws -> FfiPullBackPreflight {
+        guard let secret else { throw APIError.ffiError("No secret for backup pull-back") }
+        return try await FaunaFFISwift.backupPullBackPreflight(
+            nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
+            destinationId: destinationId, statePath: statePath)
+    }
+
+    /// The restore-after-losing-the-nest gesture's **nest-held pull-back**
+    /// (`ui/backups.md` § Restore after losing the nest), run on the owner's
+    /// confirm over the preflight's lines: the rebuilt nest takes back the copy
+    /// a surviving nest destination holds, through the shared host every app
+    /// runs in-process. `destinationId` is resolved against this client's own
+    /// pinned list on the Rust side. This account's audit state and the
+    /// `acceptance` the preflight returned (passed back verbatim) make the run
+    /// refuse any reserved set the owner was not shown or whose ledger moved.
+    /// A stop comes back in the record's `stopped`, never as a throw.
+    public func backupPullBackAccepted(
+        destinationId: String, deviceIdHex: String, statePath: String, acceptance: String
+    ) async throws -> FfiReseedResult {
+        guard let secret else { throw APIError.ffiError("No secret for backup pull-back") }
+        return try await FaunaFFISwift.backupPullBackAccepted(
+            nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
+            deviceId: hex_to_data(deviceIdHex), destinationId: destinationId,
+            statePath: statePath, acceptance: acceptance)
     }
 
     // `buildUploadCoordinatorFromConfig` was deleted at the slice-5 flip
@@ -3904,6 +4350,15 @@ public class APIClient {
     /// Admin-class — needs only the connection handle.
     public func caldavPolicyMachine() async throws -> CaldavPolicyMachine {
         buildCaldavPolicyMachine(nest: try await ensureNestConnected())
+    }
+#endif
+
+#if !FAUNA_KIDS
+    /// Build the admin `DmarcReportsMachine` (`admin-mail-reports` page — the DMARC
+    /// aggregate reports peer mail servers send about this nest's domains).
+    /// Admin-class — needs only the connection handle.
+    public func dmarcReportsMachine() async throws -> DmarcReportsMachine {
+        buildDmarcReportsMachine(nest: try await ensureNestConnected())
     }
 #endif
 
@@ -4026,6 +4481,38 @@ public class APIClient {
     /// (`mailbox-migration.md` § Credential handling).
     public func mailImportMachine() async throws -> MailImportMachine {
         buildMailImportMachine(nest: try await ensureNestConnected())
+    }
+
+    /// The machine of an import that reached Done, held across visits to the
+    /// page: the machine, not the page, owns the finished session's counts and
+    /// skip log, and a fresh machine lands on Source (`mailbox-migration.md`
+    /// § Wizard steps step 6, "leaving the page and coming back keeps it"; a
+    /// restart does not). Here rather than on the page-owned `MailImportVM`
+    /// because this client is the session: an account switch gets a new one and
+    /// never shows the previous account's import, the windows
+    /// `MailImportMachineHolder` shape. A Done machine runs no loop and holds no
+    /// token, so nothing outlives the page but what it paints.
+    @MainActor public var finishedMailImportMachine: MailImportMachine?
+
+    /// Build the user-facing `ArchiveImportMachine` (`archive-import` wizard
+    /// sub-page — `archive-import.md` § The wizard and its machine) for the
+    /// signed-in actor whose sync device id is `deviceIdHex`
+    /// (`FaunaClient.deviceId`): the archive folder's files are change records
+    /// stamped with it. Throws on a bearer-only session, which holds no
+    /// identity key to sign the imported posts with — the page then states it
+    /// cannot import rather than painting a wizard that could not commit.
+    public func archiveImportMachine(deviceIdHex: String) async throws -> ArchiveImportMachine {
+        try buildArchiveImportMachine(nest: try await ensureNestConnected(), deviceIdHex: deviceIdHex)
+    }
+
+    /// The archive links this login's conversations session built
+    /// (`archive-import.md` § Linking and merging, ruling 8;
+    /// `FfiNestClient.archiveLinks()`), or `nil` before the session, or for one
+    /// with no sync device id. A plain read — it never connects: no connection
+    /// means no session, so no links. `ArchiveLinksStore` drives them and the
+    /// archive-import wizard attaches them to its machine before a run.
+    public func archiveLinks() -> ArchiveLinks? {
+        nestClient?.archiveLinks()
     }
 #endif
 
@@ -4516,10 +5003,16 @@ public class APIClient {
     /// Share a folder with one person: resolve the typed handle / actor-id to an
     /// actor (`resolveRecipient`, the shared `fauna.actor.by_handle` path), then
     /// `folders_share` (create the MLS group + bind the content key + deliver the
-    /// Welcome). Same-nest only (`memberNestUrl == nil`) — cross-nest by
-    /// `handle@domain` is a documented follow-on across all 7 apps, matching linux.
+    /// Welcome). A typed `handle@domain` on another nest resolves through the shared
+    /// `findUser` and its peer `nestUrl` rides as `memberNestUrl` (the KeyPackage is
+    /// fetched from, and the Welcome relayed to, that nest); a same-nest handle or a
+    /// 64-hex actor id carries `nil`. Mirrors the tui reference
+    /// (`resolve_share_recipient`). `access` is the share-time `folder-share-role-select` grant: `"writer"`, or
+    /// `nil` for the Reader default (the wire's absent-grant meaning).
     @discardableResult
-    public func shareFolder(name: String, recipientInput: String) async throws -> FfiShareOutcome {
+    public func shareFolder(
+        name: String, recipientInput: String, access: String? = nil
+    ) async throws -> FfiShareOutcome {
         guard let secret else { throw APIError.ffiError("No secret for folder share") }
         let resolved = try await resolveRecipient(recipientInput)
         let outcome = try await foldersShare(
@@ -4528,13 +5021,21 @@ public class APIClient {
             ownerSecret: hex_to_data(secret),
             name: name,
             memberId: hex_to_data(resolved.actorId),
-            memberNestUrl: nil,
-            // Reader default (pre-Phase-1 semantics). The share-time role select +
-            // per-member role/cap editing is the entrusted per-app fan-out of the
-            // Phase 1 write plane — linux is the proven shape.
-            access: nil
+            memberNestUrl: resolved.nestUrl,
+            access: access
         )
         return outcome
+    }
+
+    /// `fauna.folders.members.set_access` — the owner's in-place edit of one
+    /// member's grant (`folder-member-role-select` / `folder-member-cap-input`).
+    /// The call upserts the WHOLE `(access, byteCap)` row, so every caller sends
+    /// both halves; `byteCap == nil` = uncapped. Never rotates the content key.
+    public func setFolderMemberAccess(
+        name: String, memberActorIdHex: String, access: String, byteCap: Int64?
+    ) async throws {
+        try await foldersClient().membersSetAccess(
+            name: name, actorId: memberActorIdHex, access: access, byteCap: byteCap)
     }
 
     /// Remove a member from a shared set — derives the set's 32-byte `ChannelId`
@@ -4871,12 +5372,49 @@ public class APIClient {
         try await bridgesClient().listFollows(bridgeId: bridgeId).map(BridgeFollow.init(ffi:))
     }
 
+    public func listBridgeFollowRequests(bridgeId: String) async throws -> [BridgeFollowRequest] {
+        try await bridgesClient().listFollowRequests(bridgeId: bridgeId).map(BridgeFollowRequest.init(ffi:))
+    }
+
+    public func approveBridgeFollowRequest(bridgeId: String, id: String) async throws {
+        try await bridgesClient().approveFollowRequest(bridgeId: bridgeId, id: id)
+    }
+
+    public func refuseBridgeFollowRequest(bridgeId: String, id: String) async throws {
+        try await bridgesClient().refuseFollowRequest(bridgeId: bridgeId, id: id)
+    }
+
     public func addBridgeFollow(bridgeId: String, followId: String, petname: String?) async throws {
         try await bridgesClient().addFollow(bridgeId: bridgeId, id: followId, petname: petname, extra: nil)
     }
 
     public func removeBridgeFollow(bridgeId: String, followId: String) async throws {
         try await bridgesClient().removeFollow(bridgeId: bridgeId, followId: followId)
+    }
+
+    // The admin's hosted plugins (`fauna.plugins.{list,install,uninstall}`):
+    // every row arrives composed by shared Rust (`FfiInstalledPlugin`).
+
+    public func listInstalledPlugins() async throws -> [FfiInstalledPlugin] {
+        try await bridgesClient().pluginsList()
+    }
+
+    public func installPlugin(documentUrl: String) async throws {
+        try await bridgesClient().pluginsInstall(documentUrl: documentUrl)
+    }
+
+    public func uninstallPlugin(principalIdHex: String) async throws {
+        try await bridgesClient().pluginsUninstall(principalIdHex: principalIdHex)
+    }
+
+    /// Every account's plugin settings cards on the Bridges page
+    /// (`fauna.plugins.available`), each composed once in shared Rust.
+    public func listPluginCards() async throws -> [FfiPluginCard] {
+        try await bridgesClient().pluginsAvailable()
+    }
+
+    public func setPluginSetting(principalIdHex: String, key: String, value: FfiCborValue) async throws {
+        try await bridgesClient().pluginsSetSetting(principalIdHex: principalIdHex, key: key, value: value)
     }
 
     // The deleted `/admin/api/*` HTTP twins (stats / status / users / audit /
@@ -5333,3 +5871,11 @@ public enum APIError: Error, LocalizedError {
         }
     }
 }
+
+#if !FAUNA_KIDS
+/// Inert observer for a connected-apps machine whose caller re-reads after
+/// each gesture and needs no push (`APIClient.connectedAppsMachineWithoutPush`).
+final class ConnectedAppsNoObserver: ConnectedAppsObserver, @unchecked Sendable {
+    func onChanged() {}
+}
+#endif

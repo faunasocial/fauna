@@ -808,9 +808,12 @@ impl LaunchMachine {
 
         // The same ceremony the launch took — nonce-signed, no client timestamp,
         // so immune to a wrong client clock (`login.md` § When to use which).
-        // No reach hint on a refresh: the domain reached this nest at launch,
-        // and a `Transient` here lands `Offline { transient: true }`, whose
-        // retry re-runs the launch phase with its own hint fallback.
+        // No explicit reach hint on a refresh: when the hint carried the
+        // launch, the process reach table (`run_silent_challenge_phase`) makes
+        // the dial itself fall back after the domain fails; when the domain
+        // carried it, the hint is spent. A `Transient` here lands
+        // `Offline { transient: true }`, whose retry re-runs the launch phase
+        // and re-decides from the slot.
         let outcome = self
             .connector
             .silent_challenge(&nest_url, None, &secret)
@@ -1059,6 +1062,53 @@ impl LaunchMachine {
         self.run_silent_challenge_phase(&secret, &nest_url).await;
     }
 
+    /// Hand a hint that carried the launch to the session connector: the
+    /// process reach table entry for the dialled host, with this persistence's
+    /// `delete_reach_ipv4` as the deleter the first domain-carried bearer
+    /// socket runs (`fauna_ws_substrate::reach_hint`). The socket address is
+    /// the one the launch's own hint dial used (`auth::hint_socket_addr`: the
+    /// hint's IP with the URL's own port), and a malformed hint installs
+    /// nothing, as it dialled nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn install_session_reach_hint(&self, dial_url: &str, hint: &str) {
+        let Some(host) = fauna_anon_client::reach_hint::host_key_of_url(dial_url) else {
+            return;
+        };
+        let Some(addr) = crate::auth::hint_socket_addr(dial_url, hint) else {
+            return;
+        };
+        let persistence = Arc::clone(&self.persistence);
+        fauna_anon_client::reach_hint::install(
+            &host,
+            addr,
+            Arc::new(move || persistence.delete_reach_ipv4()),
+        );
+    }
+
+    /// The wasm twin: the same entry in the page's reach table
+    /// (`fauna_rpc_wasm::reach_hint`), which reaches the session in the SPA's
+    /// core chunk although this machine runs in the launch chunk. The URL the
+    /// launch's own hint dial used is rebuilt from the hint there, so a
+    /// malformed hint installs nothing here either.
+    #[cfg(target_arch = "wasm32")]
+    fn install_session_reach_hint(&self, dial_url: &str, hint: &str) {
+        let persistence = Arc::clone(&self.persistence);
+        fauna_rpc_wasm::reach_hint::install(dial_url, hint, move || {
+            persistence.delete_reach_ipv4();
+        });
+    }
+
+    /// Forget the dialled host's table entry without running its deleter: the
+    /// launch phase's opening move on either arm.
+    fn clear_session_reach_hint(dial_url: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(host) = fauna_anon_client::reach_hint::host_key_of_url(dial_url) {
+            fauna_anon_client::reach_hint::clear(&host);
+        }
+        #[cfg(target_arch = "wasm32")]
+        fauna_rpc_wasm::reach_hint::clear(dial_url);
+    }
+
     /// One silent challenge, applying the **reach hint**'s dial rule
     /// (`onboarding.md` § Reach hint): the domain first, always; the hint only
     /// when that domain dial failed to *reach* anything; and the hint deleted
@@ -1086,7 +1136,23 @@ impl LaunchMachine {
     ///   actively harmful: the pin refuses precisely when the domain now points
     ///   at a *different* machine, and the hint is then the only address left
     ///   that still reaches the real one.
+    ///
+    /// **The session connector's half** (`onboarding-provisioning.md` § Reach
+    /// hint → *The session connector's half*) starts from this phase's verdict:
+    /// a hint that carried the launch is installed in the process reach table
+    /// (`fauna_ws_substrate::reach_hint`) with this persistence's deletion as
+    /// its deleter, so the session's own mint and bearer socket — built from a
+    /// URL and a secret on every app, with no hint in sight — fall back to the
+    /// same address after their own domain-first dial fails, and the first
+    /// bearer socket that opens over the domain deletes the slot. The phase
+    /// clears the entry before its domain dial, so that dial is never answered
+    /// from the table and the decision is always re-made from the slot.
     async fn run_silent_challenge_phase(&self, secret: &[u8], nest_url: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let dial_url = crate::dial::resolved_dial_url(nest_url);
+        #[cfg(target_arch = "wasm32")]
+        let dial_url = nest_url.to_string();
+        Self::clear_session_reach_hint(&dial_url);
         let outcome = self
             .connector
             .silent_challenge(nest_url, None, secret)
@@ -1094,9 +1160,14 @@ impl LaunchMachine {
         let outcome = match outcome {
             SilentChallengeOutcome::Transient { .. } => match self.persistence.load_reach_ipv4() {
                 Some(hint) => {
-                    self.connector
+                    let outcome = self
+                        .connector
                         .silent_challenge(nest_url, Some(&hint), secret)
-                        .await
+                        .await;
+                    if matches!(outcome, SilentChallengeOutcome::Success(_)) {
+                        self.install_session_reach_hint(&dial_url, &hint);
+                    }
+                    outcome
                 }
                 None => outcome,
             },
@@ -1324,14 +1395,25 @@ impl LaunchMachine {
             }
         }
         #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-        let identity = self.inner.lock().unwrap().identity.clone();
+        let (identity, account) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.identity.clone(), inner.identity_account)
+        };
         #[cfg(not(target_arch = "wasm32"))]
         self.identity_tx.send_if_modified(|current| {
-            let next = identity.map(|i| fauna_protocol::auth::MintedIdentity {
-                handle: i.handle,
-                domain: i.domain,
-                tier: i.tier,
-            });
+            // The published value names the account it was confirmed for, so
+            // a follower of an earlier account can tell it is not its own
+            // (`MintedIdentity`). An identity with no attributable account
+            // (a secret that was not a 32-byte key) is not published at all.
+            let next =
+                identity
+                    .zip(account)
+                    .map(|(i, actor_id)| fauna_protocol::auth::MintedIdentity {
+                        actor_id,
+                        handle: i.handle,
+                        domain: i.domain,
+                        tier: i.tier,
+                    });
             if *current == next {
                 return false;
             }

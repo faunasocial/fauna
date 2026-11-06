@@ -68,4 +68,36 @@ public class ConversationsSendTests
         Assert.Equal("hello bob", detail.messages[0].body);
         Assert.Equal("", detail.compose.bodyDraft);
     }
+
+    /// <summary>The app's observer: it enqueues its PropertyChanged on the dispatcher
+    /// (<c>ConversationsNotifyObserver</c>), so the VM's cache is cleared only after the
+    /// continuation that awaited a mutation has run. This one never delivers, which
+    /// is that continuation's whole view of it.</summary>
+    private sealed class DeferredObserver : SnapshotObserver, INotifyPropertyChanged
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+        public void OnChanged() { }
+    }
+
+    [Fact]
+    public async Task A_read_right_after_an_awaited_mutator_sees_the_mutation_not_the_cached_snapshot()
+    {
+        var m = NewManager();
+        var threadId = m.CreateMlsGroup(new TypedAddress[]
+        {
+            new TypedAddress.Email(@emailAddress: "bob@self-nest.test"),
+        });
+        var vm = new ConversationsViewModel(m, new DeferredObserver());
+        vm.OpenThread(threadId);
+        vm.SetComposeBody(threadId, "hello bob");
+        // The page paints before the send: the detail is cached, with no message yet.
+        Assert.Empty(vm.SelectedDetail!.messages);
+
+        await vm.Send(threadId);
+
+        // ConversationsPage repaints in this same continuation (`await …; Refresh();`),
+        // before any observer tick could clear the cache.
+        var painted = Assert.Single(vm.SelectedDetail!.messages);
+        Assert.Equal("hello bob", painted.body);
+    }
 }

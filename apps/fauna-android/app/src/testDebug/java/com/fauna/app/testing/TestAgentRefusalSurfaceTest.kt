@@ -226,6 +226,22 @@ class TestAgentRefusalSurfaceTest {
         )
     }
 
+    /**
+     * The receive-stopped witness's two doors (outcome 18): before the
+     * ConversationsManagerHost is wired each refuses loudly, never drops.
+     */
+    @Test
+    fun conversationsReceiveStoppedDoorsBeforeTheHostIsWiredAreRefusedNotDropped() {
+        for (name in listOf("conversations_mark_receive_stopped", "conversations_begin_receive_loop")) {
+            val appState = AppState()
+            dispatch(name, command(name), appState)
+            assertTrue(
+                "$name with a null ConversationsManagerHost must refuse by name",
+                errorFromStateProtocol(appState)!!.contains(name),
+            )
+        }
+    }
+
     @Test
     fun conversationsInjectInboundBeforeTheHostIsWiredIsRefusedNotDropped() {
         val appState = AppState()

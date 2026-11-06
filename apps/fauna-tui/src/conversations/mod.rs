@@ -37,8 +37,8 @@ use fauna_client_mail_settings::MailSettingsMachine;
 use fauna_conversations::SortOrder;
 use fauna_conversations::room::RoomSearchStatus;
 use fauna_conversations::{
-    ConversationsManager, ConversationsSnapshot, MessageId, Rail, RecipientPickerState,
-    ResolveState, SendState, SnapshotObserver, ThreadId, TypedAddress, next_sort_order,
+    ConversationsManager, ConversationsSnapshot, MessageId, Rail, RecipientPickerState, SendState,
+    SnapshotObserver, ThreadId, TypedAddress, next_sort_order,
 };
 use fauna_core::identity::ActorId;
 use fauna_core::obligation::RenderVerdict;
@@ -72,6 +72,11 @@ pub enum Action {
     CancelNewConversation,
     /// `conversation-sort` — toggle the thread sort order.
     Sort,
+    /// `dm-attachment-image` click — open the full-screen `image-lightbox` over
+    /// that attachment's picture, by blob hash (the feed's
+    /// `feed::Action::OpenLightbox` shape; one painter, `crate::lightbox`).
+    /// Dismissed with Escape: ui.yaml declares no dismiss element inside it.
+    OpenLightbox(String),
 
     // --- the compose sub-page ---
     /// Enter on `recipient-picker-input` — commit the picker's current text as
@@ -536,7 +541,9 @@ impl Action {
             | Action::StartReactionEntry
             | Action::StartDeleteMessage
             | Action::RevealMuted { .. }
-            | Action::RevealContent { .. } => None,
+            | Action::RevealContent { .. }
+            // The lightbox re-paints bytes the device already holds.
+            | Action::OpenLightbox(_) => None,
         }
     }
 }
@@ -579,7 +586,7 @@ pub struct ConversationsState {
     /// `session::establish` on login, `App`'s identity teardown on sign-out —
     /// tui gets that for free, structurally. linux, whose tracker is a local
     /// bound beside a process-lifetime observer, has to re-make one by hand each
-    /// time it re-attaches (`fauna-linux/src/main.rs`); here there is no
+    /// time it re-attaches (`fauna-linux/src/lib.rs`); here there is no
     /// re-attach path to forget, because there is no surviving state to forget
     /// it in.
     pub notif_tracker: fauna_conversations::MessageNotificationTracker,
@@ -614,6 +621,10 @@ pub struct ConversationsState {
     /// only committed `compose.reply_recipients`; Enter parses + commits this via
     /// `add_reply_recipient`, then clears it. Cleared on thread switch.
     pub reply_recipient_draft: String,
+    /// The blob hash whose `image-lightbox` is open over the thread, if any —
+    /// set by a `dm-attachment-image` click, cleared by Escape and by leaving
+    /// the thread. The feed's `FeedState::lightbox`, on this page.
+    pub lightbox: Option<String>,
     /// The live [`fauna_conversations::ConversationsSession`] (MLS engine +
     /// `NestConversationsRpc` + the unified receive loop), built by
     /// [`conv_backend::start_conversations_session`] at login. Holding the `Arc`
@@ -622,6 +633,17 @@ pub struct ConversationsState {
     /// pre-auth or when the MLS engine failed to init (the page then reads the
     /// manager's honest degraded snapshot).
     pub real_session: Option<Arc<fauna_conversations::ConversationsSession>>,
+    /// Phase two of archive import (`archive-import.md` § Linking and
+    /// merging): the account's links, registered as [`Self::real_session`]'s
+    /// archive-signal sink at login (`conv_backend`) and read by the Contacts
+    /// rows and the import page's Done step. Lifetime mirrors the session's;
+    /// the session holds it, it holds the session only weakly.
+    pub archive_links: Option<Arc<fauna_archive_import_machine::link::ArchiveLinks>>,
+    /// Set while a links drive pass runs (`archive_glue::spawn_links_drive`).
+    pub archive_links_drive: Arc<std::sync::atomic::AtomicBool>,
+    /// The links' capture count the app last repainted the Contacts rows
+    /// on (`ArchiveLinks::captures`).
+    pub archive_links_seen: u64,
     /// Another instance of this app holds the conversations-engine role over
     /// this account's `mls_state.db` (`MlsError::ServedElsewhere` at engine
     /// init — `account-data-plane.md` § Multi-instance concurrency). A
@@ -665,7 +687,7 @@ pub struct ConversationsState {
     /// the engine opened. Dropped with this state at sign-out, which gives the
     /// door up for the account's next app. Held for its drop alone, so never
     /// read.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[allow(dead_code)]
     pub oracle_door: Option<fauna_client_account_runtime::conversations_door::ConversationsDoor>,
     /// The per-bubble ⋯ actions overlay (`Some` while open) — a LOCAL overlay
@@ -738,24 +760,17 @@ impl ConversationsState {
     }
 }
 
-/// Forward manager notifications into the render loop's `UiMessage` channel.
-///
-/// `on_changed` fires **synchronously on whatever thread mutated** (a tokio worker
-/// for the async methods), so it must not touch `App`. Sending a bare tick +
-/// re-reading a fresh snapshot per tick makes coalescing safe: the receiver always
-/// reads current state, so a dropped duplicate loses nothing. Direct analogue of
-/// [`crate::feed`]'s `TuiFeedObserver` and linux's `GtkConversationsObserver`.
-struct TuiConvObserver {
-    tx: UnboundedSender<UiMessage>,
-}
-
-impl SnapshotObserver for TuiConvObserver {
-    fn on_changed(&self) {
-        // A closed channel means the app is shutting down — nothing to notify.
-        let _ = self
-            .tx
-            .send(UiMessage::Data(DataMessage::ConversationsChanged));
-    }
+crate::app::tick_observer! {
+    /// Forward manager notifications into the render loop's `UiMessage` channel.
+    ///
+    /// `on_changed` fires **synchronously on whatever thread mutated** (a tokio worker
+    /// for the async methods), so it must not touch `App`. Sending a bare tick +
+    /// re-reading a fresh snapshot per tick makes coalescing safe: the receiver always
+    /// reads current state, so a dropped duplicate loses nothing. Direct analogue of
+    /// [`crate::feed`]'s `TuiFeedObserver` and linux's `GtkConversationsObserver`.
+    TuiConvObserver,
+    SnapshotObserver,
+    UiMessage::Data(DataMessage::ConversationsChanged)
 }
 
 /// Build the conversations manager, attach the observer, and — in e2e mode —
@@ -801,14 +816,18 @@ pub fn init(tx: &UnboundedSender<UiMessage>) -> ConversationsState {
         room_leave_confirm: false,
         room_search_draft: String::new(),
         reply_recipient_draft: String::new(),
+        lightbox: None,
         attach_path_draft: String::new(),
         real_session: None,
+        archive_links: None,
+        archive_links_drive: Default::default(),
+        archive_links_seen: 0,
         served_elsewhere: false,
         state_needs_newer_app: false,
         succession_witness: None,
         peer_anchor_harvest: Default::default(),
         index_launcher: None,
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         oracle_door: None,
         actions_overlay: None,
         remote_images: crate::image_cache::ImageCache::new(),
@@ -1056,7 +1075,8 @@ impl PendingResolve {
 /// overlay **first** and only a second Esc leaves the thread (`app.rs`), matching
 /// the GUI apps whose dialog Cancel closes the modal without leaving the thread.
 pub fn detail_overlay_open(state: &ConversationsState) -> bool {
-    state.rename_draft.is_some()
+    state.lightbox.is_some()
+        || state.rename_draft.is_some()
         || state.room_settings.is_some()
         || state.actions_overlay.is_some()
         || open_room_search_thread(state).is_some()
@@ -1096,6 +1116,7 @@ pub fn cancel_detail_overlay(state: &mut ConversationsState) {
     {
         manager.close_room_search(thread_id);
     }
+    state.lightbox = None;
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
@@ -1130,6 +1151,7 @@ pub fn show_list(state: &mut ConversationsState) {
     {
         manager.clear_selection();
     }
+    state.lightbox = None;
     state.mode = Mode::List;
 }
 
@@ -1141,6 +1163,7 @@ pub fn show_list(state: &mut ConversationsState) {
 /// while a send has already selected it.
 fn show_detail(state: &mut ConversationsState, thread_id: ThreadId) {
     state.mode = Mode::Detail(thread_id);
+    state.lightbox = None;
     state.rename_draft = None;
     state.room_settings = None;
     state.room_leave_confirm = false;
@@ -1234,6 +1257,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 manager,
                 thread_id: Some(thread_id),
             })
+        }
+        // Purely local, the feed's `OpenLightbox` posture: a transient ⋯ menu
+        // does not survive another overlay opening over it.
+        Action::OpenLightbox(hash) => {
+            app.conversations.lightbox = Some(hash);
+            app.conversations.actions_overlay = None;
+            None
         }
         Action::StartNewConversation => {
             manager.start_new_conversation();
@@ -2421,7 +2451,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
 /// Fire a new-message banner for every thread the shared tracker says warrants
 /// one — tui's leg of `conversations` outcome 11 (*a new message raises a system
 /// notification while the app is running, except in the conversation you already
-/// have open*). The linux twin is the observer loop in `fauna-linux/src/main.rs`.
+/// have open*). The linux twin is the observer loop in `fauna-linux/src/lib.rs`.
 ///
 /// **This function decides nothing.** The three when/for-whom rules — seed
 /// silently on the first non-empty snapshot, fire on increased activity, suppress
@@ -2813,18 +2843,24 @@ fn recipient_picker_elements(
                 Gesture::Conversations(Action::AcceptSuggestion { index: i as u32 }),
             ));
         }
-        // The status label carries its terminal-state name as a `state`
-        // automation attribute (`get_attr("recipient-resolve-status", "state")`),
-        // exactly as linux carries it on the AT-SPI Description
-        // (`recipient_picker.rs:191`) — the value the recipient-picker suite polls
-        // to know the async resolve reached a terminal state. Same five names on
-        // every app (priority #1).
+        // The status label carries its terminal-state token as a `state`
+        // automation attribute (`get_attr("recipient-resolve-status", "state")`)
+        // — the value the recipient-picker suite polls to know the async resolve
+        // reached a terminal state. Token and label both come from the shared
+        // `recipient_resolve_status` view every app renders through, so the
+        // state vocabulary cannot drift per app (priorities #1, #2); `Idle`
+        // carries no label and paints nothing.
+        let status = fauna_conversations::compose::recipient_resolve_status(p.resolve_state);
         out.push(
             Element::label(
                 ids::RECIPIENT_RESOLVE_STATUS,
-                resolve_status_text(p.resolve_state),
+                status
+                    .label
+                    .as_ref()
+                    .map(crate::wizard::localized)
+                    .unwrap_or_default(),
             )
-            .attr("state", resolve_state_name(p.resolve_state)),
+            .attr("state", status.token),
         );
     }
     out
@@ -3657,6 +3693,13 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // names a message by its record digest (`crate::report::message_target`)
         // and hides everything an account the viewer reported authored.
         let sender = msg.sender.person_actor_id().map(|a| a.to_hex());
+        // The body's plaintext, derived at most once per message per pass and
+        // shared by every reader below (the scorer input, the muted-word match,
+        // the body element's registry text): a multi-megabyte mail walked three
+        // times per frame is what stalled this page (`mail-message-size.md`
+        // § Implementation status today).
+        let plain = std::cell::OnceCell::new();
+        let plaintext = || plain.get_or_init(|| msg.document.to_plaintext()).as_str();
         let composed = crate::region::verdict_for(
             app,
             &msg.message_id.0,
@@ -3668,7 +3711,7 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
                     .map_or(msg.message_id.0.as_str(), |p| p.record_digest.as_str()),
                 author_id: sender.as_deref(),
             }),
-            || crate::region::message_input(&msg.document.to_plaintext()),
+            || crate::region::message_input(plaintext()),
         );
         let content_verdict = composed.verdict;
         // Guardian Notify (§ Guardian Notify): count this message if the guardian
@@ -3690,12 +3733,22 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
             && (withheld.verb == fauna_client_region::RegionVerb::Block
                 || !app.conversations.revealed_content.contains(&msg.message_id))
         {
+            // The sealed-item sentence after the frame — on an end-to-end
+            // thread's bubble only, and never on one Guardian Notify counted
+            // (`region-blocking.md` § Implementation status today), decided in
+            // shared Rust.
+            let sealed_note = app.content_policy.region_sealed_note(
+                &composed,
+                detail.capabilities.encryption.is_sealed(),
+                &msg.labels,
+            );
             out.extend(crate::region::placeholder(
                 &withheld,
                 Gesture::Conversations(Action::RevealContent {
                     msg_id: msg.message_id.clone(),
                 }),
                 None,
+                sealed_note,
             ));
             out.push(message_timestamp_element(msg.timestamp_ms, selected));
             continue;
@@ -3758,9 +3811,10 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // Ordered AFTER `deleted` so a deleted message stays a tombstone rather
         // than advertising that it matched a muted word (linux's order).
         if !app.conversations.revealed_muted.contains(&msg.message_id)
+            && !app.settings.muted_words.keywords().is_empty()
             && fauna_core::scoring::muted_keywords_collapse(
                 app.settings.muted_words.keywords(),
-                &msg.document.to_plaintext(),
+                plaintext(),
             )
         {
             out.push(Element::label(
@@ -3861,7 +3915,11 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         // second list of conditions that could drift from these. Carrying it is
         // not yet reporting it: the shell reports only once the element proves
         // it landed inside the viewport.
-        let mut body = Element::document(ids::DM_MESSAGE_TEXT, msg.document.clone());
+        let text = plain
+            .into_inner()
+            .unwrap_or_else(|| msg.document.to_plaintext());
+        let mut body =
+            Element::document_with_plaintext(ids::DM_MESSAGE_TEXT, msg.document.clone(), text);
         if let Some(record) = msg.plane_ref.clone() {
             body = body.observes(record);
         }
@@ -4048,7 +4106,23 @@ fn detail_elements(app: &App, thread_id: &ThreadId) -> Vec<Element> {
         thread_id,
         detail.rail,
     ));
+    // The lightbox last — a modal overlay paints over everything below it.
+    out.extend(lightbox_elements(&app.conversations));
     out
+}
+
+/// The `image-lightbox` overlay over the open attachment picture — the one
+/// painter [`crate::lightbox::elements`] the feed shares, resolving the hash
+/// through the shared attachment store and this page's rasterized-thumbnail
+/// cache (a hit: the bubble below already rasterized it).
+fn lightbox_elements(state: &ConversationsState) -> Vec<Element> {
+    let manager = state.manager.as_ref();
+    crate::lightbox::elements(state.lightbox.as_deref(), |hash| {
+        let bytes = manager?.attachment_bytes(hash.to_string())?;
+        cached_attachment_thumbnail(hash, &bytes, |b| {
+            crate::thumbnail::rasterize(b, crate::thumbnail::POST_IMAGE_COLS)
+        })
+    })
 }
 
 /// The room's search strip (`room-search.md` § The surface): the field and
@@ -4472,6 +4546,38 @@ fn markdown_toolbar() -> Vec<Element> {
     ]
 }
 
+/// Rasterized attachment thumbnails by `blob_hash` (content-addressed, and the
+/// column width is the one constant `POST_IMAGE_COLS`, so the hash alone keys
+/// it). Decoding and resizing a picture is far too heavy to repeat on the UI
+/// thread at every state publish (`e2e-conventions.md` convention 11), so the
+/// page rasterizes each attachment once and later publishes read this map. A
+/// decode failure is cached too (`None`) so an undecodable blob is not retried
+/// per publish. Process-wide and bounded: past `CAP` entries it is cleared and
+/// refills from the open conversation.
+fn cached_attachment_thumbnail(
+    blob_hash: &str,
+    bytes: &[u8],
+    rasterize: impl FnOnce(&[u8]) -> Option<crate::thumbnail::Thumbnail>,
+) -> Option<crate::thumbnail::Thumbnail> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    const CAP: usize = 256;
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<crate::thumbnail::Thumbnail>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(blob_hash) {
+        return hit.clone();
+    }
+    // Rasterize outside the lock: the decode is the slow part.
+    let art = rasterize(bytes);
+    let mut map = cache.lock().unwrap();
+    if map.len() >= CAP {
+        map.clear();
+    }
+    map.insert(blob_hash.to_string(), art.clone());
+    art
+}
+
 /// One received message's attachment leaves — `dm-attachment-image[i]` for an
 /// image, `dm-attachment-file[i]` for anything else, in document order.
 ///
@@ -4510,13 +4616,25 @@ fn attachment_bubble_elements(
             crate::wizard::localized(&fauna_core::format::byte_size(*size_bytes))
         );
         if *is_image {
-            let art = bytes
-                .as_deref()
-                .and_then(|b| crate::thumbnail::rasterize(b, crate::thumbnail::POST_IMAGE_COLS));
-            out.push(match art {
+            let art = bytes.as_deref().and_then(|b| {
+                cached_attachment_thumbnail(blob_hash, b, |b| {
+                    crate::thumbnail::rasterize(b, crate::thumbnail::POST_IMAGE_COLS)
+                })
+            });
+            let element = match art {
                 Some(art) => Element::thumbnail(ids::DM_ATTACHMENT_IMAGE, art),
                 None => Element::label(ids::DM_ATTACHMENT_IMAGE, declared),
-            });
+            };
+            // A picture is a BUTTON that opens `image-lightbox` — the feed
+            // `post-image` shape (ui.yaml lists the lightbox for
+            // `conversations.conversation_detail`). Clickable in every load
+            // state, so the role does not flicker as bytes arrive; the
+            // lightbox paints the placeholder for a picture it cannot resolve.
+            out.push(
+                element.clickable(Gesture::Conversations(Action::OpenLightbox(
+                    blob_hash.clone(),
+                ))),
+            );
         } else {
             out.push(Element::label(ids::DM_ATTACHMENT_FILE, declared));
         }
@@ -4667,33 +4785,6 @@ fn wrap_button(id: &str, label: &str, prefix: &'static str, suffix: &'static str
     )
 }
 
-/// The `recipient-resolve-status` display text for a `ResolveState` (`Idle` paints
-/// nothing).
-fn resolve_status_text(state: ResolveState) -> &'static str {
-    match state {
-        ResolveState::Idle => "",
-        ResolveState::Resolving => conversations::unified::RECIPIENT_RESOLVE_RESOLVING,
-        ResolveState::Resolved => conversations::unified::RECIPIENT_RESOLVE_RESOLVED,
-        ResolveState::NotFound => conversations::unified::RECIPIENT_RESOLVE_NOT_FOUND,
-        ResolveState::Error => conversations::unified::RECIPIENT_RESOLVE_ERROR,
-    }
-}
-
-/// The `state` automation-attribute value for a `ResolveState` — the
-/// cross-app contract the recipient-picker suite reads via
-/// `get_attr("recipient-resolve-status", "state")`. The five names match linux
-/// verbatim (`recipient_picker.rs:160-178`); they are an automation surface, not
-/// user-facing text, so they stay hard-coded rather than i18n'd.
-fn resolve_state_name(state: ResolveState) -> &'static str {
-    match state {
-        ResolveState::Idle => "idle",
-        ResolveState::Resolving => "resolving",
-        ResolveState::Resolved => "resolved",
-        ResolveState::NotFound => "not-found",
-        ResolveState::Error => "error",
-    }
-}
-
 // ── e2e state serializer ──────────────────────────────────────────────────────
 
 /// The `data.conversation_threads` half of `GET /app/state` — ui.yaml's
@@ -4732,7 +4823,7 @@ pub fn selected_state_json(state: &ConversationsState) -> Value {
 
 // ── Mock-backend inject commands (e2e `/app/commands`) ────────────────────────
 //
-// The tui twins of linux's `handle_conversations_*` (`apps/fauna-linux/src/main.rs`).
+// The tui twins of linux's `handle_conversations_*` (`apps/fauna-linux/src/lib.rs`).
 // They route through the `test-helpers` seams (`install_mock_backends_for_test`
 // is applied at `init` in e2e mode), so a message/thread lands in the manager with
 // **no nest and no MLS engine** — the same shape the cross-app tier_2
@@ -4869,6 +4960,53 @@ pub fn inject_page_error(state: &ConversationsState, payload: &Value) -> bool {
     true
 }
 
+/// `conversations_mark_receive_stopped` — stand up the dead-receive-rail truth
+/// (`ConversationsManager::receive_stopped`, `ui/conversations.md` § Errors &
+/// edge cases) without a panicking receive loop: the shared
+/// `mark_receive_stopped_for_test` claims a fresh loop generation and marks it
+/// stopped, exactly as a supervised loop's first panic leaves it. No product
+/// path kills a receive loop on demand, which is why this is a seam.
+///
+/// Answers `None` with no manager yet — the command fails loudly, never a
+/// silent drop (testing.md point 11) — and `Some(false)` while the session's
+/// real receive loop has not yet claimed its generation
+/// (`ConversationsManager::receive_loop_begun`): a death marked inside that
+/// window would be retired by the real loop's own claim a moment later, so the
+/// seam leaves the manager untouched and the driver asks again (a state wait,
+/// convention 14). `Some(true)` is a marked dead rail. Compiled out of release
+/// artifacts (convention 15): it drives a `fauna-conversations`
+/// `test-helpers` seam absent from a release build.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub fn mark_receive_stopped(state: &ConversationsState) -> Option<bool> {
+    let manager = state.manager.as_ref()?;
+    if !manager.receive_loop_begun() {
+        return Some(false);
+    }
+    manager.mark_receive_stopped_for_test();
+    Some(true)
+}
+
+/// `conversations_begin_receive_loop` — claim a fresh receive-loop generation
+/// over the SAME manager, the one call `ConversationsSession::start_receive_loop`
+/// makes before it spawns (`ConversationsManager::begin_receive_loop`), which
+/// retires an earlier loop's death and re-renders the page without the notice.
+/// On tui a new loop only starts at session start — a re-login builds a fresh
+/// manager, so the "a newer working loop retires the notice" half of the
+/// ruling has no product gesture to drive over the same manager; this seam is
+/// that half's door, and the between-tests reset that keeps the notice from
+/// leaking into the next test on a shared app.
+///
+/// Fails loudly (`false`) when no manager exists. Compiled out of release
+/// artifacts (convention 15) like every automation-only command.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub fn begin_receive_loop(state: &ConversationsState) -> bool {
+    let Some(manager) = state.manager.as_ref() else {
+        return false;
+    };
+    manager.begin_receive_loop();
+    true
+}
+
 /// `conversations_seed_resolved_link_preview` — record a **pre-resolved** D4
 /// preview for `url`, so a bubble whose body is the standalone `[url](url)`
 /// paragraph folds its `LinkPreview` block `Resolved` and paints the card.
@@ -4970,6 +5108,36 @@ mod tests {
 
     use crate::app::tests::authed_app;
     use crate::pages::Page;
+
+    /// Rasterizing is UI-thread work, so a second publish for the same
+    /// `blob_hash` must read the cache and never decode again — a failed decode
+    /// included (`e2e-conventions.md` convention 11).
+    #[test]
+    fn attachment_thumbnail_rasterizes_once_per_blob_hash() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let count = |_: &[u8]| {
+            calls.set(calls.get() + 1);
+            Some(crate::test_support::art())
+        };
+        let first = cached_attachment_thumbnail("test-once-hash", b"bytes", count);
+        let second = cached_attachment_thumbnail("test-once-hash", b"bytes", count);
+        assert!(first.is_some() && second.is_some());
+        assert_eq!(calls.get(), 1, "the second publish must not re-rasterize");
+
+        let fails = Cell::new(0);
+        let bad = |_: &[u8]| {
+            fails.set(fails.get() + 1);
+            None
+        };
+        assert!(cached_attachment_thumbnail("test-bad-hash", b"x", bad).is_none());
+        assert!(cached_attachment_thumbnail("test-bad-hash", b"x", bad).is_none());
+        assert_eq!(
+            fails.get(),
+            1,
+            "an undecodable blob is not retried per publish"
+        );
+    }
 
     /// An authenticated app on the conversations page with a manager + mock
     /// backends, and `threads` injected through the inbound seam (no nest, no
@@ -5925,6 +6093,138 @@ mod tests {
         );
     }
 
+    /// A real, multi-pixel PNG — large enough that the lightbox's re-rasterize
+    /// at `LIGHTBOX_COLS` and the bubble's at `POST_IMAGE_COLS` differ in width.
+    fn lightbox_png() -> Vec<u8> {
+        let rgb = image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 5) as u8, 90])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        rgb.write_to(&mut out, image::ImageFormat::Png)
+            .expect("the fixture encodes");
+        out.into_inner()
+    }
+
+    fn lightbox_detail_app(png: &[u8]) -> App {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        detail_app(&[json!({
+            "rail": "FaunaMls",
+            "sender": "bob-lightbox@self-nest.test",
+            "body": "a picture to enlarge",
+            "message_id": "m-1",
+            "attachments": [
+                { "filename": "pic.png", "mime_type": "image/png", "data_base64": B64.encode(png) },
+            ],
+        })])
+    }
+
+    /// The attachment picture's gesture — the hash it opens.
+    fn attachment_lightbox_hash(app: &App) -> String {
+        let images: Vec<Element> = elements(app)
+            .into_iter()
+            .filter(|e| e.id == "dm-attachment-image")
+            .collect();
+        assert_eq!(images.len(), 1, "one attachment, one dm-attachment-image");
+        match &images[0].role {
+            crate::element::Role::Button(Gesture::Conversations(Action::OpenLightbox(h))) => {
+                h.clone()
+            }
+            other => panic!("dm-attachment-image must be a lightbox button, got {other:?}"),
+        }
+    }
+
+    /// A received `dm-attachment-image` is a BUTTON that opens `image-lightbox`
+    /// over the thread (ui.yaml lists the lightbox for
+    /// `conversations.conversation_detail`), painted through the feed's own
+    /// painter — the picture ENLARGED to `LIGHTBOX_COLS`, not the bubble's
+    /// `POST_IMAGE_COLS` preview repeated. Escape closes it and stays on the
+    /// thread. The cross-app witness is `test_conversations_image_lightbox.py`.
+    #[test]
+    fn a_received_attachment_image_opens_the_lightbox_enlarged() {
+        let png = lightbox_png();
+        let mut app = lightbox_detail_app(&png);
+        assert_eq!(
+            count_id(&app, "image-lightbox"),
+            0,
+            "no lightbox until one is opened"
+        );
+        let bubble_cols = texts_of(&app, "dm-attachment-image")[0]
+            .lines()
+            .next()
+            .expect("the picture paints a row")
+            .chars()
+            .count();
+        assert!(bubble_cols > 0);
+
+        let hash = attachment_lightbox_hash(&app);
+        assert!(apply_local(&mut app, Action::OpenLightbox(hash)).is_none());
+        let lightbox = texts_of(&app, "image-lightbox");
+        assert_eq!(lightbox.len(), 1, "exactly one lightbox");
+        assert!(
+            lightbox[0].contains('▀'),
+            "the lightbox paints the picture: {:?}",
+            lightbox[0]
+        );
+        let lightbox_cols = lightbox[0].lines().next().unwrap().chars().count();
+        assert_eq!(lightbox_cols, crate::thumbnail::LIGHTBOX_COLS as usize);
+        assert!(
+            lightbox_cols > bubble_cols,
+            "the lightbox must be BIGGER than the bubble preview ({lightbox_cols} vs {bubble_cols})"
+        );
+
+        app.handle_key(crate::app::tests::key(crossterm::event::KeyCode::Esc));
+        assert_eq!(
+            count_id(&app, "image-lightbox"),
+            0,
+            "Escape closes the lightbox"
+        );
+        assert!(
+            matches!(app.conversations.mode, Mode::Detail(_)),
+            "the first Escape closes the lightbox only, never the thread behind it"
+        );
+    }
+
+    /// A picture whose bytes this device no longer holds still OPENS the
+    /// lightbox — as the placeholder, the feed's degrade. A click silently
+    /// dropped is the shape testing.md point 11 forbids.
+    #[test]
+    fn the_lightbox_opens_over_an_evicted_attachment_as_the_placeholder() {
+        let png = lightbox_png();
+        let mut app = lightbox_detail_app(&png);
+        let hash = attachment_lightbox_hash(&app);
+        let manager = app
+            .conversations
+            .manager
+            .clone()
+            .expect("a signed-in manager");
+        let thread = manager.snapshot().threads[0].thread_id.clone();
+        assert_eq!(
+            manager.evict_thread_attachments_for_test(thread, "pic.png".into()),
+            1
+        );
+        // Still a button once the bytes are gone — the role never flickers.
+        assert_eq!(attachment_lightbox_hash(&app), hash);
+
+        apply_local(&mut app, Action::OpenLightbox(hash));
+        assert_eq!(
+            texts_of(&app, "image-lightbox"),
+            vec![crate::thumbnail::PLACEHOLDER.to_string()],
+            "the click is honoured, as the placeholder"
+        );
+    }
+
+    /// Leaving the thread for the list takes the lightbox with it: a picture
+    /// left open would otherwise reappear over the next thread opened.
+    #[test]
+    fn leaving_the_thread_closes_its_lightbox() {
+        let png = lightbox_png();
+        let mut app = lightbox_detail_app(&png);
+        let hash = attachment_lightbox_hash(&app);
+        apply_local(&mut app, Action::OpenLightbox(hash));
+        show_list(&mut app.conversations);
+        assert_eq!(app.conversations.lightbox, None);
+    }
+
     /// `topic-toggle-button` reveals/hides `subject-input` (drives the manager's
     /// `subject_draft` Some/None), the gate every app follows.
     #[test]
@@ -6061,6 +6361,80 @@ mod tests {
         apply_local(&mut app, Action::SelectThread(thread_id.0.clone()));
         assert_eq!(app.conversations.mode, Mode::Detail(thread_id));
         app
+    }
+
+    /// The fastest of `runs` timings of `f` — the least load-disturbed sample.
+    fn min_elapsed(runs: usize, mut f: impl FnMut()) -> std::time::Duration {
+        (0..runs)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                f();
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+
+    /// **A ~3 MiB mail body costs a frame about one walk of the body, not a
+    /// dozen** — the over-frame receive test's body (`test_mail_client_receive_
+    /// over_frame_reference.py`), opened. tui stalled its UI thread 44 s+ on it
+    /// (a 504 at the automation bridge) because every frame re-did whole-body
+    /// work several times over: the shared projection re-parsed every loaded body
+    /// for a 240-char reply-quote snippet, the page derived each body's plaintext
+    /// three times, and the paint stripped and laid out the whole body though a
+    /// pane shows forty rows of it (`mail-message-size.md` § Implementation status
+    /// today). Measured in a debug build before the fix: a frame was ~12 body
+    /// walks (730 ms against 60 ms for one `to_plaintext`), `thread_detail` ~4.
+    ///
+    /// The budget is in units of ONE `to_plaintext` of the same body timed in the
+    /// same test, so machine load scales both sides; the registry's `get_text`
+    /// still needs one walk per pass, so a frame cannot be below one unit.
+    #[test]
+    fn a_three_mib_mail_body_costs_a_frame_about_one_body_walk() {
+        let line = format!("{}\r\n", "z".repeat(76));
+        let filler = line.repeat((3 * 1024 * 1024) / line.len());
+        let body = format!("bignonce-HEAD\r\n{filler}bignonce-TAIL\r\n");
+        let app = detail_app(&[
+            json!({ "rail": "Smtp", "sender": "alice@host.test", "subject": "Big", "body": body, "message_id": "m-big" }),
+        ]);
+        let manager = app.conversations.manager.as_ref().unwrap();
+        let detail = manager.thread_detail(open_thread_id(&app)).unwrap();
+        let document = detail.messages[0].document.clone();
+
+        // The whole body still reaches the registry — the e2e reads HEAD..TAIL.
+        let texts = texts_of(&app, "dm-message-text");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("bignonce-HEAD") && t.contains("bignonce-TAIL")),
+            "the bubble's registry text must stay the whole body"
+        );
+
+        let unit = min_elapsed(3, || {
+            std::hint::black_box(document.to_plaintext());
+        });
+        let projection = min_elapsed(3, || {
+            std::hint::black_box(manager.thread_detail(open_thread_id(&app)));
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        let frame = min_elapsed(3, || {
+            terminal
+                .draw(|frame| {
+                    crate::ui::render(frame, &app);
+                })
+                .unwrap();
+        });
+        assert!(
+            projection < unit,
+            "thread_detail took {projection:?} for a ~3 MiB body, one body walk is {unit:?}: \
+             the projection must not walk whole bodies"
+        );
+        assert!(
+            frame < unit * 4,
+            "a frame took {frame:?} for a ~3 MiB body, one body walk is {unit:?}: \
+             whole-body work is being re-done per frame"
+        );
     }
 
     /// The count of a given detail element id (the registry is the element list).
@@ -6413,15 +6787,16 @@ mod tests {
         })])
     }
 
-    /// A guardian `block` floor collapses the bubble to
-    /// `content-policy-blocked-notice` + its timestamp — no body, so
-    /// `count("dm-message-text")` excludes it, and nothing leaks the text.
+    /// A guardian document this build cannot apply (fail-closed `block`)
+    /// collapses the bubble to `content-policy-blocked-notice` + its
+    /// timestamp — no body, so `count("dm-message-text")` excludes it, and
+    /// nothing leaks the text.
     #[tokio::test]
-    async fn a_guardian_block_floor_collapses_the_bubble_and_leaks_nothing() {
+    async fn a_fail_closed_guardian_block_collapses_the_bubble_and_leaks_nothing() {
         let app = flagged_detail_app("buy zzcheappills now");
         app.content_policy
             .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
+                document: Some(fauna_core::content_policy::ContentPolicyDocument::unreadable()),
                 ..Default::default()
             }));
         assert_eq!(count_id(&app, "content-policy-blocked-notice"), 1);
@@ -6442,7 +6817,7 @@ mod tests {
         assert_eq!(
             count_id(&app, "content-policy-blocked-reason"),
             0,
-            "a floor invents no reason"
+            "a fail-closed block invents no reason"
         );
         assert_eq!(count_id(&app, "dm-message-timestamp"), 1);
         for el in elements(&app) {
@@ -6507,11 +6882,12 @@ mod tests {
             1,
             "muted while no floor is set"
         );
-        app.content_policy
-            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Block,
-                ..Default::default()
-            }));
+        app.content_policy.set_ward_content_policy(Some(
+            fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Block,
+            )]),
+        ));
         assert_eq!(count_id(&app, "content-policy-blocked-notice"), 1);
         assert_eq!(
             count_id(&app, "dm-message-muted"),
@@ -6528,11 +6904,12 @@ mod tests {
     #[tokio::test]
     async fn a_collapse_floor_reveals_in_place_without_relaxing_the_policy() {
         let mut app = flagged_detail_app("buy zzcheappills now");
-        app.content_policy
-            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
-                spam: fauna_core::obligation::ContentFloor::Collapse,
-                ..Default::default()
-            }));
+        app.content_policy.set_ward_content_policy(Some(
+            fauna_core::obligation::ContentPolicy::category_rules(&[(
+                "spam",
+                fauna_core::content_policy::ContentVerdict::Collapse,
+            )]),
+        ));
         assert_eq!(
             count_id(&app, "dm-message-text"),
             0,
@@ -9307,6 +9684,38 @@ mod tests {
             !app.errors.contains_key(&Page::Conversations),
             "a newer receive loop over the same manager must retire the notice"
         );
+    }
+
+    /// The two automation commands behind conversations outcome 18's e2e
+    /// witness honour themselves: each fails loudly with no manager (never a
+    /// silent ack, testing.md point 11), the mark raises the notice, the
+    /// begin retires it.
+    #[test]
+    fn receive_stopped_commands_raise_and_retire_the_notice_and_refuse_without_a_manager() {
+        assert_eq!(mark_receive_stopped(&ConversationsState::default()), None);
+        assert!(!begin_receive_loop(&ConversationsState::default()));
+
+        let mut app = conv_app(&[("Smtp", "alice@host.test", "Q4 budget")]);
+        // Before the session's real loop claims a generation the mark waits and
+        // leaves the manager untouched: that claim would retire an earlier mark.
+        assert_eq!(mark_receive_stopped(&app.conversations), Some(false));
+        sync_page_error(&mut app);
+        assert!(!app.errors.contains_key(&Page::Conversations));
+        app.conversations
+            .manager
+            .as_ref()
+            .unwrap()
+            .begin_receive_loop();
+        assert_eq!(mark_receive_stopped(&app.conversations), Some(true));
+        sync_page_error(&mut app);
+        assert_eq!(
+            app.errors.get(&Page::Conversations),
+            Some(&crate::wizard::key("conversations.errors.receive_stopped"))
+        );
+
+        assert!(begin_receive_loop(&app.conversations));
+        sync_page_error(&mut app);
+        assert!(!app.errors.contains_key(&Page::Conversations));
     }
 
     /// The membership half of the same bridge: a failed add/remove/rename is

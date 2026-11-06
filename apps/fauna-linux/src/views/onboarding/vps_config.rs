@@ -396,9 +396,9 @@ fn rebuild_provider_section(
     // own `cfg.locations` order, which the reseed below keeps 1:1 with
     // the model. `select_vps_location` is idempotent, so the notify that
     // fires while the reseed restores the selection is harmless. A change
-    // re-lists the offers for the new location; the machine starts that
-    // refresh only where a tokio runtime is current, which the GTK thread's
-    // is not, so it is awaited here (a no-op for an already-listed location).
+    // re-lists the offers for the new location: the setter starts that
+    // listing on the machine's own runtime, whatever thread calls it, and the
+    // result arrives through the observer.
     let location_picker = gtk::DropDown::from_strings(&[]);
     set_test_id(&location_picker, ids::VPS_LOCATION_PICKER);
     location_picker.set_visible(false);
@@ -407,8 +407,6 @@ fn rebuild_provider_section(
         location_picker.connect_selected_notify(move |d| {
             if let Some(loc) = m.vps_config().locations.get(d.selected() as usize) {
                 m.select_vps_location(loc.id.clone());
-                let m = m.clone();
-                async_helper::run_on_tokio(m.refresh_vps_offers(), |()| {});
             }
         });
     }
@@ -595,12 +593,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_onboarding_machine::OnboardingObserver;
-
-    struct NopObs;
-    impl OnboardingObserver for NopObs {
-        fn on_changed(&self) {}
-    }
+    use fauna_onboarding_machine::observer::NullObserver;
 
     /// Repainting the channel radios never records a choice: a page built once
     /// and shown again after a wizard reset (a radio other than the default
@@ -611,7 +604,7 @@ mod tests {
     #[test]
     fn repainting_the_channel_rows_records_no_choice() {
         crate::testid::run_on_gtk_thread(|| {
-            let m = OnboardingMachine::new(Arc::new(NopObs));
+            let m = OnboardingMachine::new(Arc::new(NullObserver));
             let (_root, refresh) = build(m.clone());
             m.set_provision_update_channel(UpdateChannel::Dev);
             refresh();

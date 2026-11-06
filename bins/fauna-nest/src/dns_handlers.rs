@@ -145,7 +145,7 @@ fn build_domain_view(
 /// `list_records` and `verify_records` consume). `filter` restricts to one
 /// domain (case-insensitive); `None` → every active local domain. Empty on a
 /// fresh nest with no primary mail domain.
-async fn assemble_domain_views(
+pub(crate) async fn assemble_domain_views(
     state: &Arc<AppState>,
     filter: Option<&str>,
 ) -> Result<Vec<DomainDns>, RpcError> {
@@ -575,8 +575,15 @@ fn verify_records_handler() -> RpcHandler {
 /// Reads public DNS and mutates nothing; carries no credential (those stay
 /// client-held — `dns-management.md` § Where the credential lives). Admin-gated
 /// to match `verify_records` / `cert_status` on the same admin surface.
+///
+/// **The e2e seam** (`e2e-gated-seeds.md` § The ACME directory seed → *The web
+/// order*, leg 2): a `test-hooks` build polls the harness's fake name server
+/// its launch environment names ([`e2e_acme_nameserver`]) as the zone's
+/// authoritative set — read once, when the handler is built at startup; every
+/// other build passes no override, whatever its environment holds.
 fn probe_txt_visible_handler() -> RpcHandler {
-    Box::new(|state, actor_id, payload| {
+    let ns_override: Option<[std::net::SocketAddr; 1]> = e2e_acme_nameserver().map(|ns| [ns]);
+    Box::new(move |state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.dns.probe_txt_visible").await?;
             let req: ProbeTxtVisibleRequest = decode(&payload).map_err(malformed)?;
@@ -584,13 +591,90 @@ fn probe_txt_visible_handler() -> RpcHandler {
                 &req.zone_name,
                 &req.record_name,
                 &req.txt_value,
-                None,
+                ns_override.as_ref().map(|ns| &ns[..]),
             )
             .await;
             encode_reply(&ProbeTxtVisibleReply {
                 visible,
                 extra: Default::default(),
             })
+        })
+    })
+}
+
+/// The ACME directory seed's name-server variable — the spelling
+/// `fauna_client_dns::e2e_acme_seam::E2E_ACME_NAMESERVER_ENV` reads on native
+/// (`test_acme_directory_seed_gating.py` pins the agreement).
+#[cfg(any(test, feature = "test-hooks"))]
+pub const E2E_ACME_NAMESERVER_ENV: &str = "FAUNA_E2E_ACME_NAMESERVER";
+
+/// The harness's fake name server, as this nest's launch environment names it
+/// — `test-hooks` only; any other build answers `None` whatever its
+/// environment holds (`e2e-gated-seeds.md` § The ACME directory seed → *The
+/// web order*). The tunnel's reading is the shape
+/// (`mail_import_tunnel::LoopbackAdmission::from_env`): loopback only, and a
+/// malformed value panics — only the harness sets it, so it is a harness bug.
+fn e2e_acme_nameserver() -> Option<std::net::SocketAddr> {
+    #[cfg(feature = "test-hooks")]
+    {
+        e2e_acme_nameserver_from_value(std::env::var(E2E_ACME_NAMESERVER_ENV).ok().as_deref())
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        None
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn e2e_acme_nameserver_from_value(value: Option<&str>) -> Option<std::net::SocketAddr> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty())?;
+    let addr: std::net::SocketAddr = value
+        .parse()
+        .unwrap_or_else(|e| panic!("{E2E_ACME_NAMESERVER_ENV}={value:?} is not ip:port: {e}"));
+    assert!(
+        addr.ip().is_loopback(),
+        "{E2E_ACME_NAMESERVER_ENV} names {addr}, which is not loopback"
+    );
+    Some(addr)
+}
+
+/// `fauna.dns.e2e_mirror_txt` (Admin) — **a `test-hooks` build alone serves
+/// it** (`e2e-gated-seeds.md` § The ACME directory seed → *The web order*, leg
+/// 3). The web app's e2e fake DNS provider runs in a browser, which has no TCP,
+/// so it hands the nest the `(name, value)` pairs it published and withdrew,
+/// and the nest sends the RFC 2136 UPDATEs native's fake sends in-process
+/// (`fauna_core::authoritative_dns::send_txt_updates_by_zone`, the one shape)
+/// to the name server its own launch environment names — never to an address
+/// the request names. With no name server seeded the call is refused.
+#[cfg(feature = "test-hooks")]
+fn e2e_mirror_txt_handler() -> RpcHandler {
+    use fauna_protocol::dns::{E2eMirrorTxtReply, E2eMirrorTxtRequest};
+    let name_server = e2e_acme_nameserver();
+    Box::new(move |state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.dns.e2e_mirror_txt").await?;
+            let req: E2eMirrorTxtRequest = decode(&payload).map_err(malformed)?;
+            let Some(server) = name_server else {
+                return Err(RpcError::new(
+                    "fauna.dns.e2e_no_name_server",
+                    "error.dns.e2e_no_name_server",
+                )
+                .with_details_text(format!("{E2E_ACME_NAMESERVER_ENV} is not set")));
+            };
+            let pairs = |v: Vec<fauna_protocol::dns::E2eTxtPair>| -> Vec<(String, String)> {
+                v.into_iter().map(|p| (p.name, p.value)).collect()
+            };
+            fauna_core::authoritative_dns::send_txt_updates_by_zone(
+                server,
+                &pairs(req.published),
+                &pairs(req.withdrawn),
+            )
+            .await
+            .map_err(|e| {
+                RpcError::new("fauna.dns.e2e_mirror_failed", "error.dns.e2e_mirror_failed")
+                    .with_details_text(e)
+            })?;
+            encode_reply(&E2eMirrorTxtReply::default())
         })
     })
 }
@@ -674,6 +758,17 @@ pub fn register_dns_handlers(b: &mut RpcRouterBuilder) {
             // deadline would report a slow NS set as "not visible".
             default_deadline: Duration::from_secs(30),
             handler: probe_txt_visible_handler(),
+        },
+    );
+    // The web e2e fake provider's mirror — a `test-hooks` build alone.
+    #[cfg(feature = "test-hooks")]
+    b.add(
+        "fauna.dns.e2e_mirror_txt",
+        RpcKindMeta {
+            forbid_replay: false,
+            // One RFC 2136 UPDATE per zone over loopback TCP.
+            default_deadline: Duration::from_secs(10),
+            handler: e2e_mirror_txt_handler(),
         },
     );
 }
@@ -1584,6 +1679,30 @@ mod tests {
     /// It reads only public DNS and carries no credential, but it sits on the
     /// admin cert surface and must not become the one un-gated hole in the
     /// namespace.
+    /// The name-server seed's reading: blank is unset, a loopback `ip:port`
+    /// is read, anything else is a harness bug and panics.
+    #[test]
+    fn the_e2e_name_server_seed_is_loopback_only() {
+        assert_eq!(e2e_acme_nameserver_from_value(None), None);
+        assert_eq!(e2e_acme_nameserver_from_value(Some("  ")), None);
+        assert_eq!(
+            e2e_acme_nameserver_from_value(Some("127.0.0.1:5353")),
+            Some("127.0.0.1:5353".parse().unwrap())
+        );
+        for bad in ["not-an-addr", "192.0.2.1:53"] {
+            let read = std::panic::catch_unwind(|| e2e_acme_nameserver_from_value(Some(bad)));
+            assert!(read.is_err(), "{bad:?} must panic");
+        }
+    }
+
+    /// Without `test-hooks` the handler reads no seed, whatever the
+    /// environment holds — the probe's override stays `None`.
+    #[cfg(not(feature = "test-hooks"))]
+    #[test]
+    fn a_shipped_build_reads_no_name_server_seed() {
+        assert_eq!(e2e_acme_nameserver(), None);
+    }
+
     #[tokio::test]
     async fn probe_txt_visible_requires_admin_class() {
         let state = fixture_state().await;

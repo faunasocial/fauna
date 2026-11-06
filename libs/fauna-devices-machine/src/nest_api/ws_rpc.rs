@@ -161,6 +161,18 @@ where
             .map_err(map_err)
     }
 
+    async fn do_rename_device(
+        &self,
+        device_id: &str,
+        label_sealed: Vec<u8>,
+    ) -> Result<(), DevicesApiError> {
+        self.sync
+            .devices_rename(device_id, label_sealed)
+            .await
+            .map(|_| ())
+            .map_err(map_err)
+    }
+
     async fn do_request_p2p_off(&self, device_id: &str) -> Result<(), DevicesApiError> {
         self.sync
             .devices_p2p_participation_set(SyncDeviceP2pParticipationSetRequest {
@@ -497,6 +509,9 @@ where
                 manifest_hash,
                 size_bytes,
                 content_key_version,
+                // The review list holds no thumbnail for the version it
+                // re-points; the restored head names none.
+                None,
                 path_sealed,
                 // The review list names its set by name; no row is held here.
                 None,
@@ -656,6 +671,13 @@ mod native {
         }
         async fn request_p2p_off(&self, device_id: &str) -> Result<(), DevicesApiError> {
             self.do_request_p2p_off(device_id).await
+        }
+        async fn rename_device(
+            &self,
+            device_id: &str,
+            label_sealed: Vec<u8>,
+        ) -> Result<(), DevicesApiError> {
+            self.do_rename_device(device_id, label_sealed).await
         }
         async fn delete_folder(&self, name: &str) -> Result<(), DevicesApiError> {
             self.do_delete_folder(name).await
@@ -1080,6 +1102,13 @@ mod wasm {
         }
         async fn request_p2p_off(&self, device_id: &str) -> Result<(), DevicesApiError> {
             self.do_request_p2p_off(device_id).await
+        }
+        async fn rename_device(
+            &self,
+            device_id: &str,
+            label_sealed: Vec<u8>,
+        ) -> Result<(), DevicesApiError> {
+            self.do_rename_device(device_id, label_sealed).await
         }
         async fn delete_folder(&self, name: &str) -> Result<(), DevicesApiError> {
             self.do_delete_folder(name).await

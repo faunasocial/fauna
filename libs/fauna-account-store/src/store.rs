@@ -1586,6 +1586,33 @@ impl<B: StoreBackend> AccountStore<B> {
         }
     }
 
+    /// Set the group-plane cell at `(entry.scope, entry.kind, entry.key)` to
+    /// `entry` with NO journal row — the cache of a fold the reader derives
+    /// from rows it has already accounted ([`StoreBackend::group_state_cache_put`];
+    /// `group-set.md` decision 5, rule (ii)). A cell folding as no row is
+    /// written as a tombstoned entry, the shape every reader of the table
+    /// already folds as absent. The store assigns `entry_version`.
+    pub async fn cache_group_state(&self, mut entry: StateEntry) -> Result<()> {
+        for _ in 0..APPEND_RETRY_LIMIT {
+            let held = self
+                .backend
+                .group_state_get(&entry.scope, &entry.kind, &entry.key)
+                .await?;
+            entry.entry_version = held.as_ref().map_or(1, |e| e.entry_version + 1);
+            if self.backend.group_state_cache_put(&entry).await? == InsertOutcome::Inserted {
+                self.note_entry_write(held.as_ref(), &entry);
+                return Ok(());
+            }
+        }
+        bail!(
+            "group state cache write lost the entry-version race {APPEND_RETRY_LIMIT} times \
+             (scope {:?} kind {:?} key {:?})",
+            entry.scope,
+            entry.kind,
+            entry.key
+        )
+    }
+
     /// Current group-plane entry for `(scope, kind, key)`.
     pub async fn group_state(
         &self,

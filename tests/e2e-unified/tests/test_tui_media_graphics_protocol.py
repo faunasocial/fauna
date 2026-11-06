@@ -50,13 +50,14 @@ import pytest
 from conftest import _make_user, _seed_cross_set_media, _seeded_environment, get_available_apps
 from drivers import create_driver
 from drivers.tui import _PTY_CELL_H, _PTY_CELL_W
+from helpers.e2e_session import e2e_login_device_id
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
 FIXTURE_IMAGE = Path(__file__).parent.parent / "fixtures" / "test-image.png"
 
-# The same device id the shared login patch uses (conftest _E2E_LOGIN_DEVICE_ID).
-_DEVICE_ID = "0123456789abcdef" * 4
+# The same device id the shared login patch gives tui.
+_DEVICE_ID = e2e_login_device_id("tui")
 
 # A sixel sequence's Device Control String introducer, as
 # ``apps/fauna-tui/src/graphics/sixel.rs`` emits it.
@@ -73,6 +74,10 @@ THUMBNAIL_COLS = 16
 # reserved for it, guessing small only shrinks it.
 FALLBACK_CELL_W = 6
 
+# What each launch's dedicated actor owns before the upload: one folder holding
+# one text file, which the producer makes no thumbnail for.
+_SEED_PATHS = ("seed/readme.txt",)
+
 
 def _launch(client, app_path, nest_instance, request, *, da1_sixel: bool):
     """A logged-in tui launch on the Media page, against a terminal that reports
@@ -83,7 +88,7 @@ def _launch(client, app_path, nest_instance, request, *, da1_sixel: bool):
     cannot pollute the shared ``test_user``'s empty-state assertions.
     """
     user = _make_user(nest_instance)
-    _seed_cross_set_media(nest_instance, user, {"media-e2e-gfx": ["seed/readme.txt"]})
+    _seed_cross_set_media(nest_instance, user, {"media-e2e-gfx": list(_SEED_PATHS)})
 
     driver = create_driver(client)
     driver.launch(
@@ -123,9 +128,30 @@ def _upload_image_and_wait_for_paint(driver):
 
     media = MediaActions(driver)
     assert FIXTURE_IMAGE.exists(), f"missing image fixture: {FIXTURE_IMAGE}"
-    before = media.item_count()
+    # The seeded folder must be LISTED before the upload, or the page has no
+    # folder to upload into. Right after sign-in the folder's rows cannot be
+    # verified until the account runtime has assembled and its custody reads,
+    # so the page's first listing can come back without the folder, and an
+    # upload pressed then is refused with `media.error_no_set` ("You don't have
+    # a folder to upload into yet"). That refusal was this file's red on Windows: the
+    # upload lost the race by 55 ms on one launch and won it on the next,
+    # whichever terminal the driver answered as. A `before` read at that moment
+    # also counted 0, so the seeded item turning up a moment later satisfied
+    # `before + 1` and hid the refused upload. So wait for the seed itself,
+    # the same state `test_media.py` waits for before uploading. `ensure_loaded`
+    # alone is not enough: an empty first listing reads as loaded.
+    media.ensure_loaded()
+    seeded = media.wait_for_item_count(len(_SEED_PATHS))
+    assert seeded == len(_SEED_PATHS), (
+        f"the seeded folder should list its {len(_SEED_PATHS)} item before the upload, "
+        f"got {seeded}; error={_error_text(driver)!r}; media log: {_media_log(driver)}"
+    )
     media.upload_file(str(FIXTURE_IMAGE))
-    media.wait_for_item_count(before + 1)
+    uploaded = media.wait_for_item_count(seeded + 1)
+    assert uploaded == seeded + 1, (
+        f"the upload should add one item ({seeded} -> {seeded + 1}), got {uploaded}; "
+        f"error={_error_text(driver)!r}; media log: {_media_log(driver)}"
+    )
     # Exactly one painted item: the image just uploaded. The set's other seeded
     # member is a text file, so the producer makes it no thumbnail and its row
     # paints the placeholder — which is why this counts rather than reading a
@@ -133,9 +159,44 @@ def _upload_image_and_wait_for_paint(driver):
     painted = media.wait_for_painted_thumbnails(1)
     assert painted == 1, (
         f"the uploaded image's thumbnail should paint as half-block art whatever "
-        f"the terminal supports, got {painted}; error={driver.get_text('error-message')!r}"
+        f"the terminal supports, got {painted} of {media.item_count()} item(s); "
+        f"error={_error_text(driver)!r}; terminal stream "
+        f"{Path(driver.frame_stream_path()).stat().st_size} bytes, sixel introducer "
+        f"{'present' if SIXEL_INTRODUCER in Path(driver.frame_stream_path()).read_bytes() else 'absent'}; "
+        f"media log: {_media_log(driver)}"
     )
     return media
+
+
+def _error_text(driver) -> str | None:
+    """The page's ``error-message`` text, or None when the page registers none
+    yet — a diagnostic must report, never raise over the failure it explains
+    (convention 6)."""
+    try:
+        return driver.get_text("error-message")
+    except LookupError:
+        return None
+
+
+def _media_log(driver) -> list[str]:
+    """The client's own log lines about the media page and its notices, last
+    few first-to-last — a diagnostic, never raising (convention 6).
+
+    The page error alone is not enough to explain a failed upload: a refused
+    upload sets it, and the next successful listing clears it again, so by the
+    time an assertion reads `error-message` it can be empty. The log keeps
+    the refusal (`fauna_media` warns its key, `fauna_tui::notice` logs the
+    banner)."""
+    try:
+        text = driver.app_stderr_text() or ""
+    except Exception as exc:  # noqa: BLE001 — a diagnostic reports, never raises
+        return [f"<log unreadable: {exc}>"]
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if "fauna_media" in line or "fauna_tui::notice" in line or "fauna_tui::media" in line
+    ]
+    return lines[-6:]
 
 
 def _wait_for_bytes(path, needle: bytes, timeout: float = 10.0) -> bytes:

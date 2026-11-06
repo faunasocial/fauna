@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from helpers.settings_subpage_nav import navigate_settings_subpage
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -30,9 +32,7 @@ class LabelerCatalogActions:
 
     def navigate_home(self) -> None:
         """Navigate to the Personalization home Settings sub-page."""
-        self.driver.set_state({
-            "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "personalization"}]},
-        })
+        navigate_settings_subpage(self.driver, "personalization")
 
     def navigate_catalog(self) -> None:
         """Navigate to the Community-labelers catalog Settings sub-page.
@@ -44,9 +44,7 @@ class LabelerCatalogActions:
         neither is the Settings root on linux, whose sidebar keeps the last
         sub-page showing — the just-published row never loaded there."""
         self.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
-        self.driver.set_state({
-            "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "labeler-catalog"}]},
-        })
+        navigate_settings_subpage(self.driver, "labeler-catalog")
 
     def browse_catalog(self) -> None:
         """From the personalization home, follow the browse-catalog link."""
@@ -133,25 +131,29 @@ class LabelerCatalogActions:
 
     # ── row fields (indexed `labeler-catalog-item`) ─────────────────────
 
+    def _item_text(self, element: str, index: int) -> str:
+        """Row `index`'s field `element`, scoped `labeler-catalog-item[index]` —
+        the row's POSITION on the page in view, never its index in the full
+        catalog (the home lists only subscribed rows). An absent field fails
+        naming the frame it read: every row's scope path (convention 6)."""
+        try:
+            return self.driver.get_text(element, scope=f"labeler-catalog-item[{index}]")
+        except LookupError as e:
+            raise LookupError(
+                f"{element} not found in labeler-catalog-item[{index}]: {e}; {self._toggle_frame()}"
+            ) from e
+
     def item_publisher(self, index: int = 0) -> str:
-        return self.driver.get_text(
-            "labeler-catalog-item-publisher", scope=f"labeler-catalog-item[{index}]"
-        )
+        return self._item_text("labeler-catalog-item-publisher", index)
 
     def item_content_kind(self, index: int = 0) -> str:
-        return self.driver.get_text(
-            "labeler-catalog-item-content-kind", scope=f"labeler-catalog-item[{index}]"
-        )
+        return self._item_text("labeler-catalog-item-content-kind", index)
 
     def item_version(self, index: int = 0) -> str:
-        return self.driver.get_text(
-            "labeler-catalog-item-version", scope=f"labeler-catalog-item[{index}]"
-        )
+        return self._item_text("labeler-catalog-item-version", index)
 
     def item_factor(self, index: int = 0) -> str:
-        return self.driver.get_text(
-            "labeler-catalog-item-factor", scope=f"labeler-catalog-item[{index}]"
-        )
+        return self._item_text("labeler-catalog-item-factor", index)
 
     def is_subscribe_visible(self, index: int = 0) -> bool:
         return not self.driver.is_absent(
@@ -176,6 +178,8 @@ class LabelerCatalogActions:
         (labeler-catalog page only — v1 always mints no capability grant,
         `grant_id: None`, so this is inert-but-honest for a restricted kind;
         a public kind needs no grant at all)."""
+        self._at_click = self._toggle_frame()
+        print(f"[e2e] labeler toggle click, {self._at_click.split('; registry')[0]}")
         self.driver.click(
             "labeler-catalog-item-subscribe-button", scope=f"labeler-catalog-item[{index}]"
         )
@@ -183,6 +187,8 @@ class LabelerCatalogActions:
     def unsubscribe(self, index: int = 0) -> None:
         """Click `labeler-catalog-item-unsubscribe-button` on row `index`
         (present on both pages)."""
+        self._at_click = self._toggle_frame()
+        print(f"[e2e] labeler toggle click, {self._at_click.split('; registry')[0]}")
         self.driver.click(
             "labeler-catalog-item-unsubscribe-button", scope=f"labeler-catalog-item[{index}]"
         )
@@ -192,13 +198,21 @@ class LabelerCatalogActions:
     ) -> bool:
         """Poll row `index` until its subscribe/unsubscribe toggle reflects
         `subscribed` — the gesture round-trips async (RPC → nest write →
-        `fauna.labelers.list` refresh)."""
-        deadline = time.monotonic() + timeout
+        `fauna.labelers.list` refresh). Prints the measured latency, so a slow
+        box is told apart from a flip that never lands: on ios a landed flip
+        reads 0.2 s, and an intermittent one that missed did not land in 60 s
+        either."""
+        started = time.monotonic()
+        deadline = started + timeout
         while True:
             if (
                 self.is_unsubscribe_visible(index) == subscribed
                 and self.is_subscribe_visible(index) == (not subscribed)
             ):
+                print(
+                    f"[e2e] labeler row {index} subscribed={subscribed} after "
+                    f"{time.monotonic() - started:.1f}s"
+                )
                 return True
             if time.monotonic() >= deadline:
                 return (
@@ -206,6 +220,45 @@ class LabelerCatalogActions:
                     and self.is_subscribe_visible(index) == (not subscribed)
                 )
             time.sleep(0.2)
+
+    #: The ids whose slot counts tell a toggle that reached no machine from one
+    #: whose row is shadowed by a second mount of the page (convention 6).
+    _TOGGLE_DIAG_IDS = (
+        "labeler-catalog",
+        "labeler-catalog-item",
+        "labeler-catalog-item-subscribe-button",
+        "labeler-catalog-item-unsubscribe-button",
+    )
+
+    #: The frame :meth:`_toggle_frame` read just before the last toggle click.
+    _at_click: str = "(no click yet)"
+
+    def _toggle_frame(self) -> str:
+        """The UNSCOPED slot counts of the page and its row ids (two
+        `labeler-catalog` slots = two mounted pages, whose rows share one scope
+        path, so a scoped click may land on either), plus the registry's
+        records for them."""
+        frame = "unscoped counts: " + ", ".join(
+            f"{i}={self.driver.count(i)}" for i in self._TOGGLE_DIAG_IDS
+        )
+        records = self.driver.registry_snapshot()
+        if records is not None:
+            frame += "; registry: " + repr([
+                r for r in records if r.get("id") in self._TOGGLE_DIAG_IDS
+            ])
+        return frame
+
+    def diagnose_toggle(self, index: int = 0) -> str:
+        """What the app publishes for row `index`'s toggle, for a flip that did
+        not land: the scoped reads the wait polls, the frame now, and the frame
+        as it stood just before the click."""
+        scope = f"labeler-catalog-item[{index}]"
+        return "; ".join([
+            self.driver.diagnose("labeler-catalog-item-subscribe-button", scope=scope),
+            self.driver.diagnose("labeler-catalog-item-unsubscribe-button", scope=scope),
+            "now: " + self._toggle_frame(),
+            "at the click: " + self._at_click,
+        ])
 
     # ── inspect-before-subscribe panel ──────────────────────────────────
 

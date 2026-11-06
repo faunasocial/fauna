@@ -50,7 +50,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 
 from .helpers import (
     admin_ws,
@@ -97,21 +97,10 @@ def docker_mail_nest(app):
     *client UI* can subsequently turn the mail subsystem on. Storage is committed
     to plaintext (the "I trust the box" deploy default).
 
-    Linux-only, and the skip is the FIRST thing so the heavy image build +
-    container start never run for the parametrized web app (which can't drive
-    this native flow)."""
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the client-UI enable-mail docker drive",
-            detail="wired on linux first; the other apps are the cross-app "
-            "follow-on (same scope as test_mail_client_full_roundtrip.py). "
-            "Every app here has the mail-settings enable toggle already, so "
-            "the leg is a driver swap — what actually gates it is a FRESH "
-            "nest image on a docker-capable box, and only the primary Linux "
-            "dev VM has a docker daemon at all ",
-            tracked="mail-settings.md",
-        )
+    Built on linux, tui and web (``surfaces.toml``), and the skip is the FIRST
+    thing so the heavy image build + container start never run for an app that
+    can't drive this flow yet."""
+    require_surface(app.driver, "mail-client-ui-enable-docker-drive")
 
     docker_build(get_repo_root())  # module-cached image; a no-op buildx call if fresh
 
@@ -170,7 +159,7 @@ def docker_mail_nest(app):
 
 
 @pytest.mark.feature("turn-on-mail")
-def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
+def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest, request):
     nest = docker_mail_nest
     name = nest["name"]
 
@@ -178,7 +167,17 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
 
     _relaunch_trusting_nest(app.driver, nest)
 
-    # ── Point the linux app at the dockerized nest as admin ──────────────
+    # A browser reaches the nest only through a CORS-adding SPA proxy — the raw
+    # nest sends no Access-Control-Allow-Origin. Its HTTP and WS hops both speak
+    # TLS to the image's https listener (``_serve_spa_proxy``; this port is
+    # ``mark_tls_nest``-registered above). The proxy asserts nothing about cert
+    # trust and this test asks nothing about it: the unit is the enable toggle.
+    node_url = (
+        request.getfixturevalue("spa_proxy_for")(nest["url"])
+        if app.driver.is_web() else nest["url"]
+    )
+
+    # ── Point the app at the dockerized nest as admin ────────────────────
     # Inject the claimed admin identity over the bridge state protocol (the
     # established admin-e2e mechanism — the admin shell's root-stack child builds
     # on a `session` patch; see the `admin_app` fixture). The claim itself isn't
@@ -186,7 +185,7 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
     app.driver.set_state({
         "session": {
             "authenticated": True,
-            "node_url": nest["url"],
+            "node_url": node_url,
             "secret_hex": nest["admin"]["secret_hex"],
         },
         "nav": {"stack": [{"view": "admin"}]},
@@ -223,7 +222,7 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
             time.sleep(1.5)
 
     assert flag, (
-        "turning mail on through the linux client UI did not enable the deployment "
+        "turning mail on through the app UI did not enable the deployment "
         "mail subsystem: /data/imap-enabled was never written, so the s6-supervised "
         "mail bridge in the Docker image stayed down. The admin's mail-settings "
         "enable should fire fauna.bridges.set_mail_enabled(true) (design A, "

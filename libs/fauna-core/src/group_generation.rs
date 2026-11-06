@@ -1046,31 +1046,10 @@ where
         parents.insert(id, core.parents.clone());
         // Authenticated authorship: an honest builder cannot emit these
         // shapes, so each is a forgery — counted, never a candidate.
-        if core.member_entries.is_empty() {
-            resolution.invalid.push((
-                key.to_string(),
-                "mint member-entry set is empty — a forged row".to_string(),
-            ));
-            continue;
-        }
         if let Err(reason) =
-            verify_minter_authorization(&authorization, &core.minter, core.minted_at_ms, authority)
+            verify_group_mint_authorship(&id, &core, &minter_sig, &authorization, authority)
         {
             resolution.invalid.push((key.to_string(), reason));
-            continue;
-        }
-        if let Err(e) = verify_group_mint_minter_sig(&core.minter, &id, &minter_sig) {
-            resolution
-                .invalid
-                .push((key.to_string(), format!("mint authorship fails: {e}")));
-            continue;
-        }
-        if !core.revoked_past.windows(2).all(|w| w[0] < w[1]) {
-            resolution.invalid.push((
-                key.to_string(),
-                "mint revoked-past set is not ascending and duplicate-free — a forged row"
-                    .to_string(),
-            ));
             continue;
         }
         // Admissibility arm 1 — severance-forcing: every listed entry must
@@ -1148,6 +1127,39 @@ where
         .map(|(_, tip)| tip)
         .next_back();
     resolution
+}
+
+/// **Authenticated authorship of one `Minted` row** whose id already
+/// re-derived from `core` — the observer-independent half of candidacy, and
+/// the one check every reader of a mint's wraps goes through (the tip
+/// resolver above, and the group set's writer check,
+/// [`crate::group_file::group_generation_enrolment`]). Each refusal is a shape
+/// an honest builder cannot emit: an empty member-entry set, a minter
+/// authorization that does not chain to `authority` (or covers another
+/// device, or a revoked one), a minter signature that does not verify, a
+/// `revoked_past` set that is not ascending and duplicate-free.
+///
+/// # Errors
+/// The refusal reason, for the caller's `invalid` list.
+pub fn verify_group_mint_authorship(
+    id: &[u8; 32],
+    core: &GroupMintCore,
+    minter_sig: &[u8],
+    authorization: &[u8],
+    authority: &GroupAuthority,
+) -> Result<(), String> {
+    if core.member_entries.is_empty() {
+        return Err("mint member-entry set is empty — a forged row".to_string());
+    }
+    verify_minter_authorization(authorization, &core.minter, core.minted_at_ms, authority)?;
+    verify_group_mint_minter_sig(&core.minter, id, minter_sig)
+        .map_err(|e| format!("mint authorship fails: {e}"))?;
+    if !core.revoked_past.windows(2).all(|w| w[0] < w[1]) {
+        return Err(
+            "mint revoked-past set is not ascending and duplicate-free — a forged row".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Verify a mint's carried authority-device authorization — the plane's one

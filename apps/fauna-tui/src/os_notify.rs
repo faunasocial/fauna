@@ -168,13 +168,27 @@ fn term() -> String {
 /// restricted to the builder calls every `notify-rust` platform arm offers.
 #[cfg(not(target_os = "macos"))]
 fn show_desktop(label: &str, snippet: &str) -> Result<(), ()> {
-    notify_rust::Notification::new()
-        .summary(&fauna_i18n::strings::notifications::message_from(label))
-        .body(snippet)
-        .appname("Fauna")
-        .show()
-        .map(|_| ())
-        .map_err(|_| ())
+    off_runtime(|| {
+        notify_rust::Notification::new()
+            .summary(&fauna_i18n::strings::notifications::message_from(label))
+            .body(snippet)
+            .appname("Fauna")
+            .show()
+            .map(|_| ())
+            .map_err(|_| ())
+    })
+    .unwrap_or(Err(()))
+}
+
+/// Run `post` on a thread of its own, outside every tokio runtime context;
+/// `None` if it panicked. `notify-rust`'s zbus backend blocks on a runtime of
+/// its own, which tokio refuses from inside one — and banners fire from tui's
+/// event loop, so calling it in place panicked the app on its first desktop
+/// banner. The caller still waits for the answer: [`dispatch`] needs it to
+/// fall back to the escape.
+#[cfg(not(target_os = "macos"))]
+fn off_runtime<T: Send>(post: impl FnOnce() -> T + Send) -> Option<T> {
+    std::thread::scope(|s| s.spawn(post).join().ok())
 }
 
 /// macOS has no desktop arm ([`select_arm`] never picks it), so `notify-rust`
@@ -276,6 +290,23 @@ fn emit(seq: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Banners fire from tui's own tokio event loop, and `notify-rust`'s zbus
+    /// backend blocks on a runtime of its own — which tokio refuses from inside
+    /// one ("Cannot start a runtime from within a runtime"), killing the app on
+    /// its first desktop banner. The post runs outside every runtime context.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_desktop_post_runs_outside_the_callers_runtime() {
+        let posted = off_runtime(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .build()
+                .unwrap()
+                .block_on(async { 7 })
+        });
+        assert_eq!(posted, Some(7));
+    }
 
     #[test]
     fn osc9_is_the_default_dialect() {

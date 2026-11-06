@@ -14,6 +14,7 @@ import Foundation
 /// Hermetic: `FAUNA_E2E_BRIDGE` forces `KeychainStore` into its in-memory mode
 /// (same idiom as `FaunaAccountsDeviceIdTests`).
 @MainActor
+@Suite(.sharedKeychain)
 struct AccountSwitcherServedAccountTests {
     private static let secretA = String(repeating: "11", count: 32)
     private static let secretB = String(repeating: "22", count: 32)
@@ -70,14 +71,14 @@ struct AccountSwitcherServedAccountTests {
 
     /// ⚠ The self-inflicted erase. The remove itself refuses, not only the
     /// button: B stays registered, and the refusal paints the served-here line.
-    @Test func removingTheServedAccountIsRefusedAndTouchesNothing() throws {
+    @Test func removingTheServedAccountIsRefusedAndTouchesNothing() async throws {
         let keychain = makeHermetic()
         defer { release(keychain) }
         let (_, b) = try twoAccounts(keychain)
 
         let vm = AccountSwitcherVM(servedActorId: { b })
         vm.reload()
-        vm.remove(actorId: b)
+        await vm.remove(actorId: b)
 
         #expect(FaunaAccounts.registry(keychain: keychain).list().contains { $0.actorId == b },
                 "a refused remove must leave the account registered")

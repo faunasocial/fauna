@@ -55,6 +55,10 @@ fun TokenSelect(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    // Per-option gate: an option can be SHOWN yet not a destination (the folder
+    // audience's Shared on a bound, non-public folder). The current selection
+    // stays enabled so the menu always paints the present state.
+    selectable: (String) -> Boolean = { true },
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
@@ -75,6 +79,7 @@ fun TokenSelect(
             options.forEach { (token, label) ->
                 DropdownMenuItem(
                     text = { Text(label) },
+                    enabled = token == selected || selectable(token),
                     // The option's VALUE, for a driver selecting by token.
                     modifier = Modifier.semantics { stateDescription = token },
                     onClick = {

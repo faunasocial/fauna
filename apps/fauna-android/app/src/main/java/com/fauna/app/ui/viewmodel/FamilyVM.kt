@@ -81,7 +81,7 @@ class FamilyVM @Inject constructor(
                 // view of the ward's OWN policy anywhere in the app, so it
                 // also refreshes every client-enforced input — the global
                 // `screen-time-lock` (family-safety.md § Screen time), the
-                // content floor and Guardian Notify — off the reply's gated
+                // content rules and Guardian Notify — off the reply's gated
                 // `supervision` fold, never the raw `policy`, exactly as web's
                 // Family page does (family-client-enforcement.md
                 // § Implementation status today).

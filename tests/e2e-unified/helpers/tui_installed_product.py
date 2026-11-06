@@ -31,8 +31,11 @@ that by reading both scripts.
 when the desktop app is not installed in the same prefix (the shared
 ``agent_spawner`` writes ``fauna-sync-agent.service`` at first post-auth), so
 every invocation carries a throwaway ``XDG_CONFIG_HOME`` under this repository
-copy's untracked ``build/`` — convention 10, the linux helper's rule. The prefix
-lives there too, so an install here is invisible to every other copy on the box.
+copy's untracked ``build/`` — convention 10, the linux helper's rule. On macOS
+the same uninstall boots out and removes the per-user LaunchAgent plist under
+``$HOME/Library/LaunchAgents`` when it names the prefix's agent, so ``HOME`` is
+a throwaway there too. The prefix lives there as well, so an install here is
+invisible to every other copy on the box.
 """
 
 from __future__ import annotations
@@ -92,20 +95,27 @@ def staged_archive_dir(repo_root: Path | str) -> Path:
     return Path(repo_root) / _STAGING_RELPATH / f"fauna-tui-{_SUFFIX}"
 
 
+def isolated_home(repo_root: Path | str) -> Path:
+    """The throwaway ``HOME`` every ``install.sh`` invocation runs under."""
+    return Path(repo_root) / _STAGING_RELPATH / "home"
+
+
 def _isolated_env(repo_root: Path | str, prefix: Path) -> dict:
     """The environment every ``install.sh`` invocation runs under.
 
     ``BASH_ENV`` is dropped for the linux helper's measured reason: bash sources
     it at the start of every non-interactive shell, AFTER the passed environment
     is in place, so a login rc could overwrite anything here. ``XDG_CONFIG_HOME``
-    is the isolation (module docstring); ``PREFIX`` is the seam ``install.sh``
-    already has.
+    and ``HOME`` are the isolation (module docstring); ``PREFIX`` is the seam
+    ``install.sh`` already has, so the throwaway ``HOME`` never moves the prefix.
     """
     env = os.environ.copy()
     env.pop("BASH_ENV", None)
     env["PREFIX"] = str(prefix)
     env["XDG_CONFIG_HOME"] = str(Path(repo_root) / _STAGING_RELPATH / "xdg-config")
     Path(env["XDG_CONFIG_HOME"]).mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(isolated_home(repo_root))
+    Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     return env
 
 

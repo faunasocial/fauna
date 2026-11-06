@@ -270,8 +270,9 @@ pub struct AppState {
     /// The client a nest-to-nest byte fetch dials a loopback-literal peer with
     /// (`crate::ssrf::peer_fetch_get`). `Some` only on test state — the test
     /// constructor [`AppState::for_test`] sets one, a test whose peer serves a
-    /// self-signed cert passes its own; the production state is always `None`,
-    /// so a shipped nest refuses a loopback peer.
+    /// self-signed cert passes its own, and the e2e harness's `test-hooks`
+    /// build sets one too (`harness_peer_fetch_loopback`); a shipped nest's is
+    /// always `None`, so it refuses a loopback peer.
     pub peer_fetch_loopback: Option<reqwest::Client>,
     pub tls_enabled: bool,
     /// Client-set CORS allow-list — the trusted browser origins for nest's own
@@ -741,13 +742,15 @@ pub struct AppState {
     pub post_fanout_initiations:
         std::sync::Arc<crate::post_fanout_test_hook::PostFanoutInitiations>,
 
-    /// Test-only per-actor count of sign-ins refused as
+    /// Test-only lock arranger and refusal counter: a near lock armed for an
+    /// actor's next `fauna.auth.verify` and written at that gate in
+    /// `auth_core`, and the per-actor count of sign-ins refused as
     /// `fauna.auth.account_locked`, bumped synchronously at the three mint
-    /// gates in `auth_core`, read via `GET /api/v1/test/account_lock/{actor}/refusals`
-    /// — the outside witness that a locked app stops retrying. Never compiled
-    /// into production; see [`crate::account_lock_test_hook`].
+    /// gates, read via `GET /api/v1/test/account_lock/{actor}/refusals` — the
+    /// outside witness that a locked app stops retrying. Never compiled into
+    /// production; see [`crate::account_lock_test_hook`].
     #[cfg(feature = "test-hooks")]
-    pub account_lock_refusals: std::sync::Arc<crate::account_lock_test_hook::AccountLockRefusals>,
+    pub account_lock_hook: std::sync::Arc<crate::account_lock_test_hook::AccountLockHook>,
 
     /// Test-only forced-on override for the content-sealing-epochs mail
     /// write gate (`fauna_mls::wrapped_blob::MAIL_EPOCH_SEALING_WRITE_DEFAULT`,
@@ -870,6 +873,11 @@ pub struct AppState {
     /// separate `link_preview_override` map below so production SSRF is never
     /// loosened.
     pub link_preview: crate::link_preview::LinkPreviewState,
+
+    /// The web mail-import tunnel's open meter, live-tunnel counts and (test
+    /// builds only) loopback admission (`mail_import_tunnel`;
+    /// `mailbox-migration.md` § Where the IMAP client runs → *The web tunnel*).
+    pub mail_import_tunnel: crate::mail_import_tunnel::TunnelState,
 
     /// Test-only scripted link-preview fetch fixtures, keyed by url -> (body
     /// bytes, content-type). Consulted by the `fauna.linkpreview.resolve`
@@ -1321,6 +1329,8 @@ impl AppState {
         actor_id: &[u8; 32],
         device_key: &[u8; 32],
     ) -> usize {
+        #[cfg(test)]
+        revoke_race::before_sweep(actor_id).await;
         let revoked = self
             .auth
             .token_store
@@ -1438,10 +1448,10 @@ impl AppState {
             );
             conn.revoke();
         }
-        if let Some(key) = conn.bound_device_key.as_ref()
+        if let Some(key) = conn.bound_device_key()
             && let Err(e) = self
                 .db
-                .touch_device_last_seen_by_principal(&actor_id, key)
+                .touch_device_last_seen_by_principal(&actor_id, &key)
                 .await
         {
             tracing::warn!(
@@ -2432,7 +2442,7 @@ pub(crate) async fn deliver_held_knock_payload(
 /// Handles both wire forms:
 ///   - One comma-joined value:  `fauna.v1, bearer.<token>`  (tungstenite/browser)
 ///   - Two separate header values: `fauna.v1` + `bearer.<token>` (websocket-client/Python)
-fn parse_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+pub(crate) fn parse_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
     // Collect all Sec-WebSocket-Protocol header values and flatten any
     // comma-separated tokens within each value into a single list.
@@ -2790,7 +2800,8 @@ async fn handle_ws(
 /// task never reaches. The key gives the same isolation — every test mints its
 /// own random session id, so an armed barrier can only ever catch the upgrade
 /// it was armed for — and [`take`](upgrade_race::take) disarms it, so it fires
-/// once.
+/// once. The mail-import tunnel's upgrade (`mail_import_tunnel::serve`) parks
+/// on the same barrier, in the same window: validated, not yet registered.
 ///
 /// Two one-shot signals rather than one, for `mint_race`'s reason: the upgrade
 /// must both *announce* that it is parked and *wait* to be let through, and
@@ -2825,7 +2836,7 @@ pub(crate) mod upgrade_race {
         barrier
     }
 
-    pub(super) fn take(token_id: &str) -> Option<Arc<Barrier>> {
+    pub(crate) fn take(token_id: &str) -> Option<Arc<Barrier>> {
         ARMED.lock().unwrap().remove(token_id)
     }
 }
@@ -2876,6 +2887,37 @@ pub(crate) mod revoke_race {
         if let Some(barrier) = armed {
             barrier.swept.notify_one();
             barrier.may_finish.notified().await;
+        }
+    }
+
+    /// The removal's other window: its tombstone has committed (the caller of
+    /// `revoke_device_authority` wrote it) and nothing is swept yet.
+    #[derive(Default)]
+    pub(crate) struct BeforeSweep {
+        /// Raised by the helper on entry, before its token revoke and sweep.
+        pub(crate) reached: Notify,
+        /// Raised by the test once it may sweep.
+        pub(crate) may_sweep: Notify,
+    }
+
+    static ARMED_BEFORE: LazyLock<Mutex<HashMap<[u8; 32], Arc<BeforeSweep>>>> =
+        LazyLock::new(Default::default);
+
+    /// Hold the next device revoke of `actor_id` just before its sweep.
+    pub(crate) fn arm_before_sweep(actor_id: [u8; 32]) -> Arc<BeforeSweep> {
+        let barrier = Arc::new(BeforeSweep::default());
+        ARMED_BEFORE
+            .lock()
+            .unwrap()
+            .insert(actor_id, Arc::clone(&barrier));
+        barrier
+    }
+
+    pub(super) async fn before_sweep(actor_id: &[u8; 32]) {
+        let armed = ARMED_BEFORE.lock().unwrap().remove(actor_id);
+        if let Some(barrier) = armed {
+            barrier.reached.notify_one();
+            barrier.may_sweep.notified().await;
         }
     }
 }
@@ -3157,6 +3199,23 @@ pub(crate) async fn run_connection(
                         Ok(fauna_protocol::Frame::Request(_))
                             if dispatch_conn.spared_until().is_some() => {}
                         Ok(fauna_protocol::Frame::Request(req)) => {
+                            // A correlation id still in flight is a protocol
+                            // violation (`transport.md` § Request lifecycle,
+                            // step 1): admitting it would replace the earlier
+                            // request's Reply slot and handler entry, and a
+                            // peer reusing one id would never park.
+                            if dispatch_conn
+                                .correlation_in_flight(req.correlation_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    actor = %hex::encode(dispatch_conn.actor_id),
+                                    correlation_id = req.correlation_id,
+                                    "protocol violation: Request reuses an in-flight correlation id; closing"
+                                );
+                                dispatch_conn.signal_fatal(FatalCloseReason::ProtocolViolation);
+                                break;
+                            }
                             // Admission: reserve this request's Reply slot
                             // before anything else runs (`RpcConnection::
                             // reply_slots`). A full queue parks the reader here
@@ -3980,7 +4039,7 @@ pub(crate) async fn ingest_post_core(
     // (`conversation-rooms.md` § The three classes → *What the home nest does
     // with its read*, purpose 3). Every other post — and every failure — is a
     // no-op; the create never depends on it.
-    crate::room_post_view::index_room_post(state, &post_id, body).await;
+    crate::room_post_view::index_room_post(state, &post_id, body, None).await;
 
     spawn_replicate_post(state.clone(), post_id, body.to_vec());
     spawn_post_bridge_fanout(state, author, post_id, body);
@@ -4046,7 +4105,25 @@ pub(crate) async fn get_post_core(
 ) -> GetPostOutcome {
     match state.db.get_post(&post_id).await {
         Ok(Some((data, _blob_hash))) => {
-            // Legal-obligation takedown gate — checked FIRST, before quarantine
+            // A follow-delivered envelope is one local reader's, never the
+            // nest's (`federated-follow.md` § Decision 4, ): the
+            // anonymous and peer reads (`caller = None`) and any reader who
+            // does not follow its author get not-found, so a positive answer
+            // never reveals that some reader here follows the author. Checked
+            // FIRST, before the takedown and admin-block arms: their 451/403
+            // disclosures are owed only to a caller who could otherwise read
+            // the item, and a flagged delivered row answering them to anyone
+            // else would be the same oracle. Fails closed on a
+            // read error.
+            if state
+                .db
+                .delivered_post_hidden_from(&post_id, caller)
+                .await
+                .unwrap_or(true)
+            {
+                return GetPostOutcome::NotFound;
+            }
+            // Legal-obligation takedown gate — checked next, before quarantine
             // and before the body is ever read/resolved (moderation.md
             // § Categories & enforcement item 1). A taken-down post's body is
             // withheld from *every* viewer, including its author and admins
@@ -4455,11 +4532,25 @@ pub(crate) async fn delete_post_core(
     // withhold READS — a missing row over-serves, so it is logged loudly
     // rather than swallowed.
     if let Ok(Some(reference)) = state.db.get_post_legal_takedown(&digest).await {
-        let digests: Vec<[u8; 32]> = body_bytes
-            .as_deref()
-            .and_then(crate::db::posts::decode_stored_post)
-            .map(|post| post.blob_refs().into_iter().map(|h| h.digest()).collect())
-            .unwrap_or_default();
+        // A follow-delivered row names attachments this nest never held, so it
+        // records none: a withhold on them would only answer 451 at the blob
+        // door and tell an anonymous asker a local reader follows the author
+        // (`federated-follow.md` § Decision 4; the live walk's rule,
+        // `moderation_withhold::PostWithholds::fold_post`). Unreadable
+        // standing records the digests, the safe direction.
+        let delivered = matches!(
+            state.db.delivered_standing(&digest).await,
+            Ok(Some(crate::db::posts::DeliveredStanding::Delivered(_)))
+        );
+        let digests: Vec<[u8; 32]> = if delivered {
+            Vec::new()
+        } else {
+            body_bytes
+                .as_deref()
+                .and_then(crate::db::posts::decode_stored_post)
+                .map(|post| post.blob_refs().into_iter().map(|h| h.digest()).collect())
+                .unwrap_or_default()
+        };
         if let Err(e) = state
             .db
             .record_taken_down_post_deleted(
@@ -7190,6 +7281,120 @@ mod post_read_fallback_tests {
         ));
         assert!(!state.db.post_exists(&post_id).await.unwrap());
         assert!(state.db.post_was_deleted(&post_id).await.unwrap());
+    }
+
+    /// Seed a follow-delivered row of a remote author, an approved follower
+    /// of that author at the row's home, and a neighbour who follows no one.
+    async fn seed_delivered_row(state: &Arc<AppState>) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        use fauna_core::data::{Post, PostBody, Timestamp};
+        use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+        use fauna_core::identity::ActorKeypair;
+
+        let remote = ActorKeypair::generate();
+        let post = Post {
+            author: remote.actor_id(),
+            created_at: Timestamp::now(),
+            body: PostBody::Text {
+                content: "a followed author's post".into(),
+                facets: vec![],
+            },
+            references: vec![],
+            expires_at: None,
+            gated: None,
+            content_warning: None,
+            origin: None,
+        };
+        let (bytes, env) = sign_envelope(&remote, &post).unwrap();
+        let wire = canonical_encode(&EmbedAsBytes::from_signed(bytes, env)).unwrap();
+        let post_id = *blake3::hash(&wire).as_bytes();
+        let home = [0xB0; 32];
+        state
+            .db
+            .put_delivered_post_index_only(&post_id, &wire, "https://home.example", &home)
+            .await
+            .unwrap();
+        let (follower, neighbour) = ([0xF1; 32], [0xF2; 32]);
+        state
+            .db
+            .upsert_remote_follow(
+                &follower,
+                &remote.actor_id().0,
+                fauna_core::subscription::FOLLOWERS_TIER,
+                &home,
+                "https://home.example",
+                crate::db::remote_follows::RemoteFollowState::Approved,
+                None,
+                1,
+            )
+            .await
+            .unwrap();
+        (post_id, follower, neighbour)
+    }
+
+    ///  A follow-delivered row answers not-found to the anonymous/peer
+    /// single-post read and to a reader who does not follow its author, and is
+    /// served to the follower (`federated-follow.md` § Decision 4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivered_row_is_not_found_to_anonymous_and_non_following_readers() {
+        let state = test_state().await;
+        let (post_id, follower, neighbour) = seed_delivered_row(&state).await;
+
+        assert!(matches!(
+            get_post_core(&state, None, post_id).await,
+            GetPostOutcome::NotFound
+        ));
+        assert!(matches!(
+            get_post_core(&state, Some(neighbour), post_id).await,
+            GetPostOutcome::NotFound
+        ));
+        assert!(!matches!(
+            get_post_core(&state, Some(follower), post_id).await,
+            GetPostOutcome::NotFound
+        ));
+    }
+
+    ///  A moderation flag on a follow-delivered row is disclosed only
+    /// to a caller the per-reader guard admits: the anonymous/peer read and a
+    /// non-follower get not-found, never the 451 tombstone or the 403 notice,
+    /// and the follower still gets them (`federated-follow.md` § Decision 4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flagged_delivered_row_is_not_found_to_anonymous_and_non_following_readers() {
+        for flag in ["legal_takedown", "admin_block"] {
+            let state = test_state().await;
+            let (post_id, follower, neighbour) = seed_delivered_row(&state).await;
+            match flag {
+                "legal_takedown" => state
+                    .db
+                    .set_post_legal_takedown(&post_id, Some("ref-1"))
+                    .await
+                    .unwrap(),
+                _ => state
+                    .db
+                    .set_post_admin_block(&post_id, Some("report-1"))
+                    .await
+                    .unwrap(),
+            }
+            for (who, caller) in [("anonymous", None), ("non-follower", Some(neighbour))] {
+                assert!(
+                    matches!(
+                        get_post_core(&state, caller, post_id).await,
+                        GetPostOutcome::NotFound
+                    ),
+                    "{flag}/{who} must be not-found"
+                );
+            }
+            let outcome = get_post_core(&state, Some(follower), post_id).await;
+            match flag {
+                "legal_takedown" => assert!(
+                    matches!(outcome, GetPostOutcome::LegalTakedown { .. }),
+                    "the follower keeps the takedown tombstone"
+                ),
+                _ => assert!(
+                    matches!(outcome, GetPostOutcome::AdminBlocked { body: None, .. }),
+                    "the follower keeps the admin-block notice"
+                ),
+            }
+        }
     }
 
     /// The control: the fallback itself survives — an id this nest never held

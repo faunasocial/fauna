@@ -89,7 +89,8 @@ def _proxy_stack(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory, *,
     for every ref in ``proxy_refs``; the PLC directory fake is the stack's own.
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import open_registration, register_handled_actor
+    from common.auth import open_registration
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -199,9 +200,7 @@ def _proxy_stack(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory, *,
 
         # ── alice: handled actor, atproto identity (gives the signer unseal a
         # blob to provision-on-read), app credentials, ready for createSession. ──
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"],
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         alice_ws = WsRpcAdminClient(
             nest["url"],
             actor_id=alice["actor_id_bytes"],

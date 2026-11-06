@@ -12,9 +12,9 @@ absences:
 ## What a user gets
 
 Fauna shows how many unread messages are waiting for you without your opening
-the app: in a widget you place on your phone's or Mac's home screen, and as a
-count on the app's own icon on Windows and Linux. It keeps itself up to date
-in the background.
+the app: in a widget on your phone's home screen or your Mac's desktop, and as a
+count on the app's own icon on Windows and Linux. It keeps itself up to date in
+the background.
 
 ## Coverage contract
 
@@ -36,10 +36,13 @@ Stamped 2026-10-01 at dfa27a899f.
    - `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_taskbar_badge_shows_the_unread_count_and_moves_while_hidden`
 4. [app] A conversation you read on another of your devices stops counting on this one's home screen — `docs/goal/architecture/apps/common.md` § Home-screen widget
    - `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_a_conversation_read_on_another_device_stops_counting_on_the_badge`
+   - `tests/e2e-unified/tests/test_home_screen_widget.py::test_a_conversation_read_on_another_device_stops_counting_on_the_widget`
 5. [app] Switching account or signing out never leaves the previous account's count on your home screen — `docs/goal/architecture/apps/ios.md` § Home-screen widget
    - `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_signing_out_never_leaves_the_previous_accounts_count`
+   - `tests/e2e-unified/tests/test_home_screen_widget.py::test_signing_out_never_leaves_the_previous_accounts_count_on_the_widget`
 6. [app] Narrowing your conversations list with a search never changes the count on your home screen — `docs/goal/architecture/apps/windows.md` § Home-screen widget
    - `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_a_search_in_the_conversations_list_never_changes_the_badge`
+   - `tests/e2e-unified/tests/test_home_screen_widget.py::test_a_search_in_the_conversations_list_never_changes_the_widget_count`
 
 ## Status
 
@@ -47,10 +50,10 @@ Stamped 2026-10-01 at dfa27a899f.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ✅ full | 0.1.4-dev+f8d0f9ac.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+0881a284.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+779edfa9 standalone |
-| ios | ⚠ partial | 0.1.2-dev+2a55990d standalone |
+| linux | ✅ full | 0.1.5-dev+aaa3f320 standalone |
+| windows | ⚠ partial | 0.1.5-dev+a73ed62e.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+6017a6f7 standalone |
+| ios | ✅ full | 0.1.5-dev+c9e7fe5d standalone |
 | android |  no run recorded | |
 | tui | — absent | |
 
@@ -68,6 +71,9 @@ Stamped 2026-10-01 at dfa27a899f.
 | 3 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_the_widget_shows_the_apps_own_unread_count` | macos (macos): passed, ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_home_screen_widget_taskbar_badge.py::test_taskbar_badge_shows_the_unread_count_and_moves_while_hidden` | windows (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_a_conversation_read_on_another_device_stops_counting_on_the_badge` | linux (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_a_conversation_read_on_another_device_stops_counting_on_the_widget` | macos (macos): passed, ios (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_signing_out_never_leaves_the_previous_accounts_count` | linux (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_signing_out_never_leaves_the_previous_accounts_count_on_the_widget` | macos (macos): passed, ios (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_home_screen_widget_launcher_badge.py::test_a_search_in_the_conversations_list_never_changes_the_badge` | linux (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_home_screen_widget.py::test_a_search_in_the_conversations_list_never_changes_the_widget_count` | macos (macos): passed, ios (macos): passed |
 <!-- features-render:end -->

@@ -208,6 +208,7 @@ func (s *GrantSet) KeyForMailEpoch(owner []byte, factor string, recordTimestamp,
 		}
 		for i := range g.Keys {
 			k := &g.Keys[i]
+			// Mail only: a content.read{calendar} wrap holds the calendar key, which opens calendar records only, and no holder drains calendar.
 			if k.Class != "content.read" || k.Kind == nil || *k.Kind != "mail" || !LicensesFactor(k, factor) {
 				continue
 			}

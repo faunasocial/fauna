@@ -51,6 +51,13 @@ pub struct GcResult {
     /// blob itself stays pinned; over-pinning is the safe direction). A junk
     /// or mis-keyed record, surfaced per-reference at warn level.
     pub never_manifest_refs: u64,
+    /// Distinct thumbnail blobs pinned by a file's `sync_changes.thumbnail_hash`
+    /// (step 2b): live rows and rows superseded inside the grace window, plus
+    /// every metadata-only folder's (pin-only). Manifest-class — a thumbnail
+    /// that decodes as a `ChunkManifest` is walked to its chunks — but a bare
+    /// image blob is the expected shape and is neither warned nor counted in
+    /// [`Self::never_manifest_refs`].
+    pub sync_thumbnail_refs: usize,
     /// Retained superseded custody generations whose grace window `T` elapsed
     /// this run: their rows were dropped and their bytes credited back to the
     /// owner's quota, so their now-exclusive chunks are sweepable from here on.
@@ -209,6 +216,9 @@ pub(crate) struct ReachableHashes {
     /// Hash-intact references that provably never were manifests (see
     /// [`GcResult::never_manifest_refs`]): pinned, walk-free, NOT fail-close.
     pub never_manifest_refs: u64,
+    /// Distinct `sync_changes.thumbnail_hash` blobs pinned (see
+    /// [`GcResult::sync_thumbnail_refs`]).
+    pub sync_thumbnail_refs: usize,
     /// References confirmed (by bytes) as direct-blob rail rows.
     pub direct_blob_refs: usize,
     /// Distinct `atproto_blobs.media_ref` values pinned (F2.4): chunkless
@@ -297,6 +307,7 @@ async fn do_gc(
     result.atproto_blob_refs = reach.atproto_blob_refs;
     result.manifest_decode_failures = reach.manifest_decode_failures;
     result.never_manifest_refs = reach.never_manifest_refs;
+    result.sync_thumbnail_refs = reach.sync_thumbnail_refs;
     result.record_blob_refs = reach.record_blob_refs;
     result.record_read_failures = reach.record_read_failures;
     result.undecodable_records = reach.undecodable_records;
@@ -583,6 +594,30 @@ pub(crate) async fn collect_reachable_hashes(
         .all_sync_change_manifest_hashes_for_folders(&meta_folder_ids)
         .await
         .context("collecting metadata-only folders' manifest hashes")?;
+    // …and each file's thumbnail, under the same liveness, exclusions and
+    // residency partition as its manifest. A thumbnail enters through
+    // `POST /api/v1/blob` with no `sync_changes` row of its own, so until this
+    // column was walked every folder thumbnail was reachable from nothing and
+    // swept on the first cycle past grace (found 2026-10-22). Manifest-class:
+    // the ruled shape is a `seal_blob` manifest whose chunks must be walked
+    // (`media.md` § Encryption at rest → *A thumbnail rests as its file
+    // rests*); today's bare image blob is hash-intact and never a manifest, so
+    // the walk pins it walk-free — the expected case for this column, kept
+    // out of the junk-record warning below by `thumbnail_hashes`.
+    let sync_thumbnail_walk = db
+        .sync_change_thumbnail_refs(superseded_cutoff_millis, &walk_exclude)
+        .await
+        .context("collecting sync change thumbnail hashes")?;
+    let meta_pin_only_thumbnails = db
+        .all_sync_change_thumbnail_hashes_for_folders(&meta_folder_ids)
+        .await
+        .context("collecting metadata-only folders' thumbnail hashes")?;
+    let thumbnail_hashes: HashSet<Vec<u8>> = sync_thumbnail_walk
+        .iter()
+        .chain(&meta_pin_only_thumbnails)
+        .cloned()
+        .collect();
+    let sync_thumbnail_refs = thumbnail_hashes.len();
 
     // 2c. Cross-location backup custody — on a destination nest, segment-backup
     // chunks + the `manifest.<kind>` mirror are referenced by no snapshot or
@@ -660,6 +695,7 @@ pub(crate) async fn collect_reachable_hashes(
     for mh in backup_custody_manifest_hashes
         .into_iter()
         .chain(backup_generation_manifest_hashes)
+        .chain(sync_thumbnail_walk)
     {
         classified.insert(mh, false);
     }
@@ -739,8 +775,9 @@ pub(crate) async fn collect_reachable_hashes(
             match crate::db::posts::decode_stored_post(&body) {
                 Some(post) => {
                     referenced.extend(post.blob_refs().iter().map(|h| h.digest().to_vec()));
-                    withhold.add_record(
-                        post_withholds.ground(post_id),
+                    post_withholds.fold_post(
+                        &mut withhold,
+                        post_id,
                         post.blob_refs().into_iter().map(|h| h.digest()),
                     );
                 }
@@ -878,6 +915,7 @@ pub(crate) async fn collect_reachable_hashes(
     // is in `classified` too and walks through that source.
     referenced.extend(meta_pin_only_sync);
     referenced.extend(meta_pin_only_snapshots);
+    referenced.extend(meta_pin_only_thumbnails);
     let mut manifest_refs: Vec<Vec<u8>> = Vec::new();
     let mut direct_blob_candidates: Vec<Vec<u8>> = Vec::new();
     for (mh, direct_blob) in classified {
@@ -1021,6 +1059,18 @@ pub(crate) async fn collect_reachable_hashes(
                         // `manifest_hash`, and — with no attacker — by the
                         // android engine recording the whole-file hash, which
                         // for a single-chunk file is the CHUNK's address.
+                        //
+                        // A hash a file's `thumbnail_hash` names is the one
+                        // reference for which this is the EXPECTED shape — a
+                        // bare image blob — so it is pinned silently and not
+                        // counted as a junk record.
+                        Err(_)
+                            if thumbnail_hashes.contains(mh)
+                                && stored_bytes_match_reference(
+                                    &hash_arr,
+                                    &raw_bytes,
+                                    encryption_key,
+                                ) => {}
                         Err(e)
                             if stored_bytes_match_reference(
                                 &hash_arr,
@@ -1097,6 +1147,7 @@ pub(crate) async fn collect_reachable_hashes(
         referenced,
         manifest_decode_failures,
         never_manifest_refs,
+        sync_thumbnail_refs,
         direct_blob_refs,
         atproto_blob_refs,
         referenced_manifests,
@@ -3510,6 +3561,189 @@ mod tests {
                 .await
                 .unwrap(),
             0
+        );
+    }
+
+    /// Record a file change naming `manifest` and its `thumbnail` the way
+    /// `record_change_core` stores one — the thumbnail pointer as the 32-byte
+    /// hex the signed record carries.
+    async fn record_change_with_thumbnail(
+        db: &Arc<CacheDb>,
+        owner: &[u8; 32],
+        folder_id: i64,
+        path: &str,
+        manifest: &ContentHash,
+        thumbnail: &ContentHash,
+    ) {
+        let ph: [u8; 32] = *blake3::hash(path.as_bytes()).as_bytes();
+        db.record_sync_change_metered(
+            owner,
+            owner,
+            None,
+            &ph,
+            Some(&manifest.digest()),
+            16,
+            "modify",
+            folder_id,
+            &[0x0du8; 32],
+            Some(path),
+            None,
+            Some(&hex::encode(thumbnail.digest())),
+            None,
+            None,
+            None,
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A synced file's thumbnail enters through `POST /api/v1/blob` — bytes
+    /// and a `blob_metadata` row, no `sync_changes` row of its own — and is
+    /// named only by its file's `sync_changes.thumbnail_hash`. Until the 2b
+    /// arm walked that column, every folder thumbnail was reachable from
+    /// nothing and swept on the first cycle past grace (found 2026-10-22).
+    /// The live row's thumbnail survives a zero-grace pass; once the path's
+    /// row is superseded past grace, the old thumbnail reclaims with its
+    /// manifest — the pin follows the row, it is not a leak.
+    #[tokio::test]
+    async fn gc_pins_a_live_sync_changes_thumbnail_and_reclaims_a_superseded_one() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+
+        let owner = [0x71u8; 32];
+        db.create_folder("thumbs", &owner).await.unwrap();
+        let fs = db.get_folder("thumbs").await.unwrap().unwrap();
+
+        let (m_old, c_old) = put_manifest_with_chunk(&db, &store, 0x0a).await;
+        let t_old = put_blob(&db, &store, b"old thumbnail bytes").await;
+        let orphan = put_blob(&db, &store, b"an upload no row names").await;
+        record_change_with_thumbnail(&db, &owner, fs.id, "photo.jpg", &m_old, &t_old).await;
+
+        let dyn_store: Arc<dyn BlobStoreBackend> = store.clone();
+        let result = garbage_collect(&db, &dyn_store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert!(
+            store.exists(&t_old).await.unwrap(),
+            "a live file's thumbnail was swept"
+        );
+        assert_eq!(result.manifest_decode_failures, 0);
+        assert_eq!(
+            result.never_manifest_refs, 0,
+            "a bare thumbnail blob is the expected shape, not a junk manifest record"
+        );
+        assert_eq!(result.sync_thumbnail_refs, 1);
+        assert!(
+            !store.exists(&orphan).await.unwrap(),
+            "the unreferenced upload must still reclaim — else the pin is a no-op sweep"
+        );
+
+        // The file changes: a new row names a new manifest and thumbnail, and
+        // the owner supersedes the old one.
+        let (m_new, c_new) = put_manifest_with_chunk(&db, &store, 0x0b).await;
+        let t_new = put_blob(&db, &store, b"new thumbnail bytes").await;
+        record_change_with_thumbnail(&db, &owner, fs.id, "photo.jpg", &m_new, &t_new).await;
+        let ph: [u8; 32] = *blake3::hash(b"photo.jpg").as_bytes();
+        db.supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest(), Some(&m_old.digest()))
+            .await
+            .unwrap();
+
+        let after = garbage_collect(&db, &dyn_store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert!(
+            !store.exists(&t_old).await.unwrap(),
+            "a thumbnail named only by a row superseded past grace must reclaim"
+        );
+        assert!(!store.exists(&m_old).await.unwrap());
+        assert!(!store.exists(&c_old).await.unwrap());
+        assert_eq!(
+            after.deleted_blobs, 3,
+            "old manifest, its chunk, old thumbnail"
+        );
+        for live in [&t_new, &m_new, &c_new] {
+            assert!(
+                store.exists(live).await.unwrap(),
+                "the head's blobs survive"
+            );
+        }
+    }
+
+    /// A thumbnail pointer that names a `ChunkManifest` — the ruled target
+    /// shape (`media.md` § Encryption at rest → *A thumbnail rests as its file
+    /// rests*: sealed through `seal_blob` like its file) — is walked like a
+    /// file manifest, so its chunk survives too.
+    #[tokio::test]
+    async fn gc_walks_a_manifest_shaped_thumbnail_to_its_chunks() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+
+        let owner = [0x72u8; 32];
+        db.create_folder("sealed-thumbs", &owner).await.unwrap();
+        let fs = db.get_folder("sealed-thumbs").await.unwrap().unwrap();
+        let (m_file, c_file) = put_manifest_with_chunk(&db, &store, 0x0c).await;
+        let (m_thumb, c_thumb) = put_manifest_with_chunk(&db, &store, 0x0d).await;
+        record_change_with_thumbnail(&db, &owner, fs.id, "clip.mp4", &m_file, &m_thumb).await;
+
+        let dyn_store: Arc<dyn BlobStoreBackend> = store.clone();
+        let result = garbage_collect(&db, &dyn_store, records(&segs), 0, None, false)
+            .await
+            .unwrap();
+        assert_eq!(result.deleted_blobs, 0);
+        assert_eq!(result.manifest_decode_failures, 0);
+        for live in [&m_file, &c_file, &m_thumb, &c_thumb] {
+            assert!(store.exists(live).await.unwrap());
+        }
+    }
+
+    /// The thumbnail column follows the manifest column's two partitions: a
+    /// metadata-only folder's thumbnails are pinned without a chunk walk, and
+    /// a set the caller excludes from the walk pins no thumbnail through it.
+    #[tokio::test]
+    async fn gc_thumbnail_pins_follow_the_residency_and_exclusion_partitions() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskBlobStore::new(tmp.path()).unwrap());
+        let (_segs_dir, segs) = post_segments();
+        let (meta_id, _shared, _exclusive, meta_manifest, full_manifest) =
+            seed_residency_fixture(&db, &store).await;
+        let full_id = db.get_folder("full-set").await.unwrap().unwrap().id;
+        let owner = [7u8; 32];
+        let (meta_thumb, meta_thumb_chunk) = put_manifest_with_chunk(&db, &store, 0x0e).await;
+        let full_thumb = put_blob(&db, &store, b"full-set thumbnail").await;
+        record_change_with_thumbnail(&db, &owner, meta_id, "m.jpg", &meta_manifest, &meta_thumb)
+            .await;
+        record_change_with_thumbnail(&db, &owner, full_id, "f.jpg", &full_manifest, &full_thumb)
+            .await;
+
+        let dyn_store: Arc<dyn BlobStoreBackend> = store.clone();
+        let reach = collect_reachable_hashes(&db, &dyn_store, records(&segs), 0, None, &[])
+            .await
+            .unwrap();
+        assert!(
+            reach.referenced.contains(meta_thumb.digest().as_slice()),
+            "a metadata-only folder's thumbnail is pinned"
+        );
+        assert!(
+            !reach
+                .referenced
+                .contains(meta_thumb_chunk.digest().as_slice()),
+            "…pin-only: no chunk is reachable through a metadata-only folder's reference"
+        );
+        assert!(reach.referenced.contains(full_thumb.digest().as_slice()));
+
+        let excluded =
+            collect_reachable_hashes(&db, &dyn_store, records(&segs), 0, None, &[full_id])
+                .await
+                .unwrap();
+        assert!(
+            !excluded.referenced.contains(full_thumb.digest().as_slice()),
+            "an excluded set's thumbnail pins nothing, exactly as its manifests pin nothing"
         );
     }
 }

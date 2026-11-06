@@ -206,6 +206,21 @@ private func select(_ value: String) -> FfiRuleTypeOption {
     #expect(form.factorOptionLabels.count == form.factorOptionKeys.count)
 }
 
+@Test func factorOptionsOfferSubscribedLabelersBetweenTheBuiltinsAndTheTopics() {
+    var form = FeedCreateForm()
+    let labeler = "labeler:" + String(repeating: "aa", count: 32)
+    form.subscribedLabelerOptions = [TrainedFactorOption(key: labeler, label: labeler)]
+    form.trainedFactorOptions = [TrainedFactorOption(key: "topic:abc123", label: "Orange cats")]
+    let builtins = FeedCreateForm.builtinFactors.count
+    // A labeler has no display name: its key IS what the picker paints.
+    #expect(form.factorOptionKeys[builtins] == labeler)
+    #expect(form.factorOptionLabels[builtins] == labeler)
+    #expect(form.factorOptionKeys.last == "topic:abc123")
+    #expect(form.factorOptionLabels.count == form.factorOptionKeys.count)
+    form.selectFactor(labeler)
+    #expect(form.selectedFactorKey == labeler)
+}
+
 @Test func selectFactorTakesAKeyOrThePaintedLabel() {
     var form = FeedCreateForm()
     form.trainedFactorOptions = [TrainedFactorOption(key: "topic:abc123", label: "Orange cats")]

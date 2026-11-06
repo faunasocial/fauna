@@ -35,6 +35,9 @@ public struct SignOutSection: View {
     /// instances). `nil` on iOS, which takes no such lock and so answers a clean "not
     /// blocked" — a raw-lock seat that omits this refuses **every** sign-out, even alone.
     private let ownLock: FfiAccountInstanceLock?
+    /// The app state's bounded drafts flush (`reserved-folders.md` § The leave-flush
+    /// promise). Run ahead of everything below that takes the session away.
+    private let flushDraftRails: @MainActor () async -> Void
     @State private var statusVM = StatusVM()
     @State private var confirming = false
     /// The sign-out-blocked refusal line, painted on this section's own control — never
@@ -44,10 +47,12 @@ public struct SignOutSection: View {
 
     public init(
         session: SessionState, ownLock: FfiAccountInstanceLock? = nil,
+        flushDraftRails: @escaping @MainActor () async -> Void,
         onSignedOut: @escaping () -> Void
     ) {
         self.session = session
         self.ownLock = ownLock
+        self.flushDraftRails = flushDraftRails
         self.onSignedOut = onSignedOut
     }
 
@@ -116,6 +121,11 @@ public struct SignOutSection: View {
             return
         }
         Task { @MainActor in
+            // Sign-out is a leave door: the erase below takes the session the
+            // debounced save would ride, and a draft it never saved comes back
+            // as the one from before the last edit. Behind the refusal above, so
+            // a refused sign-out leaves the autosave's timing alone.
+            await flushDraftRails()
             if let client {
                 statusVM.configure(api: client.api)
                 // The leave-gesture push drop (`common.md` § Registration,

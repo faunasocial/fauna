@@ -352,3 +352,41 @@ class SyncAgentClient:
         resp = send_request(self.socket_path, encode_frame(req), timeout=self.timeout)
         ok_payload = unwrap_ok(resp)
         return ok_payload["ServiceStatus"]
+
+    # -- the peer-leg probe arm (test-only verbs, `fauna_ipc::sync`) --------
+
+    def call(self, method) -> object:
+        """One request whose ``Ok`` payload is returned as-is: ``method`` is
+        the serde form of a ``RequestMethod`` — a bare name for a unit verb,
+        ``{name: argument}`` for a verb that carries one."""
+        frame = encode_frame({"id": self._req_id(), "method": method})
+        return unwrap_ok(send_request(self.socket_path, frame, timeout=self.timeout))
+
+    def share_serve_info(self) -> list:
+        """Each bound folder's ``{folder, folder_id, watch_dir, db_path}``
+        (``GetShareServeInfo``) — ``folder_id`` is the folder's ``FolderRef``
+        wire string."""
+        return self.call("GetShareServeInfo")["ShareServeInfo"]
+
+    def peer_leg_dial_target(self) -> dict:
+        """Where this agent's same-account peer leg listens:
+        ``{node_id, lan_endpoints}`` (test-only ``GetPeerLegDialTarget``)."""
+        return self.call("GetPeerLegDialTarget")["PeerLegDialTarget"]
+
+    def probe_peer_leg(self, target: dict, folder: str, *, relative_path=None,
+                       store_keys=None) -> dict:
+        """Dial ``target``'s peer leg as this agent's device and report what it
+        served (test-only ``ProbePeerLeg``;
+        ``fauna_ipc::sync::PeerLegProbeReport``)."""
+        return self.call({"ProbePeerLeg": {
+            "target": target,
+            "folder": folder,
+            "relative_path": relative_path,
+            "store_keys": list(store_keys or []),
+        }})["PeerLegProbe"]
+
+    def arm_peer_serve_fault(self, bodies: int) -> None:
+        """Make this agent's same-account serve door forge the next ``bodies``
+        distinct chunk bodies it serves a sibling, one byte flipped in each
+        (test-only ``ArmPeerServeFault``)."""
+        self.call({"ArmPeerServeFault": {"bodies": int(bodies)}})

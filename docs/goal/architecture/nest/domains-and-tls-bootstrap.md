@@ -517,8 +517,8 @@ claim-authoritative-identity-domain / `FAUNA_DOMAIN`-retirement change.
   always-live floor is written by the shared `self_signed_cert::ensure_floor_present`
   helper (idempotent: writes `write_self_signed_bootstrap` only when no cert exists,
   with or without a configured domain — dropping the prior `!acme_enabled && a
-  domain is configured` gate). It is called from BOTH `prepare_listener_tls`
-  (`bins/fauna-nest/src/main.rs`, before that path builds its own TLS listener) AND
+  domain is configured` gate). It is called from BOTH `listener_tls_from_floor`
+  (`bins/fauna-nest/src/self_signed_cert.rs`, the shared seam `prepare_listener_tls` and the Windows service use before building a TLS listener) AND
   `start_server` (`bins/fauna-nest/src/lib.rs`, the shared init every caller hits).
   The `start_server` call is what covers nests that never go through `main.rs`'s
   `prepare_listener_tls` — the Windows `fauna-nest-service` (loopback plain-HTTP) and
@@ -558,7 +558,7 @@ claim-authoritative-identity-domain / `FAUNA_DOMAIN`-retirement change.
   `claim_admin_core` (`bins/fauna-nest/src/claim_core.rs`) registers a mail domain —
   and, through that registration, sets the identity via
   `identity_domain_core::apply_primary_identity` — **only** when the claim's
-  `mail_domain` is a real, `is_public_dns_name` domain; it skips `ensure_mail_domain_registered`
+  `mail_domain` is hostname-syntax-clean (`fauna_core::web::is_hostname_syntax`: no userinfo, path or whitespace) and a real, `is_public_dns_name` domain; it skips `ensure_mail_domain_registered`
   entirely when the target is a local one (IP literal / `localhost`/`*.localhost` /
   `.local` / `host:port`), using the same
   `fauna_provisioning::probe::resolve_handle_domain(d).is_public_dns_name` classifier the cert

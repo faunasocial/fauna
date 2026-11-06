@@ -115,6 +115,89 @@ def test_create_feed_has_hashtag(logged_in_app):
 
 
 @pytest.mark.feature("custom-feeds")
+def test_the_local_entry_returns_from_a_custom_feed(logged_in_app):
+    """The built-in Local entry (`feed-local-item`, feed.md § Layout & flow
+    region 1) takes the user back to the nest's local feed after they picked a
+    custom feed (`select_feed(None)`, feed.md § Persistence).
+
+    The discriminator is a post the custom feed filters out: it must leave when
+    the ruled feed is opened (so the feed really switched) and come back when
+    Local is activated. An app that stays on the custom feed never shows it again.
+    """
+    tag = _unique("testtag")
+    feed_name = _unique("tag-feed")
+    tagged_text = _unique("tagged")
+    untagged_text = _unique("untagged")
+
+    feed = logged_in_app.feed
+    feed.create_post_with_tags(text=tagged_text, tags=tag)
+    feed.create_post(text=untagged_text)
+    assert feed.wait_for_post_text(untagged_text), (
+        f"post {untagged_text!r} should be visible on Local before the ruled feed "
+        f"is created; error={logged_in_app.error_text()!r}"
+    )
+
+    feed.create_feed_with_rule(name=feed_name, rule_type="HasHashtag", value=tag)
+    feed.open_feed(feed_name)
+    assert feed.wait_for_post_text(tagged_text), (
+        f"post {tagged_text!r} should render in the HasHashtag feed {feed_name!r}; "
+        f"error={logged_in_app.error_text()!r}"
+    )
+    assert feed.wait_for_post_text_absent(untagged_text), (
+        f"post {untagged_text!r} is still rendered in the HasHashtag feed "
+        f"{feed_name!r}, so the custom feed was never selected and the return to "
+        f"Local below would prove nothing; error={logged_in_app.error_text()!r}"
+    )
+
+    feed.select_local()
+    assert feed.wait_for_post_text(untagged_text), (
+        f"post {untagged_text!r} did not come back after activating "
+        f"feed-local-item: the app is still showing the custom feed "
+        f"{feed_name!r}, not the local feed; post_count={feed.post_count()} "
+        f"error={logged_in_app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("custom-feeds")
+def test_a_custom_feed_never_takes_over_the_feed_page_at_the_next_launch(logged_in_app):
+    """The selected feed defaults to Local on launch (`feed.md` § Persistence):
+    a feed the user made but never opened does not become their front page.
+
+    macOS used to open the first feed the nest listed, and the nest lists the
+    newest first, so whoever built a ruled feed landed in it at the next launch
+    and a post the rule did not match never appeared on their page. In a run
+    that was every later post test in the session, not only this one.
+    """
+    from helpers.relaunch import relaunch, require_relaunchable
+
+    driver = logged_in_app.driver
+    require_relaunchable(driver)
+    tag = _unique("testtag")
+    untagged_text = _unique("untagged")
+
+    feed = logged_in_app.feed
+    feed.create_post(text=untagged_text)
+    assert feed.wait_for_post_text(untagged_text), (
+        f"post {untagged_text!r} should be visible before the ruled feed is "
+        f"created; error={logged_in_app.error_text()!r}"
+    )
+    feed.create_feed_with_rule(
+        name=_unique("tag-feed"),
+        rule_type="HasHashtag",
+        value=tag,
+    )
+
+    relaunch(driver)
+    feed.navigate()
+
+    assert feed.wait_for_post_text(untagged_text), (
+        f"post {untagged_text!r} is missing from the Feed page after a relaunch, "
+        f"so a feed the user never opened is filtering it; "
+        f"error={logged_in_app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("custom-feeds")
 def test_create_feed_rule_builder_input_widget_switches_on_rule_type(logged_in_app):
     """The create-feed rule-builder's input widget follows the shared
     `RuleInputKind` catalog (`ruleTypeOptions` over wasm — `docs/goal/ui/feed.md`

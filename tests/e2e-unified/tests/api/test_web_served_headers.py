@@ -32,7 +32,8 @@ import pytest
 
 import fauna_ffi
 
-from common.auth import open_registration, register_handled_actor
+from common.auth import open_registration
+from helpers.admin_wire import admit_adult
 
 from tests.api import ws_api
 from tests.api.bare import sign_and_encode_post
@@ -69,7 +70,7 @@ def served_headers_site_nest(request, nest_mode, tmp_path_factory):
     open_registration(nest)
     try:
         url, port = nest["url"], nest["port"]
-        actor = register_handled_actor(port, handle=HANDLE, domain=NEST_DOMAIN)
+        actor = admit_adult(nest, HANDLE, domain=NEST_DOMAIN, token=True)
         post_bytes = sign_and_encode_post(
             actor["signing_key"], 1_760_000_000_000_000, "Headers Post"
         )

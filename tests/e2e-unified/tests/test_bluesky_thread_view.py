@@ -22,8 +22,8 @@ the subject — opening the detail, then the thread — is the app's.
 
 tier_3: a locally-built nest and the real app; the atproto network is a fake.
 tui first, the lead app, then linux (re-pointed onto the shared page state),
-android (compile-verified until android has a run venue), web and windows
-(their trickle-down lifts); macos and ios gain their markers in theirs.
+android (compile-verified until android has a run venue), web, windows, and
+macos and ios (one shared FaunaKit view) — their trickle-down lifts.
 """
 
 from __future__ import annotations
@@ -98,6 +98,8 @@ def _open_detail(app, post_id: str) -> None:
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("atproto")
 def test_a_bluesky_posts_thread_shows_the_conversation_with_the_opened_post_marked(
     request, app, bluesky_feed_nest, atproto_far_end,
@@ -167,6 +169,8 @@ def test_a_bluesky_posts_thread_shows_the_conversation_with_the_opened_post_mark
 @pytest.mark.android
 @pytest.mark.web
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("atproto")
 def test_a_thread_whose_post_is_gone_at_its_origin_says_so(
     request, app, bluesky_feed_nest, atproto_far_end,

@@ -1229,8 +1229,8 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
              reads the messages it carries; no keys of yours are shared with it)",
         ),
         FaunaScopeArm::FolderDeposit => Some(
-            "Put files into one of your folders, sealed to you on arrival (it cannot see the \
-             folder or anything in it; no keys are shared)",
+            "Put files into one of your folders, each signed by the app and sealed to you on \
+             arrival (it cannot see the folder or anything in it; no keys are shared)",
         ),
         FaunaScopeArm::FolderRead => Some(
             "Read the files in one of your folders, everything already in it included (keys to \
@@ -1264,20 +1264,37 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
     }
 }
 
-/// The consent card's row for a `folder_read` scope, naming the folder when
-/// the approving app can resolve its id (`authorization-server.md` § Scope
-/// grammar → *The read arm*). `folder_name` is the owner's own name for the
-/// folder — `None` when the app cannot resolve it, and the row then reads as
-/// [`card_row`]'s. `None` for any scope that is not a `folder_read` scope.
+/// The folder a qualified folder-plane scope names — a `folder_deposit` or a
+/// `folder_read` string; `None` for any other string, a bare one included.
 #[must_use]
-pub fn folder_read_card_row(scope: &str, folder_name: Option<&str>) -> Option<String> {
-    folder_read_qualifier(scope)?;
-    Some(match folder_name {
-        Some(name) => format!(
+pub fn folder_qualifier(scope: &str) -> Option<i64> {
+    folder_deposit_qualifier(scope).or_else(|| folder_read_qualifier(scope))
+}
+
+/// The consent card's row for a qualified folder-plane scope, naming the
+/// folder when the approving app can resolve its id (`authorization-server.md`
+/// § Consent → *The card chooses the folder*: "a qualified folder scope on a
+/// card renders … the folder named when the approving app can resolve the
+/// id"). `folder_name` is the owner's own name for the folder — `None` when
+/// the app cannot resolve it, and the row then reads as [`card_row`]'s.
+/// `None` for any scope that is not a qualified `folder_deposit` or
+/// `folder_read` scope.
+#[must_use]
+pub fn folder_card_row(scope: &str, folder_name: Option<&str>) -> Option<String> {
+    let arm = arm_of(scope)?;
+    folder_qualifier(scope)?;
+    let Some(name) = folder_name else {
+        return card_row(scope).map(str::to_string);
+    };
+    Some(match arm {
+        FaunaScopeArm::FolderDeposit => format!(
+            "Put files into your folder \"{name}\", each signed by the app and sealed to you \
+             on arrival (it cannot see the folder or anything in it; no keys are shared)"
+        ),
+        _ => format!(
             "Read the files in your folder \"{name}\", everything already in it included (keys \
              to exactly that folder are shared with it)"
         ),
-        None => card_row(scope)?.to_string(),
     })
 }
 
@@ -1844,20 +1861,32 @@ mod tests {
         }
     }
 
-    /// The read card row names the folder when the app knows it, and falls
-    /// back to the generic row when it does not.
+    /// A qualified folder card row — read and deposit alike — names the
+    /// folder when the app knows it, and falls back to the generic row when
+    /// it does not; a bare or non-folder string has none.
     #[test]
-    fn the_folder_read_card_row_names_the_folder_when_known() {
+    fn the_folder_card_row_names_the_folder_when_known() {
         let s = "fauna:folder:read:42";
-        let named = folder_read_card_row(s, Some("Photos")).unwrap();
+        let named = folder_card_row(s, Some("Photos")).unwrap();
         assert!(named.contains("your folder \"Photos\""), "{named}");
         assert!(named.contains("keys to exactly that folder are shared"));
-        assert_eq!(folder_read_card_row(s, None).as_deref(), card_row(s));
-        assert_eq!(
-            folder_read_card_row("fauna:folder:deposit:42", Some("x")),
-            None
+        assert_eq!(folder_card_row(s, None).as_deref(), card_row(s));
+
+        let d = "fauna:folder:deposit:42";
+        let named = folder_card_row(d, Some("Inbox")).unwrap();
+        assert!(
+            named.contains("Put files into your folder \"Inbox\""),
+            "{named}"
         );
-        assert_eq!(folder_read_card_row(SCOPE_FOLDER_READ, None), None);
+        assert!(named.contains("no keys are shared"));
+        assert_eq!(folder_card_row(d, None).as_deref(), card_row(d));
+
+        assert_eq!(folder_card_row(SCOPE_FOLDER_READ, None), None);
+        assert_eq!(folder_card_row(SCOPE_FOLDER_DEPOSIT, Some("x")), None);
+        assert_eq!(folder_card_row("fauna:feed:read", Some("x")), None);
+        assert_eq!(folder_qualifier(d), Some(42));
+        assert_eq!(folder_qualifier(s), Some(42));
+        assert_eq!(folder_qualifier(SCOPE_FOLDER_DEPOSIT), None);
     }
 
     /// The folder plane's qualifier is the user's (`authorization-server.md`

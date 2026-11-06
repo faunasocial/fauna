@@ -1219,16 +1219,39 @@ def test_admin_forwarder_over_hourly_cap_waits_and_goes_out_later(mail_bridge_mt
                 "the over-cap forward must not have been dispatched"
             )
 
-            # Each hour the clock moves on releases one more (cap 1).
-            for _ in range(len(parked)):
+            # Each hour the clock moves on releases exactly one of the admin's
+            # parked forwards (cap 1), oldest first — across every forwarder the
+            # admin owns, so a row an earlier test on this session nest left
+            # parked goes out before ours. The count is read BEFORE the advance:
+            # the bridge polls on its own, so a count read after it may already
+            # include the release, and the wait would then target one row too
+            # few. Once the drop is seen the frozen clock holds the window
+            # charged, so the count is final and must be exactly one lower.
+            def _admin_parked():
+                return len(_parked_forwards(db_path, actor=admin_actor))
+
+            for _ in range(_admin_parked()):
+                if not _parked_forwards(db_path, target=target):
+                    break
+                before = _admin_parked()
                 outbound_clock(nest_url, advance=3700)
 
-                def _released(before=len(_parked_forwards(db_path, target=target))):
+                def _released():
                     _poke_outbound_bridge(nest_url)
-                    return len(_parked_forwards(db_path, target=target)) < before
+                    return _admin_parked() < before
 
                 wait_until(_released, MAIL_OUTBOUND_CYCLE_S, interval=1.0,
-                           diagnose=lambda: f"still parked: {_parked_forwards(db_path, target=target)}")
+                           diagnose=lambda: f"admin parked {_admin_parked()} (was {before}); "
+                                            f"ours: {_parked_forwards(db_path, target=target)}")
+                _poke_outbound_bridge(nest_url)
+                assert _admin_parked() == before - 1, (
+                    f"one hour under a cap of 1 must release exactly one parked forward: "
+                    f"{before} parked before the advance, {_admin_parked()} after"
+                )
+            assert _parked_forwards(db_path, target=target) == [], (
+                f"each hourly advance released one, yet ours is still parked: "
+                f"{_parked_forwards(db_path, target=target)}"
+            )
 
             def _arrived():
                 _poke_outbound_bridge(nest_url)

@@ -6,7 +6,7 @@ import FaunaKit
 /// shared FaunaKit `FoldersContent` driven by `DevicesMachine`. iOS has **no**
 /// local-folder binding (no user-bindable folder tree), so the per-set binding is
 /// the default empty view. Reached at `{"view":"settings","id":"folders"}`; no
-/// inner `NavigationStack` (pushed into the `SettingsView` stack).
+/// inner `NavigationStack` (pushed into the More tab's stack, `MoreView.settingsPath`).
 struct FoldersView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @Environment(AppState.self) private var appState: AppState?

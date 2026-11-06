@@ -241,7 +241,20 @@ class TimelineColumnContentTest {
             AllDayBand(days = listOf(java.time.LocalDate.of(2026, 6, 25) to listOf(allDay, timed)), onEventClick = {})
         }
         composeTestRule.onNodeWithTag("calendar-allday-band", useUnmergedTree = true).assertExists()
-        composeTestRule.onNodeWithText("Ea").assertExists()   // all-day chip rendered
-        composeTestRule.onNodeWithText("Et").assertDoesNotExist() // timed event not in the band
+        // the chip and the band's own text both read "Ea"
+        composeTestRule.onAllNodesWithText("Ea")[0].assertExists()   // all-day chip rendered
+        composeTestRule.onAllNodesWithText("Et").assertCountEquals(0) // timed event not in the band
+    }
+
+    @Test
+    fun allDayBand_textIsReadableThroughTheTagForTheBridge() {
+        // The bridge's get_text reads the tagged node's own text; the merged band
+        // must carry the all-day chips' summaries and none of the timed events'.
+        val allDay = ev("a", "2026-06-25", null)
+        val timed = ev("t", "2026-06-25T09:00:00", "2026-06-25T10:00:00")
+        composeTestRule.setContent {
+            AllDayBand(days = listOf(java.time.LocalDate.of(2026, 6, 25) to listOf(allDay, timed)), onEventClick = {})
+        }
+        composeTestRule.onNodeWithTag("calendar-allday-band").assertTextEquals("Ea")
     }
 }

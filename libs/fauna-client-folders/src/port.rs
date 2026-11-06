@@ -40,9 +40,10 @@ pub mod doors {
     pub const ADOPTION_MARKERS: &str = "folder_keys.adoption_markers";
     pub const RECORD_ADOPTION_MARKER: &str = "folder_keys.record_adoption_marker";
     pub const MINTING_IDENTITY: &str = "folder_keys.minting_identity";
+    pub const DROP_SET_SHARE_ENDPOINTS: &str = "folder_keys.drop_set_share_endpoints";
 
     /// Every door of the seam.
-    pub const ALL: [&str; 7] = [
+    pub const ALL: [&str; 8] = [
         LOAD,
         LOAD_FOR_WRITE,
         MERGE,
@@ -50,6 +51,7 @@ pub mod doors {
         ADOPTION_MARKERS,
         RECORD_ADOPTION_MARKER,
         MINTING_IDENTITY,
+        DROP_SET_SHARE_ENDPOINTS,
     ];
 }
 
@@ -129,6 +131,19 @@ impl<T: PortTransport> FolderKeyStore for PortFolderKeys<T> {
             .map_err(|f| anyhow::anyhow!(f.to_string()))?
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    async fn drop_set_share_endpoints(&self, channel_id: &[u8; 32]) -> anyhow::Result<usize> {
+        let crossed: Result<Result<u64, String>, PortFault> = forward(
+            &self.transport,
+            doors::DROP_SET_SHARE_ENDPOINTS,
+            &fauna_protocol::ByteBuf::from(channel_id.to_vec()),
+        )
+        .await;
+        let moved = crossed
+            .map_err(|f| anyhow::anyhow!(f.to_string()))?
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(usize::try_from(moved)?)
+    }
 }
 
 /// Answer one door of the seam from `seam` — the core chunk's half. `None`
@@ -188,6 +203,20 @@ pub async fn serve(
         doors::MINTING_IDENTITY => {
             answer(payload, |(): ()| async move {
                 seam.minting_identity().await.map_err(said)
+            })
+            .await
+        }
+        doors::DROP_SET_SHARE_ENDPOINTS => {
+            answer(payload, |channel: fauna_protocol::ByteBuf| async move {
+                let channel: [u8; 32] = channel
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "a set's channel id is 32 bytes".to_string())?;
+                let moved = seam
+                    .drop_set_share_endpoints(&channel)
+                    .await
+                    .map_err(said)?;
+                Ok::<u64, String>(moved as u64)
             })
             .await
         }
@@ -268,6 +297,55 @@ mod tests {
             block_on(port.minting_identity()).unwrap(),
             Some(ActorId([4; 32]))
         );
+    }
+
+    /// The left-set share-endpoints drop crosses: the far seam's count comes
+    /// back for the channel sent, and a faulting transport is refused.
+    #[test]
+    fn the_set_share_endpoints_drop_crosses() {
+        struct Dropping(MemoryFolderKeyStore, std::sync::Mutex<Vec<[u8; 32]>>);
+        #[async_trait::async_trait]
+        impl FolderKeyReader for Dropping {
+            async fn load(&self) -> anyhow::Result<FoldersConfig> {
+                self.0.load().await
+            }
+        }
+        #[async_trait::async_trait]
+        impl FolderKeyStore for Dropping {
+            async fn merge(&self, replica: FoldersConfig) -> anyhow::Result<FoldersConfig> {
+                self.0.merge(replica).await
+            }
+            async fn settle_removal(
+                &self,
+                removal: FolderPendingRemoval,
+            ) -> anyhow::Result<FoldersConfig> {
+                self.0.settle_removal(removal).await
+            }
+            async fn drop_set_share_endpoints(
+                &self,
+                channel_id: &[u8; 32],
+            ) -> anyhow::Result<usize> {
+                self.1.lock().unwrap().push(*channel_id);
+                Ok(2)
+            }
+        }
+        let seam = std::sync::Arc::new(Dropping(
+            MemoryFolderKeyStore::default(),
+            std::sync::Mutex::default(),
+        ));
+        let far = std::sync::Arc::clone(&seam);
+        let port = PortFolderKeys::new(Loopback::new(move |door, payload| {
+            let far = std::sync::Arc::clone(&far);
+            async move {
+                serve(&*far, door, &payload)
+                    .await
+                    .unwrap_or_else(|| Err(PortFault::UnknownDoor(door.to_string())))
+            }
+        }));
+        assert_eq!(block_on(port.drop_set_share_endpoints(&CH)).unwrap(), 2);
+        assert_eq!(*seam.1.lock().unwrap(), vec![CH]);
+        let faulting = PortFolderKeys::new(Loopback::faulting(PortFault::Glue("boom".into())));
+        assert!(block_on(faulting.drop_set_share_endpoints(&CH)).is_err());
     }
 
     /// A faulting transport answers every method with `Err` — never a

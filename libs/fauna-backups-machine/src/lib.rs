@@ -48,7 +48,7 @@ pub use nest_api::build_backups_machine;
 pub use nest_api::{BackupsApiError, BackupsNestApi};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use nest_api::{FakeBackupsNestApi, FakeCall};
-pub use observer::BackupsObserver;
 #[cfg(any(test, feature = "test-observer"))]
-pub use observer::{CountingObserver, NullObserver};
+pub use observer::CountingObserver;
+pub use observer::{BackupsObserver, NullObserver};
 pub use snapshots::*;

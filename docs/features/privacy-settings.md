@@ -9,9 +9,11 @@ guide: docs/guides/who-can-see-what.md § The short version
 ## What a user gets
 
 Choose who may start a conversation with you: anyone, contacts only, or nobody.
-Set how aggressive your spam filter is and whether your training helps others. Both
-persist across relaunch and show the real value, never a default — and while your
-nest is still being asked, the page says so rather than marking a guess.
+Contacts only isn't applied yet to someone on another nest who starts a
+conversation with you, unless they do it by inviting you to a room. Set how
+aggressive your spam filter is and whether your training helps others. Both
+persist across relaunch and show the real value, never a default — and while
+your nest is still being asked, the page says so rather than marking a guess.
 
 ## Coverage contract
 
@@ -45,27 +47,27 @@ Stamped 2026-10-01 at d8cb0887cb.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.5-dev+110d1248 standalone |
-| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| web | ✅ full | 0.1.5-dev+1e755069 standalone |
+| linux | ✅ full | 0.1.5-dev+1e755069 standalone |
+| windows | ✅ full | 0.1.2-dev+6d8dc256.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+1e755069 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_inbox_mode_toggle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_inbox_mode_pre_selects_the_accounts_real_mode_after_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_preferences` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_inbox_mode_toggle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 1 | app | `tests/e2e-unified/tests/test_settings.py::test_inbox_mode_pre_selects_the_accounts_real_mode_after_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_preferences` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_preferences_persist_web` | web (linux): passed, linux (linux): skipped, windows (windows): skipped, macos (macos): skipped, ios (macos): skipped, tui (linux): error |
-| 3 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_inbox_mode_api` | nest (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_inbox_mode_api` | nest (linux): passed, nest (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_settings.py::test_inbox_mode_is_unknown_while_its_fetch_is_still_pending` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): skipped |
-| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_privacy_nav_names_no_mode_while_the_mode_read_is_held` | tui (linux): passed |
-| 5 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_stranger_is_refused_until_the_recipient_accepts_them` | nest (linux): passed |
-| 6 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_closed_inbox_holds_against_a_sender_on_another_nest` | nest (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_opening_the_privacy_page_never_writes_the_inbox_mode_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_threshold_reads_back_in_band_words` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings.py::test_privacy_nav_names_no_mode_while_the_mode_read_is_held` | tui (linux): passed, tui (macos): passed |
+| 5 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_stranger_is_refused_until_the_recipient_accepts_them` | nest (linux): passed, nest (macos): passed |
+| 6 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_closed_inbox_holds_against_a_sender_on_another_nest` | nest (linux): passed, nest (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_settings.py::test_opening_the_privacy_page_never_writes_the_inbox_mode_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_threshold_reads_back_in_band_words` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

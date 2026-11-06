@@ -9,9 +9,9 @@ namespace FaunaApp.Views.Onboarding;
 /// Box-recovery step-4 self-hosted install page (Task E): shows the installer
 /// command carrying the recovery seed. Mirrors
 /// <c>apps/fauna-linux/src/views/onboarding/recover_selfhosted_instructions.rs</c>
-/// + the web reference. The command is a placeholder until the C2 reachable-nest
-/// render lands (box-recovery.md § Implementation status of step 4); copy is a
-/// pure clipboard action, and both restore/continue leave the recovery flow via
+/// + the web reference. The command is the shared Rust render, resolved by the
+/// view-model on entry (pending text and a disabled Copy until it resolves);
+/// copy is a pure clipboard action, and both restore/continue leave the recovery flow via
 /// the machine's <c>reset()</c> (mirroring linux). Per
 /// <c>docs/goal/architecture/nest/box-recovery.md</c> § Recovery UI (step 4).
 /// </summary>
@@ -35,8 +35,10 @@ public sealed partial class RecoverSelfhostedInstructionsView : UserControl
     /// (mirrors linux's GDK-clipboard copy).</summary>
     private void OnCopyClick(object sender, RoutedEventArgs e)
     {
+        var line = ViewModel.RecoverSelfhostedCommandToCopy;
+        if (line is null) return;
         var pkg = new DataPackage();
-        pkg.SetText(ViewModel.RecoverSelfhostedCommand);
+        pkg.SetText(line);
         Clipboard.SetContent(pkg);
     }
 }

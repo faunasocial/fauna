@@ -23,4 +23,4 @@ Everything else — how sessions are launched and stopped, how a queue item is
 chosen and reserved, and how usage limits are handled — is private
 infrastructure and out of scope for this repository.
 
-See also [`next-files.md`](next-files.md) for what the work queues are.
+See also [`task-files.md`](task-files.md) for what the work queues are.

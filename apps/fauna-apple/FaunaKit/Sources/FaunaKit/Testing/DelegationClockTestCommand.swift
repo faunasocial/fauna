@@ -43,12 +43,7 @@ public enum DelegationClockTestCommand {
     /// the driver's next `atproto-delegation-status` read races the old frame.
     @MainActor
     public static func apply(_ command: [String: Any]) async -> String? {
-        // JSON numbers arrive as `NSNumber`; take the widest read, matching the
-        // `ConversationsTestInject.labels` parser. A missing/unparseable value
-        // is `0` — the documented reset, and the same default tui's arm uses.
-        let offset = (command["now_offset_secs"] as? NSNumber)?.int64Value
-            ?? (command["now_offset_secs"] as? Int).map(Int64.init)
-            ?? 0
+        let offset = TestCommandArgs.nowOffsetSecs(command)
         setDelegationClockOffsetSecs(offsetSecs: offset)
 
         guard let vm = AtprotoSettingsVM.liveInstanceForTest else {

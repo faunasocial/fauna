@@ -31,9 +31,7 @@ public enum TrustFacetClockTestCommand {
     /// hydrate), which is not a refusal.
     @MainActor
     public static func apply(_ command: [String: Any]) async -> String? {
-        let offset = (command["now_offset_secs"] as? NSNumber)?.int64Value
-            ?? (command["now_offset_secs"] as? Int).map(Int64.init)
-            ?? 0
+        let offset = TestCommandArgs.nowOffsetSecs(command)
         setTrustClockOffsetSecs(offsetSecs: offset)
         if let vm = LinkedNestsVM.liveInstanceForTest, vm.machine != nil {
             await vm.hydrate()

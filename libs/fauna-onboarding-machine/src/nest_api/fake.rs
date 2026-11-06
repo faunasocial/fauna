@@ -90,6 +90,13 @@ pub struct FakeNestApi {
     /// `calls` itself: `calls()` and its ~20 existing callers stay exactly
     /// as they read today.
     pub(crate) base_url_calls: Mutex<Vec<(String, String)>>,
+    /// The `read_nest_rules` reply; the default is a nest that publishes no
+    /// rules. Its calls land in `nest_rules_reads` only, never in `calls` or
+    /// `base_url_calls`: the read runs in the background beside the probe, so
+    /// in the ordered call logs it would interleave by scheduling.
+    pub(crate) nest_rules_response: Mutex<Option<Result<NestRulesAnswer, NestRulesError>>>,
+    /// The `base_url` of each `read_nest_rules` call, in call order.
+    pub(crate) nest_rules_reads: Mutex<Vec<String>>,
 }
 
 /// A callback the fake runs while `silent_challenge` is in flight.
@@ -160,6 +167,15 @@ impl FakeNestApi {
         r: Result<RestoredIdentity, RestoreSeedError>,
     ) {
         *self.restore_escrowed_seed_response.lock().unwrap() = Some(r);
+    }
+
+    pub fn set_nest_rules_response(&self, r: Result<NestRulesAnswer, NestRulesError>) {
+        *self.nest_rules_response.lock().unwrap() = Some(r);
+    }
+
+    /// The `base_url` of each `read_nest_rules` call, in call order.
+    pub fn nest_rules_reads(&self) -> Vec<String> {
+        self.nest_rules_reads.lock().unwrap().clone()
     }
 
     pub fn set_lock_account_response(&self, r: Result<i64, LockAccountError>) {
@@ -527,5 +543,23 @@ impl super::NestApi for FakeNestApi {
             .unwrap_or(Err(LockAccountError::Transient {
                 reason: "no lock_account response fixtured".into(),
             }))
+    }
+
+    async fn read_nest_rules(&self, base_url: &str) -> Result<NestRulesAnswer, NestRulesError> {
+        self.nest_rules_reads
+            .lock()
+            .unwrap()
+            .push(base_url.to_string());
+        self.nest_rules_response
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| {
+                Ok(NestRulesAnswer {
+                    nest_id: FAKE_NEST_ID.to_string(),
+                    domain: "fake.test".to_string(),
+                    content_policy: None,
+                })
+            })
     }
 }

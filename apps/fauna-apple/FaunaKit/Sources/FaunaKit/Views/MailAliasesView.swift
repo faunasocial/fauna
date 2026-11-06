@@ -197,6 +197,22 @@ public struct MailAliasesView: View {
             automationText(Ids.mailAliasesListItemHits, hitsText(alias))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // A disposable's expiry, and — while it still accepts mail — the way
+            // to push it out (`mail-aliases.md` § Don't do these). Both decided by
+            // the shared helpers at paint time, as tui's `alias_row_elements`.
+            if let expiry = expiryText(alias) {
+                automationText(Ids.mailAliasesListItemExpiresAt, expiry)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if aliasIsExtendable(kind: alias.kind, expiresAtMs: alias.expiresAtMs,
+                                 usesRemaining: alias.usesRemaining, nowMs: nowMs) {
+                Button(L.mailAliases.extend) { extendAlias(alias) }
+                    .controlSize(.small)
+                    .accessibilityIdentifier(Ids.mailAliasesListItemExtendButton)
+                    .automationActivate(Ids.mailAliasesListItemExtendButton) { extendAlias(alias) }
+                    .faunaGate("fauna.bridges.update_account_alias")
+            }
             if alias.isCanonical {
                 // The canonical `<handle>@<domain>` row is the user's primary
                 // mailbox + AUTH-login identity; the nest rejects disabling,
@@ -206,15 +222,13 @@ public struct MailAliasesView: View {
                 // surfacing only as an error on attempt (`mail-aliases.md`
                 // § Aliases UX). The per-row control IDs simply don't appear on
                 // this row; the badge carries no test id (matches linux). The
-                // inert audit disclosure is kept for parity.
+                // history disclosure stays: the primary address has hits too.
                 HStack {
                     Text(L.mailAliases.primaryAddressBadge)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .help(L.mailAliases.primaryAddressTooltip)
-                    Button(L.mailAliases.showAudit) {}
-                        .disabled(true)
-                        .accessibilityIdentifier(Ids.mailAliasesListItemShowAudit)
+                    auditToggle(alias)
                 }
                 .controlSize(.small)
             } else {
@@ -291,14 +305,11 @@ public struct MailAliasesView: View {
                     // control that issues Delete is this one, and arming a
                     // confirm that cannot fire is worse than not arming it.
                     .faunaGate("fauna.bridges.delete_account_alias")
-                    // Inert disclosure — per-alias audit listing is not yet exposed
-                    // by the nest (linux renders the same disabled affordance).
-                    Button(L.mailAliases.showAudit) {}
-                        .disabled(true)
-                        .accessibilityIdentifier(Ids.mailAliasesListItemShowAudit)
+                    auditToggle(alias)
                 }
                 .controlSize(.small)
             }
+            auditList(alias)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.mailAliasesListItem)
@@ -309,6 +320,62 @@ public struct MailAliasesView: View {
         // so `mail-aliases-list-item[1]/…-revoke-button` found nothing. Same
         // idiom as `account-switcher-item`.
         .automationScope(Ids.mailAliasesListItem, index: index)
+    }
+
+    // MARK: - Per-address history (`mail-aliases.md` § Per-alias-hit audit list)
+
+    /// Whether the shared machine's one open history is this row's address.
+    private func auditIsOpen(_ alias: AliasView) -> Bool {
+        vm.snapshot?.audit?.aliasIdHex == alias.aliasIdHex
+    }
+
+    private func auditToggleLabel(_ alias: AliasView) -> String {
+        auditIsOpen(alias) ? L.mailAliases.hideAudit : L.mailAliases.showAudit
+    }
+
+    /// `ShowAudit` / `HideAudit`, read off the snapshot at click time — the
+    /// toggle-active shape. Shared by the Button and its `.automationActivate`.
+    private func toggleAudit(_ alias: AliasView) {
+        let action: MailAliasesAction = auditIsOpen(alias)
+            ? .hideAudit
+            : .showAudit(aliasIdHex: alias.aliasIdHex)
+        Task { await vm.dispatch(action) }
+    }
+
+    private func auditToggle(_ alias: AliasView) -> some View {
+        Button(auditToggleLabel(alias)) { toggleAudit(alias) }
+            .accessibilityIdentifier(Ids.mailAliasesListItemShowAudit)
+            .automationActivate(Ids.mailAliasesListItemShowAudit,
+                                text: { auditToggleLabel(alias) }) { toggleAudit(alias) }
+    }
+
+    /// The open history under the row: one `mail-aliases-audit-item` per hit,
+    /// newest first, its three leaves scoped in it — or the
+    /// `mail-aliases-audit-empty` line when nothing has arrived yet.
+    @ViewBuilder
+    private func auditList(_ alias: AliasView) -> some View {
+        if let audit = vm.snapshot?.audit, audit.aliasIdHex == alias.aliasIdHex {
+            if audit.hits.isEmpty {
+                automationText(Ids.mailAliasesAuditEmpty, L.mailAliases.auditEmpty)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(audit.hits.enumerated()), id: \.element.hitIdHex) { j, hit in
+                    HStack {
+                        automationText(Ids.mailAliasesAuditItemMatchedAddress, hit.matchedAddress)
+                        automationText(Ids.mailAliasesAuditItemSenderDomain, hit.senderDomain)
+                        automationText(Ids.mailAliasesAuditItemReceivedAt,
+                                       ValueFormat.relativeTime(thenMs: hit.receivedAtMs))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(Ids.mailAliasesAuditItem)
+                    .automationValue(Ids.mailAliasesAuditItem, text: { hit.matchedAddress })
+                    .automationScope(Ids.mailAliasesAuditItem, index: j)
+                }
+            }
+        }
     }
 
     // MARK: - Helpers (shared by Buttons and their `.automationActivate`)
@@ -362,6 +429,25 @@ public struct MailAliasesView: View {
         tapArmedDelete(alias.aliasIdHex, armed: $armedDeleteId) {
             await vm.dispatch(.delete(aliasIdHex: alias.aliasIdHex))
         }
+    }
+
+    private var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    /// The `mail-aliases-list-item-expires-at` text — the shared label with the
+    /// expiry date formatted natively (the `hitsText` split); `nil` for an alias
+    /// with no expiry.
+    private func expiryText(_ alias: AliasView) -> String? {
+        let date = alias.expiresAtMs.map { ValueFormat.absoluteDate(epochMs: $0) } ?? ""
+        return aliasExpiryLabel(expiresAtMs: alias.expiresAtMs, nowMs: nowMs, expiryDate: date)
+            .map(renderLocalizedText)
+    }
+
+    /// Extend a disposable alias. The clock is read here, the one moment the
+    /// gesture fires; the shared machine refuses a row no longer extendable
+    /// before any round trip. Shared by the Button and its `.automationActivate`.
+    private func extendAlias(_ alias: AliasView) {
+        let now = nowMs
+        Task { await vm.dispatch(.extend(aliasIdHex: alias.aliasIdHex, nowMs: now)) }
     }
 
     private func hitsText(_ alias: AliasView) -> String {

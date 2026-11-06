@@ -482,6 +482,14 @@ pub fn spawn_open_refresh(
                 session_generation,
                 crate::app::PageOutcome::Profile(Outcome::BlockState { epoch, blocked }),
             )));
+            // The OTHER header holds no handle: re-read the contact roster now,
+            // so a contact accepted a moment ago is named by the roster's
+            // handle rather than the short id until the receive loop's next
+            // tick (`value-formatting.md` § Peer display label → *the roster
+            // handle*). The header re-reads the shared projection per frame.
+            if let Some(session) = conversations.as_ref().and_then(std::sync::Weak::upgrade) {
+                session.manager().refresh_contact_roster().await;
+            }
             // The page-path harvest (OTHER only: harvesting one's own profile
             // would seed anchor slots about oneself), through the account's
             // anchor store — lent to the session's manager at the
@@ -2004,7 +2012,7 @@ async fn resolve_staged_image(
 async fn fetch_header_profile<R>(nest: R, actor_id: &str, home: Option<&str>) -> HeaderFetch
 where
     R: fauna_protocol::RpcRequester,
-    R::Error: fauna_protocol::RpcErrorClass,
+    R::Error: fauna_protocol::RpcErrorClass + From<fauna_protocol::RpcError>,
 {
     let Ok(read) = ProfileClient::new(nest)
         .profile_header_read(actor_id.to_string(), home)
@@ -2410,8 +2418,9 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
 /// The header identity: SELF = published display name → live display handle
 /// (`<handle>@<current primary>`) → actor id; OTHER = the one shared resolver (`format::peer_display_label`,
 /// value-formatting.md § Peer display label) over the viewer's own nickname,
-/// the published display name, then the canonical short id (the OTHER header
-/// has no cached handle). `public` is the name a nickname replaced — the
+/// the published display name, the contact roster's handle (the OTHER header
+/// caches none of its own — `ContactsCache::peer_label` supplies it), then the
+/// canonical short id. `public` is the name a nickname replaced — the
 /// `profile-public-name` line beneath it.
 fn header_label(st: &ProfileState) -> format::PeerLabel {
     if st.is_self() {
@@ -2427,12 +2436,10 @@ fn header_label(st: &ProfileState) -> format::PeerLabel {
             public: None,
         };
     }
-    format::peer_display_label(
-        st.viewed_nickname().as_deref(),
-        st.header_name.as_deref(),
-        None,
-        st.actor_id(),
-    )
+    match st.overlays.as_ref() {
+        Some(overlays) => overlays.peer_label(st.header_name.as_deref(), None, st.actor_id()),
+        None => format::peer_display_label(None, st.header_name.as_deref(), None, st.actor_id()),
+    }
 }
 
 /// The Block⇄Unblock toggle label (`contact_toggle_block_label`) — tui is in the
@@ -4788,6 +4795,32 @@ mod tests {
             .filter(|e| e.id == id)
             .map(|e| e.text)
             .collect()
+    }
+
+    /// The OTHER header caches no handle of its own: a contact the roster
+    /// knows by handle is named by it at first paint, not by the short id
+    /// (`value-formatting.md` § Peer display label); a published display name
+    /// and a nickname still come first.
+    #[test]
+    fn the_other_header_names_a_roster_contact_by_handle() {
+        let (mut app, cache) = other_with_overlay(None);
+        let viewed = "cd".repeat(32);
+        assert_eq!(
+            texts_of(&app, "profile-handle"),
+            vec![format::short_id(&viewed)],
+            "unknown to the roster: the short id"
+        );
+        cache.replace_roster(vec![fauna_conversations::RosterEntry {
+            actor_id_hex: viewed.clone(),
+            handle: Some("tester".into()),
+            domain: None,
+            status: "accepted".into(),
+        }]);
+        assert_eq!(texts_of(&app, "profile-handle"), vec!["tester".to_string()]);
+        app.profile.header_name = Some("Tess".into());
+        assert_eq!(texts_of(&app, "profile-handle"), vec!["Tess".to_string()]);
+        cache.replace([(viewed, overlay_with("Mum", &[]))].into_iter().collect());
+        assert_eq!(texts_of(&app, "profile-handle"), vec!["Mum".to_string()]);
     }
 
     #[test]

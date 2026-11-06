@@ -174,6 +174,70 @@ async fn the_daily_pass_queues_a_report_to_the_published_mailbox() {
 }
 
 #[tokio::test]
+async fn the_switch_off_sends_nothing_and_discards_the_window() {
+    let state = state().await;
+    state
+        .db
+        .put_dmarc_policy(crate::db::mail_policy::DmarcPolicyOverrides {
+            outbound_aggregate_enabled: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    record_observation(
+        &state,
+        ip("192.0.2.1"),
+        &DmarcVerdict::Pass,
+        &obs("peer.test"),
+    )
+    .await
+    .unwrap();
+    let fetcher = MapFetcher::new(&[(
+        "_dmarc.peer.test",
+        "v=DMARC1; p=none; rua=mailto:agg@peer.test",
+    )]);
+    assert_eq!(run_one_emit_pass(&state, &fetcher, NOW).await, 0);
+    assert!(
+        state
+            .db
+            .fetch_due_outbound(NOW, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        state
+            .db
+            .fetch_dmarc_outbound_reports_for_test()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        state
+            .email
+            .dmarc_aggregator
+            .lock()
+            .unwrap()
+            .recorded_domains()
+            .is_empty(),
+        "the window counted while off is discarded, never sent later"
+    );
+
+    // Back on: the next window is reported.
+    state.db.put_dmarc_policy(Default::default()).await.unwrap();
+    record_observation(
+        &state,
+        ip("192.0.2.1"),
+        &DmarcVerdict::Pass,
+        &obs("peer.test"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run_one_emit_pass(&state, &fetcher, NOW).await, 1);
+}
+
+#[tokio::test]
 async fn a_peer_without_a_mailto_rua_gets_nothing() {
     let state = state().await;
     for from in ["norua.test", "https.test", "nopolicy.test"] {

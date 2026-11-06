@@ -66,18 +66,41 @@ internal sealed class AgentStatusProbe : IAgentStatusProbe
         // exactly as an unreachable one — the indicator's job is to say whether THIS
         // device's agent is serving, and in both cases it is not.
         var agent = Agent();
-        if (agent is null)
-        {
-            return new FfiAgentStatus(FfiAgentHealthState.NotRunning, "", 0);
-        }
+        if (agent is null) return NotRunning;
 
-        return await agent.AgentHealth(localBuildVersion);
+        // The agent is re-resolved per probe, but the handle can still be destroyed
+        // between that resolve and this call: SyncAgentSession.Stop (sign-out, an
+        // account switch, the e2e reset) disposes the provisioner on another thread.
+        // The poll calling this is an `async void` DispatcherTimer tick, so a throw
+        // here would be an unhandled crash on the UI thread (apps/windows.md § Client
+        // lifetime, the teardown corollary) — and the honest reading of a handle that
+        // cannot answer is the same "not running" an absent one gets.
+        try
+        {
+            return await agent.AgentHealth(localBuildVersion);
+        }
+        catch (Exception ex)
+        {
+            Logs.ShellLog.Debug("AgentStatusProbe", $"health read failed, reading not-running: {ex.GetType().Name}: {ex.Message}");
+            return NotRunning;
+        }
     }
 
     public async Task<FfiAgentSyncStatus?> SyncStatusAsync()
     {
         var agent = Agent();
         if (agent is null) return null;
-        return await agent.SyncStatus();
+        // Same race and same reading as ProbeAsync: unreachable.
+        try
+        {
+            return await agent.SyncStatus();
+        }
+        catch (Exception ex)
+        {
+            Logs.ShellLog.Debug("AgentStatusProbe", $"sync-status read failed, reading unreachable: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
+
+    private static FfiAgentStatus NotRunning => new(FfiAgentHealthState.NotRunning, "", 0);
 }

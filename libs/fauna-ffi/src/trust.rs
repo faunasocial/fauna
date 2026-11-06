@@ -24,8 +24,14 @@ use std::sync::Arc;
 pub fn install_nest_identity_pin_store(data_dir: String) {
     let dir = Path::new(&data_dir);
     let _ = std::fs::create_dir_all(dir);
+    // A windows test build whose harness gave the sync agent its own
+    // `--data-dir` keeps a read replica of this file there, where that agent
+    // reads (`transport-trust.md` § Pin custody across processes, *an isolated
+    // agent reads its app's replica*); `None` everywhere else, so every other
+    // app and every production build installs the plain store.
+    let replica = fauna_client_sync::agent_spawner::spawned_agent_pin_replica_dir();
     fauna_client::trust::install_pin_store(Arc::new(
-        fauna_client::cert_binding::DiskPinStore::open_in_dir(dir),
+        fauna_client::cert_binding::DiskPinStore::open_in_dir_mirrored_to(dir, replica.as_deref()),
     ));
 }
 
@@ -76,9 +82,9 @@ pub fn install_scoped_trust_home() -> Result<String, crate::FfiError> {
 /// the replica is refreshed once now. The macOS app uses it so the sandboxed
 /// File Provider extension — which cannot reach the user-domain writer dir —
 /// reads the app's pins from the app-group container's `trust/`
-/// (`install_nest_identity_pin_store_read_only` there). The app stays the
-/// only minter; the replica is its file, copied. Best-effort: a replica that
-/// cannot be written never fails a mint.
+/// (`install_nest_identity_pin_store_read_only` there). The replica never
+/// mints; it is the writer's file, copied. Best-effort: a replica that cannot
+/// be written never fails a mint.
 #[uniffi::export]
 pub fn install_nest_identity_pin_store_with_mirror(data_dir: String, replica_dir: String) {
     let dir = Path::new(&data_dir);

@@ -66,7 +66,11 @@ pub(super) const DEFAULT_RETURN_URL: &str = "/settings/atproto";
 /// query `state` at all — only from the app state the OAuth client returns once
 /// that key matched a stored state. Safe = a single
 /// leading `/` (a path on this origin), never a protocol-relative `//host` or a
-/// backslash-smuggled `/\host`, and no CR/LF. Applied at both the construction
+/// backslash-smuggled `/\host`, and no ASCII control byte (`< 0x20`, `0x7f`)
+/// anywhere: browsers strip TAB/CR/LF from a URL before parsing it, so
+/// `/<TAB>/host` would resolve as `//host` (and a CR/LF would panic
+/// `Redirect::to`). A percent-encoded `%09` stays a path — browsers do not decode
+/// it before the authority parse. Applied at both the construction
 /// site (`bridge_provider::link`) and here, the load-bearing use site.
 pub(super) fn sanitize_return_url(candidate: &str) -> &str {
     // Some browsers fold `\` to `/` when resolving the authority, so normalize
@@ -74,7 +78,7 @@ pub(super) fn sanitize_return_url(candidate: &str) -> &str {
     let normalized = candidate.replace('\\', "/");
     let safe = normalized.starts_with('/')
         && !normalized.starts_with("//")
-        && !candidate.contains(['\n', '\r']);
+        && !candidate.chars().any(|c| c.is_ascii_control());
     if safe { candidate } else { DEFAULT_RETURN_URL }
 }
 
@@ -258,6 +262,9 @@ mod tests {
             "",
             "bridges",
             "/ok\r\nLocation: https://evil.example",
+            "/\t/evil.example",
+            "/\x0b/evil.example",
+            "/ok\x7f",
         ] {
             assert_eq!(
                 sanitize_return_url(evil),
@@ -265,6 +272,16 @@ mod tests {
                 "{evil:?} must clamp to the default"
             );
         }
+    }
+
+    /// A percent-encoded tab is not decoded by browsers before the authority
+    /// parse, so it stays an ordinary path — pins the control-byte rule as exact.
+    #[test]
+    fn sanitize_keeps_percent_encoded_tab_as_path() {
+        assert_eq!(
+            sanitize_return_url("/%09/evil.example"),
+            "/%09/evil.example"
+        );
     }
 
     fn build_state() -> Arc<AppState> {

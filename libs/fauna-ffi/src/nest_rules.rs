@@ -430,10 +430,6 @@ mod tests {
         // and with one.
         let doc = keyword_document(&Publisher::Guardian, "dare", "Not for you");
         let policy = FfiContentPolicy {
-            nsfw: "inherit".into(),
-            spam: "inherit".into(),
-            phishing: "inherit".into(),
-            commercial: "inherit".into(),
             document: Some(encode_document(&doc).unwrap()),
         };
         let plane = plane("guardian");

@@ -5,7 +5,8 @@
 // `UnifiedNotification` keeps the `type` key, so we rename on the way out.
 
 import * as rpc from './rpc';
-import { notificationDestination, notificationMuted, notificationRetained, notificationText, type NotificationDestination, type NotificationText } from './wasm';
+import { notificationDestination, notificationMuted, notificationRetained, notificationTextNaming, type NotificationDestination } from './wasm';
+import { contactOverlays } from './conversations';
 import type { MutedKeyword } from './rpc';
 import { resolveLocalized } from './i18n/localized';
 import { withLocalDeadlines } from './notificationDeadlines';
@@ -24,8 +25,6 @@ export interface UnifiedNotification {
   content_id: string | null;
   subject_uri: string | null;
   summary: string;
-  /** What the row paints — decided in shared Rust off the row as it arrived. */
-  text: NotificationText;
   /** Where opening the row leads — decided in shared Rust off the row as it
    *  arrived (`notifications.md` § Deep-link destinations); `null` = inert. */
   destination: NotificationDestination | null;
@@ -60,10 +59,6 @@ export async function getNotifications(
       content_id: n.content_id ?? null,
       subject_uri: n.subject_uri ?? null,
       summary: n.summary,
-      // Decided here, while the row still has its wire shape — the shared
-      // decision reads `body` and `summary` off it (`notifications.md`
-      // § Localized body).
-      text: withLocalDeadlines(notificationText(n)),
       destination: notificationDestination(n),
       retained: notificationRetained(n, Date.now() * 1000),
       is_read: n.is_read,
@@ -87,9 +82,14 @@ export function navigableDestination(
 }
 
 /** The sentence a row paints: the shared decision's localized arm resolved
- *  through this app's own catalog, or its verbatim `summary` as-is. */
+ *  through this app's own catalog, or its verbatim `summary` as-is. Decided at
+ *  render over the row as it arrived, because a fauna-native row's sender is
+ *  named through the overlay projection (`notifications.md` § Localized body →
+ *  *The sender arg*), which moves after the list was fetched — the page reads
+ *  `$contactsRevision` so a re-read follows it. */
 export function notificationRowText(n: UnifiedNotification): string {
-  return n.text.kind === 'localized' ? resolveLocalized(n.text) : n.text.text;
+  const text = withLocalDeadlines(notificationTextNaming(n.wire, contactOverlays()));
+  return text.kind === 'localized' ? resolveLocalized(text) : text.text;
 }
 
 /** Does a muted word collapse this row (`notifications.md` § Muted words)? The

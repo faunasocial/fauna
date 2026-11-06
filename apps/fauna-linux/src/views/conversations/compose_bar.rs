@@ -466,6 +466,12 @@ impl ComposeBar {
         }
 
         if let Some(caps) = caps {
+            // `can_send` (shared Rust): false on a bridged room no bridge serves.
+            // The body and send button stay in view, readable and never writable
+            // (the e2e driver reads `disabled == "true"` off the insensitive widget).
+            self.text_view.set_sensitive(caps.can_send);
+            self.text_view.set_editable(caps.can_send);
+            self.send_btn.set_sensitive(caps.can_send);
             self.attach_btn.set_sensitive(caps.supports_attachments);
             self.topic_btn.set_sensitive(caps.supports_subject);
             // Gate the markdown toolbar Box (so the whole row greys out and

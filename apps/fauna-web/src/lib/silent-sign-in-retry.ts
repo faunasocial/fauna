@@ -11,6 +11,9 @@
 //! (`security.md` § Transport trust → § Post-auth surfacing: background
 //! refreshes stay silent for every non-terminal class).
 //!
+//! The one exception is a nest that may be gone for good: see
+//! `lostNestOfferDue`.
+//!
 //! Pure, so the decision is unit-tested apart from the wasm and the store.
 
 import { TransientAuthError } from './auth-errors.ts';
@@ -19,6 +22,19 @@ import { TransientAuthError } from './auth-errors.ts';
  *  as the identity is still the store's. Short first (a blip clears in one),
  *  capped so a long outage costs one challenge per interval, not a storm. */
 export const SILENT_SIGN_IN_RETRY_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+/** The 0-based failure at which an unreachable nest has outlasted a blip: the
+ *  fourth, about eight seconds in on the schedule above. */
+export const LOST_NEST_OFFER_ATTEMPT = 3;
+
+/** Whether the `attempt`-th transient failure is the one that asks if this
+ *  device can recover the nest it cannot reach. Asked once per refresh: a
+ *  device with nothing to recover keeps retrying silently, and one with
+ *  something is sent to the launch surface, which ends the refresh
+ *  (`box-recovery.md` § The plane-era recovery floor, (b)). */
+export function lostNestOfferDue(attempt: number): boolean {
+  return attempt === LOST_NEST_OFFER_ATTEMPT;
+}
 
 /** How long to wait before retrying after `err` on the `attempt`-th failure
  *  (0-based), or `null` when this failure must not be retried at all.

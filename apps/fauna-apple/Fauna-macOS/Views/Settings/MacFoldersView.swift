@@ -38,11 +38,18 @@ struct MacFoldersView: View {
             // A writer's shared set the agent has parked (owner revoked the
             // write grant) — gates `folder-access-revoked-warning`.
             revokedSets: { locations?.revokedFolders ?? [] },
+            // A group set's review rows and their gesture run on the agent.
+            setReviewRows: { folderId, setLabel in
+                locations?.setReviewRows(folderId: folderId, setLabel: setLabel) ?? []
+            },
+            useRetainedVersion: { folderId, conflictId in
+                try await locations?.useRetainedVersion(folderId: folderId, conflictId: conflictId)
+            },
             // A toggle flip re-converges the FP domains through the same hook a
             // bind/unbind uses (FaunaMacApp wires it to the launch reconcile).
             onDemandChanged: { Task { await locations?.onBindingsChanged?() } }
-        ) { folder in
-            MacFolderBindingSection(folder: folder)
+        ) { target in
+            MacFolderBindingSection(target: target)
         }
         .pageTitle(L.folders.title)
         .task(id: reloadToken) {
@@ -53,15 +60,16 @@ struct MacFoldersView: View {
     }
 }
 
-/// The desktop local-folder binding for ONE folder (`folder-location-*`), nested
-/// under its row on the Folders page. Each bound folder is a device-local
+/// The desktop local-folder binding for ONE set (`folder-location-*`), nested
+/// under its row on the Folders page — a folder's or a group scope's, the
+/// target naming which. Each bound folder is a device-local
 /// `LocationBinding` from `LocationsModel`, filtered to this set — the set is
 /// contextual, so the binding records only the **folder path** (no free-text set
 /// name; D3 / O-1, folders.md § Binding). macOS is always-resident, so there is
 /// no per-row `folder-location-mode-toggle` (windows-only, until a File Provider host
 /// lands).
 struct MacFolderBindingSection: View {
-    let folder: FolderSummary
+    let target: FolderBindingTarget
     @Environment(LocationsModel.self) private var locations: LocationsModel?
     /// The page-level VM (already in the environment from `MacFoldersView`'s
     /// ancestor) — the only route a no-ref bind refusal has to the shared
@@ -72,7 +80,7 @@ struct MacFolderBindingSection: View {
     @State private var newLocationPath = ""
 
     private var mappings: [LocationBinding] {
-        (locations?.mappings ?? []).filter { $0.folder == folder.name }
+        (locations?.mappings ?? []).filter { $0.folder == target.label }
     }
 
     var body: some View {
@@ -115,6 +123,14 @@ struct MacFolderBindingSection: View {
             }
         }
         .padding(.vertical, 2)
+        // A confirmed bind enrolled this device's place on the nest (the agent
+        // enrols before it answers), so the expanded row's `folder-place-row`
+        // roster repaints from nest truth — no collapse/re-expand. A group set
+        // has no nest leg, so no roster to repaint.
+        .onChange(of: locations?.confirmedBinds) {
+            guard target.hasNestPlaces else { return }
+            Task { await vm.loadFolderPlaces(name: target.label) }
+        }
     }
 
     @ViewBuilder
@@ -207,15 +223,15 @@ struct MacFolderBindingSection: View {
         // else (`on-demand-files.md` § Hosting multiple on-demand folders). A row
         // that yields none is refused, never bound by name (fail closed),
         // surfaced on the page's `error-message` like tui/linux/windows.
-        guard let folderId = folder.folderRef else {
+        guard let folderId = target.folderRef else {
             logMessage(level: .warn, target: "fauna.sync",
-                       message: "refusing to bind \(folder.name): its folder id could not be resolved")
+                       message: "refusing to bind \(target.label): its folder id could not be resolved")
             vm.setBindLocationError(
                 L.devices.errorBindLocation(message: "the folder's identity could not be resolved"))
             return
         }
         vm.setBindLocationError(nil)
-        locations?.add(path: path, folder: folder.name, folderId: folderId)
+        locations?.add(path: path, folder: target.label, folderId: folderId)
         newLocationPath = ""
     }
 }

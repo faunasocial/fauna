@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
+from helpers.settings_tab_click import click_settings_tab
+
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
 
@@ -48,23 +50,9 @@ class MailSettingsActions:
         OAUTHBEARER like the others', and the dedicated nest reaches the device
         through `_relaunch_trusting_nest`'s `adb reverse` — so no app is excluded today, and the gate stays only as the
         one place a new app would declare the gap."""
-        if not (
-            self.driver.is_linux()
-            or self.driver.is_windows()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_tui()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the enable_mail_plain scripted-MUA-seed path",
-                detail="every app with a mail-settings page drives it",
-                tracked="mail-settings.md",
-            )
+        require_surface(self.driver, "enable-mail-plain-mua-seed")
 
     def require_token_refresh_clock_supported(self) -> None:
         """Skip unless this app runs the shared submission-token refresh AND
@@ -74,22 +62,9 @@ class MailSettingsActions:
         trickle-down lift; windows, macos and ios follow in theirs
         (`mail-credentials.md` § Trigger taxonomy, the "Submission-token
         refresh" row)."""
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
-            from helpers.app_surface import skip_unbuilt
+        from helpers.app_surface import require_surface
 
-            skip_unbuilt(
-                self.driver,
-                surface="the submission-token refresh's fake clock "
-                        "(mail_token_refresh_advance_clock)",
-                detail="the shared refresh and its clock are in place; this "
-                       "app's automation agent does not route the command yet",
-                tracked="mail-credentials.md § Trigger taxonomy",
-            )
+        require_surface(self.driver, "mail-token-refresh-clock")
 
     def advance_token_refresh_clock(self, offset_secs: int) -> None:
         """Move the submission-token refresh's clock (the 7-day re-mint
@@ -124,7 +99,7 @@ class MailSettingsActions:
         """
         row = "settings-nav-row[mail-settings]"
         if not self.driver.is_visible(row):
-            self.driver.click("settings-tab")
+            click_settings_tab(self.driver, timeout)
             self.driver.wait_for(row, timeout=timeout)
         self.driver.click(row)
         self.driver.wait_for("mail-settings-enabled-toggle", timeout=timeout)
@@ -234,6 +209,10 @@ class MailSettingsActions:
         if self.driver.is_visible("mail-add-credential-autogenerate-toggle"):
             self.driver.click("mail-add-credential-autogenerate-toggle")
         self.driver.clear_and_type("mail-add-credential-password-input", password)
+        # The submit's write needs a live nest, so a reconnect blip greys it for
+        # a moment: wait as a user would, and a word that never recovers fails
+        # naming the element's state, not as a refused click.
+        self.driver.wait_until_enabled("mail-add-credential-submit-button", timeout=30.0)
         self.driver.click("mail-add-credential-submit-button")
 
     def provision_default_credential_autogen(self, display_name: str = "Default") -> str:
@@ -673,11 +652,19 @@ class MailSettingsActions:
         # once for the session-scoped nest, and every later call sees "on").
         self.driver.wait_for(self.ENABLED_TOGGLE_ID, timeout=10.0)
         if not self.wait_for_enabled_toggle_state("on", timeout=15.0):
-            self.enable_mail("Default")
-            assert self.wait_for_enabled_toggle_state("on", timeout=self.ENABLE_SETTLE_S), (
-                "enabling mail should flip the enabled toggle to on; "
-                f"status={self.status_text()!r}, "
-                f"error: {self.page_error_text(timeout=2.0)!r}"
+            from helpers.waiting import retry_through_first_listing
+
+            retry_through_first_listing(
+                lambda: self.enable_mail("Default"),
+                lambda: self.enabled_toggle_state() == "on",
+                lambda: self.page_error_text(timeout=0.1),
+                settle=self.ENABLE_SETTLE_S,
+                reopen=self.navigate,
+                diagnose=lambda: (
+                    "enabling mail should flip the enabled toggle to on; "
+                    f"status={self.status_text()!r}, "
+                    f"error: {self.page_error_text(timeout=2.0)!r}"
+                ),
             )
         self.wait_for_credential_count_at_least(1, timeout=self.ENABLE_SETTLE_S)
 
@@ -743,9 +730,10 @@ class MailSettingsActions:
         Flipping `mail-settings-enabled-toggle` off snaps it back on (the dialog
         is the real decision point) and opens the `mail-settings-disable-confirm`
         dialog; its destructive `mail-settings-disable-confirm-button` dispatches
-        MailSettingsAction::DisableMail = bulk soft-revoke every credential (one
-        RevokeCredential per row) + clear the `msek` in the `fauna.state.mail` plane (snapshot
-        `enabled` → false). The dialog is a presented adw::MessageDialog whose
+        MailSettingsAction::DisableMail = the nest's per-actor mail flag off, every
+        submission token revoked, the credentials kept (snapshot `enabled` →
+        false; `mail-credentials.md` § Trigger taxonomy, the Disable-mail row).
+        The dialog is a presented adw::MessageDialog whose
         response button is tagged via `tag_response_button` — the same shape the
         thread-rename / add-participant / folder-delete confirms use, so the
         agent drives it directly (unlike the single-credential revoke, which is a
@@ -820,7 +808,12 @@ class MailSettingsActions:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.driver.is_visible("error-message"):
-                return self.driver.get_text("error-message")
+                # The line can go between the two reads (a clean read clearing
+                # it); that is "no error yet", not a lookup failure.
+                try:
+                    return self.driver.get_text("error-message")
+                except LookupError:
+                    pass
             time.sleep(0.3)
         return ""
 
@@ -951,19 +944,21 @@ class MailSettingsActions:
         return (self.driver.get_text(self.AUTORESPOND_MESSAGE_ID) or "").strip()
 
     def mailbox_quota_text(self) -> str:
-        """The mailbox quota readout ("" until it paints)."""
-        if not self.driver.is_visible(self.MAILBOX_QUOTA_ID):
+        """The mailbox quota readout ("" until it paints). `is_absent`, not a
+        negative `is_visible`: the readouts sit low on the page, and on windows
+        `is_visible` also means "scrolled into view"."""
+        if self.driver.is_absent(self.MAILBOX_QUOTA_ID):
             return ""
         return (self.driver.get_text(self.MAILBOX_QUOTA_ID) or "").strip()
 
     def submission_quota_text(self) -> str:
         """The daily sending allowance readout ("" until it paints)."""
-        if not self.driver.is_visible(self.SUBMISSION_QUOTA_ID):
+        if self.driver.is_absent(self.SUBMISSION_QUOTA_ID):
             return ""
         return (self.driver.get_text(self.SUBMISSION_QUOTA_ID) or "").strip()
 
     def over_quota_notice_text(self) -> str:
         """The over-quota notice, or "" while no limit has run out."""
-        if not self.driver.is_visible(self.OVER_QUOTA_NOTICE_ID):
+        if self.driver.is_absent(self.OVER_QUOTA_NOTICE_ID):
             return ""
         return (self.driver.get_text(self.OVER_QUOTA_NOTICE_ID) or "").strip()

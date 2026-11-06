@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 import features_lint as fl
 import features_catalog as fc
+import features_scan as fs
 
 
 GOAL = """\
@@ -193,6 +194,40 @@ def test_rule_3_flags_a_marker_naming_no_page(tmp_path):
     extra = TAGGED + '\n\n@pytest.mark.feature("no-such-feature")\ndef test_x(app):\n    pass\n'
     features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=extra)
     assert any("names no page in docs/features/" in p for p in run(features, e2e, repo))
+
+
+# ── rule 7 — the surface registry (e2e-conventions.md convention 7) ─────────
+SURFACES_TOML = '[events-day-cell]\nkind = "product"\nbuilt = ["tui"]\n'
+
+
+def test_rule_7_accepts_a_marker_naming_a_declared_surface(tmp_path):
+    tagged = TAGGED.replace('@pytest.mark.feature("feed-read")',
+                            '@pytest.mark.feature("feed-read")\n'
+                            '@pytest.mark.requires_surface("events-day-cell")')
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=tagged)
+    (e2e / "surfaces.toml").write_text(SURFACES_TOML, encoding="utf-8")
+    assert run(features, e2e, repo) == []
+
+
+def test_rule_7_flags_a_marker_naming_an_undeclared_surface(tmp_path):
+    tagged = TAGGED.replace('@pytest.mark.feature("feed-read")',
+                            '@pytest.mark.feature("feed-read")\n'
+                            '@pytest.mark.requires_surface("events-day-cel")')
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=tagged)
+    (e2e / "surfaces.toml").write_text(SURFACES_TOML, encoding="utf-8")
+    assert any('requires_surface("events-day-cel") names no table' in p
+               for p in run(features, e2e, repo))
+
+
+def test_rule_7_flags_a_malformed_registry(tmp_path):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED)
+    (e2e / "surfaces.toml").write_text(
+        '[events-day-cell]\nkind = "product"\nbuilt = ["tvos"]\n', encoding="utf-8")
+    # The render reads the registry too (the declared route), so it refuses the same
+    # file — a hard stop, never a partial read; the lint reports it either way.
+    with pytest.raises(fc.CatalogError, match="built names no app tvos"):
+        fc.write_all(features)
+    assert any("built names no app tvos" in p for p in run(features, e2e, repo, render=False))
 
 
 # ── rule 4 ──────────────────────────────────────────────────────────────────
@@ -601,12 +636,293 @@ def test_rule_6_flags_a_record_under_a_feature_that_no_longer_maps_its_test(tmp_
 def test_prune_removes_exactly_the_stale_records_and_the_lint_goes_green(tmp_path):
     features, e2e, repo = _stale_world(tmp_path)
     removed = fc.prune_ledger(features)
-    assert removed == [("tui", "feed-read", MOVED), ("tui", "gone-feature", MAPPED)]
+    assert removed == [("tui", "feed-read", MOVED, None), ("tui", "gone-feature", MAPPED, None)]
     left = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))
     assert list(left["features"]) == ["feed-read"]
     assert list(left["features"]["feed-read"]["tests"]) == [MAPPED]
     assert run(features, e2e, repo) == []
     assert fc.prune_ledger(features) == []  # idempotent
+
+
+def _platform_rec(outcome, platform, date="2026-08-26", stamp="0.1.2-dev+abc standalone"):
+    return {**_rec(outcome)["linux"], "platform": platform, "date": date, "stamp": stamp}
+
+
+def _cell(date, stamp):
+    return {"stamp": stamp, "date": date, "complete": True, "dirty": False, "base": None}
+
+
+def _unrunnable_world(tmp_path):
+    """web on windows is a pair no machine can run any more (build-system.md § The Deno
+    build sandbox); tui on windows is one it still can."""
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED)
+    linux_cell, windows_cell = (_cell("2026-10-20", "0.1.5-dev+bbb standalone"),
+                                _cell("2026-09-14", "0.1.2-dev+abc standalone"))
+    both = {"linux": _platform_rec("passed", "linux", "2026-10-20", linux_cell["stamp"]),
+            "windows": _platform_rec("error", "windows", "2026-09-14")}
+    for app in ("web", "tui"):
+        (features / "ledger" / f"{app}.json").write_text(json.dumps({
+            "schema": 2, "app": app, "features": {"feed-read": {
+                "cell": {**windows_cell, "platforms": {"linux": linux_cell,
+                                                       "windows": windows_cell}},
+                "tests": {MAPPED: dict(both)}}}}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+    return features, e2e, repo
+
+
+def test_rule_6_flags_a_record_on_a_platform_its_column_can_no_longer_run_on(tmp_path):
+    features, e2e, repo = _unrunnable_world(tmp_path)
+    problems = run(features, e2e, repo)
+    assert any("ledger/web.json" in p and "`windows`" in p and "feed-read" in p
+               for p in problems)
+    # tui still runs on windows: its windows record is a live observation
+    assert not any("ledger/tui.json" in p for p in problems)
+
+
+def test_prune_drops_an_unrunnable_platform_record_and_keeps_a_runnable_one(tmp_path):
+    features, e2e, repo = _unrunnable_world(tmp_path)
+    removed = fc.prune_ledger(features)
+    assert removed == [("web", "feed-read", None, "windows"),
+                       ("web", "feed-read", MAPPED, "windows")]
+    web = json.loads((features / "ledger" / "web.json").read_text(encoding="utf-8"))
+    entry = web["features"]["feed-read"]
+    assert list(entry["tests"][MAPPED]) == ["linux"]
+    # the cell re-folds over the platforms left: the windows stamp no longer holds it
+    assert list(entry["cell"]["platforms"]) == ["linux"]
+    assert entry["cell"]["stamp"] == "0.1.5-dev+bbb standalone"
+    tui = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))
+    assert sorted(tui["features"]["feed-read"]["tests"][MAPPED]) == ["linux", "windows"]
+    assert sorted(tui["features"]["feed-read"]["cell"]["platforms"]) == ["linux", "windows"]
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []  # idempotent
+
+
+# ── ruling (g): the nest file is pruned by the venues its set holds ──────────
+NEST_WITNESS = "tests/e2e-unified/tests/api/test_feed_api.py::test_feed_over_the_wire"
+DOCKER_WITNESS = ("tests/e2e-unified/tests/platform/docker/test_feed_image.py"
+                  "::test_feed_served_by_the_image")
+CONTRACT_NEST = (
+    CONTRACT_ONE + "\n"
+    "2. [nest] The nest serves the feed over the wire — `docs/goal/ui/feed.md` § Reading\n"
+    f"   - `{NEST_WITNESS}`"
+)
+CONTRACT_NEST_DOCKER = CONTRACT_NEST + f"\n   - `{DOCKER_WITNESS}`"
+# A linux-agent and a windows-agent witness of one outcome, each a `skipif` on the
+# other OS — the `notifications` outcome-8 shape (ruling (h)).
+LINUX_WITNESS = ("tests/e2e-unified/tests/platform/linux/test_agent_push_arm.py"
+                 "::test_a_frame_is_posted_once_the_app_closes")
+WINDOWS_WITNESS = ("tests/e2e-unified/tests/platform/windows/test_agent_push_arm.py"
+                   "::test_a_frame_is_toasted_once_the_app_closes")
+CONTRACT_NEST_LEGS = CONTRACT_NEST + f"\n   - `{LINUX_WITNESS}`\n   - `{WINDOWS_WITNESS}`"
+NEST_TAGGED = '''\
+import pytest
+
+
+@pytest.mark.feature("feed-read")
+def {name}():
+    pass
+'''
+
+
+def _nest_world(tmp_path, *, contract, platforms, tests):
+    """A page with a `[nest]` outcome witnessed by an ordinary `tests/api/` test and —
+    under `CONTRACT_NEST_DOCKER` — a `tests/platform/docker/` one, which runs only
+    where a docker daemon is (`fc.NEST_VENUE_PLATFORMS`) — or, under
+    `CONTRACT_NEST_LEGS`, a linux-only and a windows-only one (ruling (h)). The
+    top-level cell is the OLDEST platform's, as the writer folded before the legs."""
+    features, e2e, repo = build(tmp_path, contract=contract, tests_py=TAGGED)
+    for node_id in (NEST_WITNESS, DOCKER_WITNESS, LINUX_WITNESS, WINDOWS_WITNESS):
+        if node_id not in contract:
+            continue  # a tagged test no page cites is a rule-3 finding of its own
+        rel, name = node_id.split("::")
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(NEST_TAGGED.format(name=name), encoding="utf-8")
+    cell = dict(min(platforms.values(), key=lambda c: c["date"]))
+    (features / "ledger" / "nest.json").write_text(json.dumps({
+        "schema": 2, "app": "nest", "features": {"feed-read": {
+            "cell": {**cell, "platforms": platforms}, "tests": tests}}},
+        indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return features, e2e, repo
+
+
+MACOS_CELL = _cell("2026-09-20", "0.1.2-dev+abc standalone")
+LINUX_CELL = _cell("2026-10-20", "0.1.5-dev+bbb standalone")
+
+
+def test_venue_platforms_narrow_a_docker_witness_to_where_a_daemon_is():
+    assert fc.venue_platforms(DOCKER_WITNESS) == frozenset({"linux"})
+    assert fc.venue_platforms(NEST_WITNESS) == fc.PLATFORMS
+    assert fc.set_platforms(None) == fc.PLATFORMS
+
+
+def test_rule_6_flags_a_nest_stamp_on_a_platform_that_cannot_complete_a_docker_bearing_set(tmp_path):
+    """The macos stamp was a complete observation of the set BEFORE the docker witness
+    joined it; no macos run can ever see the whole set again (the module skips through
+    a plain `skipif`, which the writer records as nothing), so the stamp is stale."""
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_DOCKER,
+        platforms={"macos": MACOS_CELL, "linux": LINUX_CELL},
+        tests={NEST_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                              "macos": _platform_rec("passed", "macos", "2026-09-20")},
+               DOCKER_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20")}})
+    problems = run(features, e2e, repo)
+    assert any("ledger/nest.json" in p and "`macos`" in p and "feed-read" in p
+               and "cannot complete" in p for p in problems), problems
+    assert not any("`linux`" in p for p in problems)
+
+
+def test_rule_6_keeps_a_nest_stamp_from_any_platform_when_the_set_holds_no_docker_witness(tmp_path):
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST,
+        platforms={"macos": MACOS_CELL},
+        tests={NEST_WITNESS: {"macos": _platform_rec("passed", "macos", "2026-09-20")}})
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []
+
+
+def test_prune_drops_the_unreachable_nest_stamp_and_refolds_over_the_platforms_left(tmp_path):
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_DOCKER,
+        platforms={"macos": MACOS_CELL, "linux": LINUX_CELL},
+        tests={NEST_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                              "macos": _platform_rec("passed", "macos", "2026-09-20")},
+               DOCKER_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20")}})
+    assert fc.prune_ledger(features) == [("nest", "feed-read", None, "macos")]
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert list(entry["cell"]["platforms"]) == ["linux"]
+    assert entry["cell"]["stamp"] == LINUX_CELL["stamp"]
+    # the ordinary witness's macos record is a live observation: it runs there
+    assert sorted(entry["tests"][NEST_WITNESS]) == ["linux", "macos"]
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []  # idempotent
+
+
+def test_prune_removes_the_nest_cell_outright_when_no_platform_that_can_complete_the_set_stamped_it(tmp_path):
+    """The measured case (2026-10-30, `admin-forwarders` / `admin-mail-policy`): macos
+    the ONLY stamp. Unstamped is the honest state — records exist, no complete
+    observation of the current set does — until a linux run collects the whole set."""
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_DOCKER,
+        platforms={"macos": MACOS_CELL},
+        tests={NEST_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                              "macos": _platform_rec("passed", "macos", "2026-09-20")},
+               DOCKER_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20")}})
+    assert fc.prune_ledger(features) == [("nest", "feed-read", None, "macos")]
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert "cell" not in entry
+    assert sorted(entry["tests"]) == [NEST_WITNESS, DOCKER_WITNESS]
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []
+
+
+def test_prune_drops_a_docker_witness_record_keyed_by_a_platform_its_venue_cannot_run_on(tmp_path):
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_DOCKER,
+        platforms={"linux": LINUX_CELL},
+        tests={NEST_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                              "macos": _platform_rec("passed", "macos", "2026-09-20")},
+               DOCKER_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                                "macos": _platform_rec("failed", "macos", "2026-09-20")}})
+    assert fc.prune_ledger(features) == [("nest", "feed-read", DOCKER_WITNESS, "macos")]
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert list(entry["tests"][DOCKER_WITNESS]) == ["linux"]
+    assert sorted(entry["tests"][NEST_WITNESS]) == ["linux", "macos"]
+    assert run(features, e2e, repo) == []
+
+
+# ── ruling (h): a nest set with platform-exclusive witnesses is observed in legs ──
+WINDOWS_CELL = _cell("2026-10-09", "0.1.3-dev+ccc standalone")
+
+
+def _legs_tests(*, macos=False):
+    tests = {NEST_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                            "windows": _platform_rec("passed", "windows", "2026-10-09")},
+             LINUX_WITNESS: {"linux": _platform_rec("passed", "linux", "2026-10-20")},
+             WINDOWS_WITNESS: {"windows": _platform_rec("passed", "windows", "2026-10-09")}}
+    if macos:
+        tests[NEST_WITNESS]["macos"] = _platform_rec("passed", "macos", "2026-09-20")
+    return tests
+
+
+def test_a_platform_exclusive_venue_runs_on_its_own_os_alone():
+    assert fc.venue_platforms(LINUX_WITNESS) == frozenset({"linux"})
+    assert fc.venue_platforms(WINDOWS_WITNESS) == frozenset({"windows"})
+    assert fc.venue_platforms("tests/e2e-unified/tests/platform/ios/test_x.py::test_y") == frozenset({"macos"})
+    assert fc.venue_platforms("tests/e2e-unified/tests/platform/macos/test_x.py::test_y") == frozenset({"macos"})
+
+
+def test_nest_legs_follow_the_venue_table(tmp_path):
+    """One leg any platform can run for an ordinary set; one `linux` leg for a set with a
+    docker witness (ruling (g)'s reading, kept); a `linux` and a `windows` leg for a set
+    with a witness exclusive to each, `macos` redundant under both."""
+    for contract, legs, may_stamp in (
+            (CONTRACT_NEST, ({"linux", "macos", "windows"},), fc.PLATFORMS),
+            (CONTRACT_NEST_DOCKER, ({"linux"},), {"linux"}),
+            (CONTRACT_NEST_LEGS, ({"linux"}, {"windows"}), {"linux", "windows"})):
+        features, _e2e, _repo = _nest_world(tmp_path / contract[-20:].replace("`", "").replace("/", "_"),
+                                            contract=contract, platforms={"linux": LINUX_CELL}, tests={})
+        page = fc.load_pages(features)[0]
+        assert fc.legs(page) == tuple(frozenset(l) for l in legs), contract
+        assert fc.set_platforms(page) == frozenset(may_stamp), contract
+        assert set(fc.scope_by_platform(page)) == set(may_stamp), contract
+    assert fc.legs(None) == () and fc.set_platforms(None) == fc.PLATFORMS
+
+
+def test_rule_6_refolds_a_nest_cell_whose_top_level_claims_a_leg_it_lacks(tmp_path):
+    """The measured case (2026-10-31, `notifications`): a linux stamp alone, the
+    windows leg never stamped — yet the top level read complete, holding every column
+    at the linux stamp's date. The honest top level has no stamp until the windows
+    leg lands; the linux stamp waits underneath."""
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_LEGS,
+        platforms={"linux": LINUX_CELL}, tests=_legs_tests())
+    problems = run(features, e2e, repo)
+    assert any("ledger/nest.json" in p and "feed-read" in p and "not the fold" in p
+               and "rulings (h) and (i)" in p for p in problems), problems
+    assert fc.prune_ledger(features) == []  # nothing dropped: the stamp is live
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert entry["cell"] == {"complete": False, "platforms": {"linux": LINUX_CELL}}
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []  # idempotent
+
+
+def test_a_stamp_on_every_leg_folds_the_nest_cell_complete_at_the_oldest(tmp_path):
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_LEGS,
+        platforms={"linux": LINUX_CELL, "windows": WINDOWS_CELL}, tests=_legs_tests())
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert entry["cell"]["complete"] is True
+    assert entry["cell"]["stamp"] == WINDOWS_CELL["stamp"]  # the older leg shows
+
+
+def test_rule_6_flags_a_nest_stamp_on_a_platform_on_no_leg(tmp_path):
+    """`macos` can run the ordinary witness alone — a set `linux`'s and `windows`'
+    both contain outright — so its stamp claims nothing a sibling does not, and
+    would hold the top level at its own older date for good."""
+    features, e2e, repo = _nest_world(
+        tmp_path, contract=CONTRACT_NEST_LEGS,
+        platforms={"linux": LINUX_CELL, "windows": WINDOWS_CELL, "macos": MACOS_CELL},
+        tests=_legs_tests(macos=True))
+    problems = run(features, e2e, repo)
+    assert any("ledger/nest.json" in p and "`macos`" in p and "cannot complete" in p for p in problems), problems
+    assert fc.prune_ledger(features) == [("nest", "feed-read", None, "macos")]
+    entry = json.loads((features / "ledger" / "nest.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert sorted(entry["cell"]["platforms"]) == ["linux", "windows"]
+    assert entry["cell"]["stamp"] == WINDOWS_CELL["stamp"]
+    # the ordinary witness's macos record is a live observation: it runs there
+    assert sorted(entry["tests"][NEST_WITNESS]) == ["linux", "macos", "windows"]
+    assert run(features, e2e, repo) == []
+
+
+def test_the_real_notifications_page_is_observed_in_a_linux_and_a_windows_leg():
+    """Pinned against the live catalog: outcome 8's two agent witnesses."""
+    pages = {p.slug: p for p in fc.load_pages(fc.FEATURES)}
+    if "notifications" not in pages:
+        pytest.skip("no notifications page in this tree")
+    assert fc.legs(pages["notifications"]) == (frozenset({"linux"}), frozenset({"windows"}))
 
 
 def test_rule_6_absence_ignores_a_passing_record_for_an_unmapped_test(tmp_path):
@@ -617,3 +933,328 @@ def test_rule_6_absence_ignores_a_passing_record_for_an_unmapped_test(tmp_path):
     problems = run(features, e2e, repo)
     assert not any("the declaration is stale" in p for p in problems)
     assert any("no longer maps" in p for p in problems)
+
+
+# ── the surface registry's declarations (rules 6 and 7, § Cell semantics) ────
+NOT_ON_TUI = '[feed-own]\nkind = "product"\nbuilt = ["web", "linux"]\n'
+ON_TUI = '[feed-own]\nkind = "product"\nbuilt = ["web", "linux", "tui"]\n'
+MARKED = TAGGED.replace('def test_own_post_appears',
+                        '@pytest.mark.requires_surface("feed-own")\ndef test_own_post_appears')
+
+
+def _registry_world(tmp_path, registry, *, tests_py=TAGGED, records=None):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=tests_py)
+    (e2e / "surfaces.toml").write_text(registry, encoding="utf-8")
+    if records is not None:
+        _tui_ledger(features, {"feed-read": {"tests": {MAPPED: records}}})
+    return features, e2e, repo
+
+
+def _unbuilt_rec(surface="feed-own"):
+    rec = _rec("skipped")
+    rec["linux"].update(skip_class="unbuilt", surface=surface, surfaces=[surface])
+    return rec
+
+
+def test_rule_6_flags_a_stale_unbuilt_record_by_name(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, ON_TUI, records=_unbuilt_rec())
+    problems = run(features, e2e, repo)
+    assert any("stale `skipped: unbuilt` record" in p and MAPPED in p and "`feed-own`" in p
+               for p in problems)
+
+
+def test_an_unbuilt_record_on_a_column_still_unbuilt_is_not_stale(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI, records=_unbuilt_rec())
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []
+
+
+def test_a_pre_registry_unbuilt_record_is_left_for_the_migrations_last_step(tmp_path):
+    legacy = _rec("skipped")
+    legacy["linux"]["skip_class"] = "unbuilt"
+    features, e2e, repo = _registry_world(tmp_path, ON_TUI, records=legacy)
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []
+
+
+def test_unbuilt_without_surface_prune_drops_only_the_surfaceless_unbuilt_records(tmp_path):
+    """The migration's one-time last step (`--unbuilt-without-surface`): the
+    pre-registry record goes, a record that names its surface stays, and it is
+    idempotent."""
+    legacy = _rec("skipped")
+    legacy["linux"]["skip_class"] = "unbuilt"
+    keyed = _unbuilt_rec()["linux"]
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI, records=legacy)
+    _tui_ledger(features, {"feed-read": {"tests": {MAPPED: {
+        "linux": legacy["linux"], "windows": keyed}}}})
+    assert fc.prune_ledger(features) == []  # the default prune leaves them
+    assert fc.prune_ledger(features, unbuilt_without_surface=True) == [
+        ("tui", "feed-read", MAPPED, "linux")]
+    left = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))
+    assert list(left["features"]["feed-read"]["tests"][MAPPED]) == ["windows"]
+    assert fc.prune_ledger(features, unbuilt_without_surface=True) == []  # idempotent
+
+
+def test_prune_drops_a_stale_unbuilt_record_and_the_lint_goes_green(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, ON_TUI, records=_unbuilt_rec())
+    assert fc.prune_ledger(features) == [("tui", "feed-read", MAPPED, "linux")]
+    left = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))
+    assert left["features"]["feed-read"]["tests"] == {}
+    assert run(features, e2e, repo) == []
+    assert fc.prune_ledger(features) == []  # idempotent
+
+
+def test_rule_7_flags_a_declaration_a_passing_record_refutes(tmp_path):
+    """Lint (a): the map names the surface (here through the marker) and the test
+    PASSED on an app the registry says has not built it."""
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI, tests_py=MARKED,
+                                          records=_rec("passed"))
+    problems = run(features, e2e, repo)
+    assert any("[feed-own]: declared not built on tui" in p and "PASSED there" in p
+               for p in problems)
+
+
+def test_rule_7_reads_the_map_from_records_too(tmp_path):
+    passed = _rec("passed")
+    passed["linux"]["surfaces"] = ["feed-own"]
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI, records=passed)
+    assert any("[feed-own]: declared not built on tui" in p for p in run(features, e2e, repo))
+
+
+def test_rule_7_is_quiet_when_the_declaration_holds(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, ON_TUI, tests_py=MARKED,
+                                          records=_rec("passed"))
+    assert run(features, e2e, repo) == []
+    features, e2e, repo = _registry_world(tmp_path / "b", NOT_ON_TUI, tests_py=MARKED,
+                                          records=_rec("failed"))
+    assert not any("feed-own" in p for p in run(features, e2e, repo))
+
+
+def _web_ledger(features, records):
+    (features / "ledger" / "web.json").write_text(
+        json.dumps({"schema": 2, "app": "web",
+                    "features": {"feed-read": {"tests": {MAPPED: records}}}},
+                   indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _dated(outcome, date, surfaces=None):
+    r = _rec(outcome)
+    r["linux"]["date"] = date
+    if surfaces:
+        r["linux"]["surfaces"] = list(surfaces)
+    return r
+
+
+def test_rule_7_ignores_a_removed_gate_a_newer_pass_did_not_reach(tmp_path):
+    """The row's case: an older record on another app still lists the gate the test
+    dropped; the newer pass on tui reached no gate, so it refutes nothing."""
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI,
+                                          records=_dated("passed", "2026-10-30"))
+    _web_ledger(features, _dated("passed", "2026-10-29", ["feed-own"]))
+    assert not any("feed-own" in p for p in run(features, e2e, repo))
+
+
+def test_rule_7_still_reads_a_pass_that_cannot_say_what_it_reached(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI,
+                                          records=_dated("passed", "2026-10-20"))
+    _web_ledger(features, _dated("passed", "2026-10-29", ["feed-own"]))
+    assert any("[feed-own]: declared not built on tui" in p
+               for p in run(features, e2e, repo))
+
+
+def test_rule_7_keeps_a_marked_surface_whatever_the_pass_reached(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI, tests_py=MARKED,
+                                          records=_dated("passed", "2026-10-30"))
+    assert any("[feed-own]: declared not built on tui" in p
+               for p in run(features, e2e, repo))
+
+
+UI_YAML = "pages:\n  feed:\n    elements:\n      - feed-own   # text\n"
+UI_ACTUAL_HAS = "pages:\n  feed:\n    elements:\n      - feed-own   # built 2026-10-01\n"
+UI_ACTUAL_MISSING = ("pages:\n  feed:\n    elements:\n      - page-heading\n"
+                     "    missing:\n      - feed-own\n")
+
+
+def test_rule_7_flags_a_ui_yaml_id_declared_unbuilt_where_ui_actual_records_it(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI)
+    (e2e / "ui.yaml").write_text(UI_YAML, encoding="utf-8")
+    (e2e / "ui-actual-tui.yaml").write_text(UI_ACTUAL_HAS, encoding="utf-8")
+    problems = run(features, e2e, repo)
+    assert [p for p in problems if "ui-actual" in p] == [
+        "tests/e2e-unified/surfaces.toml [feed-own]: declared not built on tui, but "
+        "tests/e2e-unified/ui-actual-tui.yaml records the ui.yaml id `feed-own` present "
+        "there — declaring unbuilt what exists is a never-move (feature-catalog.md § "
+        "Closing a gap); widen `built` or correct the snapshot"]
+
+
+def test_rule_7_reads_a_missing_list_as_absent_and_a_harness_key_not_at_all(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI)
+    (e2e / "ui.yaml").write_text(UI_YAML, encoding="utf-8")
+    (e2e / "ui-actual-tui.yaml").write_text(UI_ACTUAL_MISSING, encoding="utf-8")
+    assert run(features, e2e, repo) == []
+    (e2e / "surfaces.toml").write_text(NOT_ON_TUI.replace("product", "harness"),
+                                       encoding="utf-8")
+    (e2e / "ui-actual-tui.yaml").write_text(UI_ACTUAL_HAS, encoding="utf-8")
+    assert run(features, e2e, repo) == []
+
+
+def test_rule_7_ignores_a_key_that_is_not_a_ui_yaml_id(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, NOT_ON_TUI)
+    (e2e / "ui.yaml").write_text("pages:\n  feed:\n    elements:\n      - other\n",
+                                 encoding="utf-8")
+    (e2e / "ui-actual-tui.yaml").write_text(UI_ACTUAL_HAS, encoding="utf-8")
+    assert run(features, e2e, repo) == []
+
+
+ALL_SEVEN = ('[feed-own]\nkind = "product"\n'
+             'built = ["web", "linux", "windows", "macos", "ios", "android", "tui"]\n')
+
+
+def test_rule_7_calls_a_product_entry_built_everywhere_finished(tmp_path):
+    features, e2e, repo = _registry_world(tmp_path, ALL_SEVEN)
+    assert any("[feed-own]: built on all seven apps — finished" in p
+               for p in run(features, e2e, repo))
+    # a harness entry built everywhere is still a live description of the driver
+    features, e2e, repo = _registry_world(tmp_path / "b", ALL_SEVEN.replace("product", "harness"))
+    assert run(features, e2e, repo) == []
+
+
+def test_yaml_list_ids_reads_block_lists_under_the_named_keys():
+    text = ("pages:\n  feed:\n    state_fields:\n      - data.feed.posts[].body\n"
+            "    elements:\n      - page-heading          # text\n      - feed-view\n"
+            "    optional_elements:\n      - feed-extra\n    missing:\n      - feed-gone\n"
+            "  other:\n    elements:\n    - compact-item\n")
+    present = fl.yaml_list_ids(text, fl.UI_ACTUAL_PRESENT)
+    assert present == {"page-heading", "feed-view", "feed-extra", "compact-item"}
+    assert fl.yaml_list_ids(text) == present | {"feed-gone"}
+
+
+# ── ruling (i): an app column's set is observed in legs, by host_platform ────
+APP_EVERY = MAPPED
+APP_LINUX = "tests/e2e-unified/tests/test_feed_keyring.py::test_the_feed_key_rests_in_the_keyring"
+APP_WINDOWS = "tests/e2e-unified/tests/test_feed_credman.py::test_the_feed_key_rests_in_credman"
+CONTRACT_APP_LEGS = CONTRACT_ONE + f"\n   - `{APP_LINUX}`\n   - `{APP_WINDOWS}`"
+HOST_TAGGED = '''\
+import pytest
+
+pytestmark = [pytest.mark.tui, pytest.mark.host_platform({module})]
+
+
+@pytest.mark.feature("feed-read")
+@pytest.mark.host_platform({function})
+def {name}(app):
+    pass
+'''
+LINUX_COLUMN_MARKED_WINDOWS = '''\
+import pytest
+
+
+@pytest.mark.linux
+@pytest.mark.feature("feed-read")
+@pytest.mark.host_platform("windows")
+def test_own_post_appears(app):
+    pass
+'''
+
+
+def _app_world(tmp_path, *, platforms=None, linux="\"linux\"", windows="\"windows\"",
+               tests=None):
+    """A page whose `[app]` outcome is witnessed by an ordinary test any platform runs,
+    a tui test marked `host_platform("linux")` (module and function marks, folded by
+    intersection) and one marked `host_platform("windows")` — the
+    identity-protected-on-this-device shape (ruling (i))."""
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_APP_LEGS, tests_py=TAGGED)
+    for node_id, mark in ((APP_LINUX, linux), (APP_WINDOWS, windows)):
+        rel, name = node_id.split("::")
+        (repo / rel).write_text(HOST_TAGGED.format(
+            module=f"{mark}, \"macos\"", function=mark, name=name), encoding="utf-8")
+    if platforms is not None:
+        cell = dict(min(platforms.values(), key=lambda c: c["date"]))
+        _tui_ledger(features, {"feed-read": {"cell": {**cell, "platforms": platforms},
+                                             "tests": tests or {}}})
+    return features, e2e, repo
+
+
+def test_the_host_platform_marks_fold_by_intersection(tmp_path):
+    _features, e2e, repo = _app_world(tmp_path)
+    facts = fs.scan_tree(e2e, repo=repo)
+    assert facts[APP_LINUX].platforms == ("linux",)  # module {linux, macos} ∩ function {linux}
+    assert facts[APP_WINDOWS].platforms == ("windows",)
+    assert facts[APP_EVERY].platforms is None
+    assert fc.scan_marks(repo)[2] == {APP_LINUX: ("linux",), APP_WINDOWS: ("windows",)}
+
+
+def test_app_legs_follow_the_host_platform_marker(tmp_path):
+    """tui: a `linux` and a `windows` leg, `macos` redundant under both; every
+    single-platform column one leg of its one platform, as before."""
+    features, _e2e, repo = _app_world(tmp_path)
+    page = fc.load_pages(features)[0]
+    app_marks, _s, platform_marks = fc.scan_marks(repo)
+    assert fc.witness_platforms(APP_LINUX, platform_marks) == frozenset({"linux"})
+    assert fc.witness_platforms(APP_EVERY, platform_marks) == fc.PLATFORMS
+    assert fc.legs(page, "tui", app_marks, platform_marks) == (
+        frozenset({"linux"}), frozenset({"windows"}))
+    scope = fc.scope_by_platform(page, "tui", app_marks, platform_marks)
+    assert set(scope) == {"linux", "windows"}
+    assert scope["windows"] == {APP_EVERY, APP_WINDOWS}
+    assert fc.legs(page, "linux", app_marks, platform_marks) == (frozenset({"linux"}),)
+    assert fc.legs(page, "android", app_marks, platform_marks) == (frozenset({"linux", "macos"}),)
+    # without the markers the column is one leg, exactly the pre-(i) fold
+    assert fc.legs(page, "tui", app_marks) == (frozenset({"linux", "macos", "windows"}),)
+
+
+def test_rule_6_refolds_an_app_cell_whose_top_level_claims_a_leg_it_lacks(tmp_path):
+    """The measured case (2026-11-02, identity-protected-on-this-device): a linux tui
+    stamp alone read complete; the windows leg was never stamped."""
+    features, e2e, repo = _app_world(tmp_path, platforms={"linux": LINUX_CELL})
+    problems = run(features, e2e, repo)
+    assert any("ledger/tui.json" in p and "feed-read" in p and "not the fold" in p
+               for p in problems), problems
+    assert fc.prune_ledger(features) == []
+    entry = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert entry["cell"] == {"complete": False, "platforms": {"linux": LINUX_CELL}}
+    assert run(features, e2e, repo) == []
+
+
+def test_a_tui_stamp_on_a_redundant_platform_is_stale(tmp_path):
+    features, e2e, repo = _app_world(
+        tmp_path, platforms={"linux": LINUX_CELL, "windows": WINDOWS_CELL, "macos": MACOS_CELL},
+        tests={APP_LINUX: {"linux": _platform_rec("passed", "linux", "2026-10-20"),
+                           "macos": _platform_rec("passed", "macos", "2026-09-20")}})
+    problems = run(features, e2e, repo)
+    assert any("ledger/tui.json" in p and "`macos`" in p and "ruling" in p for p in problems), problems
+    assert fc.prune_ledger(features) == [("tui", "feed-read", None, "macos"),
+                                         ("tui", "feed-read", APP_LINUX, "macos")]
+    entry = json.loads((features / "ledger" / "tui.json").read_text(encoding="utf-8"))["features"]["feed-read"]
+    assert sorted(entry["cell"]["platforms"]) == ["linux", "windows"]
+    assert entry["cell"]["complete"] is True and entry["cell"]["stamp"] == WINDOWS_CELL["stamp"]
+    assert list(entry["tests"][APP_LINUX]) == ["linux"]
+    assert run(features, e2e, repo) == []
+
+
+def test_rule_6_refuses_a_host_platform_outside_its_vocabulary_venue_or_columns(tmp_path):
+    features, e2e, repo = _app_world(tmp_path, linux="\"darwin\"")
+    assert any("darwin" in p and "vocabulary" in p for p in run(features, e2e, repo))
+    # a linux-column witness marked windows: no column it speaks for runs there
+    features, e2e, repo = build(tmp_path / "cols", contract=CONTRACT_ONE,
+                                tests_py=LINUX_COLUMN_MARKED_WINDOWS)
+    assert any("windows" in p and "none of its columns" in p for p in run(features, e2e, repo))
+    # a venue module naming a platform outside its venue
+    features, e2e, repo = _nest_world(tmp_path / "venue", contract=CONTRACT_NEST_LEGS,
+                                      platforms={"linux": LINUX_CELL}, tests={})
+    rel, name = LINUX_WITNESS.split("::")
+    (repo / rel).write_text(NEST_TAGGED.replace(
+        "def {name}", "@pytest.mark.host_platform(\"windows\")\ndef {name}").format(name=name),
+        encoding="utf-8")
+    assert any("outside its venue" in p for p in run(features, e2e, repo))
+
+
+def test_the_real_identity_page_has_tui_legs_linux_and_windows():
+    """Pinned against the live catalog: the Credential Manager witness is the windows
+    leg's, the Secret-Service and session-bus ones the linux leg's."""
+    pages = {p.slug: p for p in fc.load_pages(fc.FEATURES)}
+    if "identity-protected-on-this-device" not in pages:
+        pytest.skip("no identity-protected-on-this-device page in this tree")
+    app_marks, _s, platform_marks = fc.scan_marks()
+    assert fc.legs(pages["identity-protected-on-this-device"], "tui", app_marks,
+                   platform_marks) == (frozenset({"linux"}), frozenset({"windows"}))

@@ -21,6 +21,14 @@ struct SnapshotFileListView: View {
         // SnapshotListView's identical rule-6 conversion.
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // A kind row lists no files, and an empty folder snapshot says
+                // so — never an empty list without a reason (`backups.md`
+                // § Snapshot-list shape → *Kind entries*).
+                if let notice = vm.detailNoticeText {
+                    Text(notice)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 8)
+                }
                 ForEach(Array(vm.detailFiles.enumerated()), id: \.element.path) { offset, file in
                     HStack {
                         VStack(alignment: .leading) {
@@ -57,10 +65,21 @@ struct SnapshotFileListView: View {
             .padding(.horizontal)
         }
         .accessibilityIdentifier(Ids.snapshotDetailFiles)
-        // Read-only anchor for `is_visible("snapshot-detail-files")`. Mirrors
-        // macOS MacSnapshotFileListView.
-        .automationValue(Ids.snapshotDetailFiles, text: { "" })
+        // Read-only anchor for `is_visible("snapshot-detail-files")`; reads the
+        // notice line when one stands in for the list. Mirrors macOS
+        // MacSnapshotFileListView.
+        .automationValue(Ids.snapshotDetailFiles, text: { vm.detailNoticeText ?? "" })
         .navigationTitle(L.backups.snapshot(id: String(snapshotId)))
+        // This screen is PUSHED over `SnapshotListView`, whose own bottom banner
+        // is off screen while it is up — without this one a download refusal
+        // painted the VM's `errorMessage` where nobody could see it (convention
+        // 11: an automation command is honoured or fails visibly).
+        .safeAreaInset(edge: .bottom) {
+            if let error = vm.errorMessage {
+                ErrorBanner(message: error)
+                    .padding()
+            }
+        }
         // `snapshot-check-button` lives on the Backups landing page
         // (`SnapshotListView`'s toolbar, matching macOS `BackupSplitView` and
         // ui.yaml's flat `backups` page element scope) — not here.
@@ -75,7 +94,7 @@ struct SnapshotFileListView: View {
         // targets share one refusal instead of each dropping the command
         // silently — convention 11, see the VM's doc comment.
         guard let data = await vm.downloadSnapshotFile(
-            deviceId: vm.openSnapshotDeviceId, snapshotId: snapshotId, path: file.path)
+            snapshotId: snapshotId, path: file.path)
         else { return }
         let name = (file.path as NSString).lastPathComponent
         try? SnapshotFileSaver.save(suggestedFileName: name, data: data)

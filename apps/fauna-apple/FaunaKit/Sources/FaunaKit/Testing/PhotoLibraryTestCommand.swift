@@ -2,8 +2,9 @@ import Foundation
 import Photos
 
 // Compiled out of release artifacts (testing.md convention 15), like the app
-// shells' whole `handleTestCommand` surface that calls into it.
-#if DEBUG
+// shells' whole `handleTestCommand` surface that calls into it. Never in the
+// kids build either: it names `PhotoBackupEngine`, which the kids flavor excises.
+#if DEBUG && !FAUNA_KIDS
 
 /// The macOS photo-backup venue's two fixture seams over the REAL System Photo
 /// Library — `fauna_e2e_agent::PHOTO_BACKUP_SEED_LIBRARY` and

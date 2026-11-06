@@ -52,6 +52,9 @@ fauna-client-media = { path = "../fauna-client-media" }
 # the eligibility predicate the Media page's share surfaces are driven from.
 # Non-optional (the gestures are machine core); wasm-clean.
 fauna-client-share = { path = "../fauna-client-share" }
+# The first-load settle's back-off (`SettlePolicy`): an async sleep that builds
+# for both targets — this machine runs native and in the browser.
+fauna-sleep = { workspace = true }
 # The ingress layer the `upload` gesture runs first (`process_media`: strip,
 # thumbnail) and the audience-keyed thumbnail seal (`seal_rendered_thumbnail` +
 # `Audience` + `UploadSidecar.to_dag_cbor()`); the file itself seals through

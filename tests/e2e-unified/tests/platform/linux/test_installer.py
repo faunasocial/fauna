@@ -18,6 +18,7 @@ import pytest
 from drivers.port_util import popen_group_kwargs, reap_descendants_of
 from drivers.x_display import sweep_stale_x_locks
 from helpers.app_surface import skip_environment
+from helpers.helper_bins import helper_bin
 
 pytestmark = [pytest.mark.skipif(sys.platform != "linux", reason="Linux-only"), pytest.mark.tier_3]
 
@@ -41,63 +42,6 @@ def _get_repo_root():
         capture_output=True, text=True, check=True, cwd=here,
     )
     return result.stdout.strip()
-
-
-def max_mtime(patterns):
-    """Return the maximum mtime across all files matching the glob patterns."""
-    best = 0.0
-    for pattern in patterns:
-        for path in glob.glob(pattern, recursive=True):
-            try:
-                best = max(best, os.path.getmtime(path))
-            except OSError:
-                pass
-    return best
-
-
-def check_cache(stamp_path, current_mtime, artifact_path):
-    """Return True if the cached artifact is up-to-date.
-
-    Checks that both the stamp file and the artifact exist and the cached
-    mtime recorded in the stamp is >= current_mtime.
-    """
-    if not os.path.exists(artifact_path) or not os.path.exists(stamp_path):
-        return False
-    try:
-        with open(stamp_path) as f:
-            cached_mtime = float(f.read().strip())
-        return cached_mtime >= current_mtime
-    except (ValueError, OSError):
-        return False
-
-
-def write_stamp(stamp_path, mtime):
-    """Write mtime to the stamp file, creating parent directories as needed."""
-    os.makedirs(os.path.dirname(stamp_path), exist_ok=True)
-    with open(stamp_path, "w") as f:
-        f.write(str(mtime))
-
-
-def cargo_build(packages, extra_args=None, timeout=600):
-    """Build the given cargo packages in release mode.
-
-    Calls pytest.fail on non-zero exit. Returns the completed subprocess result.
-    """
-    cmd = ["cargo", "build", "--release"]
-    for pkg in packages:
-        cmd.extend(["-p", pkg])
-    if extra_args:
-        cmd.extend(extra_args)
-    result = subprocess.run(
-        cmd,
-        capture_output=True, text=True, timeout=timeout,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"cargo build failed (rc={result.returncode}) for {packages}:\n"
-            f"stdout: {result.stdout[-2000:]}\nstderr: {result.stderr[-2000:]}"
-        )
-    return result
 
 
 def launch_and_check(binary_path, timeout=3, args=None):
@@ -225,29 +169,13 @@ def _wm_class_pairs(display, timeout=15):
     )
 
 
-# ── Source patterns for cache invalidation ──
-
-DESKTOP_SOURCES = [
-    "apps/fauna-linux/src/**/*.rs",
-    "apps/fauna-linux/Cargo.toml",
-    "libs/*/src/**/*.rs",
-    "libs/*/Cargo.toml",
-]
-AGENT_SOURCES = [
-    "bins/fauna-sync-agent/src/**/*.rs",
-    "bins/fauna-sync-agent/Cargo.toml",
-    "libs/*/src/**/*.rs",
-    "libs/*/Cargo.toml",
-]
-NEST_SOURCES = [
-    "bins/fauna-nest/src/**/*.rs",
-    "bins/fauna-nest/Cargo.toml",
-    "libs/*/src/**/*.rs",
-    "libs/*/Cargo.toml",
-]
-
-
 # ── Build fixtures ──
+#
+# The three release binaries are the packager's INPUTS, not its subject (the
+# subject is the package), so they are built at collection time by the
+# helper-binary registry (`helpers/helper_bins.py`, `fauna-desktop` /
+# `fauna-sync-agent` / `fauna-nest`, reached by this module) and these fixtures
+# only replay the result — e2e-conventions.md convention 9.
 
 
 @pytest.fixture(scope="session")
@@ -257,69 +185,22 @@ def repo_root():
 
 
 @pytest.fixture(scope="session")
-def desktop_binary(repo_root):
-    """Build fauna-linux in release mode, returning the binary path.
-
-    Cached: skips the build if sources have not changed since the last run
-    (stamp file at build/linux-installer/desktop.stamp).
-    """
-    target_dir = os.environ.get("CARGO_TARGET_DIR", os.path.join(repo_root, "target"))
-    binary_path = os.path.join(target_dir, "release", "fauna-desktop")
-    stamp_path = os.path.join(repo_root, "build", "linux-installer", "desktop.stamp")
-
-    full_patterns = [os.path.join(repo_root, p) for p in DESKTOP_SOURCES]
-    current_mtime = max_mtime(full_patterns)
-
-    if check_cache(stamp_path, current_mtime, binary_path):
-        return binary_path
-
-    cargo_build(["fauna-linux"])
-    write_stamp(stamp_path, current_mtime)
-    return binary_path
+def desktop_binary():
+    """The release `fauna-desktop` (prebuilt)."""
+    return str(helper_bin("fauna-desktop"))
 
 
 @pytest.fixture(scope="session")
-def agent_binary(repo_root):
-    """Build fauna-sync-agent in release mode, returning the binary path.
-
-    Every install channel ships it beside fauna-desktop
-    (installers/linux-desktop.md § Installation Files). Cached via
-    build/linux-installer/agent.stamp.
-    """
-    target_dir = os.environ.get("CARGO_TARGET_DIR", os.path.join(repo_root, "target"))
-    binary_path = os.path.join(target_dir, "release", "fauna-sync-agent")
-    stamp_path = os.path.join(repo_root, "build", "linux-installer", "agent.stamp")
-
-    full_patterns = [os.path.join(repo_root, p) for p in AGENT_SOURCES]
-    current_mtime = max_mtime(full_patterns)
-
-    if check_cache(stamp_path, current_mtime, binary_path):
-        return binary_path
-
-    cargo_build(["fauna-sync-agent"])
-    write_stamp(stamp_path, current_mtime)
-    return binary_path
+def agent_binary():
+    """The release `fauna-sync-agent` (prebuilt) — every install channel ships it
+    beside fauna-desktop (installers/linux-desktop.md § Installation Files)."""
+    return str(helper_bin("fauna-sync-agent"))
 
 
 @pytest.fixture(scope="session")
-def nest_binary(repo_root):
-    """Build fauna-nest with the email feature in release mode, returning the binary path.
-
-    Cached via build/linux-installer/nest.stamp.
-    """
-    target_dir = os.environ.get("CARGO_TARGET_DIR", os.path.join(repo_root, "target"))
-    binary_path = os.path.join(target_dir, "release", "fauna-nest")
-    stamp_path = os.path.join(repo_root, "build", "linux-installer", "nest.stamp")
-
-    full_patterns = [os.path.join(repo_root, p) for p in NEST_SOURCES]
-    current_mtime = max_mtime(full_patterns)
-
-    if check_cache(stamp_path, current_mtime, binary_path):
-        return binary_path
-
-    cargo_build(["fauna-nest"], extra_args=["--features", "email"])
-    write_stamp(stamp_path, current_mtime)
-    return binary_path
+def nest_binary():
+    """The release `fauna-nest` with the email feature (prebuilt)."""
+    return str(helper_bin("fauna-nest"))
 
 
 @pytest.fixture(scope="session")

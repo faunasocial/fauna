@@ -57,13 +57,21 @@ class McpError(AssertionError):
 
 
 def _shell_env(
-    nest_url: str, home: Path, runtime_dir: str | None = None, store: str = "e2e"
+    nest_url: str,
+    home: Path,
+    runtime_dir: str | None = None,
+    store: str = "e2e",
+    user_home: str | None = None,
 ) -> dict:
     """The isolated environment every shell process under ``home`` shares.
     ``runtime_dir`` is the custodian app's private ``XDG_RUNTIME_DIR``: the
     conversations oracle's door sits beside that launch's agent socket, which a
     host on the same session would find in its own runtime dir — the harness
     isolates each app launch, so the shell is pointed at the custodian's.
+    ``user_home`` is the same pointer on macOS, which ignores
+    ``XDG_RUNTIME_DIR``: the door sits under the custodian launch's
+    ``<HOME>/Library/Application Support/Fauna`` (``fauna_ipc::unix_transport``),
+    so the shell runs with that launch's ``HOME``.
     ``store="unattended"`` launches the shell as on a box with no usable OS
     secret store: no ``FAUNA_E2E_CREDENTIAL_DIR`` (which would short-circuit
     the resolution) and ``FAUNA_E2E_FORCE_HEADLESS_STORE``, so the store
@@ -90,6 +98,8 @@ def _shell_env(
         env["FAUNA_E2E_FORCE_HEADLESS_STORE"] = "1"
     if runtime_dir is not None:
         env["XDG_RUNTIME_DIR"] = runtime_dir
+    if user_home is not None:
+        env["HOME"] = user_home
     return env
 
 
@@ -104,6 +114,7 @@ class CliMcpSession:
         transport: str = "stdio",
         runtime_dir: str | None = None,
         store: str = "e2e",
+        user_home: str | None = None,
     ):
         assert transport in ("stdio", "http"), transport
         self.transport = transport
@@ -113,7 +124,7 @@ class CliMcpSession:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_shell_env(nest_url, home, runtime_dir, store),
+            env=_shell_env(nest_url, home, runtime_dir, store, user_home),
             **popen_group_kwargs(),
         )
         reap_descendants_of(self._proc.pid)

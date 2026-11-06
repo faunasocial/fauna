@@ -311,6 +311,8 @@ pub enum Inbound {
 /// Would a deposit of `far_message_id` on `leg` for `account` be refused
 /// anyway — already stored, or past an inbound cap? The cheap answer a leg
 /// asks before paying for an unwrap or a fetch it would then throw away.
+/// `peer` is the room's far id when the leg already knows it (the duplicate
+/// test and the room cap are then that room's); `None` before an unwrap.
 ///
 /// # Errors
 /// A database fault.
@@ -318,9 +320,10 @@ pub async fn precheck(
     db: &CacheDb,
     leg: &LegDef,
     account: &[u8; 32],
+    peer: Option<&str>,
     far_message_id: &str,
 ) -> anyhow::Result<Option<DepositPrecheck>> {
-    db.bridged_deposit_precheck(account, leg.principal_id, far_message_id)
+    db.bridged_deposit_precheck(account, leg.principal_id, peer, far_message_id)
         .await
 }
 
@@ -342,7 +345,7 @@ pub async fn deposit_gated(
     account: &[u8; 32],
     dm: &InboundDm<'_>,
 ) -> anyhow::Result<Inbound> {
-    match precheck(db, leg, account, dm.far_message_id).await? {
+    match precheck(db, leg, account, Some(dm.peer), dm.far_message_id).await? {
         Some(DepositPrecheck::Duplicate) => return Ok(Inbound::Duplicate),
         Some(DepositPrecheck::Full) => return Ok(Inbound::Full),
         None => {}
@@ -364,6 +367,7 @@ pub async fn deposit_gated(
         return Ok(Inbound::NoSealKey);
     };
     let sealed = crate::bridge_routing_handlers::seal_recipient_blob(
+        fauna_mls::wrapped_blob::RecordKind::Mail,
         dm.plaintext,
         &seal_key.mls_pubkey,
         Some(seal_key.mlkem_ek.as_slice()),
@@ -432,6 +436,7 @@ pub async fn deposit_sealed(
         db.deposit_bridged_message(
             account,
             leg.principal_id,
+            leg.bridge_id,
             dm.peer,
             dm.far_message_id,
             dm.sender,

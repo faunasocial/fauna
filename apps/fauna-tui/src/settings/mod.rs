@@ -1354,6 +1354,11 @@ impl PrivacyState {
 // accept, matching linux's `gtk::StringList` exactly (priority #2/#3).
 
 impl SettingsState {
+    /// Take the status poll's latest reading of the group sets' review lists.
+    pub(crate) fn set_group_conflicts(&mut self, conflicts: crate::sync_agent::GroupConflicts) {
+        self.folders.group_conflicts = conflicts;
+    }
+
     /// The active identity's secret, for callers outside this module that must
     /// resolve something *about* the active identity (the escrow ceremonies'
     /// predecessor-seed walk in `session.rs`). The field itself stays
@@ -2447,6 +2452,28 @@ pub fn device_activity_resync_op(
     })
 }
 
+/// What the `devices` surface re-reads on a reconnect or a resync
+/// (`transport.md` § Which surfaces a push invalidates): the open sub-page's
+/// lists and, on Folders, the expanded row's reads, whose good answers retire
+/// what they put up while the nest was down (`folders.md` § Errors & edge cases).
+pub fn devices_stale_ops(state: &SettingsState) -> Vec<Op> {
+    match state.sub {
+        SubPage::Devices => devices_resync_op(state).into_iter().collect(),
+        SubPage::Folders => folders_hydrate_op(state, true)
+            .into_iter()
+            .chain(expanded_row_reread_op(state))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The expanded row's reads, whichever set it is. Same guards as
+/// [`device_activity_resync_op`].
+fn expanded_row_reread_op(state: &SettingsState) -> Option<Op> {
+    let name = expanded_owner_row_where(state, |_| true)?.name.clone();
+    roster_resync_op(state, &name)
+}
+
 /// The full roster re-read (`Op::LoadFolderRoster`, the expand edge's op) for a
 /// bind that just confirmed under `bound_set` — the agent's bind enrolled this
 /// device's place if it held none (`file-sync.md` § 4, *A local presence writes
@@ -2659,7 +2686,7 @@ pub fn spawn_archive_import_progress_refresh(
 /// visit would mean a freshly-launched client silently showed muted bodies until
 /// the user happened to open the sub-page.
 pub fn spawn_muted_words_refresh(
-    state: &SettingsState,
+    state: &mut SettingsState,
     tx: &UnboundedSender<UiMessage>,
     session_generation: u64,
 ) {
@@ -2731,10 +2758,12 @@ pub fn spawn_labeler_catalog_refresh(
 /// never a panic, and never a silent partial where the list looks empty but a
 /// save would clobber the real one: [`Action::AddMutedWord`] reads through the
 /// same gate).
-fn muted_words_load_op(state: &SettingsState) -> Option<Op> {
+fn muted_words_load_op(state: &mut SettingsState) -> Option<Op> {
     state.nest.as_ref()?;
+    state.muted_words.dispatch_seq += 1;
     Some(Op::LoadMutedWords {
         store: state.preference_store(),
+        seq: state.muted_words.dispatch_seq,
     })
 }
 
@@ -3371,11 +3400,11 @@ pub enum Action {
     /// Done screen (step 6). Purely local: the log is already on the snapshot,
     /// so this is a view toggle, not a machine action.
     ArchiveImportToggleSkipped,
-    /// `archive-import-profile-prefill-button` — offered, and DISABLED: the
-    /// machine exposes no archive profile yet, so there is nothing to prefill
-    /// (`archive-import.md` § Implementation status today). Painted so
-    /// ui.yaml's element exists, never actuable and never faked green
-    /// (testing.md point 11) — the `MailImportOAuthStart` precedent.
+    /// `archive-import-profile-prefill-button` — the Done step's one-tap
+    /// profile prefill (`archive-import.md` § What each category becomes, the
+    /// Profile row): dispatches `ApplyArchiveProfile`, which writes the
+    /// archive's name, bio, links and picture onto the user's own profile.
+    /// Enabled only while the snapshot carries an offer not yet applied.
     ArchiveImportProfilePrefill,
     /// `mail-settings-serve-here-toggle` — flip whether THIS nest serves the
     /// user's mailbox over IMAP/CalDAV (`mail-settings.md` § Local IMAP/CalDAV-
@@ -3886,6 +3915,19 @@ pub enum Action {
     ConfirmRemoveMember(String),
     /// `device-member-remove-cancel-button[i]` — disarm; nothing written.
     CancelRemoveMember,
+    /// `device-rename-button[i]` — open the name editor over the card of
+    /// listed device `device_id` (`ui/devices.md` § Device names), prefilled
+    /// with its name (`DevicesMachine::device_name`). View state only
+    /// ([`apply`]); opening another card's editor closes the first.
+    RenameDevice(String),
+    /// `device-rename-confirm-button` (or Enter in `device-rename-input`) —
+    /// name the open editor's device the typed text through
+    /// `DevicesMachine::rename_device` → `Op::RenameDevice`
+    /// ([`apply_local`]); closes the editor either way, a refusal painting
+    /// `error-message`.
+    ConfirmRenameDevice,
+    /// `device-rename-cancel-button` — close the editor; nothing written.
+    CancelRenameDevice,
     /// `custody-offer-accept-button[i]` — consent to hold (T16): records the
     /// accept on the ceremony record (binding THIS device + the default
     /// budget) on the `fauna.state.custody-ceremony` plane, then a `drive_ceremonies` pass
@@ -4128,6 +4170,12 @@ pub enum Action {
     /// `conflict-resolve-button[i]` — the review list's one-tap "use the other
     /// version", carrying the conflict id (network → [`apply_local`]).
     UseOtherVersion(i64),
+    /// `conflict-resolve-button[i]` on a group set's review row: the same "use
+    /// the other version", but the row lives in the set's own state DB on this
+    /// device, so it is addressed by (set, local id) and runs on the sync
+    /// agent — the nest machine holds no such row (`group-set.md` § Build
+    /// design — the group set, decision 9). → [`apply_local`]; no `Op`.
+    UseRetainedVersion { folder_id: String, conflict_id: i64 },
     /// `folder-location-add-button` — bind the expanded row's `folder-location-path-input`
     /// typed path to that row's set (contextual — no free-text name) on the
     /// external sync agent (A6 Slice 3). Touches `app.sync_agent` optimistically →
@@ -4629,9 +4677,9 @@ impl Action {
             | Action::ArchiveImportPause
             | Action::ArchiveImportResume
             | Action::ArchiveImportCancel
-            | Action::ArchiveImportToggleSkipped
-            | Action::ArchiveImportProfilePrefill => None,
+            | Action::ArchiveImportToggleSkipped => None,
             Action::ArchiveImportStart => Some("fauna.folders.create"),
+            Action::ArchiveImportProfilePrefill => Some("fauna.profile.set"),
 
             // ── Account (`settings.md` § Account) ───────────────────────────
             Action::ChangeHandle => Some("fauna.profile.handle.change"),
@@ -4767,6 +4815,10 @@ impl Action {
             Action::RemoveMember(_) | Action::ConfirmRemoveMember(_) | Action::CancelRemoveMember => {
                 None
             }
+            // Opening and closing the name editor are view state; the save is
+            // the rename kind (`devices.md` § Device names).
+            Action::RenameDevice(_) | Action::CancelRenameDevice => None,
+            Action::ConfirmRenameDevice => Some(fauna_protocol::sync::KIND_SYNC_DEVICES_RENAME),
             // T16 custody: consent/decline record on the `fauna.state.custody-ceremony` plane;
             // revoke is the capability plane's own kind (OnlineOnly — the
             // button greys offline). Budget/stop are local R14 door-puts the
@@ -5011,6 +5063,7 @@ impl Action {
             | Action::SetLocationMode { .. }
             | Action::FreeLocationSpace { .. }
             | Action::ApplyHeldDeletes(_)
+            | Action::UseRetainedVersion { .. }
             | Action::ToggleSyncAgentLinger
             | Action::AtprotoCancelTransition
             | Action::AtprotoSetDidMethod(_)
@@ -5145,6 +5198,18 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // pair on THAT card, cancel disarms; the confirm is `apply_local`'s.
         Action::RemoveMember(id) => state.devices.member_remove_pending = Some(id),
         Action::CancelRemoveMember => state.devices.member_remove_pending = None,
+        // The name editor opens on the row's NAME — the machine's opened
+        // name, never the painted label, which may carry rule (c)'s ` · code`.
+        Action::RenameDevice(device_id) => {
+            let text = state
+                .devices
+                .machine
+                .as_ref()
+                .and_then(|m| m.device_name(device_id.clone()))
+                .unwrap_or_default();
+            state.devices.rename = Some(devices::RenameDraft { device_id, text });
+        }
+        Action::CancelRenameDevice => state.devices.rename = None,
         // Decline the Stage-2 re-auth prompt — drop it with no side effect. Pure
         // local (cancel button / Escape both land here); the switch never ran, so
         // there is nothing to undo and no error to show.
@@ -5210,13 +5275,15 @@ pub fn apply(state: &mut SettingsState, action: Action) {
             } else {
                 // Open the add-credential form at its fresh defaults (OAUTHBEARER,
                 // auto-generate on) — never seeded from a prior visit's entry.
-                state.mail.open_add_form();
+                state.mail.open_add_form(true);
             }
         }
         Action::MailAddCredentialCancel => state.mail.reset_form(),
-        // Reveal the form for a second credential on an already-enabled mailbox
-        // — the toggle can't do it (its on-state is the disable decision).
-        Action::MailOpenAddCredential => state.mail.open_add_form(),
+        // Reveal the form for another credential — or, on a deployment serving
+        // CalDAV with mail off, an MSEK-less account's first, which the shared
+        // machine mints as the read recipe. The toggle can't do it (its
+        // on-state is the disable decision).
+        Action::MailOpenAddCredential => state.mail.open_add_form(false),
         // Flip the credential kind. Selecting PLAIN (or leaving it) re-applies the
         // auto-generate state so the password field is minted exactly once at this
         // settled edge; the shown value is then the value submit stores.
@@ -5556,6 +5623,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::RemoveDevice(_)
         | Action::SetP2pParticipation { .. }
         | Action::ConfirmRemoveMember(_)
+        | Action::ConfirmRenameDevice
         | Action::OpenFolders
         | Action::WizardCreate
         | Action::SetFolderConflictPolicy { .. }
@@ -5582,6 +5650,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::SetLocationMode { .. }
         | Action::FreeLocationSpace { .. }
         | Action::ApplyHeldDeletes(_)
+        | Action::UseRetainedVersion { .. }
         | Action::ToggleSyncAgentLinger
         | Action::OpenAtproto
         | Action::AtprotoMint
@@ -5721,9 +5790,9 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         // Same for the archive-import wizard: every gesture, nest call or not,
         // goes through the shared machine's `dispatch`, so each needs the
         // machine Arc off `App` in `apply_local`; the rail row routes through
-        // `route_subpage`. The two purely-local ones — `ToggleSkipped` and the
-        // disabled `ProfilePrefill` — are still `apply_local`'s, because they
-        // sit in the same `archive_import` match block as their siblings.
+        // `route_subpage`. The purely-local `ToggleSkipped` is still
+        // `apply_local`'s, because it sits in the same `archive_import` match
+        // block as its siblings.
         | Action::OpenArchiveImport
         | Action::ArchiveImportSelectSource(_)
         | Action::ArchiveImportOpenExportPage
@@ -5891,6 +5960,54 @@ fn devices_resync_op(state: &SettingsState) -> Option<Op> {
             custody,
             reread: true,
         })
+}
+
+/// The folder-row reads, by wire kind: the `RowReadErrors` key and, as on linux
+/// and windows, the banner's prefix.
+const READ_ROSTER: &str = "fauna.folders.members.list_actors";
+const READ_DEVICE_PLACES: &str = "fauna.folders.members.list";
+const READ_DEVICE_ACTIVITY: &str = "fauna.folders.devices";
+const READ_DESTINATIONS: &str = "fauna.backup.destination.list";
+
+/// One pass of a folder row's background reads.
+#[derive(Debug, Default)]
+pub struct FolderRowReads {
+    failed: Vec<(&'static str, String)>,
+    answered: Vec<&'static str>,
+}
+
+/// Retire what the reads that answered put up, then paint the failures as each
+/// read's own text (`folders.md` § Errors & edge cases): a gesture's message is
+/// never retired, and a read's failure shows like any failed read's.
+fn fold_folder_row_reads(app: &mut App, set: &str, reads: FolderRowReads) {
+    for read in reads.answered {
+        let shown = app.errors.get(&Page::Settings).cloned().unwrap_or_default();
+        if app
+            .settings
+            .folders
+            .row_read_errors
+            .retire(read, set, &shown)
+        {
+            app.errors.remove(&Page::Settings);
+        }
+    }
+    for (read, error) in reads.failed {
+        let message = format!("{read}: {error}");
+        app.errors.insert(Page::Settings, message.clone());
+        // A pending persist-failure message refuses the write: then the banner
+        // is not this read's, and nothing of its own stands to retire.
+        if app.errors.get(&Page::Settings) == Some(&message) {
+            app.settings.folders.row_read_errors.put(read, set, message);
+        }
+    }
+}
+
+/// A row closed: its reads will not run again to retire what they put up.
+fn retire_closed_folder_row(app: &mut App, set: &str) {
+    let shown = app.errors.get(&Page::Settings).cloned().unwrap_or_default();
+    if app.settings.folders.row_read_errors.retire_set(set, &shown) {
+        app.errors.remove(&Page::Settings);
+    }
 }
 
 fn fold_review_roster(app: &mut App, roster: Option<Vec<fauna_core::data::MemberReview>>) {
@@ -6459,6 +6576,21 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .clone()
                 .map(|machine| Op::RemoveMember { machine, device_id })
         }
+        // `device-rename-confirm-button` — the editor closes on the save; the
+        // machine decides what is sent (nothing for a blank or unchanged
+        // name) and paints any refusal on `error-message`.
+        Action::ConfirmRenameDevice => {
+            let draft = app.settings.devices.rename.take()?;
+            app.settings
+                .devices
+                .machine
+                .clone()
+                .map(|machine| Op::RenameDevice {
+                    machine,
+                    device_id: draft.device_id,
+                    label: draft.text,
+                })
+        }
         // ── T16 custody gestures. Each resolves its painted index to the
         // grant id NOW (a facet refresh re-orders rows) and carries the
         // dispatch context into the op.
@@ -7020,7 +7152,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // which is what lets the agent read the roster on its very next query
         // instead of a frame later.
         Action::ToggleFolderRow(i) => {
+            let was_open = app.settings.folders.expanded.and_then(|open| {
+                let folders = &app.settings.devices.snapshot.as_ref()?.folders;
+                Some(folders.get(open)?.name.clone())
+            });
             apply(&mut app.settings, Action::ToggleFolderRow(i));
+            if let Some(set) = was_open {
+                retire_closed_folder_row(app, &set);
+            }
             // Collapsed, or a member row (sharing is owner-only) ⇒ nothing to read.
             if app.settings.folders.expanded != Some(i) {
                 return None;
@@ -7320,22 +7459,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         // `folder-location-add-button` — bind the typed path to the expanded row's set
         // on the external sync agent (A6 Slice 3). The set is contextual: it is the
-        // expanded row's name (resolved like `SaveFolderPaths`), never a free-text
-        // field. Optimistic + no `Op` — `SyncAgentState::add_binding` records the
+        // expanded row's set — an M2 set, or a group set past them
+        // (`folders::location_bind_target`) — never a free-text field.
+        // Optimistic + no `Op` — `SyncAgentState::add_binding` records the
         // row (it renders next frame) and owns the async bind push + reconcile
         // retry itself; an empty path binds nothing (mirroring linux's guard).
         Action::AddLocation => {
             let i = app.settings.folders.expanded?;
-            let summary = app.settings.devices.snapshot.as_ref()?.folders.get(i)?;
-            let name = summary.name.clone();
             // The set's unambiguous identity — one shared rule, never re-derived
-            // per app (`fauna_client_folders::engine_binding`).
-            let folder_id = fauna_client_folders::engine_binding::folder_ref_for_row(
-                summary.id,
-                summary.mls_group_id.as_deref(),
-                summary.home_nest_url.as_deref(),
-            )
-            .map(|r| r.to_wire());
+            // per app (`fauna_client_folders::engine_binding`, `GroupScopeView::folder_id`).
+            let (name, folder_id) = folders::location_bind_target(&app.settings, i)?;
             let path = app.settings.folders.location_path_input.trim().to_string();
             if path.is_empty() {
                 return None;
@@ -7384,6 +7517,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.sync_agent.apply_held_deletes(folder, app.tx.clone());
             None
         }
+        Action::UseRetainedVersion {
+            folder_id,
+            conflict_id,
+        } => {
+            app.sync_agent
+                .restore_retained_version(folder_id, conflict_id, app.tx.clone());
+            None
+        }
         // `sync-agent-linger-toggle` — the only machine-level mutation tui makes,
         // and only ever as this explicit user gesture. Synchronous on the main
         // loop like the sub-page's other local gestures: `loginctl` is a fast
@@ -7419,15 +7560,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             };
             let machine = app.settings.mail.machine.clone()?;
             let display_name = app.settings.mail.name_input.trim().to_string();
-            // An already-enabled mailbox adds a credential; a disabled one mints
-            // its first, which is what enables mail. The shared machine owns the
-            // distinction — the page only picks the action.
-            let enabling = !app
-                .settings
-                .mail
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.enabled);
+            // The control that opened the form picks the action: the enable
+            // toggle mints the first credential, which is what enables mail;
+            // Add credential adds one — on a CalDAV-serving, mail-off
+            // deployment the first, as the read recipe. The shared machine owns
+            // what each action mints.
+            let enabling = app.settings.mail.form_enables_mail;
             app.errors.remove(&Page::Settings);
             Some(Op::SubmitMailCredential {
                 machine,
@@ -7664,13 +7802,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             match fauna_client_mail_settings::parse_forward_all_to_draft(
                 &app.settings.mail.forward_all_to_input,
             ) {
-                Ok(value) => Some(Op::MailSetForwardAllTo {
-                    nest: app.settings.nest.clone()?,
-                    value,
-                }),
+                Ok(value) => {
+                    app.settings.mail.draft_refusal = None;
+                    Some(Op::MailSetForwardAllTo {
+                        nest: app.settings.nest.clone()?,
+                        value,
+                    })
+                }
                 Err(reason) => {
-                    app.errors
-                        .insert(Page::Settings, crate::wizard::localized(&reason));
+                    app.settings.mail.draft_refusal = Some(crate::wizard::localized(&reason));
                     None
                 }
             }
@@ -7684,13 +7824,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 &app.settings.mail.forward_per_hour_input,
                 ceiling,
             ) {
-                Ok(value) => Some(Op::MailSetForwardPerHour {
-                    nest: app.settings.nest.clone()?,
-                    value,
-                }),
+                Ok(value) => {
+                    app.settings.mail.draft_refusal = None;
+                    Some(Op::MailSetForwardPerHour {
+                        nest: app.settings.nest.clone()?,
+                        value,
+                    })
+                }
                 Err(reason) => {
-                    app.errors
-                        .insert(Page::Settings, crate::wizard::localized(&reason));
+                    app.settings.mail.draft_refusal = Some(crate::wizard::localized(&reason));
                     None
                 }
             }
@@ -7732,13 +7874,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             match fauna_client_mail_settings::parse_autorespond_message_draft(
                 &app.settings.mail.autorespond_message_input,
             ) {
-                Ok(message) => Some(Op::MailSetAutorespond {
-                    nest: app.settings.nest.clone()?,
-                    message: Some(message),
-                }),
+                Ok(message) => {
+                    app.settings.mail.draft_refusal = None;
+                    Some(Op::MailSetAutorespond {
+                        nest: app.settings.nest.clone()?,
+                        message: Some(message),
+                    })
+                }
                 Err(reason) => {
-                    app.errors
-                        .insert(Page::Settings, crate::wizard::localized(&reason));
+                    app.settings.mail.draft_refusal = Some(crate::wizard::localized(&reason));
                     None
                 }
             }
@@ -8003,6 +8147,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::ArchiveImportSelectSource(kind) => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::SelectSource { kind }],
+            round: None,
         }),
         // Purely local — the address is the shared constant the step paints,
         // never anything typed (the `MailImportOpenMicrosoftSignIn` shape).
@@ -8019,6 +8164,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::ArchiveImportDispatch {
                 machine: app.settings.archive_import.machine.clone()?,
                 actions,
+                round: None,
             })
         }
         // The machine's `ToggleCategory` carries the DESIRED state rather than
@@ -8042,11 +8188,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     token,
                     selected: !selected,
                 }],
+                round: None,
             })
         }
         Action::ArchiveImportSetAudienceMode(mode) => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::SetAudienceMode { mode }],
+            round: None,
         }),
         Action::ArchiveImportNext => {
             let e = &app.settings.archive_import;
@@ -8063,19 +8211,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             } else {
                 vec![ArchiveImportAction::Next]
             };
-            Some(Op::ArchiveImportDispatch { machine, actions })
+            Some(Op::ArchiveImportDispatch {
+                machine,
+                actions,
+                round: None,
+            })
         }
         Action::ArchiveImportBack => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::Back],
+            round: None,
         }),
         Action::ArchiveImportStart => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::Start],
+            round: crate::archive_glue::LinkRound::of(app),
         }),
         Action::ArchiveImportPause => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::Pause],
+            round: None,
         }),
         // The authoring loop stops on Pause; resuming needs a fresh spawn,
         // which `Op::ArchiveImportDispatch`'s executor does whenever the
@@ -8084,6 +8239,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::ArchiveImportResume => Some(Op::ArchiveImportDispatch {
             machine: app.settings.archive_import.machine.clone()?,
             actions: vec![ArchiveImportAction::Resume],
+            round: crate::archive_glue::LinkRound::of(app),
         }),
         // The two-click inline confirm, the `MailImportCancel` shape: arming is
         // local and only the confirm reaches the machine. Already-imported
@@ -8098,6 +8254,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::ArchiveImportDispatch {
                 machine: app.settings.archive_import.machine.clone()?,
                 actions: vec![ArchiveImportAction::Cancel],
+                round: None,
             })
         }
         // Purely local — the skip log is already on the snapshot, so showing it
@@ -8106,11 +8263,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.settings.archive_import.show_skipped ^= true;
             None
         }
-        // Disabled — see the variant's doc comment. Never actuated by the UI
-        // (`enabled: false`); this arm exists only so the match stays
-        // exhaustive, and it is a deliberate no-op rather than a panic if it
-        // ever were (the `MailImportOAuthStart` precedent).
-        Action::ArchiveImportProfilePrefill => None,
+        Action::ArchiveImportProfilePrefill => Some(Op::ArchiveImportDispatch {
+            machine: app.settings.archive_import.machine.clone()?,
+            actions: vec![ArchiveImportAction::ApplyArchiveProfile],
+            round: None,
+        }),
 
         // ── Mail → Lists. Every mutation funnels through the one
         // `MailListsDispatch` op, the `MailAliasesDispatch` reasoning: exactly
@@ -8312,7 +8469,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         Action::OpenMutedWords => {
             app.settings.sub = SubPage::MutedWords;
             app.settings.muted_words.reset_form();
-            muted_words_load_op(&app.settings)
+            muted_words_load_op(&mut app.settings)
         }
         Action::OpenTaskDelegation => {
             app.settings.sub = SubPage::TaskDelegation;
@@ -9611,6 +9768,8 @@ pub enum Op {
     /// waited for when the page is opened before the runtime is up.
     LoadMutedWords {
         store: fauna_sync_engine::account_runtime::SeatAccountStore,
+        /// `MutedWordsState::dispatch_seq` at dispatch.
+        seq: u64,
     },
     /// Apply one add/remove gesture as a DELTA against the stored list — the page's copy is never sent wholesale, so a term another
     /// device stored since this page loaded survives the gesture. Hands back
@@ -10039,6 +10198,11 @@ pub enum Op {
     ArchiveImportDispatch {
         machine: Arc<ArchiveImportMachine>,
         actions: Vec<ArchiveImportAction>,
+        /// Start and Resume only: what the spawned run hands the archive
+        /// links when it finishes (`archive-import.md` § Linking and merging,
+        /// rulings 4 and 11) — the run task, not a repaint, is what knows
+        /// the run ended, whichever page the user is on by then.
+        round: Option<crate::archive_glue::LinkRound>,
     },
     /// The archive-import Progress screen's live-refresh tick (`main.rs`'s
     /// `periodic_tick`) — the [`Self::RefreshMailImportProgress`] shape: a
@@ -10183,6 +10347,13 @@ pub enum Op {
     RemoveMember {
         machine: Arc<DevicesMachine>,
         device_id: String,
+    },
+    /// `DevicesMachine::rename_device`, then re-snapshot —
+    /// `device-rename-confirm-button` (`ui/devices.md` § Device names).
+    RenameDevice {
+        machine: Arc<DevicesMachine>,
+        device_id: String,
+        label: String,
     },
     /// `FolderWizardMachine::submit()`; on `Done`,
     /// `DevicesMachine::{close_wizard, refresh}` so the list picks up the new
@@ -11042,7 +11213,12 @@ pub enum Outcome {
     /// input away shows exactly what the nest now holds. Carrying the whole
     /// record (not just its terms) is what marks the page **read**, so
     /// `muted-word-empty` may finally paint.
-    MutedWordsLoaded(fauna_client_config::MutedWordsSnapshot),
+    MutedWordsLoaded {
+        snapshot: fauna_client_config::MutedWordsSnapshot,
+        /// `MutedWordsState::dispatch_seq` at dispatch — the fold applies it
+        /// only if it is newer than `applied_seq`.
+        seq: u64,
+    },
     /// A muted-word mutation landed: the fresh list, and the gesture's own
     /// draft and busy flag cleared — which a load never touches, so a
     /// store-change reload mid-typing keeps the half-typed word.
@@ -11099,6 +11275,10 @@ pub enum Outcome {
         name: String,
         members: Vec<fauna_protocol::folders::FolderActorMember>,
         channel_id: Option<String>,
+        /// How the row's background reads went — `Some(..)` on
+        /// `Op::LoadFolderRoster`, `None` on the three gestures, whose success
+        /// clears the page's error as any gesture's does.
+        reads: Option<FolderRowReads>,
         /// Rides the SAME awaited round trip only on the expand-time producer
         /// (`Op::LoadFolderRoster`, `Action::ToggleFolderRow`'s only
         /// producer of this outcome) — `Some(..)` there, so the
@@ -11160,6 +11340,9 @@ pub enum Outcome {
     FolderDeviceActivityLoaded {
         name: String,
         devices: Vec<fauna_protocol::folders::FolderDevice>,
+        /// The read's failure, painted as its own error; `None` retires the
+        /// one it put up (`fauna_devices_machine::RowReadErrors`).
+        error: Option<String>,
     },
     /// The recipient-side knock list after an accept or decline, with the machine
     /// snapshot the same op refreshed — folded together so the consumed knock and
@@ -11431,9 +11614,8 @@ async fn list_pending_actions(
         .await
         .map(|reply| {
             reply
-                .actions
+                .into_pending()
                 .into_iter()
-                .filter(|a| a.status == "pending")
                 .map(|a| PendingActionRow {
                     id: a.id,
                     action_type: a.action_type,
@@ -12084,8 +12266,8 @@ impl Op {
                     }
                 }
             }
-            Op::LoadMutedWords { store } => match muted_words::load_words(store).await {
-                Ok(words) => Outcome::MutedWordsLoaded(words),
+            Op::LoadMutedWords { store, seq } => match muted_words::load_words(store).await {
+                Ok(snapshot) => Outcome::MutedWordsLoaded { snapshot, seq },
                 // Background self-fetch → logged, not surfaced (`QuotaFailed`)
                 // — except the first-listing gate's refusal: a page that has
                 // not loaded because this device has not listed the account's
@@ -12699,7 +12881,11 @@ impl Op {
                 }
                 Outcome::ArchiveImportSnapshot(Box::new(machine.snapshot()))
             }
-            Op::ArchiveImportDispatch { machine, actions } => {
+            Op::ArchiveImportDispatch {
+                machine,
+                actions,
+                round,
+            } => {
                 // Each `Result` is deliberately dropped, the
                 // `MailImportDispatch` reasoning: a dispatch failure arrives on
                 // the snapshot's `error`, never here. Dispatched in order and
@@ -12717,10 +12903,18 @@ impl Op {
                 // the loop mutates the machine's own snapshot as it goes, and
                 // the Progress screen's periodic tick (`main.rs`) re-reads it.
                 if should_run && snapshot.run_state == Some(RunState::Running) {
+                    if let Some(round) = &round {
+                        round.attach(&machine);
+                    }
                     let m = Arc::clone(&machine);
                     tokio::spawn(async move {
                         if let Err(e) = m.run_import().await {
                             tracing::warn!("[settings/archive_import] run_import: {e:?}");
+                        }
+                        if let Some(round) = round
+                            && m.snapshot().run_state == Some(RunState::Completed)
+                        {
+                            round.after_run(m);
                         }
                     });
                 }
@@ -12932,7 +13126,11 @@ impl Op {
                 custody,
                 reread,
             } => {
-                machine.refresh().await;
+                if reread {
+                    machine.resync().await;
+                } else {
+                    machine.refresh().await;
+                }
                 let (facet, keyed, enrolled, refusal) = match custody {
                     Some(ctx) => {
                         // The keyless-posture derivation rides the same
@@ -12986,6 +13184,14 @@ impl Op {
             }
             Op::RemoveMember { machine, device_id } => {
                 machine.remove_member_by_id(device_id).await;
+                Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
+            }
+            Op::RenameDevice {
+                machine,
+                device_id,
+                label,
+            } => {
+                machine.rename_device(device_id, label).await;
                 Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
             }
             Op::WizardCreate {
@@ -13416,6 +13622,10 @@ impl Op {
                 // `None` on a locked identity or a failed read — the render's
                 // fresh guard then simply never fires, which is the fail-safe
                 // direction (an affordance that cannot work must not paint).
+                // Each read's failure is painted as that read's own error and
+                // its next good answer retires it (`folders.md` § Errors & edge
+                // cases); none blanks the roster the agent is awaiting.
+                let mut reads = FolderRowReads::default();
                 let destinations = match store {
                     Some(store) => {
                         match folders::load_folder_destinations(
@@ -13425,11 +13635,12 @@ impl Op {
                         )
                         .await
                         {
-                            Ok(places) => Some(places),
+                            Ok(places) => {
+                                reads.answered.push(READ_DESTINATIONS);
+                                Some(places)
+                            }
                             Err(error) => {
-                                tracing::debug!(
-                                    "[settings/folders] destination-places read failed: {error}"
-                                );
+                                reads.failed.push((READ_DESTINATIONS, error));
                                 None
                             }
                         }
@@ -13437,58 +13648,55 @@ impl Op {
                     None => None,
                 };
                 // The device-activity read rides this SAME awaited round trip
-                // (the only producer of this `Op` is `Action::ToggleFolderRow`'s
-                // expand arm) — fail-safe empty on its own error, logged not
-                // surfaced, exactly like the roster arm below; a device-activity
-                // hiccup must not blank the roster the agent is actually
-                // awaiting.
-                let devices = match folders::load_device_activity(Arc::clone(&nest), name.clone())
-                    .await
-                {
-                    Ok(devices) => devices,
-                    Err(error) => {
-                        tracing::debug!("[settings/folders] device-activity read failed: {error}");
-                        Vec::new()
-                    }
-                };
+                // — fail-safe empty on its own error, exactly like the roster
+                // arm below; a device-activity hiccup must not blank the roster
+                // the agent is actually awaiting.
+                let devices =
+                    match folders::load_device_activity(Arc::clone(&nest), name.clone()).await {
+                        Ok(devices) => {
+                            reads.answered.push(READ_DEVICE_ACTIVITY);
+                            devices
+                        }
+                        Err(error) => {
+                            reads.failed.push((READ_DEVICE_ACTIVITY, error));
+                            Vec::new()
+                        }
+                    };
                 // The device places ride the same awaited round trip, with the
                 // same fail-safe-empty posture: a members.list hiccup (or a
                 // member's own set, where the single-owner roster answers
                 // not_found) must not blank the roster the agent is awaiting.
-                let places = match folders::load_device_places(Arc::clone(&nest), name.clone())
-                    .await
-                {
-                    Ok(places) => places,
-                    Err(error) => {
-                        tracing::debug!("[settings/folders] device-places read failed: {error}");
-                        Vec::new()
-                    }
-                };
-                match folders::load_roster(nest, name.clone(), mls_group_id).await {
-                    Ok((members, channel_id)) => Outcome::FolderRosterLoaded {
-                        name,
-                        members,
-                        channel_id,
-                        devices: Some(devices),
-                        places: Some(places),
-                        destinations,
-                        snapshot: None,
-                    },
-                    // A background read on an expand, not a gesture — log, don't
-                    // surface (the `LoadMutedWords` posture). Surfacing it would put
-                    // an error on a page the user merely opened a row on.
-                    Err(error) => {
-                        tracing::debug!("[settings/folders] roster read failed: {error}");
-                        Outcome::FolderRosterLoaded {
-                            name,
-                            members: Vec::new(),
-                            channel_id: None,
-                            devices: Some(devices),
-                            places: Some(places),
-                            destinations,
-                            snapshot: None,
+                let places =
+                    match folders::load_device_places(Arc::clone(&nest), name.clone()).await {
+                        Ok(places) => {
+                            reads.answered.push(READ_DEVICE_PLACES);
+                            places
                         }
-                    }
+                        Err(error) => {
+                            reads.failed.push((READ_DEVICE_PLACES, error));
+                            Vec::new()
+                        }
+                    };
+                let (members, channel_id) =
+                    match folders::load_roster(nest, name.clone(), mls_group_id).await {
+                        Ok(roster) => {
+                            reads.answered.push(READ_ROSTER);
+                            roster
+                        }
+                        Err(error) => {
+                            reads.failed.push((READ_ROSTER, error));
+                            (Vec::new(), None)
+                        }
+                    };
+                Outcome::FolderRosterLoaded {
+                    name,
+                    members,
+                    channel_id,
+                    devices: Some(devices),
+                    places: Some(places),
+                    destinations,
+                    snapshot: None,
+                    reads: Some(reads),
                 }
             }
             // The push-refresh half (`file-sync.md` § Implementation status
@@ -13496,20 +13704,20 @@ impl Op {
             // point of the render): re-read ONLY device activity, never the
             // roster, so a `fauna.sync.changed` push can't clobber an
             // in-flight share/remove or blank a roster it has nothing to do
-            // with. Same fail-safe-empty, logged-not-surfaced posture as the
-            // arm above — this is a background push reaction, not a gesture.
+            // with. Same fail-safe-empty posture as the arm above, and the same
+            // read's own error slot: it is one read on two cadences.
             Op::LoadFolderDeviceActivity { nest, name } => {
                 match folders::load_device_activity(nest, name.clone()).await {
-                    Ok(devices) => Outcome::FolderDeviceActivityLoaded { name, devices },
-                    Err(error) => {
-                        tracing::debug!(
-                            "[settings/folders] device-activity push-refresh read failed: {error}"
-                        );
-                        Outcome::FolderDeviceActivityLoaded {
-                            name,
-                            devices: Vec::new(),
-                        }
-                    }
+                    Ok(devices) => Outcome::FolderDeviceActivityLoaded {
+                        name,
+                        devices,
+                        error: None,
+                    },
+                    Err(error) => Outcome::FolderDeviceActivityLoaded {
+                        name,
+                        devices: Vec::new(),
+                        error: Some(error),
+                    },
                 }
             }
             Op::ShareFolder {
@@ -15108,6 +15316,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             places,
             destinations,
             snapshot,
+            reads,
         } => {
             // The cap buffers are rebuilt from the NEST's authoritative
             // `byte_cap` on every roster fold, positionally aligned with the
@@ -15146,19 +15355,39 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             if let Some(snapshot) = snapshot {
                 app.settings.devices.snapshot = Some(*snapshot);
             }
-            app.settings.folders.roster_for = Some(name);
+            app.settings.folders.roster_for = Some(name.clone());
             app.settings.folders.roster_channel_id = channel_id;
-            app.errors.remove(&Page::Settings);
+            match reads {
+                // The expand's or the reconnect's reads: never a gesture's text.
+                Some(reads) => fold_folder_row_reads(app, &name, reads),
+                None => {
+                    app.errors.remove(&Page::Settings);
+                }
+            }
         }
         // The push-refresh half — `fauna.sync.changed` named the expanded
         // set, so its device-activity row is re-read (never the roster,
         // which this push has nothing to do with). This is the fold that
         // makes the render live-update with no manual reload
         // (`file-sync.md` § Implementation status today).
-        Outcome::FolderDeviceActivityLoaded { name, devices } => {
+        Outcome::FolderDeviceActivityLoaded {
+            name,
+            devices,
+            error,
+        } => {
             app.settings.folders.device_activity = devices;
-            app.settings.folders.device_activity_for = Some(name);
-            app.errors.remove(&Page::Settings);
+            app.settings.folders.device_activity_for = Some(name.clone());
+            let reads = match error {
+                Some(error) => FolderRowReads {
+                    failed: vec![(READ_DEVICE_ACTIVITY, error)],
+                    ..Default::default()
+                },
+                None => FolderRowReads {
+                    answered: vec![READ_DEVICE_ACTIVITY],
+                    ..Default::default()
+                },
+            };
+            fold_folder_row_reads(app, &name, reads);
         }
         Outcome::FolderPlacesLoaded { name, places } => {
             app.settings.folders.device_places = places;
@@ -15195,12 +15424,19 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // § Multi-instance concurrency → *A runtime's own pump is a
         // source of the notice too*: a re-read never discards an edit in
         // progress). A fresh visit's `reset_form` clears the draft.
-        Outcome::MutedWordsLoaded(snapshot) => {
-            app.settings.muted_words.snapshot = snapshot;
-            app.errors.remove(&Page::Settings);
+        Outcome::MutedWordsLoaded { snapshot, seq } => {
+            let mw = &mut app.settings.muted_words;
+            // A read no newer than one already settled is dropped whole, the
+            // error slot included: the list it lost to is the truer state.
+            if seq > mw.applied_seq {
+                mw.applied_seq = seq;
+                mw.snapshot = snapshot;
+                app.errors.remove(&Page::Settings);
+            }
         }
         Outcome::MutedWordsMutated(snapshot) => {
             app.settings.muted_words.snapshot = snapshot;
+            app.settings.muted_words.applied_seq = app.settings.muted_words.dispatch_seq;
             app.settings.muted_words.input.clear();
             app.settings.muted_words.busy = false;
             app.errors.remove(&Page::Settings);
@@ -15688,6 +15924,7 @@ pub fn route_subpage(
     state.log_filter = 0;
     state.sign_out_pending = false;
     state.devices.member_remove_pending = None;
+    state.devices.rename = None;
     state.delete_confirm_input.clear();
     state.identity_qr = None;
     state.folders = folders::FoldersUiState::default();
@@ -16148,7 +16385,7 @@ fn status_text(app: &App) -> fauna_client_status::StatusText {
                     .as_ref()
                     .map_or(0, |manager| manager.secure_channel_count()),
             }),
-        build: fauna_client_status::BuildLeg::from_stamp(option_env!("FAUNA_BUILD_COMMIT")),
+        build: fauna_client_status::BuildLeg::from_stamp(crate::build_commit()),
     };
     let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
     fauna_client_status::render(&snapshot, now_ms, fauna_i18n::strings::lookup)
@@ -16387,6 +16624,10 @@ pub(crate) fn page_error(state: &SettingsState) -> Option<String> {
             .devices
             .enrollment_refusal
             .map(|refusal| refusal.notice().to_string()),
+        // A refused mail draft stays up until the user edits or re-commits it
+        // (`MailState::draft_refusal`): a later clean read's clear of
+        // `App::errors` must not take it down.
+        SubPage::Mail => state.mail.draft_refusal.clone(),
         _ => None,
     }
 }
@@ -16453,6 +16694,10 @@ pub enum SettingsField {
     /// (`Action::CustodySetBudget`), parsed by `parse_byte_size` — the
     /// backups-page typed-byte-size idiom.
     CustodyBudget(u32),
+    /// `device-rename-input` — the open name editor's text
+    /// ([`devices::DevicesState::rename`]); committed on Enter or
+    /// `device-rename-confirm-button` (`Action::ConfirmRenameDevice`).
+    DeviceRename,
     /// `filter-rule-value` — the add-filter-form's rule match-value buffer (a
     /// header condition's header name), fed to
     /// `fauna_protocol::email::encode_filter_rule_inputs` on `create-filter`
@@ -16813,6 +17058,12 @@ pub fn field(state: &SettingsState, field: &SettingsField) -> String {
             .get(*i as usize)
             .cloned()
             .unwrap_or_default(),
+        SettingsField::DeviceRename => state
+            .devices
+            .rename
+            .as_ref()
+            .map(|d| d.text.clone())
+            .unwrap_or_default(),
         SettingsField::FolderIncludePaths => state.folders.include_paths_input.clone(),
         SettingsField::FolderExcludePaths => state.folders.exclude_paths_input.clone(),
         SettingsField::FolderNestQuiet => state.folders.nest_quiet_input.clone(),
@@ -16896,6 +17147,7 @@ fn folders_roster_outcome(
             places: None,
             destinations: None,
             snapshot,
+            reads: None,
         },
         Err(error) => {
             let message = failure(&error);
@@ -17030,9 +17282,18 @@ pub fn set_field(state: &mut SettingsState, field: SettingsField, value: String)
         SettingsField::MailAliasLabel => state.mail_aliases.label_input = value,
         SettingsField::MailAliasSpamThreshold => state.mail_aliases.spam_threshold_input = value,
         SettingsField::MailSpamThresholdOverride => state.mail_spam.spam_threshold_input = value,
-        SettingsField::MailForwardAllTo => state.mail.forward_all_to_input = value,
-        SettingsField::MailForwardPerHour => state.mail.forward_per_hour_input = value,
-        SettingsField::MailAutorespondMessage => state.mail.autorespond_message_input = value,
+        SettingsField::MailForwardAllTo => {
+            state.mail.draft_refusal = None;
+            state.mail.forward_all_to_input = value;
+        }
+        SettingsField::MailForwardPerHour => {
+            state.mail.draft_refusal = None;
+            state.mail.forward_per_hour_input = value;
+        }
+        SettingsField::MailAutorespondMessage => {
+            state.mail.draft_refusal = None;
+            state.mail.autorespond_message_input = value;
+        }
         SettingsField::MailAliasRatePerHour => state.mail_aliases.rate_per_hour_input = value,
         SettingsField::MailAliasTtl => state.mail_aliases.ttl_input = value,
         SettingsField::MailAliasUses => state.mail_aliases.uses_input = value,
@@ -17086,6 +17347,11 @@ pub fn set_field(state: &mut SettingsState, field: SettingsField, value: String)
             let i = i as usize;
             if i < state.devices.custody_budget_drafts.len() {
                 state.devices.custody_budget_drafts[i] = value;
+            }
+        }
+        SettingsField::DeviceRename => {
+            if let Some(draft) = state.devices.rename.as_mut() {
+                draft.text = value;
             }
         }
         SettingsField::FolderIncludePaths => state.folders.include_paths_input = value,
@@ -17368,6 +17634,46 @@ mod tests {
         assert!(app.errors.get(&Page::Settings).is_none());
     }
 
+    fn device_activity(error: Option<&str>) -> Outcome {
+        Outcome::FolderDeviceActivityLoaded {
+            name: "Photos".into(),
+            devices: Vec::new(),
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_folder_row_read_paints_its_failure_and_its_good_answer_retires_it() {
+        let mut app = crate::app::tests::test_app();
+        apply_outcome(&mut app, device_activity(Some("connection lost")));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("fauna.folders.devices: connection lost")
+        );
+        apply_outcome(&mut app, device_activity(None));
+        assert!(app.errors.get(&Page::Settings).is_none());
+    }
+
+    #[test]
+    fn a_folder_row_reads_good_answer_leaves_a_gesture_error_standing() {
+        let mut app = crate::app::tests::test_app();
+        apply_outcome(&mut app, device_activity(Some("connection lost")));
+        app.errors.insert(Page::Settings, "serve failed".into());
+        apply_outcome(&mut app, device_activity(None));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("serve failed")
+        );
+    }
+
+    #[test]
+    fn a_closed_folder_row_retires_what_its_reads_put_up() {
+        let mut app = crate::app::tests::test_app();
+        apply_outcome(&mut app, device_activity(Some("connection lost")));
+        retire_closed_folder_row(&mut app, "Photos");
+        assert!(app.errors.get(&Page::Settings).is_none());
+    }
+
     #[test]
     fn a_nests_reread_retires_only_its_own_error() {
         let mut app = crate::app::tests::test_app();
@@ -17439,6 +17745,66 @@ mod tests {
             "a result from an OLDER dispatch (seq 1) must never overwrite a \
              result already applied from a NEWER one (seq 2)"
         );
+    }
+
+    /// A store-change re-read that left before a save landed read the list
+    /// without the saved word: applying it would silently un-mute the word on
+    /// every surface reading this copy, the store still holding it.
+    #[test]
+    fn a_muted_words_read_older_than_a_landed_save_never_overwrites_it() {
+        let mut app = crate::app::tests::test_app();
+        let list = |words: &[&str]| fauna_client_config::MutedWordsSnapshot {
+            keywords: words.iter().map(|w| (*w).into()).collect(),
+            loaded: true,
+        };
+
+        // The notice's re-read leaves, then the save lands first.
+        let seq = app.settings.muted_words.dispatch_seq + 1;
+        app.settings.muted_words.dispatch_seq = seq;
+        apply_outcome(&mut app, Outcome::MutedWordsMutated(list(&["kept"])));
+        apply_outcome(
+            &mut app,
+            Outcome::MutedWordsLoaded {
+                snapshot: list(&[]),
+                seq,
+            },
+        );
+        assert_eq!(app.settings.muted_words.snapshot.terms(), vec!["kept"]);
+
+        // A read that leaves after the save is the store's word again.
+        let seq = app.settings.muted_words.dispatch_seq + 1;
+        app.settings.muted_words.dispatch_seq = seq;
+        apply_outcome(
+            &mut app,
+            Outcome::MutedWordsLoaded {
+                snapshot: list(&["kept", "sibling"]),
+                seq,
+            },
+        );
+        assert_eq!(
+            app.settings.muted_words.snapshot.terms(),
+            vec!["kept", "sibling"]
+        );
+    }
+
+    #[test]
+    fn a_stale_muted_words_read_never_overwrites_a_newer_read() {
+        let mut app = crate::app::tests::test_app();
+        let list = |word: &str| fauna_client_config::MutedWordsSnapshot {
+            keywords: vec![word.into()],
+            loaded: true,
+        };
+        app.settings.muted_words.dispatch_seq = 2;
+        for (word, seq) in [("newer", 2), ("older", 1)] {
+            apply_outcome(
+                &mut app,
+                Outcome::MutedWordsLoaded {
+                    snapshot: list(word),
+                    seq,
+                },
+            );
+        }
+        assert_eq!(app.settings.muted_words.snapshot.terms(), vec!["newer"]);
     }
 
     #[test]
@@ -18963,6 +19329,34 @@ mod tests {
             crate::app::PageOp::Settings(op).outlives_click(),
             "the agent must spawn this op rather than await it — awaiting it is \
              what made the tier_3 sweep journey time out on its very first real group"
+        );
+    }
+
+    /// A folder row opened while the nest is unreachable starts its reads off
+    /// the click (`e2e-conventions.md` convention 11: nothing the agent awaits
+    /// may outlast its reply budget).
+    ///
+    /// The expand edge's roster op carries five reads. In a connection gap each
+    /// one waits out its whole deadline for a reconnect that is not coming, so
+    /// the awaited click outlasted the agent's 25 s reply and the bridge
+    /// answered 504 (`test_folder_row_read_error_retires.py`). Spawned, the
+    /// reads still fail, paint their own errors through the same fold, and the
+    /// reconnect sweep's re-read retires them (`folders.md` § Errors & edge
+    /// cases); the test polls the error bar, never the click.
+    #[test]
+    fn a_folder_row_opened_in_a_nest_gap_reads_off_the_click() {
+        let op = Op::LoadFolderRoster {
+            // Never connected: exactly the gap a stopped nest leaves.
+            nest: nest_for_test(),
+            name: "gap-row".to_string(),
+            mls_group_id: None,
+            store: None,
+            folder_id: 1,
+        };
+        assert!(
+            crate::app::PageOp::Settings(op).outlives_click(),
+            "a roster read issued with no live connection must not hold the \
+             agent's click reply — awaited, its reads each run out a deadline"
         );
     }
 
@@ -21911,6 +22305,49 @@ mod tests {
         );
     }
 
+    /// The rename editor's flow (`ui/devices.md` § Device names): opening
+    /// arms a draft for that device id (empty text when the machine lists no
+    /// name for it), typing lands in the draft, cancel closes it, and the save
+    /// carries the id and the typed text into `Op::RenameDevice` and closes
+    /// the editor. A save with no editor open is nothing.
+    #[test]
+    fn rename_device_opens_a_draft_and_the_save_carries_id_and_text() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.devices =
+            devices::DevicesState::build(nest_for_test(), "", &[], Default::default());
+        let id = "ab".repeat(32);
+
+        apply(&mut app.settings, Action::RenameDevice(id.clone()));
+        assert_eq!(
+            app.settings.devices.rename,
+            Some(devices::RenameDraft {
+                device_id: id.clone(),
+                text: String::new(),
+            })
+        );
+        apply(&mut app.settings, Action::CancelRenameDevice);
+        assert_eq!(app.settings.devices.rename, None);
+
+        apply(&mut app.settings, Action::RenameDevice(id.clone()));
+        set_field(
+            &mut app.settings,
+            SettingsField::DeviceRename,
+            "desk".into(),
+        );
+        assert_eq!(field(&app.settings, &SettingsField::DeviceRename), "desk");
+        let op = apply_local(&mut app, Action::ConfirmRenameDevice);
+        assert!(
+            matches!(&op, Some(Op::RenameDevice { device_id, label, .. })
+                if *device_id == id && label == "desk"),
+            "the save forwards the draft's id and text"
+        );
+        assert_eq!(
+            app.settings.devices.rename, None,
+            "the save closes the editor"
+        );
+        assert!(apply_local(&mut app, Action::ConfirmRenameDevice).is_none());
+    }
+
     #[test]
     fn remove_device_is_none_with_no_machine() {
         let mut app = crate::app::tests::authed_app();
@@ -22877,13 +23314,14 @@ mod tests {
     #[test]
     fn committing_the_forward_all_address_checks_the_draft_first() {
         let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
         app.settings.sub = SubPage::Mail;
         app.settings.nest = Some(nest_for_test());
 
         app.settings.mail.forward_all_to_input = "me@nodot".into();
         assert!(apply_local(&mut app, Action::MailCommitForwardAllTo).is_none());
         assert_eq!(
-            app.errors.get(&Page::Settings).map(String::as_str),
+            app.error_line_text().as_deref(),
             Some(fauna_i18n::strings::mail_settings::FORWARD_ALL_TO_INVALID)
         );
 
@@ -23040,6 +23478,7 @@ mod tests {
     #[test]
     fn the_automatic_reply_checks_its_draft_before_turning_on() {
         let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
         app.settings.sub = SubPage::Mail;
         app.settings.nest = Some(nest_for_test());
         app.settings.mail.autorespond = Some(Default::default());
@@ -23047,7 +23486,7 @@ mod tests {
         app.settings.mail.autorespond_message_input = "  ".into();
         assert!(apply_local(&mut app, Action::MailToggleAutorespond).is_none());
         assert_eq!(
-            app.errors.get(&Page::Settings).map(String::as_str),
+            app.error_line_text().as_deref(),
             Some(fauna_i18n::strings::mail_settings::AUTORESPOND_MESSAGE_EMPTY)
         );
 
@@ -23067,11 +23506,44 @@ mod tests {
         ));
     }
 
+    /// A refused draft stays on `error-message` when a clean read lands after
+    /// it — the page hydrate's account read, which on a loaded machine resolves
+    /// after the user's commit, clears `App::errors` and used to wipe the
+    /// refusal the page had just shown. Editing the field takes it down.
+    #[test]
+    fn a_refused_mail_draft_survives_a_later_clean_read() {
+        let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = SubPage::Mail;
+        app.settings.nest = Some(nest_for_test());
+        app.settings.mail.autorespond = Some(Default::default());
+
+        app.settings.mail.autorespond_message_input = "   ".into();
+        assert!(apply_local(&mut app, Action::MailCommitAutorespondMessage).is_none());
+
+        let mut read = mail::MailAccountRead::none();
+        read.autorespond = Some(Ok(Default::default()));
+        apply_outcome(&mut app, Outcome::MailAccountRead(Box::new(read)));
+        assert_eq!(
+            app.error_line_text().as_deref(),
+            Some(fauna_i18n::strings::mail_settings::AUTORESPOND_MESSAGE_EMPTY),
+            "a clean read must not take down the refusal"
+        );
+
+        set_field(
+            &mut app.settings,
+            SettingsField::MailAutorespondMessage,
+            "Away".into(),
+        );
+        assert_eq!(app.error_line_text(), None, "editing the draft clears it");
+    }
+
     /// The limit is bounded by the ceiling the nest returned; with no read yet
     /// there is nothing to bound it by, so the commit is inert.
     #[test]
     fn committing_the_hourly_limit_checks_it_against_the_returned_ceiling() {
         let mut app = crate::app::tests::authed_app();
+        app.page = Page::Settings;
         app.settings.sub = SubPage::Mail;
         app.settings.nest = Some(nest_for_test());
         app.settings.mail.forward_per_hour_input = "40".into();
@@ -23100,7 +23572,7 @@ mod tests {
         ] {
             app.settings.mail.forward_per_hour_input = draft.into();
             assert!(apply_local(&mut app, Action::MailCommitForwardPerHour).is_none());
-            assert_eq!(app.errors.get(&Page::Settings), Some(&reason), "{draft}");
+            assert_eq!(app.error_line_text(), Some(reason), "{draft}");
         }
     }
 
@@ -23276,13 +23748,9 @@ mod tests {
         use fauna_devices_machine::nest_api::{FakeDevicesNestApi, FakeWizardFactory};
         use fauna_devices_machine::{DevicesMachine, DevicesNestApi, WizardFactory};
 
-        struct Quiet;
-        impl fauna_devices_machine::DevicesObserver for Quiet {
-            fn on_changed(&self) {}
-        }
         let nest = Arc::new(FakeDevicesNestApi::new());
         let machine = DevicesMachine::new(
-            Arc::new(Quiet),
+            Arc::new(fauna_devices_machine::observer::NullObserver),
             Arc::clone(&nest) as Arc<dyn DevicesNestApi>,
             Arc::new(FakeWizardFactory::new()) as Arc<dyn WizardFactory>,
         );
@@ -23467,7 +23935,7 @@ mod tests {
         state.mail.password_input = "leftover".to_string();
         state.mail.shown_token = Some(SecretString::new("stale-token".into()));
 
-        state.mail.open_add_form();
+        state.mail.open_add_form(false);
         assert!(state.mail.show_add_form);
         assert!(!state.mail.add_plain, "kind resets to OAUTHBEARER");
         assert!(state.mail.autogenerate, "auto-generate resets on");
@@ -23482,7 +23950,7 @@ mod tests {
     fn the_type_selector_reveals_the_plain_family_only_when_plain() {
         let mut state = SettingsState::default();
         mail_state(&mut state, enabled_snapshot());
-        state.mail.open_add_form();
+        state.mail.open_add_form(false);
 
         let els = mail_elements(&state);
         assert_eq!(
@@ -23510,7 +23978,7 @@ mod tests {
     fn plain_autogenerate_mints_a_shown_password_once() {
         let mut state = SettingsState::default();
         mail_state(&mut state, enabled_snapshot());
-        state.mail.open_add_form();
+        state.mail.open_add_form(false);
         apply(&mut state, Action::MailAddCredentialToggleKind); // → PLAIN, autogen on
 
         let generated = state.mail.password_input.clone();
@@ -23540,7 +24008,7 @@ mod tests {
     fn plain_manual_entry_reveals_the_warning_and_strength_meter() {
         let mut state = SettingsState::default();
         mail_state(&mut state, enabled_snapshot());
-        state.mail.open_add_form();
+        state.mail.open_add_form(false);
         apply(&mut state, Action::MailAddCredentialToggleKind); // → PLAIN, autogen on
         apply(&mut state, Action::MailAddCredentialToggleAutogenerate); // → manual
         assert!(
@@ -23573,7 +24041,7 @@ mod tests {
     fn plain_manual_field_masks_until_the_show_toggle() {
         let mut state = SettingsState::default();
         mail_state(&mut state, enabled_snapshot());
-        state.mail.open_add_form();
+        state.mail.open_add_form(false);
         apply(&mut state, Action::MailAddCredentialToggleKind);
         apply(&mut state, Action::MailAddCredentialToggleAutogenerate);
         set_field(&mut state, SettingsField::MailPassword, "secret".into());
@@ -23606,7 +24074,7 @@ mod tests {
     fn an_oauthbearer_submit_reveals_the_token_and_keeps_the_form_open() {
         let mut app = crate::app::tests::authed_app();
         mail_state(&mut app.settings, enabled_snapshot());
-        app.settings.mail.open_add_form(); // OAUTHBEARER default
+        app.settings.mail.open_add_form(false); // OAUTHBEARER default
 
         apply_outcome(
             &mut app,
@@ -23655,7 +24123,7 @@ mod tests {
     fn an_empty_manual_password_is_rejected_before_dispatch() {
         let mut app = crate::app::tests::authed_app();
         mail_state(&mut app.settings, enabled_snapshot());
-        app.settings.mail.open_add_form();
+        app.settings.mail.open_add_form(false);
         apply(&mut app.settings, Action::MailAddCredentialToggleKind);
         apply(
             &mut app.settings,
@@ -23669,6 +24137,40 @@ mod tests {
             app.errors.get(&Page::Settings).map(String::as_str),
             Some(fauna_i18n::strings::settings::mail::PASSWORD_REQUIRED),
             "the empty-password guidance must reach `error-message`"
+        );
+    }
+
+    /// The control that opened the form decides the submit's action, never the
+    /// snapshot's `enabled`. On a deployment serving CalDAV with mail off, an
+    /// MSEK-less account's Add credential must reach `AddCredential` (the read
+    /// recipe) — read off `enabled: false` it became `EnableMail`, an email
+    /// enable (`mail-settings.md` § Layout & flow → *CalDAV-only mailbox*).
+    #[test]
+    fn the_opening_control_picks_enable_or_add_not_the_snapshot() {
+        let mut state = SettingsState::default();
+        mail_state(
+            &mut state,
+            MailSettingsSnapshot {
+                enabled: false,
+                caldav_enabled: true,
+                credential_management_reachable: true,
+                ..Default::default()
+            },
+        );
+
+        apply(&mut state, Action::MailOpenAddCredential);
+        assert!(state.mail.show_add_form);
+        assert!(
+            !state.mail.form_enables_mail,
+            "Add credential on a mail-off account is AddCredential, not an email enable"
+        );
+
+        apply(&mut state, Action::MailAddCredentialCancel);
+        apply(&mut state, Action::ToggleMailEnabled);
+        assert!(state.mail.show_add_form);
+        assert!(
+            state.mail.form_enables_mail,
+            "the enable toggle's form is the email enable"
         );
     }
 
@@ -24513,6 +25015,10 @@ mod tests {
             Action::OpenFolderDeleteConfirm,
             Action::ConfirmFolderDelete,
             Action::UseOtherVersion(1),
+            Action::UseRetainedVersion {
+                folder_id: s(),
+                conflict_id: 1,
+            },
             Action::AddLocation,
             Action::RemoveLocation(s()),
             Action::SetLocationMode {
@@ -24984,7 +25490,9 @@ mod tests {
     // 276 → 277 on 2026-10-19: `MailToggleScanResultVisible`
     // (`mail-settings-scan-result-visible-toggle`), added to every_action() in
     // the same commit.
-    const ACTION_COUNT: usize = 277;
+    // 277 → 278 on 2026-11-01: `UseRetainedVersion` (a group set's review row),
+    // already in every_action() since 2026-10-31 without this count moving.
+    const ACTION_COUNT: usize = 278;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -25212,9 +25720,9 @@ mod tests {
         // `OpenExportPage` hands a URL to the OS opener.
         // Pause/Resume/Cancel flip machine-local run flags — every nest call of
         // the run belongs to `run_import`'s background loop, not to the click.
-        // `ToggleSkipped` is a view toggle and `ProfilePrefill` is the disabled
-        // no-op. `ArchiveImportStart` declares a REAL kind
-        // (`fauna.folders.create`) and is deliberately absent from this list.
+        // `ToggleSkipped` is a view toggle. `ArchiveImportStart` and
+        // `ArchiveImportProfilePrefill` declare REAL kinds (`fauna.folders.create`,
+        // `fauna.profile.set`) and are deliberately absent from this list.
         let archive_import = [
             "ArchiveImportSelectSource",
             "ArchiveImportOpenExportPage",
@@ -25227,7 +25735,6 @@ mod tests {
             "ArchiveImportResume",
             "ArchiveImportCancel",
             "ArchiveImportToggleSkipped",
-            "ArchiveImportProfilePrefill",
         ];
         // Signed on this client's own connection to the public PLC directory.
         let off_nest = ["AtprotoRequestContest"];
@@ -25264,6 +25771,9 @@ mod tests {
             "MailRotateCancel",
             "NavBack",
             "CopyActorId",
+            // A group set's review row runs on the sync agent against the
+            // set's own on-device state DB — no nest wire call.
+            "UseRetainedVersion",
             "ToggleIdentityQr",
             "CredentialStoreOpenRekey",
             "CredentialStoreRekeyCancel",

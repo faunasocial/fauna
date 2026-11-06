@@ -24,27 +24,26 @@
             <ItemsControl.ItemTemplate>
                 <DataTemplate>
                     <!--
-                        AutomationId on the TextBlock rather than the Border:
-                        Border lacks a specific AutomationPeer so UIA drops
-                        its AutomationId when the chip materializes inside
-                        an ItemsControl. TextBlock's TextBlockAutomationPeer
-                        carries the id through to the bridge.
+                        A Button root reading "{address} ×": a chip activates to its
+                        ×, the one gesture a committed chip has
+                        (remove_recipient_chip(i), conversations.md § User actions —
+                        tui's and linux's chip). The Button carries a real UIA peer
+                        and InvokePattern, so the id reaches the bridge and a click
+                        drives the removal (a bare Border has no peer, and UIA drops
+                        its AutomationId inside an ItemsControl).
                     -->
-                    <Border Background="{ThemeResource SystemAccentColorLight2}"
-                            CornerRadius="12" Padding="8,4" Margin="0,0,4,4">
-                        <!-- ⚠ A LITERAL id, not `{x:Bind ids:Ids.…}`. `x:Bind`
-                             inside a DataTemplate resolves against that
-                             template's `x:DataType`, and this template has
-                             none — it is filled by the generic `SetChips<T>`,
-                             so there is no one type to declare. Without it the
-                             binding yields nothing and the element ships with
-                             NO AutomationId at all, which is invisible to
-                             MSBuild, to the C# unit tests and to
-                             ui-registry-lint (which greps for the id text) and
-                             shows up only as `count=0` in an e2e run. -->
-                        <TextBlock AutomationProperties.AutomationId="recipient-picker-chip"
-                                   Text="{Binding Display}" />
-                    </Border>
+                    <!-- ⚠ A LITERAL id, not `{x:Bind ids:Ids.…}`, and `{Binding}`, not
+                         `{x:Bind}`: this template declares no `x:DataType`, and an
+                         x:Bind inside it yields nothing — the element would ship with
+                         NO AutomationId at all, which is invisible to MSBuild, to the
+                         C# unit tests and to ui-registry-lint (which greps for the id
+                         text) and shows up only as `count=0` in an e2e run. -->
+                    <Button AutomationProperties.AutomationId="recipient-picker-chip"
+                            Content="{Binding Display}"
+                            Tag="{Binding Index}"
+                            Background="{ThemeResource SystemAccentColorLight2}"
+                            CornerRadius="12" Padding="8,4" Margin="0,0,4,4"
+                            Click="OnChipClicked" />
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
@@ -58,17 +57,22 @@
              while no bridge serves the account. -->
         <TextBlock x:Name="BridgesLine" Visibility="Collapsed" Opacity="0.7" FontSize="12"
                    TextWrapping="Wrap" />
-        <ListView x:Name="SuggestionsList"
-                  Visibility="Collapsed"
-                  SelectionChanged="OnSuggestionPicked">
-            <ListView.ItemTemplate>
+        <ItemsControl x:Name="SuggestionsList" Visibility="Collapsed">
+            <ItemsControl.ItemTemplate>
                 <DataTemplate>
-                    <!-- Literal for the same reason as the chip above. -->
-                    <TextBlock AutomationProperties.AutomationId="recipient-picker-suggestion"
-                               Text="{Binding Display}" />
+                    <!-- A Button root: it carries a real UIA InvokePattern, so the
+                         e2e bridge drives the click directly (a bare TextBlock in a
+                         ListViewItem has none). Literal id for the same reason as the
+                         chip above. -->
+                    <Button AutomationProperties.AutomationId="recipient-picker-suggestion"
+                            Content="{Binding Display}"
+                            Tag="{Binding Index}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left"
+                            Click="OnSuggestionClicked" />
                 </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
         <TextBlock x:Name="ResolveStatus"
                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientResolveStatus}"
                    Tag="idle" />

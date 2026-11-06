@@ -53,6 +53,7 @@ from typing import Any, Optional
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import port_base_url
+from common.nest import register_stop_listener
 
 
 # (base_url, actor_id_hex) → open client. The WsRpcAdminClient is the generic
@@ -116,7 +117,22 @@ def close_all_ws() -> None:
     _CLIENTS.clear()
 
 
+
+def forget_port(port: int) -> None:
+    """Close and drop every cached connection to the nest on ``port`` — called by
+    ``common.nest.stop_nest`` when that nest goes down, so a restart never hands
+    the next caller a socket to the process that is gone."""
+    suffix = f":{port}"
+    for key in [k for k in _CLIENTS if k[0].endswith(suffix)]:
+        client = _CLIENTS.pop(key)
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 atexit.register(close_all_ws)
+register_stop_listener(forget_port)
 
 
 # ── posts ──────────────────────────────────────────────────────────────────

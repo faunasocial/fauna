@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import Testing
 import Foundation
 @testable import FaunaKit
@@ -113,3 +114,5 @@ import Foundation
     #expect(await gate.finish() == true)
     #expect(await gate.finish() == false)
 }
+
+#endif // !FAUNA_KIDS

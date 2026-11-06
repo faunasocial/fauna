@@ -86,9 +86,16 @@ pub enum ResolveState {
     /// recipient that isn't reachable (e.g. a Fauna actor id with no key
     /// package on the nest). Distinct from `Error` (a transport/probe failure)
     /// per `docs/goal/ui/conversations.md` § Errors & edge cases
-    /// (`recipient-resolve-status`: resolving / resolved / error / not-found).
+    /// (`recipient-resolve-status`: idle / resolving / resolved / not-found /
+    /// not-reachable / error).
     NotFound,
     Error,
+    /// The home nest FOUND the handle as one of its own accounts, but it is not
+    /// addressable yet (no key package — its app has never signed in, or its
+    /// supply lapsed). Terminal like `Error`: nothing resolved, no chip, never
+    /// a mail fall-through (`conversations.md` § Errors & edge cases → *The
+    /// picker tells the truth*, rule 2).
+    NotReachable,
 }
 
 impl ResolveState {
@@ -101,6 +108,7 @@ impl ResolveState {
             "Resolved" => ResolveState::Resolved,
             "NotFound" => ResolveState::NotFound,
             "Error" => ResolveState::Error,
+            "NotReachable" => ResolveState::NotReachable,
             _ => ResolveState::Idle,
         }
     }
@@ -121,7 +129,8 @@ impl<'de> Deserialize<'de> for ResolveState {
 }
 
 /// The `recipient-resolve-status` element's render-ready view: the kebab-case
-/// state `token` (`idle` / `resolving` / `resolved` / `not-found` / `error` —
+/// state `token` (`idle` / `resolving` / `resolved` / `not-found` /
+/// `not-reachable` / `error` —
 /// the vocabulary `docs/goal/ui/conversations.md` § Errors & edge cases
 /// ratifies, driving the element's `state` automation attribute) plus the
 /// status `label` each app resolves through its own i18n pipeline
@@ -163,6 +172,10 @@ pub fn recipient_resolve_status(state: ResolveState) -> ResolveStatusView {
         ResolveState::Error => (
             "error",
             Some("conversations.unified.recipient_resolve_error"),
+        ),
+        ResolveState::NotReachable => (
+            "not-reachable",
+            Some("conversations.unified.recipient_resolve_not_reachable"),
         ),
     };
     ResolveStatusView {
@@ -344,8 +357,8 @@ mod tests {
 
     #[test]
     fn recipient_resolve_status_maps_every_state_to_token_and_label() {
-        // The 5-way vocabulary conversations.md § Errors & edge cases ratifies;
-        // Idle renders empty (label None), the other four carry their
+        // The 6-way vocabulary conversations.md § Errors & edge cases ratifies;
+        // Idle renders empty (label None), the other five carry their
         // conversations.unified.recipient_resolve_* key.
         let idle = recipient_resolve_status(ResolveState::Idle);
         assert_eq!(idle.token, "idle");
@@ -371,6 +384,11 @@ mod tests {
                 "error",
                 "conversations.unified.recipient_resolve_error",
             ),
+            (
+                ResolveState::NotReachable,
+                "not-reachable",
+                "conversations.unified.recipient_resolve_not_reachable",
+            ),
         ];
         for (state, token, key) in cases {
             let view = recipient_resolve_status(state);
@@ -390,6 +408,10 @@ mod tests {
         assert_eq!(
             recipient_resolve_status_from_variant("Resolved").token,
             "resolved"
+        );
+        assert_eq!(
+            recipient_resolve_status_from_variant("NotReachable").token,
+            "not-reachable"
         );
         assert_eq!(
             recipient_resolve_status_from_variant("garbage").token,

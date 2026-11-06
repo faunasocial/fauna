@@ -157,21 +157,39 @@ pub fn validate_counterparty_nest_url_scoped(
     Ok(())
 }
 
-/// The policy's own origin reading of `url`: the lowercase scheme and
-/// `host[:port]` with the one optional trailing slash dropped, or `None` for
-/// a URL the device-scope policy refuses. Two addresses name the same nest
-/// exactly when their origins are equal — how the restore gesture matches a
-/// typed address against a custody row's `custodian_nest_url`
-/// (`account-replica-posture.md` § *Corollary — the cold device*, bound (b)).
+/// The policy's own origin reading of `url` — canonical in every way the
+/// dialer is, or `None` for a URL the device-scope policy refuses. Two
+/// addresses name the same nest exactly when their origins are equal — how the
+/// restore gesture matches a typed address against a custody row's
+/// `custodian_nest_url` (`account-replica-posture.md` § *Corollary — the cold
+/// device*, bounds (b) and (c)). Every spelling the validator admits that
+/// dials the same endpoint reads the same:
+///
+/// - case is folded and the one optional trailing slash dropped;
+/// - one scheme per family: `wss` reads as `https`, `ws` as `http` — the dial
+///   reaches the same nest over either;
+/// - the family's default port is dropped (443 for TLS, 80 for plaintext),
+///   and a port is written without leading zeros;
+/// - one trailing dot of a DNS host is dropped (`c.example.` is the
+///   fully-qualified spelling of `c.example`; an IP literal keeps its form).
 pub fn counterparty_origin(url: &str) -> Option<String> {
     validate_counterparty_nest_url_scoped(url, DialScope::Device).ok()?;
     let (scheme, rest) = url.split_once("://")?;
-    let authority = rest.strip_suffix('/').unwrap_or(rest);
-    Some(format!(
-        "{}://{}",
-        scheme.to_ascii_lowercase(),
-        authority.to_ascii_lowercase()
-    ))
+    let (scheme, default_port) = match scheme.to_ascii_lowercase().as_str() {
+        "https" | "wss" => ("https", 443),
+        "http" | "ws" => ("http", 80),
+        _ => return None,
+    };
+    let authority = rest.strip_suffix('/').unwrap_or(rest).to_ascii_lowercase();
+    let (host, port) = crate::web::split_host_port(&authority);
+    let host = match host.strip_suffix('.') {
+        Some(bare) if !bare.is_empty() && !host.starts_with('[') => bare,
+        _ => host,
+    };
+    Some(match port {
+        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+        _ => format!("{scheme}://{host}"),
+    })
 }
 
 #[cfg(test)]
@@ -194,6 +212,52 @@ mod tests {
         // A refused address has no origin to match.
         assert_eq!(origin("http://friend-nest.example"), None);
         assert_eq!(origin("https://friend-nest.example/path"), None);
+    }
+
+    /// Every spelling the validator admits that dials the same nest reads as
+    /// one origin — and a spelling that dials another
+    /// endpoint stays apart.
+    #[test]
+    fn the_origin_reading_is_canonical_in_every_way_the_dialer_is() {
+        use super::counterparty_origin as origin;
+        let canonical = Some("https://c.example".to_string());
+        for variant in [
+            "https://c.example:443",
+            "https://c.example:0443/",
+            "https://c.example.",
+            "https://C.Example.:443/",
+            "wss://c.example",
+            "WSS://c.example:443",
+            "wss://c.example./",
+        ] {
+            assert_eq!(origin(variant), canonical, "{variant}");
+        }
+        // A non-default port is kept, its leading zeros not.
+        assert_eq!(
+            origin("wss://c.example.:08443"),
+            Some("https://c.example:8443".to_string())
+        );
+        // The plaintext family's default is 80, never 443.
+        assert_eq!(
+            origin("ws://localhost:80"),
+            Some("http://localhost".to_string())
+        );
+        assert_eq!(origin("http://127.0.0.1:80/"), origin("ws://127.0.0.1"));
+        assert_eq!(
+            origin("http://localhost:443"),
+            Some("http://localhost:443".to_string())
+        );
+        // The two families never meet, and 80 is no default for TLS.
+        assert_ne!(origin("https://localhost"), origin("http://localhost"));
+        assert_eq!(
+            origin("https://c.example:80"),
+            Some("https://c.example:80".to_string())
+        );
+        // An IP literal keeps its form.
+        assert_eq!(
+            origin("https://[::1]:443"),
+            Some("https://[::1]".to_string())
+        );
     }
 
     use super::validate_counterparty_nest_url as validate;

@@ -685,6 +685,70 @@ pub fn decode_document(payload: &[u8]) -> Result<ContentPolicyDocument, Document
     fauna_cbor::decode_strict(payload).map_err(|e| DocumentDecodeError::Decode(format!("{e:?}")))
 }
 
+/// Read a document a carriage holds as a typed field — **version first**, like
+/// [`decode_document`], and never failing the enclosing value.
+///
+/// A document inside a larger wire value (the guardian's, inside the family
+/// policy reply) would otherwise decode through the closed [`ContentVerdict`]
+/// and [`ScorerKind`] enums, so a document written under a newer grammar would
+/// fail the whole reply and the version-first path would never be reached. This
+/// takes the field as a generic value, re-encodes it canonically and hands it
+/// to [`decode_document`]; a document it still cannot read comes back as
+/// [`ContentPolicyDocument::unreadable`], whose status is inert — and a
+/// guardian's renders fail closed on it (`nest-rules.md` § The shared rule
+/// editor).
+///
+/// # Errors
+///
+/// Only when the field is not a value at all (the enclosing decode is broken).
+pub fn deserialize_carried_document<'de, D>(
+    deserializer: D,
+) -> Result<Option<ContentPolicyDocument>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<fauna_cbor::Value>::deserialize(deserializer)?;
+    Ok(value.map(|mut value| {
+        scorer_bytes_from_json_form(&mut value);
+        fauna_cbor::encode_canonical(&value)
+            .ok()
+            .and_then(|bytes| decode_document(&bytes).ok())
+            .unwrap_or_else(ContentPolicyDocument::unreadable)
+    }))
+}
+
+/// A text format (the ward's JSON snapshot slot) spells a scorer's
+/// `serde_bytes` field as a list of integers, which the generic value keeps as a
+/// list; turn it back into the byte string the canonical document carries, so a
+/// document read from JSON decodes exactly as it did when typed. A list that is
+/// not all bytes is left alone (and the document then reads as unreadable).
+fn scorer_bytes_from_json_form(document: &mut fauna_cbor::Value) {
+    use fauna_cbor::Value;
+    let Value::Map(fields) = document else { return };
+    let Some(Value::List(scorers)) = fields.get_mut("scorers") else {
+        return;
+    };
+    for scorer in scorers {
+        let Value::Map(scorer) = scorer else { continue };
+        let Some(bytes @ Value::List(_)) = scorer.get_mut("bytes") else {
+            continue;
+        };
+        let Value::List(items) = &*bytes else {
+            continue;
+        };
+        let decoded: Option<Vec<u8>> = items
+            .iter()
+            .map(|item| match item {
+                Value::Integer(n) => u8::try_from(*n).ok(),
+                _ => None,
+            })
+            .collect();
+        if let Some(decoded) = decoded {
+            *bytes = Value::Bytes(decoded);
+        }
+    }
+}
+
 /// Encode a document as the canonical dag-cbor every carriage signs and stores.
 ///
 /// # Errors

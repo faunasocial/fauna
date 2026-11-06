@@ -230,6 +230,20 @@ impl ContentPolicyState {
             .note_enforcement(item_id, labels, now, offset);
     }
 
+    /// Does this item's region placeholder carry the sealed-item sentence? The
+    /// shared [`fauna_core::obligation::ContentPolicyState::region_sealed_note`];
+    /// pass the same `labels` as [`Self::note_enforcement`].
+    pub fn region_sealed_note(
+        &self,
+        verdict: &ComposedVerdict,
+        sealed: bool,
+        labels: &[ContentLabelEntry],
+    ) -> bool {
+        self.engine
+            .borrow()
+            .region_sealed_note(verdict, sealed, labels)
+    }
+
     /// Drain the batched Guardian Notify report if a flush is due (≤ hourly, the
     /// accumulator's own gate). The one-minute tick calls this and, on `Some`,
     /// sends `fauna.family.notify_report(entries, offset)`.
@@ -372,7 +386,7 @@ pub fn spawn_spam_preferences_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fauna_core::obligation::{ContentFloor, RenderVerdict};
+    use fauna_core::obligation::RenderVerdict;
 
     fn entry(category: &str, per_mille: u16) -> ContentLabelEntry {
         ContentLabelEntry {
@@ -434,10 +448,9 @@ mod tests {
         );
 
         // A guardian floor composes on top and is what Notify counts.
-        state.set_ward_content_policy(Some(ContentPolicy {
-            spam: ContentFloor::Block,
-            ..Default::default()
-        }));
+        state.set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy::category_rules(
+            &[("spam", fauna_core::content_policy::ContentVerdict::Block)],
+        )));
         state.set_ward_content_notify(true);
         state.note_enforcement("p1", &[entry("spam", 900)]);
         let (entries, _offset) = state

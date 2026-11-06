@@ -24,7 +24,11 @@ public struct RecipientPicker: View {
     public var liveResolveState: () -> ResolveState
     public var onInputChange: (String) -> Void
     public var onAcceptCurrent: () -> Void
-    public var onAcceptSuggestion: (TypedAddress) -> Void
+    /// The suggestion's INDEX, not its address: the click is the Enter path and
+    /// the shared manager (`accept_suggestion(i)`) owns what it commits.
+    public var onAcceptSuggestion: (Int) -> Void
+    /// `recipient-picker-chip[i]`'s × — `remove_recipient_chip(i)`.
+    public var onRemoveChip: (Int) -> Void
     /// The bridges serving this account (`ConversationsSnapshot.bridges`): their
     /// labels name who the picker also reaches (a chrome line, no id) and give a
     /// bridged address its declared display. Empty paints no line.
@@ -40,7 +44,8 @@ public struct RecipientPicker: View {
         liveResolveState: @escaping () -> ResolveState,
         onInputChange: @escaping (String) -> Void = { _ in },
         onAcceptCurrent: @escaping () -> Void = {},
-        onAcceptSuggestion: @escaping (TypedAddress) -> Void = { _ in }
+        onAcceptSuggestion: @escaping (Int) -> Void = { _ in },
+        onRemoveChip: @escaping (Int) -> Void = { _ in }
     ) {
         self.state = state
         self.bridges = bridges
@@ -48,6 +53,7 @@ public struct RecipientPicker: View {
         self.onInputChange = onInputChange
         self.onAcceptCurrent = onAcceptCurrent
         self.onAcceptSuggestion = onAcceptSuggestion
+        self.onRemoveChip = onRemoveChip
     }
 
     @State private var text: String = ""
@@ -95,12 +101,24 @@ public struct RecipientPicker: View {
 
             if !state.chips.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(Array(state.chips.enumerated()), id: \.offset) { _, chip in
-                        automationText(Ids.recipientPickerChip, display(chip))
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                    ForEach(Array(state.chips.enumerated()), id: \.offset) { i, chip in
+                        HStack(spacing: 4) {
+                            automationText(Ids.recipientPickerChip, display(chip))
+                                .font(.caption)
+                            // The chip's ×: no id of its own (ui.yaml declares
+                            // only the chip); tui's chip gesture is the same removal.
+                            Button { onRemoveChip(i) } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help(L.common.remove)
+                            .accessibilityLabel(L.common.remove)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
                     }
                 }
             }
@@ -120,22 +138,29 @@ public struct RecipientPicker: View {
                     .automationValue(Ids.recipientPickerClass, text: { classLabel }, value: { classToken })
             }
 
-            ForEach(Array(state.suggestions.enumerated()), id: \.offset) { _, sugg in
+            ForEach(Array(state.suggestions.enumerated()), id: \.offset) { i, sugg in
+                // The row text is the shared `suggestion_displays[i]`; the
+                // address follows beside it only when it differs.
+                let shown = i < state.suggestionDisplays.count ? state.suggestionDisplays[i] : display(sugg)
+                let address = display(sugg)
                 Button {
-                    onAcceptSuggestion(sugg)
+                    onAcceptSuggestion(i)
                 } label: {
                     HStack {
                         Text(ConversationsUI.rail(for: sugg).map { ConversationsUI.glyphEmoji(railGlyph(rail: $0)) } ?? "")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text(display(sugg)).font(.caption)
+                        Text(shown).font(.caption)
+                        if address != shown {
+                            Text(address).font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
                     }
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(Ids.recipientPickerSuggestion)
-                .automationActivate(Ids.recipientPickerSuggestion, value: { display(sugg) }) {
-                    onAcceptSuggestion(sugg)
+                .automationActivate(Ids.recipientPickerSuggestion, value: { shown }) {
+                    onAcceptSuggestion(i)
                 }
             }
 

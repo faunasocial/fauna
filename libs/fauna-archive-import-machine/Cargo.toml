@@ -8,8 +8,9 @@ license.workspace = true
 [features]
 default = []
 # UniFFI scaffolding for the fauna-ffi consumers (slice 7). Off by default —
-# mirrors fauna-client-mail-settings.
-uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# mirrors fauna-client-mail-settings, `fauna-uniffi-async` included (every
+# async export runs on a runtime worker, never the foreign poll thread).
+uniffi = ["dep:uniffi", "fauna-core/uniffi", "dep:fauna-uniffi-async"]
 # The generated fixture corpus + the in-memory ArchiveNest fake for
 # downstream integration tests (fauna-ffi, the tui walk).
 test-helpers = ["fauna-archive/test-helpers"]
@@ -25,6 +26,7 @@ rpc-glue = [
     "dep:fauna-client-config",
     "dep:fauna-client-posts",
     "dep:fauna-client-caldav",
+    "dep:fauna-client-contacts",
     "dep:fauna-protocol",
     "dep:fauna-sync-engine",
     # `FolderArchiveSource` bridges the sync `ArchiveSource::read_at` onto the
@@ -32,6 +34,25 @@ rpc-glue = [
     # multi-thread scheduler provides.
     "tokio/rt-multi-thread",
 ]
+# The browser `ArchivePlane` (`web_plane::WebPlane`) the web app's chunks build
+# the seam over: the session's chunk-store reads and writes and the blob route,
+# over `fauna-rpc-wasm`. Every dep it adds is declared under the wasm32 target
+# table, so on native the feature is `rpc-glue` alone.
+web-plane = [
+    "rpc-glue",
+    "dep:fauna-rpc-wasm",
+    "dep:fauna-media",
+    "dep:serde_json",
+    "fauna-core/blob-fetch-wasm",
+]
+# Phase two's login wiring: `link::ArchiveLinks` as the conversations session's
+# `ArchiveSignalSink`, and the session as its `ArchiveSignalPoster`. Off by
+# default, so the base crate (and its wasm build) never pulls in the MLS and
+# media graph `fauna-conversations` brings.
+conversations-sink = ["dep:fauna-conversations"]
+# The folded archive comments' wiring: `comments::ArchiveComments` as the feed
+# manager's `ArchiveCommentSource`. Off by default, like `conversations-sink`.
+feed-sink = ["dep:fauna-feed", "dep:fauna-protocol"]
 
 [dependencies]
 # `default-features = false` keeps fauna-core's `network` default (redb, tokio,
@@ -45,6 +66,10 @@ fauna-archive = { path = "../fauna-archive" }
 fauna-cbor = { workspace = true }
 # The backdating post builders + `decode_post` (slice 3, Task 6).
 fauna-client-core = { path = "../fauna-client-core" }
+# The Done step's profile prefill (§ What each category becomes, the Profile
+# row): the own-profile read-modify-write sign step every edit form shares.
+# Pure and wasm-clean (fauna-wasm links it).
+fauna-client-profile = { path = "../fauna-client-profile" }
 serde = { workspace = true, features = ["derive"] }
 # `state::InFlightPost` carries a gated post's built bytes through the folder
 # — byte strings, not integer arrays, in the canonical CBOR.
@@ -57,6 +82,7 @@ blake3 = { workspace = true }
 zeroize = { workspace = true }
 getrandom = { workspace = true }
 uniffi = { workspace = true, optional = true, features = ["tokio"] }
+fauna-uniffi-async = { workspace = true, optional = true }
 # rpc-glue only. `anyhow` is the error type of the shared download walk's
 # `BlobFetcher` seam, which this crate implements over the HTTP chunk store.
 anyhow = { workspace = true, optional = true }
@@ -70,6 +96,14 @@ fauna-client-config = { path = "../fauna-client-config", optional = true }
 fauna-client-posts = { path = "../fauna-client-posts", optional = true }
 fauna-client-caldav = { path = "../fauna-client-caldav", optional = true }
 fauna-client-folders = { path = "../fauna-client-folders", optional = true }
+# rpc-glue only: `fauna.contacts.status` / `fauna.contacts.list` — phase two's
+# admission gate and the announce round's recipients.
+fauna-client-contacts = { path = "../fauna-client-contacts", optional = true }
+# conversations-sink only: the `ArchiveSignalSink` trait and the session's
+# archive-signal doors (`archive-import.md` § Linking and merging, ruling 2).
+fauna-conversations = { path = "../fauna-conversations", optional = true }
+# feed-sink only: the `ArchiveCommentSource` trait the fold implements.
+fauna-feed = { path = "../fauna-feed", optional = true }
 fauna-client-sync = { path = "../fauna-client-sync", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -80,6 +114,13 @@ fauna-core = { path = "../fauna-core", default-features = false, features = ["js
 # fauna-core's rand_core 0.9). Mirrors libs/fauna-archive + libs/fauna-wasm.
 getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# web-plane only: the browser transport's blob and chunk-store POSTs.
+fauna-rpc-wasm = { path = "../fauna-rpc-wasm", optional = true }
+# web-plane only: the media pipeline the blob posts process and seal through
+# (`process_media` alone, as fauna-feed's wasm edge: no C2PA weight on web).
+fauna-media = { path = "../fauna-media", default-features = false, features = ["process_media"], optional = true }
+# web-plane only: the nest's `{"hash": …}` upload reply.
+serde_json = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `sync` backs the fake nest's `on_post_created` notify; `rt` is what the
@@ -90,6 +131,8 @@ fauna-sync-engine = { path = "../fauna-sync-engine", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# `snapshot.rs`'s vocabulary test: every shared label key is a shipped string.
+fauna-i18n = { path = "../fauna-i18n" }
 # `fauna_archive::testing::{fixture_zip, zip_of}` — the generated corpus.
 fauna-archive = { path = "../fauna-archive", features = ["test-helpers"] }
 # Self-dev-dependency: turns `test-helpers` on for this package's own test

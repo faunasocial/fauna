@@ -169,6 +169,117 @@ pub struct QuotaHold {
     pub seen: BTreeMap<u32, ImportFold>,
 }
 
+/// The most UIDs a quota hold's `seen` may remember above the held one
+/// (`mailbox-migration.md` § Progress lives nest-side → *The quota hold*). An
+/// honest app stops sending at the first `quota_exceeded`, so only what was
+/// already in flight with it (one window, ≤32 messages per call) ever lands
+/// above the hold; 1024 is dozens of times that, and small enough that the
+/// blob re-encoded under the nest's one DB lock on every fold stays a few
+/// tens of KB.
+pub const MAX_QUOTA_HOLD_SEEN: usize = 1024;
+
+/// A fold would grow a quota hold past [`MAX_QUOTA_HOLD_SEEN`]: the caller is
+/// reporting messages far above a message the full mailbox turned away. Typed
+/// so the handlers answer a client error; resume and "skip remaining" fold the
+/// held UID first and so still lift the hold.
+#[derive(Debug, PartialEq, Eq)]
+pub struct QuotaHoldFull;
+
+impl std::fmt::Display for QuotaHoldFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the mailbox is held at a message the full mailbox turned away; \
+             more than {MAX_QUOTA_HOLD_SEEN} messages above it cannot be recorded"
+        )
+    }
+}
+
+impl std::error::Error for QuotaHoldFull {}
+
+/// The most distinct source mailboxes one import session's row may track in
+/// its `cursors` and `quota_holds` blobs (`mailbox-migration.md` § Progress
+/// lives nest-side → *The row's mailboxes are bounded*). The honest walk
+/// visits each selected source mailbox once, so this is the most mailboxes
+/// one import can carry; both blobs are decoded and re-encoded whole under the
+/// nest's one DB lock on every fold, so their key count must not be the
+/// caller's to grow.
+pub const MAX_IMPORT_SESSION_MAILBOXES: usize = 1024;
+
+/// The longest source mailbox name, in bytes, a row may start tracking. Real
+/// IMAP hierarchies stay far below it; without it the count bound above would
+/// not bound the blobs' size.
+pub const MAX_IMPORT_MAILBOX_NAME_BYTES: usize = 512;
+
+/// The most mailboxes one row may hold a quota hold in at once. An honest app
+/// pauses at the first `quota_exceeded`, and a resume re-folds that held
+/// message before walking on, so a session carries one live hold at a time;
+/// each hold may remember [`MAX_QUOTA_HOLD_SEEN`] UIDs, so their count is what
+/// bounds the `quota_holds` blob.
+pub const MAX_IMPORT_QUOTA_HOLDS: usize = 16;
+
+/// A fold would make the session's row track a mailbox past one of its bounds
+/// ([`MAX_IMPORT_SESSION_MAILBOXES`], [`MAX_IMPORT_MAILBOX_NAME_BYTES`],
+/// [`MAX_IMPORT_QUOTA_HOLDS`]). Refused whole, before any write, and typed so
+/// the handlers answer a client error. A mailbox the row already tracks never
+/// meets the first two, and lifting a hold adds none, so a resume and "skip
+/// remaining" always fold.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ImportMailboxLimit {
+    TooManyMailboxes,
+    NameTooLong,
+    TooManyQuotaHolds,
+}
+
+impl std::fmt::Display for ImportMailboxLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyMailboxes => write!(
+                f,
+                "an import session tracks at most {MAX_IMPORT_SESSION_MAILBOXES} mailboxes"
+            ),
+            Self::NameTooLong => write!(
+                f,
+                "a mailbox name is at most {MAX_IMPORT_MAILBOX_NAME_BYTES} bytes"
+            ),
+            Self::TooManyQuotaHolds => write!(
+                f,
+                "an import session holds at most {MAX_IMPORT_QUOTA_HOLDS} mailboxes \
+                 at a message the full mailbox turned away"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ImportMailboxLimit {}
+
+/// Whether a fold whose result is `(adds_cursor, adds_hold)` for `mailbox` may
+/// land on a row whose blobs are `cursors` and `holds` — `holds` with this
+/// mailbox's own hold already taken out, `had_hold` saying whether it had one.
+fn check_mailbox_limits(
+    cursors: &BTreeMap<String, (u32, u32)>,
+    holds: &BTreeMap<String, QuotaHold>,
+    mailbox: &str,
+    had_hold: bool,
+    adds_entry: bool,
+    adds_hold: bool,
+) -> std::result::Result<(), ImportMailboxLimit> {
+    let tracked = had_hold || cursors.contains_key(mailbox);
+    if adds_entry && !tracked {
+        if mailbox.len() > MAX_IMPORT_MAILBOX_NAME_BYTES {
+            return Err(ImportMailboxLimit::NameTooLong);
+        }
+        let count = cursors.len() + holds.keys().filter(|k| !cursors.contains_key(*k)).count();
+        if count >= MAX_IMPORT_SESSION_MAILBOXES {
+            return Err(ImportMailboxLimit::TooManyMailboxes);
+        }
+    }
+    if adds_hold && !had_hold && holds.len() >= MAX_IMPORT_QUOTA_HOLDS {
+        return Err(ImportMailboxLimit::TooManyQuotaHolds);
+    }
+    Ok(())
+}
+
 impl QuotaHold {
     /// The lowest UID still turned away, if any — what holds the cursor.
     fn held_at(&self) -> Option<u32> {
@@ -212,6 +323,8 @@ impl FoldDelta {
 ///   message is folded again as anything else: the resume that imports it
 ///   once there is room, or the "skip remaining" choice recording it as
 ///   skipped for good. The cursor then moves on to `high`.
+/// - **The hold's memory is bounded** ([`MAX_QUOTA_HOLD_SEEN`]): a fold that
+///   would remember more UIDs is refused whole with [`QuotaHoldFull`].
 /// - **Each message counts once.** A UID in the hold's `seen` already
 ///   counted; folded again it moves nothing, except a turned-away message now
 ///   landing elsewhere, which moves out of `skipped`. The hold is dropped once
@@ -221,7 +334,7 @@ pub fn fold_mailbox(
     hold: Option<QuotaHold>,
     uid_validity: u32,
     folds: &[(u32, ImportFold)],
-) -> (Option<(u32, u32)>, Option<QuotaHold>, FoldDelta) {
+) -> Result<(Option<(u32, u32)>, Option<QuotaHold>, FoldDelta), QuotaHoldFull> {
     let mut delta = FoldDelta::default();
     let mut hold = hold.filter(|h| h.uid_validity == uid_validity);
     // The furthest point already processed in this namespace.
@@ -252,6 +365,12 @@ pub fn fold_mailbox(
                     .and_then(QuotaHold::held_at)
                     .is_some_and(|at| uid >= at);
                 if kind == ImportFold::QuotaRefused || above_hold {
+                    if hold
+                        .as_ref()
+                        .is_some_and(|h| h.seen.len() >= MAX_QUOTA_HOLD_SEEN)
+                    {
+                        return Err(QuotaHoldFull);
+                    }
                     hold.get_or_insert_with(|| QuotaHold {
                         uid_validity,
                         ..QuotaHold::default()
@@ -270,7 +389,7 @@ pub fn fold_mailbox(
         Some(at) => Some((at.saturating_sub(1), uid_validity)),
         None => high.map(|h| (h, uid_validity)).or(cursor),
     };
-    (cursor, hold, delta)
+    Ok((cursor, hold, delta))
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportSessionRow> {
@@ -600,12 +719,24 @@ impl crate::db::CacheDb {
             serde_json::from_str(&cursors_json).unwrap_or_default();
         let mut holds: BTreeMap<String, QuotaHold> =
             serde_json::from_str(&holds_json).unwrap_or_default();
+        let prior_hold = holds.remove(mailbox);
+        let had_hold = prior_hold.is_some();
         let (cursor, hold, delta) = fold_mailbox(
             cursors.get(mailbox).copied(),
-            holds.remove(mailbox),
+            prior_hold,
             uid_validity,
             folds,
-        );
+        )?;
+        // The row's mailbox bounds, checked before anything is written: a
+        // fold that would track one mailbox too many is refused whole.
+        check_mailbox_limits(
+            &cursors,
+            &holds,
+            mailbox,
+            had_hold,
+            cursor.is_some() || hold.is_some(),
+            hold.is_some(),
+        )?;
         if let Some(c) = cursor {
             cursors.insert(mailbox.to_string(), c);
         }
@@ -1461,6 +1592,129 @@ mod tests {
     }
 
     #[test]
+    fn a_quota_hold_remembers_a_bounded_number_of_uids() {
+        use ImportFold::*;
+        // A hold remembers at most MAX_QUOTA_HOLD_SEEN UIDs: a fold
+        // reporting more above the held UID is refused whole, the hold intact.
+        let held = fold_mailbox(Some((9, 7)), None, 7, &[(10, QuotaRefused)])
+            .unwrap()
+            .1;
+        let flood: Vec<(u32, ImportFold)> = (11..11 + MAX_QUOTA_HOLD_SEEN as u32 + 40)
+            .map(|u| (u, Skipped))
+            .collect();
+        assert_eq!(
+            fold_mailbox(Some((9, 7)), held.clone(), 7, &flood).unwrap_err(),
+            QuotaHoldFull
+        );
+        // Under the cap it folds, and the encoded blob stays bounded.
+        let ok = fold_mailbox(Some((9, 7)), held, 7, &flood[..MAX_QUOTA_HOLD_SEEN - 1])
+            .unwrap()
+            .1
+            .unwrap();
+        assert!(ok.seen.len() <= MAX_QUOTA_HOLD_SEEN);
+        assert!(serde_json::to_string(&ok).unwrap().len() < 64 * 1024);
+        // The held UID folded as a plain skip still lifts it.
+        let (_, lifted, _) = fold_mailbox(Some((9, 7)), Some(ok), 7, &[(10, Skipped)]).unwrap();
+        assert_eq!(lifted.and_then(|h| h.held_at()), None);
+    }
+
+    ///  A row tracks at most MAX_IMPORT_SESSION_MAILBOXES mailboxes:
+    /// a fold naming one more is refused whole, nothing written, while a
+    /// mailbox already tracked still folds.
+    #[tokio::test]
+    async fn a_session_tracks_a_bounded_number_of_mailboxes() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        for i in 0..MAX_IMPORT_SESSION_MAILBOXES {
+            db.record_import_progress(&ACTOR, "s1", &format!("m{i}"), 7, &[(1, Skipped)], None)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let err = db
+            .record_import_progress(&ACTOR, "s1", "one-too-many", 7, &[(1, Skipped)], None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ImportMailboxLimit>(),
+            Some(&ImportMailboxLimit::TooManyMailboxes)
+        );
+        let row = db.get_import_session(&ACTOR, "s1").await.unwrap().unwrap();
+        assert_eq!(row.cursors.len(), MAX_IMPORT_SESSION_MAILBOXES);
+        assert_eq!(row.skipped_count, MAX_IMPORT_SESSION_MAILBOXES as u64);
+        // A tracked mailbox always folds.
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "m0", 7, &[(2, Imported)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("m0"), Some(&(2, 7)));
+    }
+
+    /// A fresh mailbox name past MAX_IMPORT_MAILBOX_NAME_BYTES is refused; one
+    /// at the bound folds.
+    #[tokio::test]
+    async fn a_fresh_mailbox_name_is_bounded() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        let long = "x".repeat(MAX_IMPORT_MAILBOX_NAME_BYTES + 1);
+        let err = db
+            .record_import_progress(&ACTOR, "s1", &long, 7, &[(1, Skipped)], None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ImportMailboxLimit>(),
+            Some(&ImportMailboxLimit::NameTooLong)
+        );
+        db.record_import_progress(&ACTOR, "s1", &long[1..], 7, &[(1, Skipped)], None)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// At most MAX_IMPORT_QUOTA_HOLDS mailboxes hold at once: one more refused
+    /// message in a fresh mailbox is refused whole, and a held mailbox's hold
+    /// still lifts.
+    #[tokio::test]
+    async fn a_session_holds_a_bounded_number_of_mailboxes() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        for i in 0..MAX_IMPORT_QUOTA_HOLDS {
+            db.record_import_progress(
+                &ACTOR,
+                "s1",
+                &format!("h{i}"),
+                7,
+                &[(5, QuotaRefused)],
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let err = db
+            .record_import_progress(&ACTOR, "s1", "h-extra", 7, &[(5, QuotaRefused)], None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ImportMailboxLimit>(),
+            Some(&ImportMailboxLimit::TooManyQuotaHolds)
+        );
+        // A plain fold into a fresh mailbox needs no hold and still lands.
+        db.record_import_progress(&ACTOR, "s1", "plain", 7, &[(5, Skipped)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        // "Skip remaining" lifts a hold.
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "h0", 7, &[(5, Skipped)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("h0"), Some(&(5, 7)));
+    }
+
+    #[test]
     fn fold_holds_at_the_lowest_refusal_and_lifts_when_it_resolves() {
         use ImportFold::*;
         let (cursor, hold, delta) = fold_mailbox(
@@ -1468,7 +1722,8 @@ mod tests {
             None,
             7,
             &[(10, QuotaRefused), (11, Imported), (12, QuotaRefused)],
-        );
+        )
+        .unwrap();
         assert_eq!(cursor, Some((9, 7)));
         assert_eq!(
             delta,
@@ -1482,7 +1737,7 @@ mod tests {
         assert_eq!(hold.high, 12);
 
         // The first refusal resolves; the second still holds.
-        let (cursor, hold, delta) = fold_mailbox(cursor, Some(hold), 7, &[(10, Imported)]);
+        let (cursor, hold, delta) = fold_mailbox(cursor, Some(hold), 7, &[(10, Imported)]).unwrap();
         assert_eq!(cursor, Some((11, 7)));
         assert_eq!(
             delta,
@@ -1494,20 +1749,20 @@ mod tests {
         );
 
         // Refused again: nothing counts twice, the hold stays.
-        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, QuotaRefused)]);
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, QuotaRefused)]).unwrap();
         assert_eq!(cursor, Some((11, 7)));
         assert_eq!(delta, FoldDelta::default());
 
         // "Skip remaining" records it as skipped for good: no counter moves
         // (it was already a skip), and the cursor moves on.
-        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, Skipped)]);
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, Skipped)]).unwrap();
         assert_eq!(cursor, Some((12, 7)));
         assert_eq!(delta, FoldDelta::default());
         assert!(hold.is_some(), "kept until the walk passes it");
 
         // The walk passes the hold's last UID: it is dropped, and new UIDs
         // count as ever.
-        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(13, Imported)]);
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(13, Imported)]).unwrap();
         assert_eq!(cursor, Some((13, 7)));
         assert!(hold.is_none());
         assert_eq!(
@@ -1524,14 +1779,14 @@ mod tests {
     fn fold_never_walks_back_and_a_new_uidvalidity_replaces_the_hold() {
         use ImportFold::*;
         // A lower UID reported late never walks the cursor back.
-        let (cursor, hold, _) = fold_mailbox(Some((50, 7)), None, 7, &[(3, Skipped)]);
+        let (cursor, hold, _) = fold_mailbox(Some((50, 7)), None, 7, &[(3, Skipped)]).unwrap();
         assert_eq!(cursor, Some((50, 7)));
         assert!(hold.is_none());
 
-        let (cursor, hold, _) = fold_mailbox(cursor, None, 7, &[(51, QuotaRefused)]);
+        let (cursor, hold, _) = fold_mailbox(cursor, None, 7, &[(51, QuotaRefused)]).unwrap();
         assert_eq!(cursor, Some((50, 7)));
         // The source mailbox was rebuilt: its old UIDs mean nothing.
-        let (cursor, hold, _) = fold_mailbox(cursor, hold, 8, &[(2, Imported)]);
+        let (cursor, hold, _) = fold_mailbox(cursor, hold, 8, &[(2, Imported)]).unwrap();
         assert_eq!(cursor, Some((2, 8)));
         assert!(hold.is_none());
     }

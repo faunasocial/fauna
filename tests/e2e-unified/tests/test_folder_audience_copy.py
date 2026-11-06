@@ -52,6 +52,10 @@ pytestmark = [
     pytest.mark.tui,
     pytest.mark.web,
     pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.android,
+    pytest.mark.windows,
 ]
 
 # Generous ceilings, not expectations (convention 14): every wait below is a
@@ -130,7 +134,7 @@ def _await_website_hint(app, name: str, want: str, why: str) -> None:
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux", "macos", "ios", "android", "windows"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_a_website_folder_says_whether_anyone_can_reach_it(folder_share_owner_app):
@@ -182,7 +186,7 @@ def test_a_website_folder_says_whether_anyone_can_reach_it(folder_share_owner_ap
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux", "macos", "ios", "android", "windows"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_the_go_public_confirmation_states_both_consequences(folder_share_owner_app):
@@ -236,7 +240,7 @@ def test_the_go_public_confirmation_states_both_consequences(folder_share_owner_
     )
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "web", "linux", "macos", "ios", "android", "windows"], indirect=True)
 @pytest.mark.real_conversations
 @pytest.mark.feature("public-folders-and-websites")
 def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
@@ -246,7 +250,7 @@ def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
     The folder is bound the one way a folder becomes bound — the owner's share
     gesture — and the picker is then read whole: `private` must be absent (the
     nest refuses it while bound), and the hint must explain the repair."""
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import MAIL_PRIMARY_DOMAIN
     from tests.api import conv_api
 
@@ -256,9 +260,7 @@ def test_a_shared_folder_offers_no_private_and_says_why(folder_share_owner_app):
     # A headless recipient with a fetchable KeyPackage — bound-ness is minted by
     # the owner's gesture and waits on nobody accepting.
     recipient_handle = "shbob" + secrets.token_hex(2)
-    recipient = register_handled_actor(
-        nest["port"], handle=recipient_handle, domain=MAIL_PRIMARY_DOMAIN
-    )
+    recipient = admit_adult(nest, recipient_handle, domain=MAIL_PRIMARY_DOMAIN, token=True)
     conv_api.keypackage_upload(
         nest["port"],
         recipient,

@@ -28,68 +28,19 @@ pub const FACTS_SEPARATOR: &str = " · ";
 /// all (a tui/linux item's declared text).
 pub const LINE_SEPARATOR: &str = "\n";
 
-/// A [`LocalizedText`] whose template arguments may themselves be
-/// translatable: `nested` maps an argument name to the text that fills it
-/// (a resolved app name, a described scope, the oracle's operation words),
-/// and wins over `text.args` of the same name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct ComposedText {
-    pub text: LocalizedText,
-    pub nested: HashMap<String, LocalizedText>,
+/// The page's composed line — lifted to `fauna-core` beside
+/// [`LocalizedText`] so every shared crate composing a page's lines hands the
+/// apps one type.
+pub use fauna_core::localized::ComposedText;
+
+/// A bulleted line whose text is itself translatable.
+fn bullet(text: LocalizedText) -> ComposedText {
+    ComposedText::with_nested(BULLET, [], [("text", text)])
 }
 
-impl ComposedText {
-    fn key(key: &str) -> Self {
-        Self {
-            text: LocalizedText::key(key),
-            nested: HashMap::new(),
-        }
-    }
-
-    fn args<const N: usize>(key: &str, pairs: [(&str, &str); N]) -> Self {
-        Self {
-            text: LocalizedText::key_args(key, pairs),
-            nested: HashMap::new(),
-        }
-    }
-
-    fn with_nested<const N: usize>(
-        key: &str,
-        pairs: [(&str, &str); N],
-        nested: impl IntoIterator<Item = (&'static str, LocalizedText)>,
-    ) -> Self {
-        Self {
-            text: LocalizedText::key_args(key, pairs),
-            nested: nested
-                .into_iter()
-                .map(|(n, t)| (n.to_string(), t))
-                .collect(),
-        }
-    }
-
-    fn bullet(text: LocalizedText) -> Self {
-        Self::with_nested(BULLET, [], [("text", text)])
-    }
-
-    fn bullet_verbatim(text: &str) -> Self {
-        Self::args(BULLET, [("text", text)])
-    }
-
-    /// Resolve through `lookup` (the app's key → template function): each
-    /// nested text first, then this template with them substituted.
-    pub fn resolve<F, S>(&self, lookup: F) -> String
-    where
-        F: Fn(&str) -> Option<S>,
-        S: AsRef<str>,
-    {
-        let mut text = self.text.clone();
-        for (name, nested) in &self.nested {
-            text.args
-                .insert(name.clone(), nested.resolve(|k| lookup(k)));
-        }
-        text.resolve(lookup)
-    }
+/// A bulleted line carrying a verbatim string.
+fn bullet_verbatim(text: &str) -> ComposedText {
+    ComposedText::args(BULLET, [("text", text)])
 }
 
 /// A roster row's text: `lines` top to bottom (the head, any burned state,
@@ -167,11 +118,7 @@ pub fn set_lines(set: &ConsentSetRow) -> Vec<ComposedText> {
             .as_deref()
             .map(|d| ComposedText::args(INDENTED, [("text", d)])),
     );
-    lines.extend(
-        set.member_descriptions
-            .iter()
-            .map(|m| ComposedText::bullet_verbatim(m)),
-    );
+    lines.extend(set.member_descriptions.iter().map(|m| bullet_verbatim(m)));
     lines
 }
 
@@ -271,12 +218,7 @@ pub fn roster_row_text_with(
             )],
         ));
     }
-    lines.extend(
-        row.scope_descriptions
-            .iter()
-            .cloned()
-            .map(ComposedText::bullet),
-    );
+    lines.extend(row.scope_descriptions.iter().cloned().map(bullet));
     // The permission sets those permissions came from, after the list and in
     // the card's own lines, so the row reads as the approval did
     // (`atproto-oauth-provider.md` § Implementation status today).
@@ -313,8 +255,10 @@ pub fn roster_row_text_with(
 }
 
 /// A request card's lines, top to bottom: the heading, who is asking, the
-/// scopes heading and one bulleted line per scope, the permission sets, then
-/// — last — what the approve ends besides granting (a key replacement's line,
+/// scopes heading and one bulleted line per scope, the permission sets, the
+/// cli's reach line when the cli is asking (what is granted reaches whichever
+/// assistant drives it, `apps/cli.md` § Hosting cases), then — last — what the
+/// approve ends besides granting (a key replacement's line,
 /// `ConsentCardRow.ends`; absent on an ordinary card).
 pub fn request_card_lines(consent: &ConsentCardRow) -> Vec<ComposedText> {
     let who = match &consent.client_name {
@@ -336,9 +280,12 @@ pub fn request_card_lines(consent: &ConsentCardRow) -> Vec<ComposedText> {
         consent
             .scope_descriptions
             .iter()
-            .map(|s| ComposedText::bullet_verbatim(s)),
+            .map(|s| bullet_verbatim(s)),
     );
     lines.extend(consent.sets.iter().flat_map(set_lines));
+    if consent.client_id == fauna_protocol::principals::CLI_CLIENT_ID {
+        lines.push(ComposedText::key("connected_apps.consent_assistant_reach"));
+    }
     lines.extend(consent.ends.as_ref().map(|e| ComposedText {
         text: e.clone(),
         nested: HashMap::new(),
@@ -388,7 +335,7 @@ pub fn request_install_text(consent: &ConsentCardRow) -> Option<InstallSectionTe
             return vec![ComposedText::key(none)];
         }
         let mut lines = vec![ComposedText::key(heading)];
-        lines.extend(items.iter().map(|i| ComposedText::bullet_verbatim(i)));
+        lines.extend(items.iter().map(|i| bullet_verbatim(i)));
         lines
     };
     let publisher = match (&install.publisher_key, install.development) {

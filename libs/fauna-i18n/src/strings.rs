@@ -497,14 +497,6 @@ pub mod tips {
 }
 
 pub mod onboarding {
-    pub mod welcome {
-        pub const TITLE: &str = "Fauna";
-
-        pub const SUBTITLE: &str = "Your personal, private communications nest.";
-
-        pub const TAGLINE: &str = "Private messaging and file sync,\nbuilt on your own server.";
-    }
-
     pub mod terms {
         pub const NOTICE: &str = "By continuing you agree to the Fauna terms and content guidelines";
     }
@@ -514,7 +506,9 @@ pub mod onboarding {
 
         pub const USE_DIFFERENT_NEST: &str = "Use a different nest";
 
-        pub const LAUNCH_FAILED: &str = "Startup hit a problem. Your data is safe — you can retry, or continue setup below.";
+        pub const LAUNCH_FAILED: &str = "Startup hit a problem. Nothing saved on this device was deleted — restart the app to try again.";
+
+        pub const LOCKED_SECRET_MISSING: &str = "This device doesn't hold this account's secret key, so it can't replace the identity from here. Add the account back with its secret key or recovery kit, then try again.";
 
         pub const IDENTITY_CHANGED_WARNING: &str = "This nest's identity has changed, or it can no longer prove the identity you previously trusted. It may have been re-deployed or had its key rotated — or someone may be impersonating it. Don't continue unless you were expecting this change.";
 
@@ -540,7 +534,7 @@ pub mod onboarding {
 
         pub const INDEX_MALFORMED: &str = "Your saved accounts can't be read, and updating the app won't help. Nothing has been changed or deleted. You can start over on this device, or move this device's data somewhere safe first.";
 
-        pub const INDEX_MALFORMED_RESET_RESIDUAL: &str = "Starting over removes every account from this device and returns the app to a fresh install. Your accounts still exist on your nest, but you will need your secret key or recovery kit to sign back in — this device's copy is removed. Some saved data on this device cannot be reached to clear it.";
+        pub const INDEX_MALFORMED_RESET_RESIDUAL: &str = "Starting over clears this app's list of accounts. Your accounts still exist on your nest — you can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit. Some saved data on this device, which can include sign-in keys, can't be reached to clear it and stays behind.";
 
         pub const INDEX_NEWER_BUILD_TITLE: &str = "Update needed";
 
@@ -548,7 +542,7 @@ pub mod onboarding {
 
         pub const INDEX_MALFORMED_RESET: &str = "Start over on this device";
 
-        pub const INDEX_MALFORMED_RESET_CONFIRM: &str = "Remove everything and start over";
+        pub const INDEX_MALFORMED_RESET_CONFIRM: &str = "Clear the list and start over";
 
         pub const INDEX_MALFORMED_RESET_BLOCKED_OTHER_WINDOW: &str = "Nothing was removed — another Fauna window is using an account on this device. Close it, then start over again.";
 
@@ -600,7 +594,7 @@ pub mod onboarding {
 
         pub const RECOVER_LOST_BOX: &str = "Recover a lost box";
 
-        pub const RESTORE_FROM_RECOVERY_KIT: &str = "Restore my account from a recovery phrase";
+        pub const RESTORE_FROM_RECOVERY_KIT: &str = "Restore my account from a recovery kit";
 
         pub const EMERGENCY_LOCKOUT_ENTRY: &str = "Lock my account for 24 hours";
     }
@@ -626,9 +620,9 @@ pub mod onboarding {
     pub mod recovery_kit {
         pub const TITLE: &str = "Your Recovery Kit";
 
-        pub const DESC: &str = "This recovery phrase outranks your secret key — it is the only way to get your account back if your secret key is ever stolen or lost. Keep it offline; it is shown exactly once and never stored on any device.";
+        pub const DESC: &str = "Your recovery kit is a second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.";
 
-        pub const ESCROW_DEFERRED: &str = "Your kit activates when your account comes online at the end of setup — until then, keep the phrase safe.";
+        pub const ESCROW_DEFERRED: &str = "Your kit activates when your account comes online at the end of setup — until then, keep it safe and offline.";
 
         pub const CONFIRM: &str = "I've saved it — continue";
 
@@ -640,17 +634,17 @@ pub mod onboarding {
     pub mod recovery_entry {
         pub const TITLE: &str = "Restore from Recovery Kit";
 
-        pub const PHRASE_LABEL: &str = "Recovery phrase";
+        pub const PHRASE_LABEL: &str = "Recovery kit";
 
-        pub const DESC: &str = "Paste your recovery phrase (the fauna://recovery link or the 64-character code). Your identity will be restored from your nest's sealed escrow.";
+        pub const DESC: &str = "Paste your recovery kit (the fauna://recovery link or the 64-character code). Your identity will be restored from the copy of your secret key that only your kit opens.";
 
-        pub const ACCOUNT_HINT: &str = "If your phrase doesn't name your account, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.";
+        pub const ACCOUNT_HINT: &str = "If your kit doesn't say where your account lives, enter your handle (user@domain) so your nest can be found. If that domain is gone, put your nest's own address after the @ instead — like alice@192.0.2.10 or alice@nest.local.";
 
         pub const SUBMIT: &str = "Restore";
 
-        pub const INVALID_KIT: &str = "That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.";
+        pub const INVALID_KIT: &str = "That isn't a recovery kit. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.";
 
-        pub const ACCOUNT_NEEDED: &str = "Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.";
+        pub const ACCOUNT_NEEDED: &str = "Enter the handle of the account you're restoring (user@domain) — this kit doesn't say where your account lives.";
 
         pub const ACCOUNT_MALFORMED: &str = "Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.";
 
@@ -659,13 +653,13 @@ pub mod onboarding {
             format!("No account named {account} exists on that nest.")
         }
 
-        pub const NO_ESCROW: &str = "This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in.";
+        pub const NO_ESCROW: &str = "Your kit can't restore this account from here — no copy of your secret key that it opens is available. On a device that's still signed in, open Settings → Account → Recovery Kit. If it offers Restore Kit Recovery, enter this kit and press it; if instead Create Recovery Kit can be pressed, this kit never took effect, so create a new one.";
 
         pub const SUPERSEDED: &str = "This identity was replaced after it was compromised. Import the new identity to continue.";
 
-        pub const REFUSED: &str = "That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})";
+        pub const REFUSED: &str = "That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})";
         pub fn refused(reason: &str) -> String {
-            format!("That recovery phrase was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})")
+            format!("That recovery kit was refused — it may have been replaced by a newer kit, or belong to another account. ({reason})")
         }
 
         pub const UNREACHABLE: &str = "Could not reach that account's nest. Check the handle and your connection, then try again. If the domain itself is gone, enter your handle with your nest's address instead, like alice@192.0.2.10. ({reason})";
@@ -673,9 +667,9 @@ pub mod onboarding {
             format!("Could not reach that account's nest. Check the handle and your connection, then try again. If the domain itself is gone, enter your handle with your nest's address instead, like alice@192.0.2.10. ({reason})")
         }
 
-        pub const RESTORED_PREDECESSORS_LOST: &str = "Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})";
+        pub const RESTORED_PREDECESSORS_LOST: &str = "Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})";
         pub fn restored_predecessors_lost(reason: &str) -> String {
-            format!("Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})")
+            format!("Your account was restored. But part of the copy your kit opened — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})")
         }
     }
 
@@ -693,7 +687,7 @@ pub mod onboarding {
             format!("Your account is locked until {until}. Nothing was saved on this device.")
         }
 
-        pub const INVALID_SECRET: &str = "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase.";
+        pub const INVALID_SECRET: &str = "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery kit.";
 
         pub const ACCOUNT_NEEDED: &str = "Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives.";
 
@@ -741,13 +735,13 @@ pub mod onboarding {
     pub mod recovery {
         pub const TITLE: &str = "Recover a lost box";
 
-        pub const SUBTITLE: &str = "Choose the box you lost. Fauna re-provisions a fresh box with its saved identity, so your pinned devices reconnect automatically once it's back online.";
+        pub const SUBTITLE: &str = "Choose the box you lost. A new server started with its saved key is the same nest, and Fauna can set one up on a cloud host for you. Your installed Fauna apps then reconnect to it automatically once it's back online, with no warning that its identity changed.";
 
         pub const BOX_LIST_LABEL: &str = "Your boxes";
 
-        pub const BOX_ITEM_HINT: &str = "Recovery key custodied";
+        pub const BOX_ITEM_HINT: &str = "Server key saved";
 
-        pub const EMPTY_MESSAGE: &str = "No recovery keys are available yet. Connect to one of your other nests first — its synced configuration holds the recovery keys for every box you administer.";
+        pub const EMPTY_MESSAGE: &str = "No saved server keys were found for your boxes. If another of your nests is still running, and your devices have signed in to it or linked it since saving those keys, it holds a copy of them — choose Recover a lost box on the Set Up Your Identity screen, import your identity, and enter your handle on that nest.";
 
         pub const METHOD_CLOUD: &str = "Re-provision on a cloud host";
 
@@ -767,11 +761,11 @@ pub mod onboarding {
     pub mod retire {
         pub const TITLE: &str = "Retire a server";
 
-        pub const SUBTITLE: &str = "Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved.";
+        pub const SUBTITLE: &str = "Delete a server Fauna created in your cloud account since 8 July 2026 — on OVH, any server your credentials reach — and clean up the DNS records that belong to it, or, where your provider can hand it out, get your domain's transfer code. Your cloud token is used for this visit only and is never saved.";
 
-        pub const LIST_LABEL: &str = "Servers Fauna created in this account";
+        pub const LIST_LABEL: &str = "Servers found in this account";
 
-        pub const EMPTY_MESSAGE: &str = "No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard.";
+        pub const EMPTY_MESSAGE: &str = "No servers created by Fauna were found in this account. Except on OVH, servers created before 8 July 2026 predate the Fauna marker and are not listed — retire those from your provider's dashboard.";
 
         pub const DOMAIN_LABEL: &str = "Domain";
 
@@ -819,9 +813,9 @@ pub mod onboarding {
 
         pub const CONFIRM_CURRENT: &str = "This is the server you're signed into. This session's nest will stop existing.";
 
-        pub const CONFIRM_DNS_REMOVALS: &str = "Before the server is deleted, these DNS records pointing at it are removed: {records}";
+        pub const CONFIRM_DNS_REMOVALS: &str = "Before the server is deleted, these DNS records belonging to it are removed: {records}";
         pub fn confirm_dns_removals(records: &str) -> String {
-            format!("Before the server is deleted, these DNS records pointing at it are removed: {records}")
+            format!("Before the server is deleted, these DNS records belonging to it are removed: {records}")
         }
 
         pub const CONFIRM_DNS_NONE: &str = "No DNS records will be removed automatically. The records to remove by hand are listed below.";
@@ -952,7 +946,7 @@ pub mod onboarding {
 
         pub const PROVISIONING_COMPLETE: &str = "Provisioning complete";
 
-        pub const TIME: &str = "This usually takes 2-3 minutes.";
+        pub const TIME: &str = "This usually takes a few minutes.";
 
         pub const SERVER: &str = "Provision Server";
 
@@ -1133,13 +1127,13 @@ pub mod onboarding {
 
         pub const UPDATE_CHANNEL_TEST_DESC: &str = "Numbered releases being accepted by users before they become Stable.";
 
-        pub const UPDATE_CHANNEL_TEST_DESC_SAME_VERSION: &str = "Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks.";
+        pub const UPDATE_CHANNEL_TEST_DESC_SAME_VERSION: &str = "Numbered releases being accepted by users before they become Stable. Until version 0.2 the server works only with apps of exactly the same version.";
 
         pub const UPDATE_CHANNEL_DEV_LABEL: &str = "Dev";
 
         pub const UPDATE_CHANNEL_DEV_DESC: &str = "The newest development builds, before any checking, for people who build the apps from source. Expect breakage.";
 
-        pub const UPDATE_CHANNEL_DEV_DESC_SAME_VERSION: &str = "The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.";
+        pub const UPDATE_CHANNEL_DEV_DESC_SAME_VERSION: &str = "The newest development builds, before any checking. Until version 0.2 the server works only with apps built from the same source. Expect breakage.";
 
         pub const UPDATE_CHANNEL_STABLE_DESC_NO_BUILD: &str = "No build has been published on this channel yet — choose another channel.";
 
@@ -1149,7 +1143,7 @@ pub mod onboarding {
 
         pub const MAIL_MODE_LABEL: &str = "Run mail on this box";
 
-        pub const MAIL_MODE_DESC: &str = "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS.";
+        pub const MAIL_MODE_DESC: &str = "A mail box runs email (SMTP, IMAP), which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box, which runs everything except email and can run on the cheapest 1 GB plan, but cannot add email later: the server would have to be set up again with email, on a plan with 2 GB or more.";
 
         pub const SSH_DOOR_LABEL: &str = "Keep an SSH door to this server";
 
@@ -1269,6 +1263,11 @@ pub mod onboarding {
                 format!("{domain} resolves but no nest is running. To set one up, confirm you control DNS for this domain.")
             }
 
+            pub const LOCAL_NO_NEST: &str = "No nest is running at {domain}. Start a nest there, then check again.";
+            pub fn local_no_nest(domain: &str) -> String {
+                format!("No nest is running at {domain}. Start a nest there, then check again.")
+            }
+
             pub const ALREADY_ON_NEST_HANDLE_MATCHES: &str = "Welcome back, {handle}.";
             pub fn already_on_nest_handle_matches(handle: &str) -> String {
                 format!("Welcome back, {handle}.")
@@ -1353,6 +1352,10 @@ pub mod onboarding {
             pub fn transient(cause: &str) -> String {
                 format!("{cause}. Try again.")
             }
+
+            pub const DOMAIN_NOT_HOSTED: &str = "This nest doesn't host addresses on that domain. Go back and choose an address on one of its own domains.";
+
+            pub const UNREACHABLE: &str = "Couldn't reach the nest to create your account. Try again.";
 
             pub const ALREADY_REGISTERED: &str = "This nest already has an account for you, so it won't take a new invite request. Its admin may have suspended your account — contact the admin; if they restore it, sign in again.";
 
@@ -1460,7 +1463,7 @@ pub mod onboarding {
     pub mod trust_prompt {
         pub const TITLE: &str = "Trust this box?";
 
-        pub const SUMMARY: &str = "This box can do more for you if you let it read the things it looks after: filtering your mail as it arrives, and serving your calendar to your other devices. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.";
+        pub const SUMMARY: &str = "This box can do more for you if you let it read your mail and calendar, and the posts of the paid tiers you already have: running its virus and spam checks on your mail again when those checks are updated, reading your calendar for itself, and showing the paid posts you publish on the web to the people who pay for them. Your trust renews itself while you use Fauna, you can take it back at any time in Settings → Nests, and every time you give or withdraw trust it is written down for you there.";
 
         pub const GRANT_BUTTON: &str = "Yes, trust this box";
 
@@ -1501,6 +1504,8 @@ pub mod onboarding {
         pub fn persist_account(message: &str) -> String {
             format!("Couldn't save your new account: {message}")
         }
+
+        pub const PERSIST_IDENTITY: &str = "Couldn't save your identity on this device — its secure storage may be locked or unavailable. Try again when it is.";
 
         pub const PERSIST_SUCCESSOR: &str = "Couldn't save your new identity: {message}";
         pub fn persist_successor(message: &str) -> String {
@@ -1604,6 +1609,8 @@ pub mod unlock {
 
     pub const CREATE_PROMPT: &str = "There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.";
 
+    pub const KEYRING_LOCKED_NOTICE: &str = "Your system keyring is locked or not set up, so Fauna can't keep your sign-in keys in it and will encrypt them with a passphrase you choose instead. To use the keyring, unlock it or set it up, then restart Fauna before you choose a passphrase.";
+
     pub const PASSPHRASE_LABEL: &str = "Passphrase";
 
     pub const CONFIRM_LABEL: &str = "Confirm passphrase";
@@ -1682,6 +1689,13 @@ pub mod tui_settings {
 
 pub mod feed {
     pub const COMPOSE_EMPTY: &str = "Post cannot be empty";
+
+    pub const IMPORTED_NOTICE: &str = "Showing the posts you imported from {platform}";
+    pub fn imported_notice(platform: &str) -> String {
+        format!("Showing the posts you imported from {platform}")
+    }
+
+    pub const IMPORTED_CLEAR: &str = "Show all posts";
 
     pub const VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE: &str = "Open this video externally?";
 
@@ -1782,10 +1796,6 @@ pub mod feed {
 
     pub const REPORT_POST: &str = "Report post";
 
-    pub const POST_MUTED_PLACEHOLDER: &str = "Muted word";
-
-    pub const POST_MUTED_REVEAL: &str = "Show anyway";
-
     pub const ERROR_MUTED_KEYWORDS: &str = "Your muted words are not being applied: {message}";
     pub fn error_muted_keywords(message: &str) -> String {
         format!("Your muted words are not being applied: {message}")
@@ -1815,6 +1825,8 @@ pub mod feed {
         pub const TITLE: &str = "Feeds";
 
         pub const TRENDING: &str = "Trending";
+
+        pub const LOCAL: &str = "Local";
 
         pub const NO_POSTS: &str = "No posts yet.";
 
@@ -2075,9 +2087,9 @@ pub mod conversations {
 
         pub const RECEIVE_STOPPED: &str = "New messages stopped arriving because of an internal error. Restart the app (or reload the page) to receive them again.";
 
-        pub const MAIL_UNOPENABLE: &str = "{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.";
+        pub const MAIL_UNOPENABLE: &str = "{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.";
         pub fn mail_unopenable(count: &str) -> String {
-            format!("{count} received messages could not be opened on this device. They were sealed to mail keys this account no longer holds, and were skipped.")
+            format!("{count} received messages could not be opened on this device, so they were skipped. Newer mail keeps arriving.")
         }
     }
 
@@ -2155,10 +2167,6 @@ pub mod conversations {
         pub const MEMBER_UNATTESTED_MARK: &str = "Was in this group before you recovered your account. Keep them, or remove them if you don't recognise them.";
 
         pub const MEMBER_KEEP: &str = "Keep";
-
-        pub const MUTED_WORD: &str = "Muted word";
-
-        pub const MUTED_REVEAL: &str = "Show anyway";
 
         pub const MARK_AS_SPAM: &str = "Mark as spam";
 
@@ -2378,6 +2386,8 @@ pub mod conversations {
         pub const RECIPIENT_RESOLVE_ERROR: &str = "Lookup failed — try again";
 
         pub const RECIPIENT_RESOLVE_NOT_FOUND: &str = "Not found — check the address";
+
+        pub const RECIPIENT_RESOLVE_NOT_REACHABLE: &str = "Not reachable yet — they need to open Fauna first";
 
         pub const RECIPIENT_RESOLVE_RESOLVED: &str = "Resolved";
 
@@ -2927,16 +2937,6 @@ pub mod groups {
     pub const REACT: &str = "React";
 
     pub const MESSAGE_PLACEHOLDER: &str = "Type a message...";
-
-    pub mod message {
-        pub const ENCRYPTED: &str = "Encrypted";
-
-        pub const ENCRYPTED_TITLE: &str = "End-to-end encrypted via MLS";
-
-        pub const SIGNED: &str = "Signed";
-
-        pub const SIGNED_TITLE: &str = "Sender signature verified — content is plaintext in the nest";
-    }
 }
 
 pub mod atproto_settings {
@@ -3015,7 +3015,7 @@ pub mod atproto_settings {
 
     pub const EXTERNAL_APPS_TOGGLE: &str = "Allow external apps";
 
-    pub const EXTERNAL_APPS_HINT: &str = "When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.";
+    pub const EXTERNAL_APPS_HINT: &str = "When this is off, every app it affects is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected.";
 
     pub const DEPTH_HEADING: &str = "Integration depth";
 
@@ -3029,7 +3029,7 @@ pub mod atproto_settings {
 
     pub const DEPTH_HOSTED_VISIBLE_TITLE: &str = "Hosted here — visible";
 
-    pub const DEPTH_HOSTED_VISIBLE_DESC: &str = "This nest holds your identity and publishes your public posts to the Bluesky network.";
+    pub const DEPTH_HOSTED_VISIBLE_DESC: &str = "This nest holds your identity and publishes your public posts, apart from posts you imported from another service, to the Bluesky network.";
 
     pub const DEPTH_HOSTED_FULL_TITLE: &str = "Hosted here — full access";
 
@@ -3063,8 +3063,6 @@ pub mod atproto_settings {
     pub fn handle_either_way(handle: &str) -> String {
         format!("Your Bluesky handle will be @{handle} either way.")
     }
-
-    pub const HISTORY_BACKFILL_LABEL: &str = "Also publish my existing public posts.";
 
     pub const HISTORY_BACKFILL_COUNT_LABEL: &str = "Also publish my {count} existing public posts.";
     pub fn history_backfill_count_label(count: &str) -> String {
@@ -3254,7 +3252,7 @@ pub mod atproto_settings {
         format!("Your identity {handle} is restored — the same identity you had before, nothing new is created.")
     }
 
-    pub const CARD_PUBLISH_CONSENT: &str = "Your public posts become visible to everyone on the Bluesky network.";
+    pub const CARD_PUBLISH_CONSENT: &str = "Your public posts, apart from posts you imported from another service, become visible to everyone on the Bluesky network.";
 
     pub const CARD_DEACTIVATE: &str = "Publishing stops and the network no longer serves your profile or posts. Your identity is kept — re-enabling restores it exactly.";
 
@@ -3275,7 +3273,7 @@ pub mod atproto_settings {
         format!("Your AT Protocol identity @{handle} is kept. This removes what you published, not who you are — turning AT Protocol hosting back on later restores the same identity.")
     }
 
-    pub const DELETE_CONFIRM_APPS_DISCONNECTED: &str = "Bluesky apps you are signed in to are disconnected, and other apps can no longer post as you.";
+    pub const DELETE_CONFIRM_APPS_DISCONNECTED: &str = "Bluesky apps you are signed in to are disconnected. If you have let other apps post as you, that permission is kept — stop it under Posting from other apps.";
 
     pub const DELETE_CONFIRM_LEVEL_OFF: &str = "Your Bluesky setting returns to Off.";
 
@@ -3302,9 +3300,9 @@ pub mod atproto_settings {
 
     pub const ERROR_CONSENT_GONE: &str = "That request is no longer waiting for an answer — it may have expired, or you may have already answered it on another device. Start the sign-in again from the app that asked.";
 
-    pub const CONTEST_DETAIL_CONTESTABLE: &str = "A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.";
+    pub const CONTEST_DETAIL_CONTESTABLE: &str = "A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today.";
     pub fn contest_detail_contestable(handle: &str) -> String {
-        format!("A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away; replacing it is a separate step.")
+        format!("A change to your AT Protocol identity {handle} was made with a key this device does not hold. You can undo it: the change and everything built on it are reversed, and afterwards only your own keys can change who controls this identity. Your posts and profile keep working through this nest — which also means it keeps the key it uses to publish them, so it could still post as you. Undoing the change does not take that key away, and Fauna has no way to replace that key today.")
     }
 
     pub const CONTEST_DETAIL_WINDOW_CLOSED: &str = "A change to your AT Protocol identity {handle} was made with a key this device does not hold, and the time limit for undoing it has passed. The change now stands permanently. Contact whoever runs your nest.";
@@ -3341,7 +3339,7 @@ pub mod atproto_settings {
         format!("You are about to undo the change to {handle}, and everything published on top of it, by signing an earlier state of your identity back into place.")
     }
 
-    pub const CONTEST_CONFIRM_SIGNS: &str = "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you; replacing that key is a separate step.";
+    pub const CONTEST_CONFIRM_SIGNS: &str = "This device signs with the recovery key it holds, which puts your own keys back in charge of who can change this identity. Your nest keeps the separate key it publishes your posts with, so this does not stop it posting as you, and Fauna has no way to replace that key today.";
 
     pub const CONTEST_CONFIRM_DIRECTORY_RULES: &str = "The public directory decides whether to accept the undo. If it refuses, nothing about your identity changes and trying again is safe.";
 }
@@ -3362,21 +3360,21 @@ pub mod critical_alerts {
         format!("Security alert: the published record of your AT Protocol identity names no handle at all, so nobody can find you at {domain}. Do not trust this identity for anything sensitive, and contact whoever runs your nest.")
     }
 
-    pub const RECOVERY_REPLACEMENT_PENDING: &str = "Security alert: someone used your identity secret to request a replacement of your account recovery key. If that was not you, someone else has your identity secret. Cancel it in Settings, under Recovery kit.";
+    pub const RECOVERY_REPLACEMENT_PENDING: &str = "Security alert: someone used your secret key to request a replacement of your recovery kit. If that was not you, someone else has your secret key. Cancel it in Settings → Account → Recovery Kit.";
 
     pub const RECOVERY_REPLACEMENT_PENDING_DETAIL: &str = "The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.";
     pub fn recovery_replacement_pending_detail(days: &str, fingerprint: &str) -> String {
         format!("The replacement takes effect in {days} days unless cancelled. The pending recovery key begins {fingerprint} — if you hold a recovery kit and it does not begin with those characters, the request was not made with your kit.")
     }
 
-    pub const DOMAIN_EXPIRING_ADMIN: &str = "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.";
+    pub const DOMAIN_EXPIRING_ADMIN: &str = "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now.";
     pub fn domain_expiring_admin(domain: &str, days: &str) -> String {
-        format!("Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and anyone recovering an account from their recovery phrase alone will no longer be able to find this nest. Renew it at your registrar now.")
+        format!("Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, whoever registers it next receives your mail (including password resets for accounts tied to those addresses), and  anyone recovering an account from their recovery kit alone will no longer be able to find this nest. Renew it at your registrar now.")
     }
 
-    pub const DOMAIN_EXPIRING_RESIDENT: &str = "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.";
+    pub const DOMAIN_EXPIRING_RESIDENT: &str = "Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.";
     pub fn domain_expiring_resident(domain: &str, days: &str) -> String {
-        format!("Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there will go to whoever registers the name next, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.")
+        format!("Urgent: {domain} — the name this deployment runs on — expires in {days} days. If it lapses, mail sent to your address there  will go to whoever registers the name next, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.")
     }
 
     pub const DOMAIN_EXPIRED_ADMIN: &str = "Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.";
@@ -3384,9 +3382,9 @@ pub mod critical_alerts {
         format!("Urgent: {domain} — the name this deployment runs on — has expired. Whoever registers it next receives your mail, including password resets for accounts tied to those addresses. Renew or redeem it at your registrar immediately; if it is gone, move the deployment to a new domain.")
     }
 
-    pub const DOMAIN_EXPIRED_RESIDENT: &str = "Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.";
+    pub const DOMAIN_EXPIRED_RESIDENT: &str = "Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address.";
     pub fn domain_expired_resident(domain: &str) -> String {
-        format!("Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there may now reach someone else, and recovering your account from your recovery phrase alone will not work. Contact whoever runs this nest, and make sure you know its direct address.")
+        format!("Urgent: {domain} — the name this deployment runs on — has expired. Mail sent to your address there  may now reach someone else, and recovering your account from your recovery kit alone will not work. Contact whoever runs this nest, and make sure you know its direct address.")
     }
 
     pub const DOMAIN_LAPSING_ADMIN: &str = "Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.";
@@ -3394,9 +3392,9 @@ pub mod critical_alerts {
         format!("Urgent: the registration for {domain} — the name this deployment runs on — is in a hold or deletion state ({status}) and is being withdrawn from DNS. Whoever registers it next receives your mail. Contact your registrar now; renewal is usually still possible at this stage.")
     }
 
-    pub const DOMAIN_LAPSING_RESIDENT: &str = "Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.";
+    pub const DOMAIN_LAPSING_RESIDENT: &str = "Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.";
     pub fn domain_lapsing_resident(domain: &str, status: &str) -> String {
-        format!("Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.")
+        format!("Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there  will stop arriving, and recovering your account from your recovery kit alone will stop working. Contact whoever runs this nest, and make sure you know its direct address.")
     }
 
     pub const EVICTION_WARNING: &str = "Your account on this nest is being closed by its admin. Your access ends in {days} days, at {suspend_at} UTC, and your account and everything in it will be deleted at {delete_at} UTC. Until your access ends you can export all your data from Settings → Account → Export My Data.";
@@ -3750,6 +3748,16 @@ pub mod media {
         format!("Edited by {author}")
     }
 
+    pub const VERSION_AUTHOR_DEPOSITED: &str = "Edited by {app} via {author}";
+    pub fn version_author_deposited(app: &str, author: &str) -> String {
+        format!("Edited by {app} via {author}")
+    }
+
+    pub const VERSION_AUTHOR_DEPOSITED_UNKNOWN: &str = "Edited by a connected app via {author}";
+    pub fn version_author_deposited_unknown(author: &str) -> String {
+        format!("Edited by a connected app via {author}")
+    }
+
     pub const VERSION_RESTORE: &str = "Restore";
 
     pub const VERSIONS_SHOW_PRUNED: &str = "Show recently pruned";
@@ -4026,6 +4034,12 @@ pub mod backups {
 
     pub const RESTORE_KINDS_CALENDAR: &str = "calendar";
 
+    pub const RESTORE_KINDS_CONTACTS: &str = "contacts";
+
+    pub const RESTORE_KINDS_POSTS: &str = "posts";
+
+    pub const RESTORE_KINDS_CONVERSATIONS: &str = "conversations";
+
     pub const RESTORE_CONFIRM_PLACEHOLDER: &str = "Re-type the snapshot id to confirm";
 
     pub const RESTORE_CONFIRM_BUTTON: &str = "Restore";
@@ -4034,9 +4048,9 @@ pub mod backups {
 
     pub const RESTORE_PROGRESS_RUNNING: &str = "Restoring…";
 
-    pub const RESTORE_PROGRESS_DONE: &str = "Done — restart the bridge.";
+    pub const RESTORE_PROGRESS_DONE: &str = "Done — restart the mail and calendar service.";
 
-    pub const RESTORE_WARNING_CONFIG_ABSENT: &str = "Restored, but the bridge's sign-in keys were not part of the restore — the bridge can't sign in after it restarts until they are restored too.";
+    pub const RESTORE_WARNING_CONFIG_ABSENT: &str = "Restored, but this mail and calendar service's sign-in keys were not part of the restore — it can't sign in after it restarts until they are restored too.";
 
     pub const RESTORE_NO_SNAPSHOTS: &str = "No local snapshots available to restore.";
 
@@ -4046,9 +4060,9 @@ pub mod backups {
 
     pub const RESTORE_NO_DESTINATIONS: &str = "No backup destinations yet — add one under \"Backup destinations\" above.";
 
-    pub const RESTORE_DIVERGENCE_BANNER: &str = "{count} MUAs reconnected with newer state";
+    pub const RESTORE_DIVERGENCE_BANNER: &str = "{count} mail or calendar apps reconnected with newer state";
     pub fn restore_divergence_banner(count: &str) -> String {
-        format!("{count} MUAs reconnected with newer state")
+        format!("{count} mail or calendar apps reconnected with newer state")
     }
 
     pub const RESTORE_DIVERGENCE_MODAL_TITLE: &str = "Restore divergence (forensic)";
@@ -4085,7 +4099,7 @@ pub mod backups {
 
     pub const BACKUP_DESTINATIONS_TITLE: &str = "Backup destinations";
 
-    pub const BACKUP_DESTINATIONS_DESC: &str = "Replicate your data to another nest you control. Chunks are sealed under your backup key — the destination never reads them.";
+    pub const BACKUP_DESTINATIONS_DESC: &str = "Replicate your data to another place — a second nest you control, a friend's nest or one of your own devices. Everything that travels there is encrypted, apart from a folder you have made public — the destination cannot read the rest.";
 
     pub const BACKUP_DESTINATIONS_EMPTY: &str = "No backup destinations configured.";
 
@@ -4215,7 +4229,7 @@ pub mod backups {
 
     pub const BACKUP_SOLE_CLIENT_DESTINATION_WARNING: &str = "Every backup destination you have is one of your own devices. Devices get lost, wiped and replaced — add a nest destination so a copy lives somewhere else.";
 
-    pub const BACKUP_DESTINATION_CUSTODIAN_EXPOSURE: &str = "This device will keep a complete offline copy of your data. Anyone who can unlock it can read all of it, not just what is on screen.";
+    pub const BACKUP_DESTINATION_CUSTODIAN_EXPOSURE: &str = "This device will keep an offline copy of everything a backup destination keeps. Anyone who can unlock it can read all of it, not just what is on screen.";
 
     pub const BACKUP_ORPHANED_STORE_ROW: &str = "This device is still holding {held} of a backup copy. No destination uses it any more.";
     pub fn backup_orphaned_store_row(held: &str) -> String {
@@ -4326,6 +4340,45 @@ pub mod backups {
     pub const RESEED_GAP_UNNAMED_FILES: &str = "{count} files arrived without their names, so some files are still missing.";
     pub fn reseed_gap_unnamed_files(count: &str) -> String {
         format!("{count} files arrived without their names, so some files are still missing.")
+    }
+
+    pub const RESEED_REFUSED_NOT_ACCEPTED: &str = "You did not confirm this part of the copy, so it was left where it is. Run the restore again to see it and decide.";
+
+    pub const RESEED_REFUSED_PREFLIGHT_STALE: &str = "The copy changed after you confirmed the restore, so this part was left where it is. Run the restore again to see the copy as it is now.";
+
+    pub const RESEED_NOTE_UNANCHORED_ROWS: &str = "{count} files the other nest offered are not in your own record of the backup, so they were left out.";
+    pub fn reseed_note_unanchored_rows(count: &str) -> String {
+        format!("{count} files the other nest offered are not in your own record of the backup, so they were left out.")
+    }
+
+    pub const RESEED_PREFLIGHT_VOUCHED: &str = "{set}: the copy is as new as or newer than what this device last checked on {date} (version {generation}).";
+    pub fn reseed_preflight_vouched(set: &str, date: &str, generation: &str) -> String {
+        format!("{set}: the copy is as new as or newer than what this device last checked on {date} (version {generation}).")
+    }
+
+    pub const RESEED_PREFLIGHT_VOUCHED_UNDATED: &str = "{set}: the copy is as new as or newer than what this device last checked (version {generation}).";
+    pub fn reseed_preflight_vouched_undated(set: &str, generation: &str) -> String {
+        format!("{set}: the copy is as new as or newer than what this device last checked (version {generation}).")
+    }
+
+    pub const RESEED_PREFLIGHT_ROLLED_BACK: &str = "{set}: the copy is OLDER than what this device last checked (version {generation}, this device saw version {pinned}). Restoring it brings back that older state.";
+    pub fn reseed_preflight_rolled_back(set: &str, generation: &str, pinned: &str) -> String {
+        format!("{set}: the copy is OLDER than what this device last checked (version {generation}, this device saw version {pinned}). Restoring it brings back that older state.")
+    }
+
+    pub const RESEED_PREFLIGHT_UNVOUCHED: &str = "{set}: this device has never checked this copy, so it cannot tell whether it is the newest (version {generation}).";
+    pub fn reseed_preflight_unvouched(set: &str, generation: &str) -> String {
+        format!("{set}: this device has never checked this copy, so it cannot tell whether it is the newest (version {generation}).")
+    }
+
+    pub const RESEED_PREFLIGHT_WITHHELD: &str = "{set}: part of the copy is MISSING — this device last checked version {pinned} of it, and the other nest no longer offers it. Restoring brings the rest back without it.";
+    pub fn reseed_preflight_withheld(set: &str, pinned: &str) -> String {
+        format!("{set}: part of the copy is MISSING — this device last checked version {pinned} of it, and the other nest no longer offers it. Restoring brings the rest back without it.")
+    }
+
+    pub const RESEED_PREFLIGHT_FOLDERS: &str = "{count} folders come back as the other nest holds them. This device cannot check that they are complete or the newest.";
+    pub fn reseed_preflight_folders(count: &str) -> String {
+        format!("{count} folders come back as the other nest holds them. This device cannot check that they are complete or the newest.")
     }
 
     pub const BACKUP_AUDIT_RECOVER_BUTTON: &str = "Recover what your nest lost";
@@ -4527,13 +4580,17 @@ pub mod backups {
 
         pub const STORAGE_BACKEND: &str = "Storage Backend";
 
+        pub const COMPRESSION_LABEL: &str = "Compression";
+
+        pub const CHUNK_SIZES_LABEL: &str = "Chunk Sizes";
+
         pub const ENCRYPTION: &str = "Encryption & Compression";
 
         pub const ENCRYPTION_ALGO: &str = "ChaCha20-Poly1305";
 
-        pub const COMPRESSION: &str = "zstd level 3";
+        pub const COMPRESSION: &str = "zstd";
 
-        pub const CHUNK_SIZES: &str = "512 KB - 16 MB avg 4 MB";
+        pub const CHUNK_SIZES: &str = "up to 8 MB; larger files split into chunks of 2 MB on average, 8 MB at most";
 
         pub const LOADING_STATS: &str = "Loading statistics...";
     }
@@ -4762,6 +4819,10 @@ pub mod folders {
         format!("Limited by {source}")
     }
 
+    pub const SHARE_TRANSFER_STATE_UNREACHABLE: &str = "Could not reach their device";
+
+    pub const SHARE_TRANSFER_STATE_INTERRUPTED: &str = "Connection lost; retrying";
+
     pub const SHARE_TRANSFER_SOURCE_FREE_SPACE: &str = "free space on this device";
 }
 
@@ -4829,6 +4890,12 @@ pub mod devices {
 
     pub const MEMBER_REMOVE_CONFIRM: &str = "Yes, remove it permanently";
 
+    pub const RENAME: &str = "Rename";
+
+    pub const RENAME_LABEL: &str = "Device name";
+
+    pub const RENAME_CONFIRM: &str = "Save name";
+
     pub const FOLDERS: &str = "Folders";
 
     pub const ADD_FOLDER: &str = "Add Folder";
@@ -4893,9 +4960,9 @@ pub mod devices {
 
     pub const KEYLESS_POSTURE_BADGE: &str = "Relay only — holds no keys";
 
-    pub const CUSTODY_HOLDER_SECTION: &str = "Custodians — who holds sealed copies of your data";
+    pub const CUSTODY_HOLDER_SECTION: &str = "Custodians — who holds encrypted copies of your data";
 
-    pub const CUSTODY_HOLDER_SCOPE: &str = "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone";
+    pub const CUSTODY_HOLDER_SCOPE: &str = "Trusted to hold encrypted copies — cannot read them, apart from what you published to everyone";
 
     pub const CUSTODY_RECEIPT_FRESH: &str = "Last confirmed {when}";
     pub fn custody_receipt_fresh(when: &str) -> String {
@@ -4916,16 +4983,16 @@ pub mod devices {
 
     pub const CUSTODY_REVOKE: &str = "Stop trusting this custodian";
 
-    pub const CUSTODY_REVOKE_BOUND_NOTE: &str = "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before.";
+    pub const CUSTODY_REVOKE_BOUND_NOTE: &str = "Stops future copies and serving on honest holders. Copies already held stay where they are, no more readable to the holder than before.";
 
-    pub const CUSTODY_HELD_SECTION: &str = "Held for others — sealed copies this device keeps";
+    pub const CUSTODY_HELD_SECTION: &str = "Held for others — encrypted copies you keep for them";
 
     pub const CUSTODY_HELD_OWNER: &str = "Holding for {owner}";
     pub fn custody_held_owner(owner: &str) -> String {
         format!("Holding for {owner}")
     }
 
-    pub const CUSTODY_HELD_SCOPE_ACCOUNT: &str = "Their account's sealed data — unreadable on this device, apart from what they published to everyone";
+    pub const CUSTODY_HELD_SCOPE_ACCOUNT: &str = "Their account's encrypted data — unreadable where you hold it, apart from what they published to everyone";
 
     pub const CUSTODY_HELD_RESTORE_ADDRESS: &str = "If they lose every device, they can restore from this nest at {address} — give them this address yourself.";
     pub fn custody_held_restore_address(address: &str) -> String {
@@ -4942,12 +5009,12 @@ pub mod devices {
 
     pub const CUSTODY_REMOVE_DONE: &str = "Removed — the space is free.";
 
-    pub const CUSTODY_OFFER_TITLE: &str = "{owner} asks this device to hold sealed copies";
+    pub const CUSTODY_OFFER_TITLE: &str = "{owner} asks you to hold encrypted copies";
     pub fn custody_offer_title(owner: &str) -> String {
-        format!("{owner} asks this device to hold sealed copies")
+        format!("{owner} asks you to hold encrypted copies")
     }
 
-    pub const CUSTODY_OFFER_FLOOR: &str = "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.";
+    pub const CUSTODY_OFFER_FLOOR: &str = "Their copies would be stored encrypted wherever you hold them, and could not be read there, apart from what they have published to everyone. Of the rest you would see only the shape: what kinds of their data you hold, how much is stored, and when it changes — never the content.";
 
     pub const CUSTODY_OFFER_ACCEPT: &str = "Hold for them";
 
@@ -4961,13 +5028,13 @@ pub mod devices {
 
     pub const CUSTODY_DEGRADED_BADGE: &str = "Degraded — some copies were dropped under the budget";
 
-    pub const CUSTODY_MINT_BUTTON: &str = "Ask a friend to hold sealed copies";
+    pub const CUSTODY_MINT_BUTTON: &str = "Ask a friend to hold encrypted copies";
 
     pub const CUSTODY_MINT_HOST_LABEL: &str = "Who to ask";
 
     pub const CUSTODY_MINT_HOST_PLACEHOLDER: &str = "Choose a contact";
 
-    pub const CUSTODY_MINT_FLOOR: &str = "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.";
+    pub const CUSTODY_MINT_FLOOR: &str = "They will store encrypted copies, on one of their devices or on their nest, that they cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — what kinds of your data they hold, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.";
 
     pub const CUSTODY_MINT_CONFIRM: &str = "Send the request";
 
@@ -5028,13 +5095,13 @@ pub mod devices {
 
     pub const FOLDER_AUDIENCE_SHARED_HINT: &str = "This folder is shared with other people, so it can't be made private while it's shared. To make it private, remove the sharing in the section below first — or change who it is shared with there.";
 
-    pub const FOLDER_AUDIENCE_PUBLIC_BOUND_HINT: &str = "This folder is shared with other people and currently public. Pick Shared to re-seal it so only those people can read it. Anything published while it was public should still be treated as public.";
+    pub const FOLDER_AUDIENCE_PUBLIC_BOUND_HINT: &str = "This folder is shared with other people and currently public. Pick Shared to encrypt it again so only those people can read it. Anything published while it was public should still be treated as public.";
 
     pub const DECLASSIFY_TITLE: &str = "Make this folder public?";
 
     pub const DECLASSIFY_BODY: &str = "Anyone on the web will be able to read this folder's files, and its file and folder names too — they become part of the address of each file.";
 
-    pub const DECLASSIFY_IRREVERSIBLE: &str = "Making it private again protects only files you add afterwards. Anything published while the folder is public should be treated as public for good.";
+    pub const DECLASSIFY_IRREVERSIBLE: &str = "Turning it back later encrypts its files again, but anything published while the folder is public may already have been read or copied, so treat it as public for good.";
 
     pub const DECLASSIFY_CONFIRM: &str = "Make public";
 
@@ -5131,7 +5198,7 @@ pub mod devices {
 
     pub const SERVE_WEBDAV: &str = "Serve over WebDAV";
 
-    pub const SERVE_WEBDAV_HINT: &str = "Browse and edit this set from any WebDAV client (Finder, GNOME Files, rclone).";
+    pub const SERVE_WEBDAV_HINT: &str = "Browse and edit this folder from any WebDAV client (Finder, GNOME Files, rclone).";
 
     pub const SERVE_WEBDAV_NEEDS_MAIL: &str = "Set up mail first — serving over WebDAV uses your mail encryption key.";
 
@@ -5140,6 +5207,12 @@ pub mod devices {
     pub const SHOW_ON_DEMAND_FILES: &str = "Show in Files";
 
     pub const SHOW_ON_DEMAND_HINT: &str = "Browse this set on demand — files download when opened and can be freed again.";
+
+    pub const ON_DEMAND_NEEDS_FILES_ENABLE: &str = "Not shown in Files yet — in the Files app open Browse, choose Edit from the ⋯ menu and turn on Fauna.";
+
+    pub const ON_DEMAND_NEEDS_EXTENSION_ENABLE: &str = "Not shown in Finder yet — turn on Fauna under System Settings → General → Login Items & Extensions → Extensions.";
+
+    pub const ON_DEMAND_OPEN_SETTINGS: &str = "Open System Settings";
 
     pub const ON_DEMAND_BOUND_HINT: &str = "This set syncs to its bound location; remove the binding to show it on demand instead.";
 
@@ -5183,6 +5256,15 @@ pub mod devices {
     }
 
     pub const ERROR_P2P_REMOTE_ENABLE: &str = "Peer transfers can only be turned on from that device itself. From here you can only turn them off.";
+
+    pub const ERROR_RENAME_DEVICE: &str = "Couldn't rename the device: {message}";
+    pub fn error_rename_device(message: &str) -> String {
+        format!("Couldn't rename the device: {message}")
+    }
+
+    pub const ERROR_RENAME_NEEDS_KEY: &str = "This app can't rename devices until it holds your account key.";
+
+    pub const ERROR_RENAME_RESERVED_NAME: &str = "That name is the one an app gives a device you haven't named. Choose another.";
 
     pub const ERROR_REMOVE_FLEET_DEVICE: &str = "Removed the device, but couldn't finish cleanup: {message}";
     pub fn error_remove_fleet_device(message: &str) -> String {
@@ -5609,7 +5691,7 @@ pub mod sessions {
 
     pub const REVOKE_NOTE: &str = "Revoking ends a sign-in and makes whoever held it prove themselves again. It does not sign a device out — a device that holds your secret key or a device grant signs itself straight back in. To end a device for good, remove it under Settings → Devices. If someone else holds your secret key, only your recovery kit ends them (Settings → Account → Recovery Kit → My Identity Was Stolen).";
 
-    pub const LOCKOUT_WARNING: &str = "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. It does not remove somebody who holds your secret key — they come back when the lock ends. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use (Settings → Account → Recovery Kit → My Identity Was Stolen) — a lock you did not set is itself the sign to use it.";
+    pub const LOCKOUT_WARNING: &str = "Lock this account for 24 hours. Every device is signed out, this one too. Nobody can sign in for 24 hours, you included, and there is no unlock. (On an account that is an admin of its nest, the lock signs every device out but does not stop anyone signing in again.) It does not remove somebody who holds your secret key — they come back when the lock ends, or at once on an account that is an admin of its nest. They can do the same to you: anyone with your secret key can sign you out and lock the account, again every 24 hours. Your recovery kit still works while the account is locked and moves it to a new key the thief cannot use — on a device that holds your secret key, choose My Identity Was Stolen on the Account locked screen (on an account that is an admin of its nest, which is not locked out, under Settings → Account → Recovery Kit). A lock you did not set is itself the sign to use it.";
 
     pub const LOCKOUT_CONFIRM_PLACEHOLDER: &str = "Type LOCK to confirm";
 
@@ -5651,17 +5733,17 @@ pub mod settings {
     pub mod recovery_kit {
         pub const TITLE: &str = "Recovery Kit";
 
-        pub const DESC: &str = "An offline key that can recover your account if you lose your identity secret — or take it back if someone steals it. It is shown once and never stored on this device.";
+        pub const DESC: &str = "A second key, kept only by you and only offline, that outranks your secret key — it can get your account back if you lose your secret key, or take it back if someone steals it. It is shown once, and no device keeps a copy.";
 
-        pub const STATUS_NEVER_CREATED: &str = "No recovery kit. If you lose your identity secret, your account cannot be recovered, and if someone steals it, you cannot take it back.";
+        pub const STATUS_NEVER_CREATED: &str = "No recovery kit. If every copy of your secret key is lost, your account cannot be recovered, and if someone steals it, you cannot take it back.";
 
-        pub const STATUS_REGISTERED: &str = "Your recovery kit is active, and a sealed copy of your identity secret is stored for it.";
+        pub const STATUS_REGISTERED: &str = "Your recovery kit is active, and the copy of your secret key that only your kit opens is stored.";
 
-        pub const STATUS_REGISTERED_NO_ESCROW: &str = "Your recovery kit is active, but no sealed copy of your identity secret is stored — your recovery phrase cannot recover this account right now. Enter your kit below and press Restore Phrase Recovery to fix this.";
+        pub const STATUS_REGISTERED_NO_ESCROW: &str = "Your recovery kit is active, but the copy of your secret key that only your kit opens is not stored, so the kit cannot recover this account right now. Enter your kit below and press Restore Kit Recovery to fix this.";
 
-        pub const STATUS_REPLACEMENT_PENDING: &str = "A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.";
+        pub const STATUS_REPLACEMENT_PENDING: &str = "A replacement of your recovery kit was requested with your secret key alone, and takes effect in {days} days. Cancel it below if it was not you.";
         pub fn status_replacement_pending(days: &str) -> String {
-            format!("A replacement of your recovery kit was requested with your identity secret alone, and takes effect in {days} days. Cancel it below if it was not you.")
+            format!("A replacement of your recovery kit was requested with your secret key alone, and takes effect in {days} days. Cancel it below if it was not you.")
         }
 
         pub const STATUS_LOADING: &str = "Checking your recovery kit…";
@@ -5672,7 +5754,7 @@ pub mod settings {
 
         pub const LOST: &str = "I Lost My Kit";
 
-        pub const ESCROW_RESEAL: &str = "Restore Phrase Recovery";
+        pub const ESCROW_RESEAL: &str = "Restore Kit Recovery";
 
         pub const SWEEP_RETRY: &str = "Finish Moving Your Groups";
 
@@ -5761,9 +5843,9 @@ pub mod settings {
             format!("Could not cancel the pending replacement: {message}")
         }
 
-        pub const KIT_PHRASE_PLACEHOLDER: &str = "Paste your recovery phrase (fauna://recovery link or 64-character code)";
+        pub const KIT_PHRASE_PLACEHOLDER: &str = "Paste your recovery kit (fauna://recovery link or 64-character code)";
 
-        pub const KIT_PHRASE_REQUIRED: &str = "Paste the recovery phrase for this account first.";
+        pub const KIT_PHRASE_REQUIRED: &str = "Paste the recovery kit for this account first.";
 
         pub const SWEEP_NONE: &str = "Your conversations were not running, so your groups still include your old identity, and your new one is not in them. Press Finish Moving Your Groups below to complete it now, or ask another member of each group to remove the old identity and add your new one.";
 
@@ -5821,9 +5903,9 @@ pub mod settings {
             format!("{who} is not in any of your group conversations on this device.")
         }
 
-        pub const REVIEW_REMOVE_FOLDER_SEATS: &str = "They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the set, if it is not yours — then choose Remove again.";
+        pub const REVIEW_REMOVE_FOLDER_SEATS: &str = "They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again.";
         pub fn review_remove_folder_seats(seats: &str) -> String {
-            format!("They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the set, if it is not yours — then choose Remove again.")
+            format!("They are also in {seats} shared folder(s). Remove them in each folder's sharing settings — or leave the folder, if it is not yours — then choose Remove again.")
         }
 
         pub const REVIEW_REMOVE_UNSYNCED_SEATS: &str = "They are also in {seats} group chat(s) not yet synced to this device. Choose Remove again after syncing completes, or from a device that has those chats.";
@@ -5940,7 +6022,7 @@ pub mod settings {
 
         pub const TOGGLE: &str = "Back up identity to iCloud Keychain";
 
-        pub const FOOTER: &str = "When off (the default), your identity stays on this device and never syncs to iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Fauna's own device-add and recovery flows are the primary way to use multiple devices.";
+        pub const FOOTER: &str = "When off (the default), your identity stays out of iCloud. Turn it on to let iCloud Keychain restore your identity on a new device. Adding a device and your recovery kit remain the main ways to have your identity in more than one place.";
     }
 
     pub const CHECK_FOR_UPDATES: &str = "Check for Updates";
@@ -6003,7 +6085,7 @@ pub mod settings {
 
         pub const DISABLE_TITLE: &str = "Disable mail?";
 
-        pub const DISABLE_WARNING: &str = "This revokes all your mail credentials and clears your mail encryption key. Third-party mail apps (IMAP/CalDAV) will stop working until you re-enable mail.";
+        pub const DISABLE_WARNING: &str = "Mail apps you connected can no longer send or read mail until you turn mail back on. Calendar, contacts and file apps that sign in with the same password keep working. Your mail keys stay, so your earlier mail stays readable, and turning mail back on needs no new set-up.";
 
         pub const DISABLE_CONFIRM: &str = "Disable mail";
 
@@ -6176,7 +6258,7 @@ pub mod settings {
 
         pub const DELETE_ACCOUNT: &str = "Delete Account";
 
-        pub const DELETE_CONFIRM_TEXT: &str = "This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail.";
+        pub const DELETE_CONFIRM_TEXT: &str = "This permanently removes your handle and data from this nest. Your key is not affected. Take your data first: Export My Data, in Settings → Account, downloads what your nest holds for you, your mail included; to move your mailbox to another mail service, use Export mailbox, among the mail pages in Settings.";
 
         pub const CONNECTED_SERVICES: &str = "Connected Services";
 
@@ -6583,7 +6665,7 @@ pub mod settings {
 
     pub const ABOUT_NAME: &str = "Fauna for Windows";
 
-    pub const ABOUT_DESC: &str = "Encrypted messaging, contacts, and file sync.";
+    pub const ABOUT_DESC: &str = "Your feed, messages, mail, calendar and files, on a server you control.";
 
     pub const DANGER_ZONE_DESC: &str = "Permanently delete your account and all associated data. This action cannot be undone.";
 
@@ -6609,6 +6691,8 @@ pub mod settings {
         pub const CHANGE_HANDLE: &str = "Failed to change handle";
 
         pub const DELETE_ACCOUNT: &str = "Deletion failed";
+
+        pub const ICLOUD_BACKUP: &str = "The copy to iCloud Keychain could not be made, so the backup stays off";
 
         pub const EXPORT: &str = "Export failed";
 
@@ -6646,11 +6730,11 @@ pub mod nests {
 
     pub const NOT_TRUSTED: &str = "This nest is not trusted to read any of your content.";
 
-    pub const ESCROW_HOLDER_BADGE: &str = "Holds your recovery escrow";
+    pub const ESCROW_HOLDER_BADGE: &str = "Holds the copy your recovery kit opens";
 
-    pub const CUSTODY_NEST_LABEL: &str = "{host}'s nest — trusted to hold sealed copies";
+    pub const CUSTODY_NEST_LABEL: &str = "{host}'s nest — trusted to hold encrypted copies";
     pub fn custody_nest_label(host: &str) -> String {
-        format!("{host}'s nest — trusted to hold sealed copies")
+        format!("{host}'s nest — trusted to hold encrypted copies")
     }
 
     pub const CUSTODY_RESTORE_BUTTON: &str = "Restore from a custodian nest…";
@@ -6679,14 +6763,16 @@ pub mod nests {
         format!("Restored {count} of your account's records.")
     }
 
-    pub const CUSTODY_RESTORE_SEALED: &str = "{count} came back sealed and stay unreadable until this device has their key.";
+    pub const CUSTODY_RESTORE_SEALED: &str = "{count} came back still encrypted and stay unreadable until this device has their key.";
     pub fn custody_restore_sealed(count: &str) -> String {
-        format!("{count} came back sealed and stay unreadable until this device has their key.")
+        format!("{count} came back still encrypted and stay unreadable until this device has their key.")
     }
 
     pub const CUSTODY_RESTORE_NOTHING_NEW: &str = "Nothing new — this device already has everything that nest holds for you.";
 
     pub const CUSTODY_RESTORE_MISMATCH: &str = "Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest.";
+
+    pub const CUSTODY_RESTORE_UNCHECKED: &str = "Restored — but this device couldn't confirm that the nest that answered is the one your records name for this address. Your records stand; check the address with whoever runs that nest.";
 
     pub const TRUSTED_TO_READ: &str = "Trusted to read:";
 
@@ -6742,7 +6828,7 @@ pub mod nests {
 
     pub const BOUND_NOTE_STANDING: &str = "On an honest nest, revoking stops future access and re-acquisition. It cannot un-see what was already read, and does not yet block content arriving after revocation.";
 
-    pub const BOUND_NOTE_BOUNDED_MAIL: &str = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail sealed under that period's rotating keys, so content sealed before the schedule caught up may still be unreadable to it.";
+    pub const BOUND_NOTE_BOUNDED_MAIL: &str = "This trust is cryptographically time-boxed: once its window ends (accurate to within about a week), this nest can no longer read new mail at all — not even by re-acquiring a key. Within the window it can only open mail encrypted under that period's rotating keys, so content encrypted before the schedule caught up may still be unreadable to it.";
 
     pub const HISTORY_MINTED: &str = "Trusted to read {scope} · {when}";
     pub fn history_minted(scope: &str, when: &str) -> String {
@@ -6759,7 +6845,7 @@ pub mod nests {
         format!("Trust revoked: {scope} · {when}")
     }
 
-    pub const BACKUP_SCOPE_SEAL: &str = "Backs up your messages for you";
+    pub const BACKUP_SCOPE_SEAL: &str = "Encrypts and uploads the backups of your mail, calendar, contacts and posts";
 
     pub const BACKUP_SCOPE_WRITER: &str = "Writes your backups to {destination}";
     pub fn backup_scope_writer(destination: &str) -> String {
@@ -6854,13 +6940,13 @@ pub mod nests {
 
     pub const CAPABILITIES_LABEL: &str = "Syncs:";
 
-    pub const CAPABILITY_ACCOUNT_REPLICA: &str = "sealed copy of your account settings";
+    pub const CAPABILITY_ACCOUNT_REPLICA: &str = "encrypted copy of your account settings";
 
     pub const EXPIRY_LABEL: &str = "Expires:";
 
     pub const EXPIRY_NEVER: &str = "Never expires";
 
-    pub const LINK_RECOVERY_KEYS_DIFFER: &str = "These two nests hold different recovery keys for this account, so they can't be linked.";
+    pub const LINK_RECOVERY_KEYS_DIFFER: &str = "These two nests know different recovery kits for this account, so they can't be linked.";
 
     pub const FORWARD_QUEUE_SUMMARY: &str = "{count} of your posts are waiting to reach your relay.";
     pub fn forward_queue_summary(count: &str) -> String {
@@ -6891,7 +6977,7 @@ pub mod linked_nests {
 pub mod logs {
     pub const TITLE: &str = "Logs";
 
-    pub const DESCRIPTION: &str = "Recent activity recorded on this device, newest first. No message contents or secrets are ever logged — only what happened, when, and where.";
+    pub const DESCRIPTION: &str = "Recent activity recorded on this device, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.";
 
     pub const FILTER_LABEL: &str = "Severity";
 
@@ -7483,7 +7569,7 @@ pub mod mail_import {
 
     pub const MICROSOFT_SIGN_IN_AGAIN: &str = "Sign in with Microsoft again";
 
-    pub const MICROSOFT_UNAVAILABLE: &str = "Microsoft sign-in is not available yet.";
+    pub const MICROSOFT_UNAVAILABLE: &str = "Microsoft sign-in is not available in this version of Fauna.";
 
     pub const MICROSOFT_SESSION_SIGN_IN_AGAIN: &str = "The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept.";
 
@@ -7633,7 +7719,7 @@ pub mod mail_import {
 pub mod archive_import {
     pub const TITLE: &str = "Import from other services";
 
-    pub const DESCRIPTION: &str = "Bring your posts, photos and events from a Facebook or Instagram export archive into Fauna, at their original dates and audiences. The archive itself stays in a sealed folder on your nest.";
+    pub const DESCRIPTION: &str = "Bring your posts, photos and events from a Facebook export archive into Fauna, at their original dates. Unless you choose Only me, a public post can be seen on Fauna but is never shared to other networks, and a Friends-only post is visible to the people who follow you; every other post, and your events, are visible only to you. The archive itself is stored encrypted in a folder on your nest.";
 
     pub const UNAVAILABLE: &str = "Importing needs a session that holds your identity key; this one does not.";
 
@@ -7684,9 +7770,9 @@ pub mod archive_import {
 
     pub const AUDIENCE_ONLY_ME: &str = "Only me";
 
-    pub const SCOPE_AUDIENCE_SUMMARY_FMT: &str = "{known} posts and albums have a recorded audience and import to it; {unknown} have none recorded and will be visible only to you.";
+    pub const SCOPE_AUDIENCE_SUMMARY_FMT: &str = "{known} posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; {unknown} have none recorded and will be visible only to you.";
     pub fn scope_audience_summary_fmt(known: &str, unknown: &str) -> String {
-        format!("{known} posts and albums have a recorded audience and import to it; {unknown} have none recorded and will be visible only to you.")
+        format!("{known} posts and albums have a recorded audience: a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you; {unknown} have none recorded and will be visible only to you.")
     }
 
     pub const SCOPE_AUDIENCE_SUMMARY_ONLY_ME: &str = "Everything will be visible only to you.";
@@ -7713,14 +7799,19 @@ pub mod archive_import {
         format!("{state} · {imported} of {total} · {skipped} skipped")
     }
 
-    pub const PROGRESS_TIMING_FMT: &str = "{elapsed} elapsed · about {eta} left";
-    pub fn progress_timing_fmt(elapsed: &str, eta: &str) -> String {
-        format!("{elapsed} elapsed · about {eta} left")
-    }
-
     pub const PROGRESS_TIMING_ESTIMATING_FMT: &str = "{elapsed} elapsed · estimating the time left";
     pub fn progress_timing_estimating_fmt(elapsed: &str) -> String {
         format!("{elapsed} elapsed · estimating the time left")
+    }
+
+    pub const PROGRESS_LINE_FMT: &str = "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · about {eta} left";
+    pub fn progress_line_fmt(state: &str, imported: &str, total: &str, skipped: &str, elapsed: &str, eta: &str) -> String {
+        format!("{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · about {eta} left")
+    }
+
+    pub const PROGRESS_LINE_ESTIMATING_FMT: &str = "{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · estimating the time left";
+    pub fn progress_line_estimating_fmt(state: &str, imported: &str, total: &str, skipped: &str, elapsed: &str) -> String {
+        format!("{state} · {imported} of {total} · {skipped} skipped · {elapsed} elapsed · estimating the time left")
     }
 
     pub const PROGRESS_ROW_FMT: &str = "{imported} of {count} · {skipped} skipped";
@@ -7753,11 +7844,57 @@ pub mod archive_import {
         format!("{imported} imported · {skipped} skipped")
     }
 
+    pub const DONE_UNPLACED_COMMENTS_FMT: &str = "{count} comments could not be placed under a post";
+    pub fn done_unplaced_comments_fmt(count: &str) -> String {
+        format!("{count} comments could not be placed under a post")
+    }
+
+    pub const DONE_SUMMARY_UNPLACED_FMT: &str = "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post";
+    pub fn done_summary_unplaced_fmt(imported: &str, skipped: &str, count: &str) -> String {
+        format!("{imported} imported · {skipped} skipped · {count} comments could not be placed under a post")
+    }
+
+    pub const DONE_SUMMARY_LINKS_FMT: &str = "{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post";
+    pub fn done_summary_links_fmt(imported: &str, skipped: &str, claimed: &str, unmatched: &str) -> String {
+        format!("{imported} imported · {skipped} skipped · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post")
+    }
+
+    pub const DONE_SUMMARY_UNPLACED_LINKS_FMT: &str = "{imported} imported · {skipped} skipped · {count} comments could not be placed under a post · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post";
+    pub fn done_summary_unplaced_links_fmt(imported: &str, skipped: &str, count: &str, claimed: &str, unmatched: &str) -> String {
+        format!("{imported} imported · {skipped} skipped · {count} comments could not be placed under a post · {claimed} comments and reactions came back from linked contacts · {unmatched} could not be matched to a post")
+    }
+
+    pub const LINK_PROMPT_FMT: &str = "Is {contact} the “{archived_name}” from your {platform} friends?";
+    pub fn link_prompt_fmt(contact: &str, archived_name: &str, platform: &str) -> String {
+        format!("Is {contact} the “{archived_name}” from your {platform} friends?")
+    }
+
+    pub const LINK_PROMPT_UNNAMED_FMT: &str = "Is {contact} one of your {platform} friends?";
+    pub fn link_prompt_unnamed_fmt(contact: &str, platform: &str) -> String {
+        format!("Is {contact} one of your {platform} friends?")
+    }
+
+    pub const LINK_YES: &str = "Yes, link";
+
+    pub const LINK_NO: &str = "No";
+
+    pub const LINKED_FMT: &str = "Linked: {platform}";
+    pub fn linked_fmt(platform: &str) -> String {
+        format!("Linked: {platform}")
+    }
+
+    pub const LINKED_UNMATCHED_FMT: &str = "Linked: {platform} · {unmatched} could not be matched to a post";
+    pub fn linked_unmatched_fmt(platform: &str, unmatched: &str) -> String {
+        format!("Linked: {platform} · {unmatched} could not be matched to a post")
+    }
+
+    pub const UNLINK: &str = "Unlink";
+
     pub const VIEW_IMPORTED_BUTTON: &str = "View imported posts";
 
     pub const REVIEW_SKIPPED_BUTTON: &str = "Review skipped";
 
-    pub const PROFILE_PREFILL_BUTTON: &str = "Use the archive's profile name and bio";
+    pub const PROFILE_PREFILL_BUTTON: &str = "Use the archive's profile name, bio, links and picture";
 
     pub const FOLDER_LINK_FMT: &str = "Archive folder: {folder}";
     pub fn folder_link_fmt(folder: &str) -> String {
@@ -7933,7 +8070,7 @@ pub mod nostr {
 
         pub const EXPOSE_TITLE: &str = "Expose content";
 
-        pub const EXPOSE_SUBTITLE: &str = "Allow Nostr users to see your Fauna content";
+        pub const EXPOSE_SUBTITLE: &str = "Serve your public posts, apart from posts you imported from another service, to Nostr users from your nest's relay";
     }
 
     pub mod relays {
@@ -8100,11 +8237,11 @@ pub mod status {
 
         pub const ALLOW_KNOCK: &str = "Allow Knocks";
 
-        pub const ALLOW_KNOCK_DESC: &str = "New contacts must send a knock request first.";
+        pub const ALLOW_KNOCK_DESC: &str = "New contacts must send a knock request first. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.";
 
         pub const CONTACTS_ONLY: &str = "Contacts Only";
 
-        pub const CONTACTS_ONLY_DESC: &str = "Only confirmed contacts can message you.";
+        pub const CONTACTS_ONLY_DESC: &str = "Only confirmed contacts can message you. This isn't applied yet to someone on another nest who starts a conversation with you, unless they do it by inviting you to a room.";
 
         pub const CLOSED: &str = "Closed";
 
@@ -8118,8 +8255,6 @@ pub mod status {
         pub fn available(count: &str) -> String {
             format!("{count} available")
         }
-
-        pub const LOW_KEYS: &str = "Low key packages. Publishing more...";
 
         pub const CHECKING: &str = "Checking encryption status...";
 
@@ -8147,7 +8282,7 @@ pub mod status {
 
         pub const TITLE: &str = "Push Notifications";
 
-        pub const CONTENT_ENCRYPTED: &str = "Notification content is encrypted end-to-end.";
+        pub const CONTENT_ENCRYPTED: &str = "Notification content is encrypted end-to-end, apart from a generic alert and the number of unread items, which Apple's notification service carries in the clear.";
 
         pub const REGISTERED: &str = "Registered with server";
 
@@ -8221,10 +8356,6 @@ pub mod status {
         pub const CHANGING: &str = "Changing...";
     }
 
-    pub mod danger_zone {
-        pub const DELETE_HINT: &str = "Permanently removes your handle and data from this node. Your key is not affected.";
-    }
-
     pub mod admin_section {
         pub const TITLE: &str = "Nest Administration";
 
@@ -8241,8 +8372,6 @@ pub mod status {
         pub const TITLE: &str = "Build";
 
         pub const COMMIT: &str = "Commit";
-
-        pub const VERIFY_HINT: &str = "Verify this build: clone the repo at this commit, build locally, and compare file hashes.";
     }
 }
 
@@ -8722,7 +8851,7 @@ pub mod admin {
 
         pub const RETIRE_TITLE: &str = "Retire this server";
 
-        pub const RETIRE_DESC: &str = "Delete this server at your cloud provider and remove the DNS records that point at it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.";
+        pub const RETIRE_DESC: &str = "If Fauna created this server in your cloud account since 8 July 2026, when it began marking the servers it creates, or it is on OVH, delete it there and clean up the DNS records that belong to it. Unlike a factory reset, which wipes a server you keep, this destroys the server itself. You'll need your cloud provider's token.";
 
         pub const RETIRE_BUTTON: &str = "Retire this server…";
 
@@ -8980,7 +9109,7 @@ pub mod admin {
 
         pub const TAKEDOWN_LABEL: &str = "Legal takedown";
 
-        pub const TAKEDOWN_DESC: &str = "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever.";
+        pub const TAKEDOWN_DESC: &str = "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever.";
 
         pub const TAKEDOWN_CONTENT_ID_LABEL: &str = "Content id";
 
@@ -9000,9 +9129,9 @@ pub mod admin {
 
         pub const TAKEDOWN_BLOCKED_NO_REFERENCE: &str = "A legal reference is required — a takedown without one is refused.";
 
-        pub const TAKEDOWN_CONFIRM_TAKEDOWN: &str = "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.";
+        pub const TAKEDOWN_CONFIRM_TAKEDOWN: &str = "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit record keeps this action.";
         pub fn takedown_confirm_takedown(content_type: &str, content_id: &str, reference: &str) -> String {
-            format!("Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.")
+            format!("Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit record keeps this action.")
         }
 
         pub const TAKEDOWN_CONFIRM_RESTORE: &str = "Overturn the takedown of {content_type} {content_id}? The content serves again; the takedown record remains as history.";
@@ -9018,7 +9147,7 @@ pub mod admin {
 
         pub const TAKEDOWN_WORKING: &str = "Submitting…";
 
-        pub const TAKEDOWN_DONE: &str = "Taken down. A tombstone is served in its place and the author of a post can appeal.";
+        pub const TAKEDOWN_DONE: &str = "Taken down. A tombstone is served in its place and the author can appeal.";
 
         pub const TAKEDOWN_RESTORED: &str = "Restored. The content is served again; the takedown stays on record.";
 
@@ -9070,9 +9199,9 @@ pub mod admin {
 
         pub const BLOCK_ITEM_MESSAGE: &str = "message";
 
-        pub const BLOCK_CONFIRM_BLOCK: &str = "Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.";
+        pub const BLOCK_CONFIRM_BLOCK: &str = "Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author keeps their view of it — its photos and files are withheld from the author too, and an author on another nest keeps a message only on the devices that already had it — and can appeal, and a permanent audit record keeps this action. Nothing is deleted.";
         pub fn block_confirm_block(item: &str, content_id: &str, reason: &str) -> String {
-            format!("Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.")
+            format!("Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author keeps their view of it — its photos and files are withheld from the author too, and an author on another nest keeps a message only on the devices that already had it — and can appeal, and a permanent audit record keeps this action. Nothing is deleted.")
         }
 
         pub const BLOCK_CONFIRM_UNBLOCK: &str = "Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.";
@@ -9084,7 +9213,7 @@ pub mod admin {
 
         pub const BLOCK_CONFIRM_BUTTON_UNBLOCK: &str = "Confirm unblock";
 
-        pub const BLOCK_DONE: &str = "Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.";
+        pub const BLOCK_DONE: &str = "Blocked. A notice is shown in its place, the author can appeal, and the report is recorded as acted on.";
 
         pub const BLOCK_RESTORED: &str = "Unblocked. The item is served again; the block stays on record.";
 
@@ -9099,7 +9228,7 @@ pub mod admin {
 
         pub const BLOCKED_LABEL: &str = "Blocked items";
 
-        pub const BLOCKED_DESC: &str = "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was.";
+        pub const BLOCKED_DESC: &str = "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves except its author — its photos and files from the author too, and an author on another nest keeps a message only on the devices that already had it — with a notice in its place. Unblock serves it again exactly as it was.";
 
         pub const BLOCKED_LOADING: &str = "Loading blocked items…";
 
@@ -9221,11 +9350,11 @@ pub mod admin {
 
         pub const ENABLED_LABEL: &str = "Enable calendar (CalDAV) on this nest";
 
-        pub const ENABLED_SUBTITLE: &str = "Serve calendar sync (CalDAV) for all users. Needs only a real domain with a public certificate — no email infrastructure — so calendar can run with or without email. The shared mail-and-calendar bridge runs whenever this or Enable mail is on.";
+        pub const ENABLED_SUBTITLE: &str = "Serve calendar sync (CalDAV) for all users. It needs no email infrastructure, so calendar can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.";
 
         pub const CALDAV_PORT_LABEL: &str = "CalDAV port";
 
-        pub const CALDAV_PORT_DESC: &str = "The port the calendar (CalDAV) server listens on for desktop or IP-only nests that have no domain — reach it at https://this-host:port/. Default 8443. On a domain nest this is ignored: CalDAV is served at mail.your-domain on port 443.";
+        pub const CALDAV_PORT_DESC: &str = "The port calendar, contacts and file apps use when they reach this nest directly at its own address — a nest at home or on a desktop computer. Default 8443. On a server in the cloud with a domain, they are served at your domain's mail server name (mail. followed by your domain) on the standard port, 443, and this setting does not apply.";
 
         pub const CALDAV_PORT_SAVE: &str = "Save port";
 
@@ -9239,7 +9368,7 @@ pub mod admin {
 
         pub const ENABLED_LABEL: &str = "Enable contacts (CardDAV) on this nest";
 
-        pub const ENABLED_SUBTITLE: &str = "Serve contact sync (CardDAV) for all users. Rides the same server and certificate as calendar — no email infrastructure — so contacts can run with or without email or calendar. The shared bridge runs whenever this, Enable calendar, or Enable mail is on.";
+        pub const ENABLED_SUBTITLE: &str = "Serve contact sync (CardDAV) for all users. It needs no email infrastructure, so contacts can run with or without email. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.";
     }
 
     pub mod files_page {
@@ -9249,7 +9378,7 @@ pub mod admin {
 
         pub const ENABLED_LABEL: &str = "Enable files (WebDAV) on this nest";
 
-        pub const ENABLED_SUBTITLE: &str = "Serve file access (WebDAV) for all users. Rides the same server and certificate as calendar and contacts — no email infrastructure — so files can run with or without email, calendar, or contacts. Nothing is served until a user flags a folder for WebDAV. The shared bridge runs whenever this, Enable contacts, Enable calendar, or Enable mail is on.";
+        pub const ENABLED_SUBTITLE: &str = "Serve file access (WebDAV) for all users. It needs no email infrastructure, so files can run with or without email. Nothing is served until a user flags a folder for WebDAV. Calendar, contacts, files and mail share one service, which runs whenever any of them is turned on.";
     }
 
     pub mod invite_requests_page {
@@ -9307,7 +9436,7 @@ pub mod admin {
     pub mod logs_page {
         pub const TITLE: &str = "Nest Logs";
 
-        pub const DESCRIPTION: &str = "Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where.";
+        pub const DESCRIPTION: &str = "Recent activity recorded on the nest, newest first — what happened, when, and where. Fauna is written never to record message contents or secrets here.";
 
         pub const EMPTY: &str = "No nest log entries yet.";
 
@@ -9473,7 +9602,7 @@ pub mod admin {
 
         pub const ENABLED_LABEL: &str = "Enable mail";
 
-        pub const ENABLED_SUBTITLE: &str = "Run the mail subsystem (SMTP / IMAP / CalDAV) for this nest.";
+        pub const ENABLED_SUBTITLE: &str = "Run mail (SMTP and IMAP) for this nest.";
 
         pub const HEALTH_TITLE: &str = "Mail health";
 
@@ -9524,7 +9653,7 @@ pub mod admin {
 
         pub const HEALTH_DELIST: &str = "Request removal from the blocklist";
 
-        pub const HEALTH_SENDER_DASHBOARDS_NOTE: &str = "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).";
+        pub const HEALTH_SENDER_DASHBOARDS_NOTE: &str = "Gmail Postmaster Tools and Outlook SNDS are dashboards that Google and Microsoft run themselves. If you want their view of how your mail is received, sign up with each through its link. Fauna doesn't connect to them.";
 
         pub const HEALTH_SENDER_DASHBOARD_GMAIL: &str = "Gmail Postmaster Tools";
 
@@ -9557,11 +9686,11 @@ pub mod admin {
 
         pub const AUTO_ENABLE_NEW_USERS_LABEL: &str = "Auto-enable mail for new users";
 
-        pub const AUTO_ENABLE_NEW_USERS_SUBTITLE: &str = "New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.";
+        pub const AUTO_ENABLE_NEW_USERS_SUBTITLE: &str = "New users automatically get a mailbox at their handle on first sign-in — or, while mail is off and calendars or contacts are served, a password for their calendar and contacts apps. Each user can still turn their own mail off.";
 
         pub const MICROSOFT_GROUP_TITLE: &str = "Microsoft sign-in for the Outlook import";
 
-        pub const MICROSOFT_GROUP_DESC: &str = "The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.";
+        pub const MICROSOFT_GROUP_DESC: &str = "The Outlook import signs in to Microsoft with your organisation's own app registration: enter its application (client) ID and, if you like, its directory. Until one is entered, the import's Sign in with Microsoft does nothing. Clear both fields and save to remove it.";
 
         pub const MICROSOFT_REQUIREMENTS: &str = "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory.";
 
@@ -9573,7 +9702,7 @@ pub mod admin {
 
         pub const MICROSOFT_SAVE: &str = "Save Microsoft registration";
 
-        pub const MICROSOFT_USING_DEFAULT: &str = "Using the default registration.";
+        pub const MICROSOFT_USING_DEFAULT: &str = "No registration entered — the Outlook import's Sign in with Microsoft does nothing until one is.";
 
         pub const MICROSOFT_USING_OWN: &str = "Using your organisation's registration.";
 
@@ -9813,7 +9942,7 @@ pub mod admin {
 
         pub const DMARC_GROUP_TITLE: &str = "DMARC reports";
 
-        pub const DMARC_GROUP_DESC: &str = "The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.";
+        pub const DMARC_GROUP_DESC: &str = "The reports peer mail servers send about mail claiming to be from your domains, how long they are kept, and whether your nest sends reports of its own.";
 
         pub const DMARC_RUF_PUBLISH_LABEL: &str = "Ask for forensic reports";
 
@@ -9826,6 +9955,8 @@ pub mod admin {
         pub const DMARC_FORENSIC_RETENTION_LABEL: &str = "Keep forensic reports (days, 1–90)";
 
         pub const DMARC_FORENSIC_RETENTION_WARNING: &str = "Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.";
+
+        pub const DMARC_OUTBOUND_AGGREGATE_LABEL: &str = "Send daily DMARC reports to other domains";
 
         pub const DMARC_SAVE: &str = "Save DMARC policy";
     }
@@ -9868,7 +9999,7 @@ pub mod admin {
 
         pub const ADD_DOMAIN_SUBMIT: &str = "Add";
 
-        pub const ADD_DOMAIN_PRIMARY_WARNING: &str = "This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.";
+        pub const ADD_DOMAIN_PRIMARY_WARNING: &str = "This becomes your nest's primary domain, which can never be removed, only renamed onto a different domain.";
 
         pub const PRIMARY_BADGE: &str = "Primary";
 
@@ -10205,6 +10336,8 @@ pub mod moderation {
 
         pub const INCLUDE_TEXT_LABEL: &str = "Include the text of this message — the admins will be able to read it";
 
+        pub const INCLUDE_TEXT_LABEL_POST: &str = "Include the text of this post — the admins will be able to read it";
+
         pub const BLOCK_AUTHOR_LABEL: &str = "Also block this person";
 
         pub const SUBMIT: &str = "Send report";
@@ -10306,7 +10439,7 @@ pub mod moderation {
 pub mod muted_words {
     pub const TITLE: &str = "Muted words";
 
-    pub const DESCRIPTION: &str = "A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.";
+    pub const DESCRIPTION: &str = "A new word is set to “Hide”, so posts, messages and notifications containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages and notifications show as usual. A security notice always shows in full. This list is stored encrypted on your nest, and only your devices can read it.";
 
     pub const INPUT_PLACEHOLDER: &str = "Add a word to mute";
 
@@ -10372,7 +10505,7 @@ pub mod personalization {
 
     pub const PUBLISH_NAME_PLACEHOLDER: &str = "e.g. Small orange cats";
 
-    pub const PUBLISH_LIMITATION_NOTE: &str = "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published anonymously: nothing links the list back to you or your account.";
+    pub const PUBLISH_LIMITATION_NOTE: &str = "You’re sharing the posts below — not the topic itself or anything it learned about you. Only posts this device has already loaded and seen can be included, so the list won’t cover posts you never saw. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though the posts you choose can still say something about you.";
 
     pub const PUBLISH_EXEMPLARS_TITLE: &str = "Posts to include";
 
@@ -10407,7 +10540,7 @@ pub mod personalization {
 
     pub const PUBLISH_NAME_LABEL_MODEL: &str = "Public name for this model";
 
-    pub const PUBLISH_LIMITATION_NOTE_MODEL: &str = "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published anonymously, and it’s built only from posts you marked by hand: nothing you merely read or watched goes into it.";
+    pub const PUBLISH_LIMITATION_NOTE_MODEL: &str = "You’re sharing the word patterns this topic learned — not the topic itself, and none of the posts. Unlike a list, a model also matches posts nobody here has seen yet. Only patterns that appear in at least 3 of your marked public posts are included, and that covers both what you marked as more like this and what you marked as less like this — the direction column below shows which is which. It’s published without your name or account on it: it is signed by a key made for this topic alone, so the public name you choose is the only name anyone will know it by — though someone who compares its word patterns with public posts may be able to guess which of them you marked. It’s built only from posts you marked by hand: nothing you merely read or watched goes into it.";
 
     pub const PUBLISH_CORPUS_SIZE: &str = "Built from {included} public examples of your {marked} marked posts.";
     pub fn publish_corpus_size(included: &str, marked: &str) -> String {
@@ -11288,14 +11421,14 @@ pub mod notifications {
         format!("Security: an administrative change ({change_type}) was made to {target}. If you did not request it, contact your nest administrator.")
     }
 
-    pub const ROW_SECURITY_RECOVERY_REPLACEMENT_PENDING: &str = "Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.";
+    pub const ROW_SECURITY_RECOVERY_REPLACEMENT_PENDING: &str = "Security: a recovery kit replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.";
     pub fn row_security_recovery_replacement_pending(new_key: &str, lands_at: &str) -> String {
-        format!("Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.")
+        format!("Security: a recovery kit replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days.")
     }
 
-    pub const ROW_SECURITY_RECOVERY_REPLACEMENT_LANDED: &str = "Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.";
+    pub const ROW_SECURITY_RECOVERY_REPLACEMENT_LANDED: &str = "Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.";
     pub fn row_security_recovery_replacement_landed(new_key: &str) -> String {
-        format!("Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.")
+        format!("Security: your recovery kit was replaced (new key {new_key}). Your new recovery kit cannot recover this account until you enter it and press Restore Kit Recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.")
     }
 
     pub const ROW_SECURITY_RECOVERY_REPLACEMENT_CANCELLED: &str = "Security: the pending recovery key replacement was cancelled by {cancelled_by}.";
@@ -11308,14 +11441,14 @@ pub mod notifications {
         format!("Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.")
     }
 
-    pub const ROW_SECURITY_ARCHIVE_EXPORTED: &str = "Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.";
+    pub const ROW_SECURITY_ARCHIVE_EXPORTED: &str = "Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.";
     pub fn row_security_archive_exported(ip: &str) -> String {
-        format!("Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.")
+        format!("Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there) and contact your nest administrator.")
     }
 
-    pub const ROW_SECURITY_MAILBOX_EXPORT_DOWNLOADED: &str = "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.";
+    pub const ROW_SECURITY_MAILBOX_EXPORT_DOWNLOADED: &str = "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.";
     pub fn row_security_mailbox_export_downloaded(format: &str, ip: &str) -> String {
-        format!("Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.")
+        format!("Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Sessions (or use the emergency lockout there), discard the export from the mail export page, and contact your nest administrator.")
     }
 }
 
@@ -11849,7 +11982,7 @@ pub mod error {
     }
 
     pub mod sync {
-        pub const DEVICE_LIMIT_EXCEEDED: &str = "This account already has as many devices as its plan allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.";
+        pub const DEVICE_LIMIT_EXCEEDED: &str = "This account already has as many devices as its tier allows, so this device could not be added. Remove a device you no longer use under Settings → Devices, or ask your admin for a bigger tier.";
     }
 
     pub mod send {
@@ -11901,7 +12034,7 @@ pub mod errors {
 
     pub const NEST_TIMEOUT: &str = "Nest did not come online within the expected time";
 
-    pub const SNAPSHOT_DEVICE_UNKNOWN: &str = "This snapshot's owning device is unknown, so its files cannot be downloaded.";
+    pub const SNAPSHOT_DOWNLOAD_NO_DEVICE_ID: &str = "This device could not load its own identity, so snapshot files cannot be downloaded here. Restart the app; if that does not help, sign in again.";
 
     pub const NO_IDENTITY: &str = "No identity configured";
 
@@ -11969,7 +12102,7 @@ pub mod errors {
 
     pub const RECOVERY_SUPERSEDED: &str = "This identity has already been succeeded by another one. Import your new identity to continue.";
 
-    pub const RECOVERY_NO_ESCROW: &str = "No sealed copy of your identity secret is stored for this recovery kit, so it cannot recover this account right now.";
+    pub const RECOVERY_NO_ESCROW: &str = "The copy of your secret key that only this recovery kit opens is not stored, so the kit cannot recover this account right now.";
 
     pub const RECOVERY_NOT_REGISTERED: &str = "No recovery key is registered for this identity, so there is nothing to recover from.";
 
@@ -12181,10 +12314,6 @@ pub mod provisioning {
 
         pub const LOCATION: &str = "Region";
     }
-
-    pub mod managed {
-        pub const DISABLED: &str = "Managed subdomains on fauna.social are coming soon. For now, pick another option.";
-    }
 }
 
 pub mod region {
@@ -12197,6 +12326,8 @@ pub mod region {
     pub fn collapsed_notice(region: &str, authority: &str) -> String {
         format!("Hidden in {region} under the policy of {authority} — select to show")
     }
+
+    pub const SEALED_NOTE: &str = "Hidden from you on this device — nothing was removed, detected or reported";
 
     pub const REVEAL_BUTTON: &str = "Show";
 
@@ -12254,6 +12385,15 @@ pub mod nest_rules {
     pub fn collapsed_notice(nest: &str) -> String {
         format!("Hidden on {nest} under this nest’s rules — select to show")
     }
+
+    pub const JOINING_HEADING: &str = "Rules of {nest}. By continuing you accept them.";
+    pub fn joining_heading(nest: &str) -> String {
+        format!("Rules of {nest}. By continuing you accept them.")
+    }
+
+    pub const NOT_APPLIED_NEWER_VERSION: &str = "These rules were written by a newer version of Fauna, so none of them apply on this device. Update the app to see and apply them.";
+
+    pub const NOT_APPLIED_MALFORMED: &str = "These rules contain an error, so none of them apply on this device.";
 
     pub const CHANGED_NOTICE: &str = "{nest} changed its rules — see what is in force";
     pub fn changed_notice(nest: &str) -> String {
@@ -12446,13 +12586,15 @@ pub mod connected_apps {
 
     pub const SCOPE_NOSTR_SIGN: &str = "Sign Nostr events with your key";
 
-    pub const SCOPE_MAIL: &str = "Read and send your mail, and sync your calendar, contacts and files";
+    pub const SCOPE_MAIL: &str = "Read and send your mail while mail is on, and sync your calendar, contacts and files";
 
     pub const REQUESTS_HEADING: &str = "Requests";
 
     pub const CONSENT_ENDS_HOLDER: &str = "This app now uses a new key. Approving ends the access its earlier key was given.";
 
     pub const CONSENT_ENDS_WRITER: &str = "This app now signs with a new key. Approving ends its earlier key's permission to write.";
+
+    pub const CONSENT_ASSISTANT_REACH: &str = "Whatever you allow here, the AI assistant you connect can read or do — and if that assistant runs on a company's servers, that company's service can too. You can disconnect it here at any time.";
 
     pub const CONNECT_HEADING: &str = "Connect an app";
 
@@ -12596,12 +12738,12 @@ pub mod connected_apps {
         format!("Failed to change the external-apps switch: {message}")
     }
 
-    pub const ORACLE_OPS: &str = "Your nest used your keys for this app {count} times in the current window";
+    pub const ORACLE_OPS: &str = "Fauna acted for this app {count} times in the current window";
     pub fn oracle_ops(count: &str) -> String {
-        format!("Your nest used your keys for this app {count} times in the current window")
+        format!("Fauna acted for this app {count} times in the current window")
     }
 
-    pub const ORACLE_OPS_ONE: &str = "Your nest used your keys for this app once in the current window";
+    pub const ORACLE_OPS_ONE: &str = "Fauna acted for this app once in the current window";
 
     pub const ORACLE_REQUESTS: &str = "{count} requests answered in all";
     pub fn oracle_requests(count: &str) -> String {
@@ -12987,13 +13129,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "tips.sender_unknown" => Some(tips::SENDER_UNKNOWN),
         "tips.amount_unknown" => Some(tips::AMOUNT_UNKNOWN),
         "tips.more" => Some(tips::MORE),
-        "onboarding.welcome.title" => Some(onboarding::welcome::TITLE),
-        "onboarding.welcome.subtitle" => Some(onboarding::welcome::SUBTITLE),
-        "onboarding.welcome.tagline" => Some(onboarding::welcome::TAGLINE),
         "onboarding.terms.notice" => Some(onboarding::terms::NOTICE),
         "onboarding.launch.transient_error" => Some(onboarding::launch::TRANSIENT_ERROR),
         "onboarding.launch.use_different_nest" => Some(onboarding::launch::USE_DIFFERENT_NEST),
         "onboarding.launch.launch_failed" => Some(onboarding::launch::LAUNCH_FAILED),
+        "onboarding.launch.locked_secret_missing" => Some(onboarding::launch::LOCKED_SECRET_MISSING),
         "onboarding.launch.identity_changed_warning" => Some(onboarding::launch::IDENTITY_CHANGED_WARNING),
         "onboarding.launch.identity_changed_trust" => Some(onboarding::launch::IDENTITY_CHANGED_TRUST),
         "onboarding.launch.identity_fork_warning" => Some(onboarding::launch::IDENTITY_FORK_WARNING),
@@ -13280,6 +13420,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.handle_check.outcome.domain_available_not_buyable_via_provider" => Some(onboarding::handle_check::outcome::DOMAIN_AVAILABLE_NOT_BUYABLE_VIA_PROVIDER),
         "onboarding.handle_check.outcome.domain_available_inside_zone" => Some(onboarding::handle_check::outcome::DOMAIN_AVAILABLE_INSIDE_ZONE),
         "onboarding.handle_check.outcome.registered_no_nest" => Some(onboarding::handle_check::outcome::REGISTERED_NO_NEST),
+        "onboarding.handle_check.outcome.local_no_nest" => Some(onboarding::handle_check::outcome::LOCAL_NO_NEST),
         "onboarding.handle_check.outcome.already_on_nest_handle_matches" => Some(onboarding::handle_check::outcome::ALREADY_ON_NEST_HANDLE_MATCHES),
         "onboarding.handle_check.outcome.already_on_nest_handle_differs" => Some(onboarding::handle_check::outcome::ALREADY_ON_NEST_HANDLE_DIFFERS),
         "onboarding.handle_check.outcome.user_unregistered" => Some(onboarding::handle_check::outcome::USER_UNREGISTERED),
@@ -13303,6 +13444,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.invite.error.rate_limited" => Some(onboarding::invite::error::RATE_LIMITED),
         "onboarding.invite.error.not_found" => Some(onboarding::invite::error::NOT_FOUND),
         "onboarding.invite.error.transient" => Some(onboarding::invite::error::TRANSIENT),
+        "onboarding.invite.error.domain_not_hosted" => Some(onboarding::invite::error::DOMAIN_NOT_HOSTED),
+        "onboarding.invite.error.unreachable" => Some(onboarding::invite::error::UNREACHABLE),
         "onboarding.invite.error.already_registered" => Some(onboarding::invite::error::ALREADY_REGISTERED),
         "onboarding.invite.error.terminal" => Some(onboarding::invite::error::TERMINAL),
         "onboarding.oob_code.idle" => Some(onboarding::oob_code::IDLE),
@@ -13354,6 +13497,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.awaiting_dns.copy_button" => Some(onboarding::awaiting_dns::COPY_BUTTON),
         "onboarding.done.finished" => Some(onboarding::done::FINISHED),
         "onboarding.session_error.persist_account" => Some(onboarding::session_error::PERSIST_ACCOUNT),
+        "onboarding.session_error.persist_identity" => Some(onboarding::session_error::PERSIST_IDENTITY),
         "onboarding.session_error.persist_successor" => Some(onboarding::session_error::PERSIST_SUCCESSOR),
         "onboarding.session_error.switch_successor" => Some(onboarding::session_error::SWITCH_SUCCESSOR),
         "onboarding.session_error.switch_appended" => Some(onboarding::session_error::SWITCH_APPENDED),
@@ -13391,6 +13535,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "unlock.unlock_prompt" => Some(unlock::UNLOCK_PROMPT),
         "unlock.create_title" => Some(unlock::CREATE_TITLE),
         "unlock.create_prompt" => Some(unlock::CREATE_PROMPT),
+        "unlock.keyring_locked_notice" => Some(unlock::KEYRING_LOCKED_NOTICE),
         "unlock.passphrase_label" => Some(unlock::PASSPHRASE_LABEL),
         "unlock.confirm_label" => Some(unlock::CONFIRM_LABEL),
         "unlock.unlock_button" => Some(unlock::UNLOCK_BUTTON),
@@ -13417,6 +13562,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "tui_settings.external_media_always" => Some(tui_settings::EXTERNAL_MEDIA_ALWAYS),
         "tui_settings.external_media_never" => Some(tui_settings::EXTERNAL_MEDIA_NEVER),
         "feed.compose_empty" => Some(feed::COMPOSE_EMPTY),
+        "feed.imported_notice" => Some(feed::IMPORTED_NOTICE),
+        "feed.imported_clear" => Some(feed::IMPORTED_CLEAR),
         "feed.video_external_open_confirm_title" => Some(feed::VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE),
         "feed.compose_gate_preview_empty" => Some(feed::COMPOSE_GATE_PREVIEW_EMPTY),
         "feed.compose_gate_no_key" => Some(feed::COMPOSE_GATE_NO_KEY),
@@ -13447,8 +13594,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.delete_post_confirm_title" => Some(feed::DELETE_POST_CONFIRM_TITLE),
         "feed.error_delete" => Some(feed::ERROR_DELETE),
         "feed.report_post" => Some(feed::REPORT_POST),
-        "feed.post_muted_placeholder" => Some(feed::POST_MUTED_PLACEHOLDER),
-        "feed.post_muted_reveal" => Some(feed::POST_MUTED_REVEAL),
         "feed.error_muted_keywords" => Some(feed::ERROR_MUTED_KEYWORDS),
         "feed.unverified_source" => Some(feed::UNVERIFIED_SOURCE),
         "feed.unverified_source_tooltip" => Some(feed::UNVERIFIED_SOURCE_TOOLTIP),
@@ -13461,6 +13606,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.post_type.classified" => Some(feed::post_type::CLASSIFIED),
         "feed.list.title" => Some(feed::list::TITLE),
         "feed.list.trending" => Some(feed::list::TRENDING),
+        "feed.list.local" => Some(feed::list::LOCAL),
         "feed.list.no_posts" => Some(feed::list::NO_POSTS),
         "feed.list.no_matching_posts" => Some(feed::list::NO_MATCHING_POSTS),
         "feed.list.end_of_feed" => Some(feed::list::END_OF_FEED),
@@ -13597,8 +13743,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.detail.remote_image_blocked" => Some(conversations::detail::REMOTE_IMAGE_BLOCKED),
         "conversations.detail.member_unattested_mark" => Some(conversations::detail::MEMBER_UNATTESTED_MARK),
         "conversations.detail.member_keep" => Some(conversations::detail::MEMBER_KEEP),
-        "conversations.detail.muted_word" => Some(conversations::detail::MUTED_WORD),
-        "conversations.detail.muted_reveal" => Some(conversations::detail::MUTED_REVEAL),
         "conversations.detail.mark_as_spam" => Some(conversations::detail::MARK_AS_SPAM),
         "conversations.detail.report_message" => Some(conversations::detail::REPORT_MESSAGE),
         "conversations.message.signed" => Some(conversations::message::SIGNED),
@@ -13672,6 +13816,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.recipient_picker_bridges" => Some(conversations::unified::RECIPIENT_PICKER_BRIDGES),
         "conversations.unified.recipient_resolve_error" => Some(conversations::unified::RECIPIENT_RESOLVE_ERROR),
         "conversations.unified.recipient_resolve_not_found" => Some(conversations::unified::RECIPIENT_RESOLVE_NOT_FOUND),
+        "conversations.unified.recipient_resolve_not_reachable" => Some(conversations::unified::RECIPIENT_RESOLVE_NOT_REACHABLE),
         "conversations.unified.recipient_resolve_resolved" => Some(conversations::unified::RECIPIENT_RESOLVE_RESOLVED),
         "conversations.unified.recipient_resolve_resolving" => Some(conversations::unified::RECIPIENT_RESOLVE_RESOLVING),
         "conversations.unified.reply_all" => Some(conversations::unified::REPLY_ALL),
@@ -13906,10 +14051,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "groups.mute_group" => Some(groups::MUTE_GROUP),
         "groups.react" => Some(groups::REACT),
         "groups.message_placeholder" => Some(groups::MESSAGE_PLACEHOLDER),
-        "groups.message.encrypted" => Some(groups::message::ENCRYPTED),
-        "groups.message.encrypted_title" => Some(groups::message::ENCRYPTED_TITLE),
-        "groups.message.signed" => Some(groups::message::SIGNED),
-        "groups.message.signed_title" => Some(groups::message::SIGNED_TITLE),
         "atproto_settings.title" => Some(atproto_settings::TITLE),
         "atproto_settings.app_credentials_heading" => Some(atproto_settings::APP_CREDENTIALS_HEADING),
         "atproto_settings.app_credentials_empty" => Some(atproto_settings::APP_CREDENTIALS_EMPTY),
@@ -13957,7 +14098,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "atproto_settings.did_method_web_title" => Some(atproto_settings::DID_METHOD_WEB_TITLE),
         "atproto_settings.did_method_web_desc" => Some(atproto_settings::DID_METHOD_WEB_DESC),
         "atproto_settings.handle_either_way" => Some(atproto_settings::HANDLE_EITHER_WAY),
-        "atproto_settings.history_backfill_label" => Some(atproto_settings::HISTORY_BACKFILL_LABEL),
         "atproto_settings.history_backfill_count_label" => Some(atproto_settings::HISTORY_BACKFILL_COUNT_LABEL),
         "atproto_settings.hosted_handle_prefix" => Some(atproto_settings::HOSTED_HANDLE_PREFIX),
         "atproto_settings.hosted_method_prefix" => Some(atproto_settings::HOSTED_METHOD_PREFIX),
@@ -14186,6 +14326,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "media.versions_loading" => Some(media::VERSIONS_LOADING),
         "media.versions_error" => Some(media::VERSIONS_ERROR),
         "media.version_author" => Some(media::VERSION_AUTHOR),
+        "media.version_author_deposited" => Some(media::VERSION_AUTHOR_DEPOSITED),
+        "media.version_author_deposited_unknown" => Some(media::VERSION_AUTHOR_DEPOSITED_UNKNOWN),
         "media.version_restore" => Some(media::VERSION_RESTORE),
         "media.versions_show_pruned" => Some(media::VERSIONS_SHOW_PRUNED),
         "media.version_pruned_badge" => Some(media::VERSION_PRUNED_BADGE),
@@ -14281,6 +14423,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.restore_history_row" => Some(backups::RESTORE_HISTORY_ROW),
         "backups.restore_kinds_mail" => Some(backups::RESTORE_KINDS_MAIL),
         "backups.restore_kinds_calendar" => Some(backups::RESTORE_KINDS_CALENDAR),
+        "backups.restore_kinds_contacts" => Some(backups::RESTORE_KINDS_CONTACTS),
+        "backups.restore_kinds_posts" => Some(backups::RESTORE_KINDS_POSTS),
+        "backups.restore_kinds_conversations" => Some(backups::RESTORE_KINDS_CONVERSATIONS),
         "backups.restore_confirm_placeholder" => Some(backups::RESTORE_CONFIRM_PLACEHOLDER),
         "backups.restore_confirm_button" => Some(backups::RESTORE_CONFIRM_BUTTON),
         "backups.restore_progress_idle" => Some(backups::RESTORE_PROGRESS_IDLE),
@@ -14390,6 +14535,15 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.reseed_refused_other" => Some(backups::RESEED_REFUSED_OTHER),
         "backups.reseed_gap_sidecarless_segments" => Some(backups::RESEED_GAP_SIDECARLESS_SEGMENTS),
         "backups.reseed_gap_unnamed_files" => Some(backups::RESEED_GAP_UNNAMED_FILES),
+        "backups.reseed_refused_not_accepted" => Some(backups::RESEED_REFUSED_NOT_ACCEPTED),
+        "backups.reseed_refused_preflight_stale" => Some(backups::RESEED_REFUSED_PREFLIGHT_STALE),
+        "backups.reseed_note_unanchored_rows" => Some(backups::RESEED_NOTE_UNANCHORED_ROWS),
+        "backups.reseed_preflight_vouched" => Some(backups::RESEED_PREFLIGHT_VOUCHED),
+        "backups.reseed_preflight_vouched_undated" => Some(backups::RESEED_PREFLIGHT_VOUCHED_UNDATED),
+        "backups.reseed_preflight_rolled_back" => Some(backups::RESEED_PREFLIGHT_ROLLED_BACK),
+        "backups.reseed_preflight_unvouched" => Some(backups::RESEED_PREFLIGHT_UNVOUCHED),
+        "backups.reseed_preflight_withheld" => Some(backups::RESEED_PREFLIGHT_WITHHELD),
+        "backups.reseed_preflight_folders" => Some(backups::RESEED_PREFLIGHT_FOLDERS),
         "backups.backup_audit_recover_button" => Some(backups::BACKUP_AUDIT_RECOVER_BUTTON),
         "backups.backup_recover_confirm_title" => Some(backups::BACKUP_RECOVER_CONFIRM_TITLE),
         "backups.backup_recover_confirm_body" => Some(backups::BACKUP_RECOVER_CONFIRM_BODY),
@@ -14463,6 +14617,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.repo_stats.stored_size" => Some(backups::repo_stats::STORED_SIZE),
         "backups.repo_stats.dedup_ratio" => Some(backups::repo_stats::DEDUP_RATIO),
         "backups.repo_stats.storage_backend" => Some(backups::repo_stats::STORAGE_BACKEND),
+        "backups.repo_stats.compression_label" => Some(backups::repo_stats::COMPRESSION_LABEL),
+        "backups.repo_stats.chunk_sizes_label" => Some(backups::repo_stats::CHUNK_SIZES_LABEL),
         "backups.repo_stats.encryption" => Some(backups::repo_stats::ENCRYPTION),
         "backups.repo_stats.encryption_algo" => Some(backups::repo_stats::ENCRYPTION_ALGO),
         "backups.repo_stats.compression" => Some(backups::repo_stats::COMPRESSION),
@@ -14546,6 +14702,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "folders.share_transfer_state_pulling" => Some(folders::SHARE_TRANSFER_STATE_PULLING),
         "folders.share_transfer_state_up_to_date" => Some(folders::SHARE_TRANSFER_STATE_UP_TO_DATE),
         "folders.share_transfer_state_limited" => Some(folders::SHARE_TRANSFER_STATE_LIMITED),
+        "folders.share_transfer_state_unreachable" => Some(folders::SHARE_TRANSFER_STATE_UNREACHABLE),
+        "folders.share_transfer_state_interrupted" => Some(folders::SHARE_TRANSFER_STATE_INTERRUPTED),
         "folders.share_transfer_source_free_space" => Some(folders::SHARE_TRANSFER_SOURCE_FREE_SPACE),
         "devices.title" => Some(devices::TITLE),
         "devices.my_devices" => Some(devices::MY_DEVICES),
@@ -14571,6 +14729,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.member_enrolled_at" => Some(devices::MEMBER_ENROLLED_AT),
         "devices.member_note" => Some(devices::MEMBER_NOTE),
         "devices.member_remove_confirm" => Some(devices::MEMBER_REMOVE_CONFIRM),
+        "devices.rename" => Some(devices::RENAME),
+        "devices.rename_label" => Some(devices::RENAME_LABEL),
+        "devices.rename_confirm" => Some(devices::RENAME_CONFIRM),
         "devices.folders" => Some(devices::FOLDERS),
         "devices.add_folder" => Some(devices::ADD_FOLDER),
         "devices.retention" => Some(devices::RETENTION),
@@ -14700,6 +14861,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.show_on_demand_finder" => Some(devices::SHOW_ON_DEMAND_FINDER),
         "devices.show_on_demand_files" => Some(devices::SHOW_ON_DEMAND_FILES),
         "devices.show_on_demand_hint" => Some(devices::SHOW_ON_DEMAND_HINT),
+        "devices.on_demand_needs_files_enable" => Some(devices::ON_DEMAND_NEEDS_FILES_ENABLE),
+        "devices.on_demand_needs_extension_enable" => Some(devices::ON_DEMAND_NEEDS_EXTENSION_ENABLE),
+        "devices.on_demand_open_settings" => Some(devices::ON_DEMAND_OPEN_SETTINGS),
         "devices.on_demand_bound_hint" => Some(devices::ON_DEMAND_BOUND_HINT),
         "devices.paywall_tier" => Some(devices::PAYWALL_TIER),
         "devices.paywall_tier_hint" => Some(devices::PAYWALL_TIER_HINT),
@@ -14717,6 +14881,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.error_remove_device" => Some(devices::ERROR_REMOVE_DEVICE),
         "devices.error_set_p2p_participation" => Some(devices::ERROR_SET_P2P_PARTICIPATION),
         "devices.error_p2p_remote_enable" => Some(devices::ERROR_P2P_REMOTE_ENABLE),
+        "devices.error_rename_device" => Some(devices::ERROR_RENAME_DEVICE),
+        "devices.error_rename_needs_key" => Some(devices::ERROR_RENAME_NEEDS_KEY),
+        "devices.error_rename_reserved_name" => Some(devices::ERROR_RENAME_RESERVED_NAME),
         "devices.error_remove_fleet_device" => Some(devices::ERROR_REMOVE_FLEET_DEVICE),
         "devices.error_remove_own_device" => Some(devices::ERROR_REMOVE_OWN_DEVICE),
         "devices.error_remove_unverified_device" => Some(devices::ERROR_REMOVE_UNVERIFIED_DEVICE),
@@ -15264,6 +15431,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.errors.update_inbox" => Some(settings::errors::UPDATE_INBOX),
         "settings.errors.change_handle" => Some(settings::errors::CHANGE_HANDLE),
         "settings.errors.delete_account" => Some(settings::errors::DELETE_ACCOUNT),
+        "settings.errors.icloud_backup" => Some(settings::errors::ICLOUD_BACKUP),
         "settings.errors.export" => Some(settings::errors::EXPORT),
         "settings.errors.export_status" => Some(settings::errors::EXPORT_STATUS),
         "settings.errors.create_filter" => Some(settings::errors::CREATE_FILTER),
@@ -15294,6 +15462,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.custody_restore_sealed" => Some(nests::CUSTODY_RESTORE_SEALED),
         "nests.custody_restore_nothing_new" => Some(nests::CUSTODY_RESTORE_NOTHING_NEW),
         "nests.custody_restore_mismatch" => Some(nests::CUSTODY_RESTORE_MISMATCH),
+        "nests.custody_restore_unchecked" => Some(nests::CUSTODY_RESTORE_UNCHECKED),
         "nests.trusted_to_read" => Some(nests::TRUSTED_TO_READ),
         "nests.scope_mail" => Some(nests::SCOPE_MAIL),
         "nests.scope_calendar" => Some(nests::SCOPE_CALENDAR),
@@ -15701,8 +15870,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "archive_import.start_button" => Some(archive_import::START_BUTTON),
         "archive_import.progress_title" => Some(archive_import::PROGRESS_TITLE),
         "archive_import.progress_summary_fmt" => Some(archive_import::PROGRESS_SUMMARY_FMT),
-        "archive_import.progress_timing_fmt" => Some(archive_import::PROGRESS_TIMING_FMT),
         "archive_import.progress_timing_estimating_fmt" => Some(archive_import::PROGRESS_TIMING_ESTIMATING_FMT),
+        "archive_import.progress_line_fmt" => Some(archive_import::PROGRESS_LINE_FMT),
+        "archive_import.progress_line_estimating_fmt" => Some(archive_import::PROGRESS_LINE_ESTIMATING_FMT),
         "archive_import.progress_row_fmt" => Some(archive_import::PROGRESS_ROW_FMT),
         "archive_import.state_running" => Some(archive_import::STATE_RUNNING),
         "archive_import.state_paused" => Some(archive_import::STATE_PAUSED),
@@ -15715,6 +15885,17 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "archive_import.error_log_title" => Some(archive_import::ERROR_LOG_TITLE),
         "archive_import.done_title" => Some(archive_import::DONE_TITLE),
         "archive_import.done_summary_fmt" => Some(archive_import::DONE_SUMMARY_FMT),
+        "archive_import.done_unplaced_comments_fmt" => Some(archive_import::DONE_UNPLACED_COMMENTS_FMT),
+        "archive_import.done_summary_unplaced_fmt" => Some(archive_import::DONE_SUMMARY_UNPLACED_FMT),
+        "archive_import.done_summary_links_fmt" => Some(archive_import::DONE_SUMMARY_LINKS_FMT),
+        "archive_import.done_summary_unplaced_links_fmt" => Some(archive_import::DONE_SUMMARY_UNPLACED_LINKS_FMT),
+        "archive_import.link_prompt_fmt" => Some(archive_import::LINK_PROMPT_FMT),
+        "archive_import.link_prompt_unnamed_fmt" => Some(archive_import::LINK_PROMPT_UNNAMED_FMT),
+        "archive_import.link_yes" => Some(archive_import::LINK_YES),
+        "archive_import.link_no" => Some(archive_import::LINK_NO),
+        "archive_import.linked_fmt" => Some(archive_import::LINKED_FMT),
+        "archive_import.linked_unmatched_fmt" => Some(archive_import::LINKED_UNMATCHED_FMT),
+        "archive_import.unlink" => Some(archive_import::UNLINK),
         "archive_import.view_imported_button" => Some(archive_import::VIEW_IMPORTED_BUTTON),
         "archive_import.review_skipped_button" => Some(archive_import::REVIEW_SKIPPED_BUTTON),
         "archive_import.profile_prefill_button" => Some(archive_import::PROFILE_PREFILL_BUTTON),
@@ -15864,7 +16045,6 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "status.inbox_privacy.closed_desc" => Some(status::inbox_privacy::CLOSED_DESC),
         "status.encryption.key_packages" => Some(status::encryption::KEY_PACKAGES),
         "status.encryption.available" => Some(status::encryption::AVAILABLE),
-        "status.encryption.low_keys" => Some(status::encryption::LOW_KEYS),
         "status.encryption.checking" => Some(status::encryption::CHECKING),
         "status.encryption.publishing" => Some(status::encryption::PUBLISHING),
         "status.encryption.mls_engine" => Some(status::encryption::MLS_ENGINE),
@@ -15908,14 +16088,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "status.spam.save" => Some(status::spam::SAVE),
         "status.change_handle.placeholder" => Some(status::change_handle::PLACEHOLDER),
         "status.change_handle.changing" => Some(status::change_handle::CHANGING),
-        "status.danger_zone.delete_hint" => Some(status::danger_zone::DELETE_HINT),
         "status.admin_section.title" => Some(status::admin_section::TITLE),
         "status.admin_section.description" => Some(status::admin_section::DESCRIPTION),
         "status.admin_section.dashboard" => Some(status::admin_section::DASHBOARD),
         "status.self_host.title" => Some(status::self_host::TITLE),
         "status.build.title" => Some(status::build::TITLE),
         "status.build.commit" => Some(status::build::COMMIT),
-        "status.build.verify_hint" => Some(status::build::VERIFY_HINT),
         "admin.aliases" => Some(admin::ALIASES),
         "admin.exit" => Some(admin::EXIT),
         "admin.actor_id_fallback_label" => Some(admin::ACTOR_ID_FALLBACK_LABEL),
@@ -16540,6 +16718,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.mail_page.dmarc_aggregate_retention_label" => Some(admin::mail_page::DMARC_AGGREGATE_RETENTION_LABEL),
         "admin.mail_page.dmarc_forensic_retention_label" => Some(admin::mail_page::DMARC_FORENSIC_RETENTION_LABEL),
         "admin.mail_page.dmarc_forensic_retention_warning" => Some(admin::mail_page::DMARC_FORENSIC_RETENTION_WARNING),
+        "admin.mail_page.dmarc_outbound_aggregate_label" => Some(admin::mail_page::DMARC_OUTBOUND_AGGREGATE_LABEL),
         "admin.mail_page.dmarc_save" => Some(admin::mail_page::DMARC_SAVE),
         "admin.dns.title" => Some(admin::dns::TITLE),
         "admin.dns.description" => Some(admin::dns::DESCRIPTION),
@@ -16696,6 +16875,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "moderation.report.reason.other" => Some(moderation::report::reason::OTHER),
         "moderation.report.note_label" => Some(moderation::report::NOTE_LABEL),
         "moderation.report.include_text_label" => Some(moderation::report::INCLUDE_TEXT_LABEL),
+        "moderation.report.include_text_label_post" => Some(moderation::report::INCLUDE_TEXT_LABEL_POST),
         "moderation.report.block_author_label" => Some(moderation::report::BLOCK_AUTHOR_LABEL),
         "moderation.report.submit" => Some(moderation::report::SUBMIT),
         "moderation.report.cancel" => Some(moderation::report::CANCEL),
@@ -17311,7 +17491,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "errors.secret_key_invalid" => Some(errors::SECRET_KEY_INVALID),
         "errors.nest_unreachable" => Some(errors::NEST_UNREACHABLE),
         "errors.nest_timeout" => Some(errors::NEST_TIMEOUT),
-        "errors.snapshot_device_unknown" => Some(errors::SNAPSHOT_DEVICE_UNKNOWN),
+        "errors.snapshot_download_no_device_id" => Some(errors::SNAPSHOT_DOWNLOAD_NO_DEVICE_ID),
         "errors.no_identity" => Some(errors::NO_IDENTITY),
         "errors.not_connected_to_nest" => Some(errors::NOT_CONNECTED_TO_NEST),
         "errors.nostr_nsec_required" => Some(errors::NOSTR_NSEC_REQUIRED),
@@ -17414,9 +17594,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "provisioning.linode.help" => Some(provisioning::linode::HELP),
         "provisioning.linode.api_token" => Some(provisioning::linode::API_TOKEN),
         "provisioning.linode.location" => Some(provisioning::linode::LOCATION),
-        "provisioning.managed.disabled" => Some(provisioning::managed::DISABLED),
         "region.blocked_notice" => Some(region::BLOCKED_NOTICE),
         "region.collapsed_notice" => Some(region::COLLAPSED_NOTICE),
+        "region.sealed_note" => Some(region::SEALED_NOTE),
         "region.reveal_button" => Some(region::REVEAL_BUTTON),
         "region.section_title" => Some(region::SECTION_TITLE),
         "region.declared" => Some(region::DECLARED),
@@ -17434,6 +17614,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "region.stale_warning" => Some(region::STALE_WARNING),
         "nest_rules.blocked_notice" => Some(nest_rules::BLOCKED_NOTICE),
         "nest_rules.collapsed_notice" => Some(nest_rules::COLLAPSED_NOTICE),
+        "nest_rules.joining_heading" => Some(nest_rules::JOINING_HEADING),
+        "nest_rules.not_applied_newer_version" => Some(nest_rules::NOT_APPLIED_NEWER_VERSION),
+        "nest_rules.not_applied_malformed" => Some(nest_rules::NOT_APPLIED_MALFORMED),
         "nest_rules.changed_notice" => Some(nest_rules::CHANGED_NOTICE),
         "nest_rules.reveal_button" => Some(nest_rules::REVEAL_BUTTON),
         "nest_rules.settings_title" => Some(nest_rules::SETTINGS_TITLE),
@@ -17496,6 +17679,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.requests_heading" => Some(connected_apps::REQUESTS_HEADING),
         "connected_apps.consent_ends_holder" => Some(connected_apps::CONSENT_ENDS_HOLDER),
         "connected_apps.consent_ends_writer" => Some(connected_apps::CONSENT_ENDS_WRITER),
+        "connected_apps.consent_assistant_reach" => Some(connected_apps::CONSENT_ASSISTANT_REACH),
         "connected_apps.connect_heading" => Some(connected_apps::CONNECT_HEADING),
         "connected_apps.connect_hint" => Some(connected_apps::CONNECT_HINT),
         "connected_apps.connect_placeholder" => Some(connected_apps::CONNECT_PLACEHOLDER),

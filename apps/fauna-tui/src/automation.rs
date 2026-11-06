@@ -427,6 +427,10 @@ struct SharedState {
     ready: bool,
     state: Value,
     machine_result: Option<String>,
+    /// `(actor id, sync device id)` of the session last published, so the state
+    /// report reads the id off disk once per account rather than on every apply.
+    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+    session_device_id: Option<(String, String)>,
 }
 
 /// The main loop's handle to the running agent.
@@ -543,6 +547,8 @@ pub fn start_if_enabled() -> Option<Agent> {
         ready: true,
         state: Value::Null,
         machine_result: None,
+        #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+        session_device_id: None,
     }));
 
     let dispatch_tx = tx.clone();
@@ -616,7 +622,8 @@ impl Agent {
     pub fn publish(&self, app: &App, command_id: Option<&str>) {
         let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         let machine_result = s.machine_result.clone();
-        s.state = state_json(app, machine_result);
+        let device_id = session_device_id(&mut s, app);
+        s.state = state_json(app, machine_result, device_id.as_deref());
         if let Some(id) = command_id {
             s.last_command_id = id.to_string();
         }
@@ -633,6 +640,24 @@ impl Agent {
     }
 }
 
+/// This session's sync device id for the state report — the id the agent
+/// registers and enrols under (`crate::media::device_id_hex`), which a witness
+/// keys a roster read on, the same `session.device_id` linux publishes. Held per
+/// account: the id does not change under a session, and publishing runs after
+/// every apply on the UI loop.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn session_device_id(shared: &mut SharedState, app: &App) -> Option<String> {
+    let actor_id = &app.session.as_ref()?.actor_id;
+    if let Some((held, device_id)) = &shared.session_device_id
+        && held == actor_id
+    {
+        return Some(device_id.clone());
+    }
+    let device_id = crate::media::device_id_hex(actor_id)?;
+    shared.session_device_id = Some((actor_id.clone(), device_id.clone()));
+    Some(device_id)
+}
+
 /// The `state` object the driver reads (`get_state`) and `reset()` polls
 /// (`session.authenticated == false`).
 ///
@@ -644,12 +669,13 @@ impl Agent {
 /// only caller (`start_if_enabled`) carries the same cfg, so this needs no no-op
 /// twin. `docs/goal/architecture/testing.md` convention 15.
 #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
-fn state_json(app: &App, machine_result: Option<String>) -> Value {
+fn state_json(app: &App, machine_result: Option<String>, device_id: Option<&str>) -> Value {
     let session = match &app.session {
         Some(s) => json!({
             "authenticated": true,
             "handle": s.handle,
             "actor_id": s.actor_id,
+            "device_id": device_id,
         }),
         None => json!({ "authenticated": false }),
     };
@@ -953,6 +979,15 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
     // Set after the literal: the object above is at `json!`'s macro recursion
     // limit, so further keys are inserted rather than listed.
     //
+    // Every chat channel this device has bound a thread to — the restore
+    // witness a Welcome-only (unlisted) 1:1 still satisfies
+    // (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY`, which owns the contract).
+    // Shared derivation, one line like `mls_folded_commits`.
+    state[fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY] =
+        fauna_conversations::state_json::mls_bound_channels_json_for_session(
+            app.conversations.real_session.as_ref(),
+        );
+    //
     // The Devices/Folders machine's refresh triple — the `feed_reloads` twin
     // for `DevicesMachine::refresh` (`fauna_e2e_agent::DEVICES_REFRESHES_KEY`,
     // which owns the contract). A plain atomic read; zeros before the machine
@@ -995,8 +1030,15 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
 /// same-signature callee. Unreachable in such a build: `start_if_enabled` returns
 /// `None` there, so no `Agent` is ever constructed to publish from.
 #[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
-fn state_json(_app: &App, _machine_result: Option<String>) -> Value {
+fn state_json(_app: &App, _machine_result: Option<String>, _device_id: Option<&str>) -> Value {
     Value::Null
+}
+
+/// No-op twin of [`session_device_id`] for the same release build: the caller in
+/// `Agent::publish` stays unconditionally compiled, so it needs a callee.
+#[cfg(not(any(test, debug_assertions, feature = "e2e-agent")))]
+fn session_device_id(_shared: &mut SharedState, _app: &App) -> Option<String> {
+    None
 }
 
 /// A reader method hands back its **JSON-serialized** value, so it must be
@@ -1227,6 +1269,9 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
         // `Visible`/`Enabled` above stay `unwrap_or(false)`: missing=false is
         // the documented cross-app predicate contract every driver relies on;
         // only `Text` needs the split.
+        ElementKind::Texts => json!({
+            "texts": registry.matches(id, scope).map(|e| e.text.clone()).collect::<Vec<_>>()
+        }),
         ElementKind::Text => match registry.matches(id, scope).nth(req.index) {
             Some(e) => json!({ "text": e.text.clone() }),
             None => json!({ "error": "not found" }),
@@ -1539,6 +1584,15 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
                 }),
             },
         },
+        // A pixel fraction of an element at the bottom edge has no meaning in a
+        // viewport that follows the focus ring row by row, and the one journey
+        // that needs it is inline playback — a declared tui absence
+        // (`docs/goal/architecture/apps/tui.md` § Declared platform absences).
+        // Loud, never a silent ack (convention 11).
+        ElementKind::ScrollToBottomFraction => json!({
+            "error": "scroll-to-bottom-fraction is not driven on the tui client — its \
+                      viewport follows the focus ring, and inline playback is a declared absence",
+        }),
     }
 }
 
@@ -1781,9 +1835,9 @@ async fn dispatch_command(
                 return recognized(true);
             };
             if action == "archive_import_hold_after" {
-                machine.set_test_hold_after_records(records);
+                machine.set_hold_after_records_for_test(records);
             } else {
-                machine.set_test_pause_after_records(records);
+                machine.set_pause_after_records_for_test(records);
             }
             recognized(true)
         }
@@ -2173,6 +2227,8 @@ async fn dispatch_command(
         // already reuses `App::reset` (`settings.md` § User actions: identical
         // local effect).
         "reset" | "logout" => {
+            // The forced crash at a reset (a no-op outside an e2e build).
+            fauna_e2e_agent::fault_at_reset();
             app.reset();
             recognized(true)
         }
@@ -2264,11 +2320,11 @@ async fn dispatch_command(
                     let outcome = match password {
                         Some(pw) => {
                             machine
-                                .enable_caldav_mailbox_with_password("Default".to_string(), pw)
+                                .enable_dav_mailbox_with_password("Default".to_string(), pw)
                                 .await
                         }
                         None => machine
-                            .enable_caldav_mailbox_with_generated_password("Default".to_string())
+                            .enable_dav_mailbox_with_generated_password("Default".to_string())
                             .await
                             .map(|_password| ()),
                     };
@@ -2398,6 +2454,21 @@ async fn dispatch_command(
                 machine_result: Some(value.to_string()),
             }
         }
+        // e2e-only: where this app's account store's escrow-wrap rows sit on
+        // the fleet feed — the recovery-kit let-go journey's staging read
+        // (`fleet-scope-reclamation.md` § *Fleet-scope reclamation*, clause
+        // (3)(j)). The `device_set_state` reader shape: async store I/O, never
+        // a per-tick state key.
+        "escrow_wrap_coordinates" => {
+            let value = fauna_client_account_runtime::escrow_wrap_coordinates_json(
+                app.settings.account_store.as_ref(),
+            )
+            .await;
+            CommandResult {
+                recognized: true,
+                machine_result: Some(value.to_string()),
+            }
+        }
         // The conversations mock-backend inject seams (the tui twins of linux's
         // `handle_conversations_*`). Their fields ride flat at the top level of
         // the request body, so they read `payload`, not `state` (only `patch`
@@ -2418,6 +2489,26 @@ async fn dispatch_command(
             &app.conversations,
             payload,
         )),
+        // The dead receive rail (`conversations.errors.receive_stopped`) and its
+        // retirement by a newer loop over the same manager — conversations
+        // outcome 18's two halves (`test_conversations_receive_stopped.py`).
+        // The mark answers `"pending"` until the session's real receive loop has
+        // claimed its generation (that claim would retire an earlier mark); the
+        // action layer asks again until it reads `"marked"`.
+        "conversations_mark_receive_stopped" => {
+            match crate::conversations::mark_receive_stopped(&app.conversations) {
+                None => recognized(false),
+                Some(marked) => CommandResult {
+                    recognized: true,
+                    machine_result: Some(
+                        if marked { "\"marked\"" } else { "\"pending\"" }.to_owned(),
+                    ),
+                },
+            }
+        }
+        "conversations_begin_receive_loop" => {
+            recognized(crate::conversations::begin_receive_loop(&app.conversations))
+        }
         "conversations_seed_resolved_link_preview" => recognized(
             crate::conversations::seed_resolved_link_preview(&app.conversations, payload),
         ),
@@ -3187,6 +3278,14 @@ fn apply_messages(app: &mut App, messages: &Value) -> bool {
         // A string injects; null (or any non-string) clears — linux's
         // `as_str()` branch shape.
         *slot = value.as_str().map(|s| s.to_string());
+        // An injected error is a displayed error: it goes through the funnel
+        // every page error does, so the displayed-banner→ring witness checks
+        // the real logging rather than a line only this hook writes.
+        if key == "error"
+            && let Some(text) = value.as_str().filter(|t| !t.is_empty())
+        {
+            crate::wizard::log_displayed_error(text);
+        }
     }
     ok
 }
@@ -3918,7 +4017,7 @@ mod tests {
         let mut app = authed_app();
         let departed = app.admin.auto_renew_wake.clone();
         // What `admin::init` does for the next session.
-        app.admin.auto_renew_wake = crate::loop_wake::LoopWake::default();
+        app.admin.auto_renew_wake = fauna_core::loop_wake::LoopWake::default();
         let current = app.admin.auto_renew_wake.clone();
         apply_command(
             &mut app,
@@ -4004,7 +4103,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            state_json(&app, None)[fauna_e2e_agent::CONNECTION_REPORTS_KEY],
+            state_json(&app, None, None)[fauna_e2e_agent::CONNECTION_REPORTS_KEY],
             json!({ "reports": 3, "transitions": 1, "word": "unreachable" })
         );
     }
@@ -4015,9 +4114,15 @@ mod tests {
     #[test]
     fn state_nav_reads_welcome_while_a_launch_surface_owns_the_screen() {
         let app = test_app();
-        assert_eq!(state_json(&app, None)["nav"]["stack"][0]["view"], "welcome");
+        assert_eq!(
+            state_json(&app, None, None)["nav"]["stack"][0]["view"],
+            "welcome"
+        );
         let authed = authed_app();
-        assert_eq!(state_json(&authed, None)["nav"]["stack"][0]["view"], "feed");
+        assert_eq!(
+            state_json(&authed, None, None)["nav"]["stack"][0]["view"],
+            "feed"
+        );
     }
 
     /// `logout` takes the same arm as `reset` (linux's `"reset" | "logout"`;
@@ -4032,7 +4137,10 @@ mod tests {
                 .recognized
         );
         assert!(app.session.is_none());
-        assert_eq!(state_json(&app, None)["nav"]["stack"][0]["view"], "welcome");
+        assert_eq!(
+            state_json(&app, None, None)["nav"]["stack"][0]["view"],
+            "welcome"
+        );
     }
 
     /// The `messages` patch: inject reads back through state AND the painted
@@ -4052,7 +4160,7 @@ mod tests {
             .await
             .recognized
         );
-        let state = state_json(&app, None);
+        let state = state_json(&app, None, None);
         assert_eq!(state["messages"]["error"], "boom");
         assert_eq!(state["messages"]["warning"], "careful");
         assert_eq!(state["messages"]["info"], "fyi");
@@ -4089,7 +4197,10 @@ mod tests {
         );
         assert!(app.injected_error.is_none());
         assert!(app.injected_info.is_none());
-        assert_eq!(state_json(&app, None)["messages"]["error"], Value::Null);
+        assert_eq!(
+            state_json(&app, None, None)["messages"]["error"],
+            Value::Null
+        );
     }
 
     /// Scroll-into-view resolves against the never-clipped registry: a present
@@ -5000,7 +5111,7 @@ mod tests {
         let app = test_app();
 
         // A scalar reader: the driver must see the bare string.
-        let state = state_json(&app, Some("\"http://127.0.0.1:9\"".to_string()));
+        let state = state_json(&app, Some("\"http://127.0.0.1:9\"".to_string()), None);
         assert_eq!(
             state["machine_method_result"],
             json!("http://127.0.0.1:9"),
@@ -5008,11 +5119,11 @@ mod tests {
         );
 
         // A structured reader: the driver must see an object it can index.
-        let state = state_json(&app, Some(r#"{"overall":"Idle"}"#.to_string()));
+        let state = state_json(&app, Some(r#"{"overall":"Idle"}"#.to_string()), None);
         assert_eq!(state["machine_method_result"]["overall"], json!("Idle"));
 
         // A setter reports no value.
-        let state = state_json(&app, None);
+        let state = state_json(&app, None, None);
         assert_eq!(state["machine_method_result"], Value::Null);
     }
 

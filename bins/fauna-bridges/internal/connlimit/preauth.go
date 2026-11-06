@@ -26,8 +26,8 @@ type PreAuthListener struct {
 }
 
 // NewPreAuthListener wraps inner with the pre-auth deadline. onDeadline fires
-// once per connection whose read fails on OUR bound (the caller's metric and
-// log); it may be nil.
+// once per connection whose read or write fails on OUR bound (the caller's
+// metric and log); it may be nil.
 func NewPreAuthListener(inner net.Listener, onDeadline func()) *PreAuthListener {
 	return &PreAuthListener{Listener: inner, onDeadline: onDeadline, now: time.Now}
 }
@@ -37,8 +37,10 @@ func NewPreAuthListener(inner net.Listener, onDeadline func()) *PreAuthListener 
 // a knob.
 func (l *PreAuthListener) SetClockForTest(now func() time.Time) { l.now = now }
 
-// Accept sets the inner read deadline to accept + PreAuthDeadline before
-// returning the wrapped connection.
+// Accept sets the inner read AND write deadlines to accept + PreAuthDeadline
+// before returning the wrapped connection. The write half matters as much as
+// the read: a stranger that pipelines commands and stops reading leaves the
+// server blocked in Write, where no read deadline applies.
 func (l *PreAuthListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
@@ -54,27 +56,33 @@ func (l *PreAuthListener) Accept() (net.Conn, error) {
 		_ = conn.Close()
 		return nil, err
 	}
+	if err := conn.SetWriteDeadline(c.bound); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	return c, nil
 }
 
-// preAuthConn clamps every read deadline the serving library sets to the
-// pre-auth bound until MarkAuthenticated lifts it. The serving library pokes
-// read deadlines itself (go-imap's IDLE deadline and drain wake-up), so the
-// bound is a clamp, never a set-once: a clear or a later deadline keeps ours,
-// an earlier one passes. Write deadlines are never clamped.
+// preAuthConn clamps every read and write deadline the serving library sets
+// to the pre-auth bound until MarkAuthenticated lifts it. The serving library
+// pokes deadlines itself (go-imap's IDLE deadline and drain wake-up,
+// go-smtp's per-reply WriteTimeout), so the bound is a clamp, never a
+// set-once: a clear or a later deadline keeps ours, an earlier one passes.
+// Each half remembers its own last request for the lift.
 type preAuthConn struct {
 	net.Conn
 	bound      time.Time
 	now        func() time.Time
 	onDeadline func()
 
-	mu            sync.Mutex
-	authenticated bool
-	requested     time.Time // the library's last-requested read deadline
-	counted       bool
+	mu             sync.Mutex
+	authenticated  bool
+	requestedRead  time.Time // the library's last-requested read deadline
+	requestedWrite time.Time // the library's last-requested write deadline
+	counted        bool
 }
 
-// clamped returns the read deadline to apply for a requested one while
+// clamped returns the deadline to apply for a requested one while
 // unauthenticated. Caller holds mu.
 func (c *preAuthConn) clamped(t time.Time) time.Time {
 	if t.IsZero() || t.After(c.bound) {
@@ -89,40 +97,61 @@ func (c *preAuthConn) SetReadDeadline(t time.Time) error {
 	if c.authenticated {
 		return c.Conn.SetReadDeadline(t)
 	}
-	c.requested = t
+	c.requestedRead = t
 	return c.Conn.SetReadDeadline(c.clamped(t))
 }
 
+func (c *preAuthConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.authenticated {
+		return c.Conn.SetWriteDeadline(t)
+	}
+	c.requestedWrite = t
+	return c.Conn.SetWriteDeadline(c.clamped(t))
+}
+
 func (c *preAuthConn) SetDeadline(t time.Time) error {
-	if err := c.Conn.SetWriteDeadline(t); err != nil {
+	if err := c.SetWriteDeadline(t); err != nil {
 		return err
 	}
 	return c.SetReadDeadline(t)
 }
 
-// Read counts a timeout on OUR bound — the one place that knows the close
-// was ours.
+// Read and Write count a timeout on OUR bound — the one place that knows the
+// close was ours.
 func (c *preAuthConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
-			c.mu.Lock()
-			ours := !c.authenticated && !c.counted && !c.now().Before(c.bound)
-			if ours {
-				c.counted = true
-			}
-			c.mu.Unlock()
-			if ours && c.onDeadline != nil {
-				c.onDeadline()
-			}
-		}
-	}
+	c.countIfOurs(err)
 	return n, err
 }
 
+func (c *preAuthConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.countIfOurs(err)
+	return n, err
+}
+
+// countIfOurs fires onDeadline for a timeout past our bound while
+// unauthenticated, once per connection whichever half saw it.
+func (c *preAuthConn) countIfOurs(err error) {
+	var ne net.Error
+	if err == nil || !errors.As(err, &ne) || !ne.Timeout() {
+		return
+	}
+	c.mu.Lock()
+	ours := !c.authenticated && !c.counted && !c.now().Before(c.bound)
+	if ours {
+		c.counted = true
+	}
+	c.mu.Unlock()
+	if ours && c.onDeadline != nil {
+		c.onDeadline()
+	}
+}
+
 // markAuthenticated lifts the clamp and restores the library's own
-// last-requested read deadline (zero → cleared).
+// last-requested read and write deadlines (zero → cleared).
 func (c *preAuthConn) markAuthenticated() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -130,7 +159,8 @@ func (c *preAuthConn) markAuthenticated() {
 		return
 	}
 	c.authenticated = true
-	_ = c.Conn.SetReadDeadline(c.requested)
+	_ = c.Conn.SetReadDeadline(c.requestedRead)
+	_ = c.Conn.SetWriteDeadline(c.requestedWrite)
 }
 
 // netConner is the unwrap step: *tls.Conn and go-imap's *imapserver.Conn

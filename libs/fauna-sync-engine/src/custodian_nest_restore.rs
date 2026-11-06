@@ -80,10 +80,14 @@ impl CustodianDial for NativeCustodianDial {
             writer_key.clone(),
             authorization.clone(),
         );
-        client
-            .connect()
-            .await
-            .map_err(|e| anyhow::anyhow!("custodied-fleet handshake/connect refused: {e}"))?;
+        // The mint first: its verdict is this dial's. `connect()` alone is `Ok`
+        // over a custodian that never answered, its supervisor retrying.
+        async {
+            client.authenticate().await?;
+            client.connect().await
+        }
+        .await
+        .map_err(|e| anyhow::anyhow!("custodied-fleet handshake/connect refused: {e}"))?;
         let device_id = writer_key.verifying_key().to_bytes();
         let bytes = crate::nest_client::SyncClient::new(Arc::clone(client.auth()), &device_id);
         Ok(CustodianSession { rpc: client, bytes })
@@ -159,4 +163,30 @@ pub async fn restore_at_address<B: StoreBackend>(
         content_scopes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A custodian nest that never answers is the dial's `Err` — not a session
+    /// whose first read fails later.
+    #[tokio::test]
+    async fn an_unreachable_custodian_fails_the_dial() {
+        let authorization = fauna_core::encoding::EmbedAsBytes {
+            envelope: vec![0; 100],
+            bytes: Vec::new(),
+            signer_auth: None,
+        };
+        let dialled = NativeCustodianDial
+            .connect(
+                // Nothing listens on port 1 of the loopback.
+                "http://127.0.0.1:1",
+                [0x33; 32],
+                &SigningKey::from_bytes(&[0x24; 32]),
+                &authorization,
+            )
+            .await;
+        assert!(dialled.is_err(), "an unreachable custodian connected");
+    }
 }

@@ -24,7 +24,7 @@ import com.fauna.app.R
 import social.fauna.generated.Ids
 
 @Composable
-fun ImageLightbox(url: String, onDismiss: () -> Unit) {
+fun ImageLightbox(model: Any, onDismiss: () -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
 
@@ -44,7 +44,7 @@ fun ImageLightbox(url: String, onDismiss: () -> Unit) {
                 .background(Color.Black.copy(alpha = 0.9f))
         ) {
             AsyncImage(
-                model = url,
+                model = model,
                 contentDescription = "Image",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier

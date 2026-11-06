@@ -316,6 +316,9 @@ def test_hosted_ladder_through_the_card(atproto_hosted_logged_in_app):
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_a_stepped_down_identity_shows_marked_deactivated(atproto_hosted_logged_in_app):
     """After stepping down from hosting, the hosted identity is still shown —
@@ -491,10 +494,10 @@ def test_an_app_password_carries_dm_access_only_when_the_toggle_was_on(
 
 
 # tui led the switch's move to the Connected apps page (owner-ruled
-# 2026-10-16), web, linux, android, macos and ios followed; windows re-adds its
-# marker in the batched trickle-down.
+# 2026-10-16), web, linux, android, macos, ios and windows followed.
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.android
@@ -744,6 +747,92 @@ def test_lapse_reads_as_reauthorize_here(atproto_hosted_logged_in_app):
 
 
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.feature("atproto")
+def test_the_posting_permission_shows_and_stops_below_the_full_level(
+    atproto_hosted_logged_in_app,
+):
+    """The delegation row is gated on the DELEGATION, not on the level
+    (`ui/atproto.md` § Layout & flow, the delegation paragraph, ruled
+    2026-10-23). Approving a connected app's posting or profile line provisions
+    the account's one authoring delegation at ANY level (`consent_grant::
+    ensure_authoring_delegation` checks none), so a row that rendered only at
+    hosted_full left a user below it holding a live, account-wide posting
+    permission with no visible row and no Stop until it lapsed — the dark-grant
+    class `principles.md` § The user always controls their data forbids.
+
+    The journey: hold a delegation at hosted_full, step the selector DOWN to
+    hosted_visible through its own card (the full-PDS panel hides, as the ladder
+    test pins), and the held row — status, scope, Stop — still renders there;
+    Stop ends it from there. Below-full is reached by the step-down rather than
+    by approving a `post.author` consent at a lower level because the step-down
+    is the one path to a held delegation below full that is the user's own
+    gesture and needs no second principal (convention 8); the shared machine
+    fetches the delegation at every level either way, so the shell's gate is
+    the whole difference. After Stop nothing is held, and below full the empty
+    state and its first-grant control stay withheld: nothing a first grant
+    would authorize is signed in there.
+
+    tui, macos/ios (the shared FaunaKit leg), linux, web and android have
+    lifted their gates; windows adds its mark as its own lift lands — the
+    lead-app rule, `testing.md` § Default app and nest mode.
+    """
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    bs.ensure_hosted_full()
+    assert bs.wait_for_fullpds_visible(), (
+        f"the full-PDS panel must be present. error: {bs.page_error_text()!r}"
+    )
+    if not bs.is_delegation_row_visible():
+        bs.authorize_delegation()
+        assert bs.wait_for_delegation(present=True), (
+            f"authorizing must render the delegation row. error: {bs.page_error_text()!r}"
+        )
+    assert bs.wait_for_delegation_status("active"), (
+        f"a held delegation is active, not {bs.delegation_status()!r}. "
+        f"error: {bs.page_error_text()!r}"
+    )
+
+    bs.select_depth("hosted_visible")
+    assert bs.wait_for_card(), "stepping down from full PDS must stage a card"
+    bs.confirm_transition()
+    assert bs.wait_for_depth_level("hosted_visible"), (
+        f"confirm must step down. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
+    )
+    assert not bs.is_fullpds_visible(), "the full-PDS panel must hide below hosted_full"
+
+    assert bs.wait_for_delegation(present=True), (
+        "the held posting permission must stay visible below hosted_full — the "
+        "row is gated on the delegation, not on the level. "
+        f"error: {bs.page_error_text()!r}. "
+        f"diagnose: {app.driver.diagnose('atproto-delegation-row')}."
+    )
+    assert bs.delegation_status() == "active", (
+        f"the row below full states the same liveness, not {bs.delegation_status()!r}"
+    )
+    assert bs.delegation_scope_text().strip(), "the row below full still names what was granted"
+
+    bs.revoke_delegation()
+    assert bs.wait_for_delegation(present=False), (
+        f"Stop must end the permission from below hosted_full. error: {bs.page_error_text()!r}"
+    )
+    assert app.driver.is_absent("atproto-delegation-authorize"), (
+        "below hosted_full nothing a first grant would authorize is signed in, "
+        "so the empty state and its first-grant control stay withheld"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_an_unsigned_posting_permission_shows_as_a_mismatch(
     atproto_hosted_logged_in_app, atproto_hosted_nest
@@ -758,8 +847,8 @@ def test_an_unsigned_posting_permission_shows_as_a_mismatch(
     therefore the nest's own row (`atproto_authoring_keys.cert`), overwritten on
     this test-owned nest with a cert built by the SAME shared-Rust minter every
     app uses, for the account's own authoring sub-key, but signed by a key that
-    is not this account's. tui first; the other apps gain the marker in the
-    cross-app lift."""
+    is not this account's. tui, linux, web, macos, ios and windows; android follows in its own
+    queue."""
     import os
     import sqlite3
 
@@ -841,6 +930,11 @@ def test_an_unsigned_posting_permission_shows_as_a_mismatch(
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("atproto")
 def test_an_app_password_is_shown_again_on_another_device(
     request, atproto_hosted_logged_in_app, atproto_hosted_nest
@@ -853,9 +947,11 @@ def test_an_app_password_is_shown_again_on_another_device(
     Re-navigating on the minting seat proves nothing: tui keeps a per-session
     reveal cache. So the second read is a SECOND seat — the same identity, a
     distinct device id, a fresh empty state root — which can only show the
-    secret by reading it back from the synced plane. tui first; the other apps
-    gain the marker in the cross-app lift."""
-    from conftest import _alice_extra_seat
+    secret by reading it back from the synced plane (on web, a twin page in its
+    own browser context). tui, linux, web, macos, ios and windows; android follows in its own
+    queue."""
+    from conftest import _alice_extra_seat, _alice_web_twin_seat
+    from helpers.app_surface import app_name
     from helpers.waiting import account_pump_role, await_account_runtime_assembled
 
     app = atproto_hosted_logged_in_app
@@ -876,10 +972,18 @@ def test_an_app_password_is_shown_again_on_another_device(
         f"error: {bs.page_error_text()!r}"
     )
 
-    seat_gen = _alice_extra_seat(
-        "tui", request, atproto_hosted_nest["user"], atproto_hosted_nest,
-        screenshot_tag="atproto-second-device",
-    )
+    name = app_name(app.driver)
+    if name == "web":
+        seat_gen = _alice_web_twin_seat(
+            app.driver, request, atproto_hosted_nest["user"],
+            screenshot_tag="atproto-second-device",
+            node_url=request.getfixturevalue("atproto_hosted_spa_url"),
+        )
+    else:
+        seat_gen = _alice_extra_seat(
+            name, request, atproto_hosted_nest["user"], atproto_hosted_nest,
+            screenshot_tag="atproto-second-device",
+        )
     seat_b, seat_b_driver = next(seat_gen)
     try:
         # The plane is reachable only once the second seat's account runtime

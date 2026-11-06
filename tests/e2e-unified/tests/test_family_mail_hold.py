@@ -33,7 +33,8 @@ import time
 import pytest
 
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
-from helpers.family_wire import admit_adult_directly, admit_ward
+from helpers.admin_wire import admit_adult
+from helpers.family_wire import admit_ward
 from helpers.mail_wire import (
     _connect_smtp_starttls,
     _imap_auth_plain,
@@ -131,7 +132,7 @@ def mail_ward(request, nest_instance, seal_helper_binary, mail_bridge_inbound_to
     suffix = _suffix()
     guardian_handle = f"family-mailg-{suffix}"
     ward_handle = f"family-mailw-{suffix}"
-    guardian = admit_adult_directly(nest_instance, guardian_handle)
+    guardian = admit_adult(nest_instance, guardian_handle)
     ward = admit_ward(nest_instance, guardian, ward_handle)
     recipient = _provision_msek_recipient(
         nest_instance=nest_instance,

@@ -91,10 +91,12 @@ func bearerMiddleware(next http.Handler, client wsrpc.Caller, logger *slog.Logge
 		token, _ := bearerToken(r)
 		// The proof's `htu`: the request's absolute URL without query or
 		// fragment (RFC 9449 § 4.2). The listener terminates TLS, so `https`.
+		// The host is the client's `Host` header; the nest refuses one that is
+		// not its own DAV host, so the proof stays bound to this server.
 		htu := "https://" + r.Host + r.URL.EscapedPath()
 
 		ctx, cancel := context.WithTimeout(r.Context(), auth.RPCTimeout)
-		reply, err := wsrpc.WebdavAdmitPrincipal(ctx, client, token, r.Header.Values("DPoP"), r.Method, htu)
+		reply, err := wsrpc.WebdavAdmitPrincipal(ctx, client, token, r.Header.Values("DPoP"), r.Method, htu, davauth.ClientIP(r))
 		cancel()
 		if err != nil {
 			logger.Warn("webdav: bearer admission failed", "err", err)
@@ -108,6 +110,9 @@ func bearerMiddleware(next http.Handler, client wsrpc.Caller, logger *slog.Logge
 
 		view := newPrincipalView(reply.Admitted, r.Header.Get(folderKeysHeader), logger)
 		defer view.close()
+		// Once decoded, the header leaves the request: no handler below, and
+		// no log line, can reach the keys in their encoded form (rule (3)).
+		r.Header.Del(folderKeysHeader)
 		sess := davauth.NewSession(client, logger, reply.Admitted.ActorID, "", "")
 		defer sess.Close()
 		ctx = davauth.ContextWithSession(r.Context(), sess)

@@ -27,6 +27,8 @@ from helpers.waiting import wait_until
 
 from .helpers import (
     HEALTH_TIMEOUT,
+    IMAGE_TAG,
+    _note_booted_artifact,
     docker_build,
     find_free_port,
     get_repo_root,
@@ -51,6 +53,15 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(scope="module")
+def docker_image():
+    """This tree's image, built once for the module. A fixture rather than a
+    call in each test body, so the nest-mode axis sees what the test boots and
+    excludes it from docker and live runs (`nest_surface.OWN_IMAGE_FIXTURES`)."""
+    docker_build(get_repo_root())
+    return IMAGE_TAG
+
+
 def _await_https_health(port: int, name: str) -> None:
     """Poll the health endpoint over https ONLY (verify off: the leaf is
     self-signed). Readiness is the condition, the timeout only a backstop."""
@@ -62,6 +73,10 @@ def _await_https_health(port: int, name: str) -> None:
         try:
             with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
                 if resp.status == 200:
+                    # The ledger's door (`wait_for_health` is bypassed: it accepts
+                    # plain http) — without it the record names no artifact and is
+                    # declined (feature-catalog.md § The ledger, ruling (b)).
+                    _note_booted_artifact(name, resp)
                     return
         except Exception as e:  # not up yet
             last = e
@@ -74,11 +89,10 @@ def _await_https_health(port: int, name: str) -> None:
 
 
 @pytest.mark.feature("certificates-by-themselves")
-def test_domainless_nest_serves_tls_on_its_own_certificate():
+def test_domainless_nest_serves_tls_on_its_own_certificate(docker_image):
     """No domain, no claim: the main port completes a TLS handshake and
     presents a self-signed leaf (issuer DN == subject DN) — for an IP-dialled
     peer (no SNI) and for `localhost` alike."""
-    docker_build(get_repo_root())
     port = find_free_port()
     name = f"fauna-nest-domainless-floor-{port}"
     start_container(name, port, env={"FAUNA_MODE": "public"})
@@ -122,7 +136,7 @@ def _plant_near_expiry_floor(data_dir: str, days_left: int) -> None:
 
 
 @pytest.mark.feature("certificates-by-themselves")
-def test_the_floor_renews_itself_on_the_same_key():
+def test_the_floor_renews_itself_on_the_same_key(docker_image):
     """The self-signed certificate renews itself and keeps the same key, so a
     mail app that accepted it once is not asked again (tls-certificates.md § A:
     the floor is re-synthesized from its persisted stable key inside the
@@ -130,7 +144,6 @@ def test_the_floor_renews_itself_on_the_same_key():
     twice a day, so the near-expiry floor is planted on a kept /data while the
     box is down and the box started again — no name is ever given, so no CA
     order can replace the floor first."""
-    docker_build(get_repo_root())
     port = find_free_port()
     name = f"fauna-nest-floor-renew-{port}"
     data_dir = tempfile.mkdtemp(prefix="fauna-floor-data-")

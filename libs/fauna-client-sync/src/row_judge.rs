@@ -498,6 +498,13 @@ where
             })
         };
         let account_predecessors = self.account_predecessors();
+        // One read's view of the binding source: the roster and custody read
+        // once for every set below, never once per set
+        // (`SetNonceSource::read_scope`).
+        let nonces = match self.nonces {
+            Some(source) if !folders.is_empty() => Some(source.read_scope().await),
+            _ => None,
+        };
         let mut readers = BTreeMap::new();
         for (set, &name) in folders {
             // A member row names no owner here: this reader holds no
@@ -521,7 +528,7 @@ where
             // roster's `webdav_enabled` — and the set whose rows are all
             // unsigned DAV rows is exactly the one that needs the answer. No
             // source, or a failed read, exempts nothing.
-            let lineage = self.lineage(name, set).await;
+            let lineage = Self::lineage(nonces.as_ref(), name, set).await;
             binding.webdav_served = lineage.webdav_served();
             if signed.contains(set) {
                 // The live nonce with its minter and the set's lineage (ruling
@@ -544,11 +551,11 @@ where
     }
 
     async fn lineage(
-        &self,
+        nonces: Option<&SetNonceSource>,
         folder: &str,
         set: &SetKey,
     ) -> fauna_core::folder_keys::SetNonceLineage {
-        let Some(nonces) = self.nonces else {
+        let Some(nonces) = nonces else {
             return Default::default();
         };
         match nonces
@@ -1432,6 +1439,85 @@ mod tests {
             ]
         );
         assert_eq!((tally.verified, tally.refused, tally.held), (2, 1, 0));
+    }
+
+    /// A binding source that counts its per-call lineage asks and the read
+    /// scopes opened over it; a scope answers from `NonceByHash` and counts
+    /// nothing — the stand-in for one roster + custody read.
+    #[derive(Default)]
+    struct CountingNonces {
+        per_call: std::sync::atomic::AtomicUsize,
+        scopes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::folder_keys::FolderKeyResolver for CountingNonces {
+        async fn resolve(
+            &self,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn set_lineage(
+            &self,
+            _folder: &str,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
+            self.per_call
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Default::default())
+        }
+
+        async fn read_scope(
+            &self,
+        ) -> Option<std::sync::Arc<dyn fauna_core::folder_keys::FolderKeyResolver>> {
+            self.scopes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(std::sync::Arc::new(NonceByHash(Vec::new())))
+        }
+    }
+
+    /// One judgment asks the binding source of EVERY set it names — through
+    /// one read scope, never once per set: per call, each ask is a whole
+    /// roster + custody read, so one Media read on N sets cost about N roster
+    /// reads of N rows (`docs/goal/ui/README.md` § List pages: loading is not
+    /// empty).
+    #[test]
+    fn one_judgment_asks_every_sets_lineage_through_one_read_scope() {
+        use std::sync::atomic::Ordering;
+        let owner = kp(1);
+        let names = ["a", "b", "c", "d", "e"];
+        let nest = RejectingRequester::new().reply(
+            KIND_FOLDERS_LIST,
+            &folders(names.iter().map(|n| own_set(n)).collect()),
+        );
+        let source = std::sync::Arc::new(CountingNonces::default());
+        let nonces = SetNonceSource::Resolver(source.clone());
+        let judge = ProjectionJudge::new(&nest, Some(owner.actor_id().0), Some(&nonces));
+        let rows: Vec<_> = names
+            .iter()
+            .map(|n| at(n, Some(signed(&owner, NONCE))))
+            .collect();
+        block_on(judge.judge(&rows, &[])).expect("judged");
+        assert_eq!(
+            source.scopes.load(Ordering::SeqCst),
+            1,
+            "one scope per judgment"
+        );
+        assert_eq!(
+            source.per_call.load(Ordering::SeqCst),
+            0,
+            "no set is asked of the source per call"
+        );
     }
 
     /// No nonce source: a signed row cannot verify yet, so it is HELD — absent

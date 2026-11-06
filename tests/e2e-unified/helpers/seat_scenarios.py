@@ -80,12 +80,83 @@ class Step:
     other_act: Callable[[Path], None] | None = None
 
 
+RENAME_RETRY_DEADLINE_S = 10.0
+
+
+def _lock_holders(path: Path) -> str:
+    """Name the processes holding ``path`` open (Windows Restart Manager), for a
+    failure message; ``""`` off Windows or when the query itself fails."""
+    if os.name != "nt":
+        return ""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Unique(ctypes.Structure):
+        _fields_ = [("pid", wintypes.DWORD), ("start", wintypes.FILETIME)]
+
+    class _Info(ctypes.Structure):
+        _fields_ = [
+            ("proc", _Unique),
+            ("app", ctypes.c_wchar * 256),
+            ("svc", ctypes.c_wchar * 64),
+            ("kind", ctypes.c_int),
+            ("status", wintypes.DWORD),
+            ("session", wintypes.DWORD),
+            ("restartable", wintypes.BOOL),
+        ]
+
+    rm = ctypes.WinDLL("rstrtmgr")
+    session = wintypes.DWORD()
+    key = ctypes.create_unicode_buffer(33)
+    if rm.RmStartSession(ctypes.byref(session), 0, key) != 0:
+        return ""
+    try:
+        files = (ctypes.c_wchar_p * 1)(str(path))
+        if rm.RmRegisterResources(session, 1, files, 0, None, 0, None) != 0:
+            return ""
+        needed, count, reasons = wintypes.UINT(), wintypes.UINT(8), wintypes.DWORD()
+        infos = (_Info * 8)()
+        rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), infos,
+                     ctypes.byref(reasons))
+        return ", ".join(f"{i.app} (pid {i.proc.pid})" for i in infos[: count.value])
+    finally:
+        rm.RmEndSession(session)
+
+
 def _write(path: Path, body: bytes) -> None:
-    """Write via temp+rename, so a watcher never observes a half-written body."""
+    """Write via temp+rename, so a watcher never observes a half-written body.
+
+    On Windows the rename can be refused (``PermissionError``) for a moment when
+    a scanner or the seat's agent has just opened the target for the previous
+    rewrite — the same transient an editor's atomic save meets. It is retried
+    under a deadline (a bounded operation retry, never a sleep-then-assert);
+    the holders named by the Restart Manager go into the failure message and
+    stderr so the holder is on record rather than guessed.
+
+    Observed 2026-11-02 (Windows, 5 warm runs of the 2-seat native pair): the
+    refusal fired once, on ``rapid-rewrites``, and the Restart Manager listed NO
+    holder — so it is not a file handle either seat's agent keeps open (those
+    are enumerable); a scanner's or the cloud-files filter's transient is the
+    standing suspect, and the retry absorbed it within the deadline."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_bytes(body)
-    os.replace(tmp, path)
+    deadline = time.monotonic() + RENAME_RETRY_DEADLINE_S
+    reported = False
+    while True:
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            if not reported:
+                reported = True
+                print(f"[seat_scenarios] rename onto {path.name} refused; "
+                      f"holders: {_lock_holders(path) or 'none reported'}", flush=True)
+            if time.monotonic() >= deadline:
+                raise PermissionError(
+                    f"{exc}; holders of {path.name}: {_lock_holders(path) or 'none reported'}"
+                ) from exc
+            time.sleep(0.05)
 
 
 def _read(path: Path) -> bytes | None:

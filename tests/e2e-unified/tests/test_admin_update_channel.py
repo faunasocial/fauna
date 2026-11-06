@@ -38,13 +38,15 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from conftest import _login_admin_as
-from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
 
-pytestmark = pytest.mark.tier_3
-
-# The apps whose admin-nest renders the section. tui leads.
-BUILT = {"tui", "linux", "web"}
+# `standalone_only` for the whole module: every cell starts a dedicated nest
+# with a channel-registry environment (`FAUNA_E2E_UPDATE_REGISTRY*`) or a
+# hand-chosen image tag, neither of which the release image carries — a docker
+# nest stamps its own tag and the e2e registry env is a test-hooks seam compiled
+# out of the artifact (e2e convention 15), so docker declares the module out
+# rather than erroring at setup.
+pytestmark = [pytest.mark.tier_3, pytest.mark.standalone_only]
 
 # The harness registry's heads: Dev far ahead of any running build, Stable
 # (the ``latest`` tag) behind every one.
@@ -72,16 +74,6 @@ def _get(nest) -> dict:
         nest["url"], actor_id=bytes(key.verify_key), signing_key=bytes(key)
     ) as admin:
         return admin.call("fauna.admin.update_channel.get", {})
-
-
-def _require_built(app) -> None:
-    if app_name(app.driver) not in BUILT:
-        skip_unbuilt(
-            app.driver,
-            surface="admin-nest-update-channel-section",
-            detail="the update channel section's six-app trickle-down has not reached this app yet",
-            tracked="",
-        )
 
 
 @pytest.fixture(scope="module")
@@ -212,7 +204,6 @@ def test_admin_moves_the_box_between_channels_and_the_status_follows_the_decisio
     channel_admin_app, channel_nest,
 ):
     app = channel_admin_app
-    _require_built(app)
     version = _health(channel_nest)["version"]
     app.admin.navigate_nest()
 
@@ -239,7 +230,6 @@ def test_a_pinned_box_follows_no_channel_until_one_is_chosen(
     pinned_channel_admin_app, pinned_channel_nest,
 ):
     app = pinned_channel_admin_app
-    _require_built(app)
     nest = pinned_channel_nest
     version = _health(nest)["version"]
     assert _health(nest)["update_channel"] is None
@@ -257,14 +247,12 @@ def test_a_pinned_box_follows_no_channel_until_one_is_chosen(
 
 
 @pytest.mark.feature("admin-nest")
-@pytest.mark.standalone_only
 def test_a_nest_the_image_does_not_run_says_so_and_its_controls_are_inert(
     packaged_channel_admin_app, packaged_channel_nest,
 ):
     """``standalone_only``: the Docker nest mode stamps the image tag itself, so
     only a standalone nest can be started without one."""
     app = packaged_channel_admin_app
-    _require_built(app)
     nest = packaged_channel_nest
     version = _health(nest)["version"]
     assert _health(nest)["update_channel"] is None

@@ -196,7 +196,7 @@ mod tests {
             0,
             4,
             1,
-            Some(1),
+            Some(fauna_core::blob_seal::SealStamp::Version(1)),
         )
         .unwrap();
     }

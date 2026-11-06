@@ -41,7 +41,7 @@ public class WardAsksTests : IDisposable
     [Fact]
     public void ContactAskPending_ReadsTheDurableList_ForExactlyThatPeer()
     {
-        WardAsksCache.SetFromStatus(true, [ContactAsk(PeerA)], []);
+        WardAsksCache.SetFromStatus(true, null, [ContactAsk(PeerA)], []);
 
         Assert.True(WardAsksCache.ContactAskPending(Hex(PeerA)));
         Assert.True(WardAsksCache.ContactAskPending(Hex(PeerA).ToUpperInvariant()));
@@ -53,10 +53,10 @@ public class WardAsksTests : IDisposable
     {
         // supervised_by absent ⇒ no guardian to be waiting on: a stale ask from an
         // earlier read must stop painting "asked — waiting" (rule (c)).
-        WardAsksCache.SetFromStatus(true, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
+        WardAsksCache.SetFromStatus(true, null, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
         Assert.True(WardAsksCache.ContactAskPending(Hex(PeerA)));
 
-        WardAsksCache.SetFromStatus(false, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
+        WardAsksCache.SetFromStatus(false, null, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
 
         Assert.False(WardAsksCache.ContactAskPending(Hex(PeerA)));
         Assert.Empty(WardAsksCache.FeedRequests);
@@ -78,7 +78,7 @@ public class WardAsksTests : IDisposable
     [Fact]
     public void Reset_DropsAsksAndRefusals_OnAnIdentityChange()
     {
-        WardAsksCache.SetFromStatus(true, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
+        WardAsksCache.SetFromStatus(true, null, [ContactAsk(PeerA)], [FeedAsk("b", "link", "")]);
         WardAsksCache.NoteFeedRefusal(new FeedTriple("b", "link", ""));
 
         WardAsksCache.Reset();
@@ -96,13 +96,54 @@ public class WardAsksTests : IDisposable
         WardAsksCache.Changed += Handler;
         try
         {
-            WardAsksCache.SetFromStatus(true, [], []);
+            WardAsksCache.SetFromStatus(true, null, [], []);
             WardAsksCache.NoteFeedRefusal(new FeedTriple("b", "link", ""));
             WardAsksCache.NoteFeedRefusal(new FeedTriple("b", "link", ""));   // a set: no change
         }
         finally { WardAsksCache.Changed -= Handler; }
 
         Assert.Equal(2, fired);
+    }
+
+    // ── knock-guardian-pending (family-safety.md § App surface) ─────────────
+    // The shared fauna_client_family::knocks_await_guardian over the ward's OWN
+    // status policy, folded at the same read as the asks (android's WardAsks).
+
+    internal static FfiReachPolicy Approval(bool on) =>
+        new(contactApproval: on, unknownSenderMail: "allow", federationContact: true,
+            feedSources: "allow", contentPolicy: null, screenTime: null,
+            contentNotify: null, unknownPeerDm: null);
+
+    [Fact]
+    public void KnocksAwaitGuardian_FollowsTheOwnPolicysContactApproval()
+    {
+        WardAsksCache.SetFromStatus(true, Approval(true), [], []);
+        Assert.True(WardAsksCache.KnocksAwaitGuardian);
+
+        WardAsksCache.SetFromStatus(true, Approval(false), [], []);
+        Assert.False(WardAsksCache.KnocksAwaitGuardian);
+    }
+
+    [Fact]
+    public void KnocksAwaitGuardian_NeverForAnUnsupervisedAccount_AndResetDropsIt()
+    {
+        // A graduated account has no guardian to wait on, whatever policy the reply
+        // still carries.
+        WardAsksCache.SetFromStatus(false, Approval(true), [], []);
+        Assert.False(WardAsksCache.KnocksAwaitGuardian);
+
+        WardAsksCache.SetFromStatus(true, Approval(true), [], []);
+        WardAsksCache.Reset();
+        Assert.False(WardAsksCache.KnocksAwaitGuardian);
+    }
+
+    [Fact]
+    public void TheStatusFold_CarriesTheOwnPolicyIntoTheKnockMark()
+    {
+        FamilyStatusHandler.ApplyWardAsks(
+            FfiFamilyStatusFixture.Make(supervisedBy: Guardian(), policy: Approval(true)));
+
+        Assert.True(WardAsksCache.KnocksAwaitGuardian);
     }
 
     // ── Rule (a): the ask is offered ONLY on the typed refusal ──────────────
@@ -350,13 +391,38 @@ public class ContactsAskViewModelTests : IDisposable
         Assert.Equal(1, rpc.Calls.Count(c => c == "FamilyContactRequest"));
     }
 
+    /// <summary><c>knock-guardian-pending</c> sits on EVERY knock card while the ward
+    /// is supervised with contact approval on, and a status read that moves the
+    /// policy repaints the cards already shown (the page calls
+    /// <c>RefreshKnockMarks</c> on <c>WardAsksCache.Changed</c>).</summary>
+    [Fact]
+    public void EveryKnockRow_CarriesTheGuardianMark_AndRepaintsWhenTheStatusMoves()
+    {
+        var vm = new ContactsViewModel(new MockNestRpcClient());
+        vm.Knocks.Add(new KnockInfo(Peer, "hi", 1));
+        vm.Knocks.Add(new KnockInfo(string.Concat(Enumerable.Repeat("b2", 32)), "hello", 2));
+        vm.RefreshNames();
+        Assert.All(vm.KnockRows, r => Assert.False(r.AwaitsGuardian));
+
+        WardAsksCache.SetFromStatus(true, WardAsksTests.Approval(true), [], []);
+        vm.RefreshKnockMarks();
+
+        Assert.Equal(2, vm.KnockRows.Count);
+        Assert.All(vm.KnockRows, r => Assert.True(r.AwaitsGuardian));
+
+        WardAsksCache.SetFromStatus(true, WardAsksTests.Approval(false), [], []);
+        vm.RefreshKnockMarks();
+
+        Assert.All(vm.KnockRows, r => Assert.False(r.AwaitsGuardian));
+    }
+
     [Fact]
     public async Task ADurablePendingAsk_RendersWithoutAnyRefusalThisSession()
     {
         // A ward who asked yesterday must see "asked — waiting" on reopening, not a
         // send button that would only be refused again (rule (c)).
         WardAsksCache.SetFromStatus(
-            true, [new FfiFamilyContactRequest(Convert.FromHexString(Peer), "peer", 1)], []);
+            true, null, [new FfiFamilyContactRequest(Convert.FromHexString(Peer), "peer", 1)], []);
         var vm = new ContactsViewModel(new MockNestRpcClient());
 
         await vm.LookUpRecipientCommand.ExecuteAsync(Peer);
@@ -544,9 +610,9 @@ public class BridgesSourceAskViewModelTests : IDisposable
     public async Task ARefusedFollow_IsKeyedOnTheFollowIdNotOnTheFormBuffers()
     {
         var rpc = new MockNestRpcClient { NextAddFollowException = new FfiException.GuardianApprovalRequired("no") };
-        var vm = new BridgesViewModel(rpc) { SelectedBridgeId = "activitypub" };
+        var vm = new BridgesViewModel(rpc);
 
-        await vm.AddFollowCommand.ExecuteAsync("user-9|Nine");
+        await vm.AddFollowAsync("activitypub", "user-9", "Nine");
 
         Assert.Equal(
             new FeedTriple("activitypub", "follow", "user-9"),

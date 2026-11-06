@@ -199,6 +199,24 @@ import Testing
         #expect(vm.errorMessage == nil, "the residue has its own view, never error-message")
     }
 
+    /// The handover re-roots the wizard at `identity_choice` (`settings.md`,
+    /// the `sign-out-button` row). A wizard left where the last sign-in finished —
+    /// `.done` — re-ran its exit when the signed-out root remounted it: the
+    /// handoff re-persisted the identity just erased and relaunched into it,
+    /// so a Settings sign-out after a UI sign-in landed back on the main window.
+    @Test func theHandoverReRootsTheWizardAtIdentityChoice() {
+        let vm = OnboardingVM()
+        vm.machine.beginImportIdentity()
+        #expect(vm.step == .identityImport)
+        let session = SessionState()
+        session.signOutResidue = FakeResidue(Self.line)
+
+        vm.takeSignOutResidue(from: session)
+
+        #expect(vm.step == .identityChoice)
+        #expect(vm.signOutResidue?.line == Self.line, "the re-root keeps the residue")
+    }
+
     /// A clean erase's handover closes a view a previous one left up.
     @Test func aCleanHandoverClosesTheView() {
         let vm = OnboardingVM()

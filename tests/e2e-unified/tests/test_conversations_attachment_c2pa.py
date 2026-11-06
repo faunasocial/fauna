@@ -12,9 +12,10 @@ picture carries the real verdict without a live backend round-trip.
 
 The feed twin is ``test_feed.py::test_post_image_shows_c2pa_badge_when_uploaded_with_provenance``.
 
-Apps: tui (the lead), linux, macos, ios, windows and android. Web's bubble
-detection is a genuine stub (``conversations.md`` § Attachments "C2PA
-on-device").
+Apps: tui (the lead), linux, macos, ios, windows, android and web. Web paints
+``c2pa-badge`` from its own JavaScript check of the decrypted attachment bytes
+(``C2paImage`` over ``#lib/c2pa``, ``media.md`` § C2PA provenance), not from the
+shared ``AttachmentSnapshot.c2pa`` field, which stays ``false`` on web.
 """
 
 import base64
@@ -30,6 +31,7 @@ pytestmark = [
     pytest.mark.ios,
     pytest.mark.windows,
     pytest.mark.android,
+    pytest.mark.web,
 ]
 
 # Lives in the repo-root `tests/fixtures/`, as the feed twin's does.
@@ -77,6 +79,12 @@ def test_a_received_signed_picture_shows_a_provenance_badge(logged_in_app):
     assert d.count("dm-attachment-image") >= 1, (
         f"the signed picture did not render: error={logged_in_app.error_text()!r}"
     )
+    # Web checks the bytes in its own async JS/WASM read, so the badge lands after
+    # the picture does: wait for the state (convention 14), never a fixed delay.
+    try:
+        d.wait_for("c2pa-badge", timeout=30.0)
+    except Exception:
+        pass  # the assertion below reports the diagnosis
     assert d.count("c2pa-badge") == 1, (
         f"a C2PA-signed received picture must show exactly one c2pa-badge; "
         f"got {d.count('c2pa-badge')}, error={logged_in_app.error_text()!r}"

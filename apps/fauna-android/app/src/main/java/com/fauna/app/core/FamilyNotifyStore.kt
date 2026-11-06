@@ -16,13 +16,13 @@ import javax.inject.Singleton
  * Ward-side **Guardian Notify** counter (`family-safety.md` § Guardian Notify)
  * — the android twin of linux `content_policy.rs`'s `NotifyAccumulator` and
  * web's `familyNotify.ts` `NotifyBuffer`. Counts the viewer's own
- * GUARDIAN-floor render-enforcement events per category — **coarse counts
+ * GUARDIAN-rule render-enforcement events per category — **coarse counts
  * only, never a content id** — deduped by `(item id, category)` within the
  * local day, and batches them for `fauna.family.notify_report`, flushing at
  * most once per the shared [notifyReportMinIntervalSecs].
  *
  * *Which* categories count is the shared [guardianEnforcedCategories] (only
- * the guardian floor, never the ward's own thresholds — [ContentPolicyStore]
+ * the guardian rules, never the ward's own thresholds — [ContentPolicyStore]
  * composes both, but Notify is a lens on the guardian's policy alone), so
  * android never drifts from linux/web on what Notify reports.
  */
@@ -63,9 +63,9 @@ class FamilyNotifyStore @Inject constructor(
     }
 
     /**
-     * Count any **guardian-floor** render-enforcement on [itemId] (a feed post
+     * Count any **guardian-rule** render-enforcement on [itemId] (a feed post
      * or DM message). A no-op unless the ward's `content_notify` knob is on AND
-     * the guardian floor bites on one of this item's [labels] — never the
+     * the guardian rules bite on one of this item's [labels] — never the
      * ward's own-threshold collapses. Deduped per item per local day, so a
      * re-render never re-counts.
      */

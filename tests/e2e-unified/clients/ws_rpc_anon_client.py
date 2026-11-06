@@ -39,8 +39,6 @@ the shared base). Not safe to share across threads.
 
 from __future__ import annotations
 
-import websocket  # type: ignore[import-untyped]  # from `websocket-client`
-
 from ._ws_rpc_core import (  # noqa: F401  (RpcCallError re-exported for symmetry)
     RpcCallError,
     _WsRpcClientBase,
@@ -70,11 +68,10 @@ class WsRpcAnonClient(_WsRpcClientBase):
         # Single subprotocol value `fauna.v1` with NO `bearer.<token>` element
         # → `routes.rs::ws_anonymous_handler` accepts; the authenticated
         # `/api/v1/ws/{actor_id}` would 401 a bearer-less upgrade.
-        self._ws = websocket.create_connection(
+        self._ws = self._create_ws(
             ws_url,
             subprotocols=["fauna.v1"],
             timeout=self._http_timeout,
-            sslopt=self._ssl_opt(),
         )
 
     def _anon_ws_url(self) -> str:

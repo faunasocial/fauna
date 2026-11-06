@@ -54,6 +54,7 @@ import Testing
 /// because retiring the id would silently kill photo backup instead. A later
 /// cleanup pass that "finishes the job" by dropping the id is the regression
 /// this pins.
+#if !FAUNA_KIDS  // the kids build has no photo backup, so no upload task id
 @Test func iOSKeepsTheSharedUploadTaskIdForPhotoBackup() {
     #expect(
         AppleIdentifiers.BackgroundTask.upload == "social.fauna.sync.upload",
@@ -63,3 +64,4 @@ import Testing
         retire the id itself
         """)
 }
+#endif

@@ -186,6 +186,18 @@ pub struct PostGetReply {
     /// byte-identical to before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_nest_actor_id: Option<String>,
+    /// The post's four counts and per-emoji reaction tally, projected for the
+    /// calling actor — the single-post read's twin of the counters
+    /// `FeedPostItem` carries, so a post opened through the deep-link door
+    /// shows the numbers its timeline card does (`docs/goal/ui/feed.md` §
+    /// Layout & flow → *Reaction posts count and paint*, ruling 5). The same
+    /// type the post-act reply carries. Present for a local row the nest
+    /// counts; absent (and omitted from the wire) on a `bluesky` row, whose
+    /// counters live at the origin, on a discovery stub, on a relayed
+    /// `fauna.posts.get_remote`, and whenever the read failed — so a reply
+    /// without it is byte-identical to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<PostEngagementCounts>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -259,12 +271,22 @@ pub struct PostInteractRequest {
 /// All four counters ride together (not just the one the action touched) because
 /// they are one row: sending the row is cheaper than deciding which field the
 /// caller may trust.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `Default` exists for struct-update fixtures (`..Default::default()`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PostEngagementCounts {
     pub like_count: i64,
     pub reply_count: i64,
     pub repost_count: i64,
     pub quote_count: i64,
+    /// The post's per-emoji reaction tally after the act, as
+    /// [`FeedPostItem::reactions`](crate::feed::FeedPostItem::reactions)
+    /// projects it for the calling actor — so a client folds the tally
+    /// exactly as it folds the four counts (`docs/goal/ui/feed.md` § Layout &
+    /// flow → *Reaction posts count and paint*, ruling 5). Additive +
+    /// empty-default, omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<crate::feed::PostReactionGroup>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -733,6 +755,35 @@ mod tests {
     }
 
     #[test]
+    fn post_get_reply_counts_round_trip_and_are_additive() {
+        // A reply without counts omits the field: byte-identical to a reply
+        // built before `counts` existed, and decodes to None.
+        let bare = sample_get_reply();
+        let bare_bytes = encode_canonical(&bare).unwrap();
+        let decoded: PostGetReply = decode(&bare_bytes).unwrap();
+        assert!(decoded.counts.is_none());
+        let counted = PostGetReply {
+            counts: Some(PostEngagementCounts {
+                like_count: 1,
+                reply_count: 2,
+                reactions: vec![crate::feed::PostReactionGroup {
+                    emoji: "❤️".into(),
+                    count: 1,
+                    viewer_react_id: Some("cd".repeat(32)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..sample_get_reply()
+        };
+        let counted_bytes = encode_canonical(&counted).unwrap();
+        assert_ne!(bare_bytes, counted_bytes, "Some adds the field");
+        let decoded: PostGetReply = decode(&counted_bytes).unwrap();
+        assert_eq!(counted, decoded);
+        assert_eq!(encode_canonical(&decoded).unwrap(), counted_bytes);
+    }
+
+    #[test]
     fn post_get_reply_round_trips() {
         let reply = sample_get_reply();
         let bytes = encode_canonical(&reply).unwrap();
@@ -892,10 +943,13 @@ mod tests {
             result: r#"{"ok":true}"#.into(),
             counts: Some(PostEngagementCounts {
                 like_count: 1,
-                reply_count: 0,
-                repost_count: 0,
-                quote_count: 0,
-                extra: BTreeMap::new(),
+                reactions: vec![crate::feed::PostReactionGroup {
+                    emoji: "❤️".into(),
+                    count: 2,
+                    viewer_react_id: Some("ab".repeat(32)),
+                    ..Default::default()
+                }],
+                ..Default::default()
             }),
             extra: BTreeMap::new(),
         };

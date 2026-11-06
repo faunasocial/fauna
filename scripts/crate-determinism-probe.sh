@@ -25,8 +25,12 @@
 # Feature resolution mirrors the shipped core wasm chunk: the manifest is
 # `libs/fauna-wasm/Cargo.toml` and `CARGO_RESOLVER_FEATURE_UNIFICATION=selected`,
 # exactly as `just _wasm-core-impl` runs wasm-pack; override with PROBE_MANIFEST.
-# The wasm32 build carries the justfile's `--remap-path-prefix` triple so the
-# artifacts are the release recipe's, not a variant of them.
+# The build carries the justfile's `wasm_trim` (cargo's `trim-paths = "all"`) so
+# the artifacts are the release recipe's, not a variant of them.
+#
+# The rlib + rmeta are read where Cargo's build-dir layout leaves them,
+# `<profile>/build/<crate>/<hash>/out/lib<crate>-<hash>.{rlib,rmeta}` (the wipe
+# between runs keeps one unit per crate).
 #
 # Why its own target and `unset BASH_ENV`: a shell profile that re-derives
 # `CARGO_TARGET_DIR` per checkout from BASH_ENV (the primary dev VM's does)
@@ -40,13 +44,14 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}/determinism-probe"
 OUT="${3:-$CARGO_TARGET_DIR/out-$CRATE}"
 unset BASH_ENV
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--remap-path-prefix=$ROOT=/fauna --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/fauna/target"
+export CARGO_PROFILE_RELEASE_TRIM_PATHS=all
+unset CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS
 export CARGO_RESOLVER_FEATURE_UNIFICATION=selected
 MF="${PROBE_MANIFEST:-$ROOT/libs/fauna-wasm/Cargo.toml}"
 TARGET="${PROBE_TARGET:-wasm32-unknown-unknown}"
 W="$CARGO_TARGET_DIR/$TARGET/release"
 H="$CARGO_TARGET_DIR/release"
-LIB="lib$(echo "$CRATE" | tr '-' '_')-"
+LIB="lib$(echo "$CRATE" | tr '-' '_')"
 rm -rf "$OUT"; mkdir -p "$OUT"
 echo "crate=$CRATE runs=$N target=$TARGET manifest=$MF"
 echo "cargo target: $CARGO_TARGET_DIR  out: $OUT"
@@ -58,14 +63,14 @@ for i in $(seq 1 "$N"); do
   echo "== run $i: $TARGET build ($(date +%T)) =="
   cargo build --manifest-path "$MF" -p "$CRATE" --lib --release --target "$TARGET" --locked --jobs 4 2>&1 | quiet
   echo "cargo exit: ${PIPESTATUS[0]}"
-  cp "$W"/deps/"$LIB"* "$R/cross/"
+  cp "$W"/build/"$CRATE"/*/out/"$LIB"[.-]* "$R/cross/"
   echo "== run $i: expanded ($(date +%T)) =="
   cargo rustc --manifest-path "$MF" -p "$CRATE" --lib --release --target "$TARGET" --locked -- -Zunpretty=expanded > "$R/expanded.rs" 2> "$R/expanded.err"
   echo "cargo rustc exit: $? ; expanded bytes: $(stat -c%s "$R/expanded.rs") ; stderr lines: $(wc -l < "$R/expanded.err")"
   echo "== run $i: host build ($(date +%T)) =="
   cargo build --manifest-path "$MF" -p "$CRATE" --lib --release --locked --jobs 4 2>&1 | quiet
   echo "cargo exit: ${PIPESTATUS[0]}"
-  cp "$H"/deps/"$LIB"* "$R/host/"
+  cp "$H"/build/"$CRATE"/*/out/"$LIB"[.-]* "$R/host/"
   for rl in "$R"/cross/*.rlib; do (cd "$R/cross-ar" && ar x "$rl"); done
   # wipe for the next run: the whole cross-target tree; the crate alone on the
   # host (its proc-macro deps stay compiled — a macro that varies per INVOCATION

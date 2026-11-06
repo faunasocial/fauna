@@ -8,12 +8,12 @@ namespace FaunaApp.Core.Services;
 /// <c>fauna_credential_store::CredentialStore</c>. Unit tests supply in-memory
 /// implementations.
 ///
-/// <para>Keys are the <b>native</b> (already-resolved) names — <see cref="SecretKeyMap"/>
-/// does the logical→native translation above this seam.</para>
+/// <para>Keys are the registry's logical keys, verbatim — <see cref="LogicalSecretStore"/>
+/// passes each one straight through (android's <c>SecretBackend</c> is the twin).</para>
 /// </summary>
 internal interface ISecretBackend
 {
-    string? Get(string resource, string user);
-    void Set(string resource, string user, string value);
-    void Delete(string resource, string user);
+    string? Get(string resource);
+    void Set(string resource, string value);
+    void Delete(string resource);
 }

@@ -27,7 +27,9 @@
 //! The webhook HTTP ingress (signature verification, non-2xx statuses vs the
 //! catch-all 200) is covered end-to-end by the Python tier_3 API suite
 //! (`tests/e2e-unified/tests/api/test_payments_webhook.py`) — it needs the
-//! real axum surface; these tests exercise the engine below it.
+//! real axum surface; these tests exercise the engine below it — except the
+//! per-product tier mapping's, which call the ingress handler itself
+//! ([`deliver`]) because the coverage decision sits there.
 //!
 //! Authority for the wire types: `libs/fauna-protocol/src/payments.rs`.
 //!
@@ -81,10 +83,23 @@ async fn providers_set(
     secret: &str,
     tier: &str,
 ) -> Result<ProviderSetReply, RpcError> {
+    providers_set_with_product(router, state, author, kind, secret, tier, None).await
+}
+
+async fn providers_set_with_product(
+    router: &RpcRouter,
+    state: Arc<AppState>,
+    author: [u8; 32],
+    kind: &str,
+    secret: &str,
+    tier: &str,
+    product_ref: Option<&str>,
+) -> Result<ProviderSetReply, RpcError> {
     let req = encode_canonical(&ProviderSetRequest {
         kind: kind.into(),
         webhook_secret: secret.into(),
         tier: tier.into(),
+        product_ref: product_ref.map(str::to_string),
         extra: Default::default(),
     })
     .unwrap();
@@ -270,6 +285,8 @@ fn entitlement(
         valid_until_secs: valid_until.map(|s| s as u64),
         external_ref: external_ref.into(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     }
 }
 
@@ -467,7 +484,8 @@ async fn refund_voids_the_window() {
         &entitlement(&author, Buyer::Actor(ActorId(buyer)), "gold", None, "pay_1"),
     )
     .await
-    .expect("refund ok");
+    .expect("refund ok")
+    .acted;
     assert!(acted);
     assert!(
         !state
@@ -732,7 +750,8 @@ async fn claim_redeem_rejects_unknown_and_voided_codes() {
         &entitlement(&author, Buyer::Unbound, "gold", None, "pay_9"),
     )
     .await
-    .expect("refund ok");
+    .expect("refund ok")
+    .acted;
     assert!(acted, "the unredeemed claim was voided");
     let err = claims_redeem(&router, state, buyer, &code)
         .await
@@ -1146,4 +1165,286 @@ async fn void_by_a_non_author_is_claim_not_found() {
         .unwrap()
         .expect("claim row");
     assert!(row.voided_at.is_none(), "a foreign void changes nothing");
+}
+
+// ── Per-product tier mapping (monetization.md § Pillar 3 → Configuration) ──
+
+/// One signed `fake` delivery through the real webhook handler; answers the
+/// status and the JSON body.
+async fn deliver(
+    state: &Arc<AppState>,
+    author: [u8; 32],
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    let body = body.to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        fauna_payments::fake::SIGNATURE_HEADER,
+        fauna_payments::fake::sign("whsec_1", body.as_bytes())
+            .parse()
+            .unwrap(),
+    );
+    let response = fauna_nest::payment_routes::payment_webhook(
+        State(state.clone()),
+        Path((hex::encode(author), "fake".to_string())),
+        headers,
+        Bytes::from(body),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+#[tokio::test]
+async fn providers_set_keeps_clears_and_lists_the_product() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    let product = |list: ProvidersListReply| list.providers[0].product_ref.clone();
+
+    providers_set_with_product(
+        &router,
+        state.clone(),
+        author,
+        "fake",
+        "whsec_1",
+        "gold",
+        Some("plink_gold"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        product(providers_list(&router, state.clone(), author).await).as_deref(),
+        Some("plink_gold")
+    );
+
+    // A client that predates the field rotates the secret without clearing it.
+    providers_set(&router, state.clone(), author, "fake", "whsec_2", "gold")
+        .await
+        .unwrap();
+    assert_eq!(
+        product(providers_list(&router, state.clone(), author).await).as_deref(),
+        Some("plink_gold")
+    );
+
+    // An empty product clears it: every payment maps again.
+    providers_set_with_product(
+        &router,
+        state.clone(),
+        author,
+        "fake",
+        "whsec_2",
+        "gold",
+        Some(""),
+    )
+    .await
+    .unwrap();
+    assert_eq!(product(providers_list(&router, state, author).await), None);
+}
+
+#[tokio::test]
+async fn a_paid_checkout_for_an_unmapped_product_is_acknowledged_and_mints_nothing() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    providers_set_with_product(
+        &router,
+        state.clone(),
+        author,
+        "fake",
+        "whsec_1",
+        "gold",
+        Some("plink_gold"),
+    )
+    .await
+    .unwrap();
+
+    for product in [Some("plink_tips"), None] {
+        let (status, body) = deliver(
+            &state,
+            author,
+            serde_json::json!({ "id": format!("evt-{product:?}"), "event": "payment",
+                                "product": product, "purchase": "pi_tip" }),
+        )
+        .await;
+        assert!(status.is_success(), "acknowledged, never retried: {status}");
+        assert_eq!(body["status"], "ignored", "{product:?}");
+        assert_eq!(body["reason"], "product_not_mapped");
+    }
+    assert!(
+        state
+            .db
+            .list_payment_claims(&author)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_mapped_checkout_mints_and_its_renewal_is_covered_by_the_purchase() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    providers_set_with_product(
+        &router,
+        state.clone(),
+        author,
+        "fake",
+        "whsec_1",
+        "gold",
+        Some("plink_gold"),
+    )
+    .await
+    .unwrap();
+
+    let (status, body) = deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-checkout", "event": "payment",
+                            "product": "plink_gold", "purchase": "sub_1",
+                            "valid_until": future_secs() }),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(
+        body["status"], "claim_minted",
+        "the mapped product mints as today"
+    );
+
+    // The renewal names its subscription only — covered by the recorded purchase.
+    let (status, body) = deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-renewal", "event": "payment",
+                            "purchase": "sub_1", "valid_until": future_secs() + 86_400 }),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_ne!(
+        body["status"], "ignored",
+        "a renewal of a covered purchase: {body}"
+    );
+
+    // A renewal of a purchase no covered checkout recorded is not this tier's.
+    let (_, body) = deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-other-renewal", "event": "payment",
+                            "purchase": "sub_other" }),
+    )
+    .await;
+    assert_eq!(body["status"], "ignored");
+    assert_eq!(
+        state.db.list_payment_claims(&author).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_provider_with_no_product_maps_every_payment_as_before() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    providers_set(&router, state.clone(), author, "fake", "whsec_1", "gold")
+        .await
+        .unwrap();
+    let (status, body) = deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-any", "event": "payment", "product": "plink_tips" }),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(body["status"], "claim_minted");
+}
+
+#[tokio::test]
+async fn re_pointing_the_mapping_never_renews_an_older_purchase_onto_the_new_tier() {
+    let (router, state) = router_with_db().await;
+    let author_kp = seed_author_with_gold(&router, &state).await;
+    let author = author_kp.actor_id().0;
+    common::create_tier(
+        &router,
+        state.clone(),
+        &author_kp,
+        common::tier_create_request(&author_kp, "platinum", 2),
+    )
+    .await
+    .expect("tiers.create platinum ok");
+
+    // Under the first mapping every payment lands on gold: one checkout
+    // through a Payment Link, one hand-built with none.
+    providers_set(&router, state.clone(), author, "fake", "whsec_1", "gold")
+        .await
+        .unwrap();
+    for (id, product, purchase) in [
+        ("evt-gold-link", Some("plink_gold"), "sub_link"),
+        ("evt-gold-bare", None, "sub_bare"),
+    ] {
+        let (status, body) = deliver(
+            &state,
+            author,
+            serde_json::json!({ "id": id, "event": "payment", "product": product,
+                                "purchase": purchase, "valid_until": future_secs() }),
+        )
+        .await;
+        assert!(status.is_success());
+        assert_eq!(body["status"], "claim_minted", "{id}");
+    }
+
+    // The creator narrows the mapping to one product, sold at platinum.
+    providers_set_with_product(
+        &router,
+        state.clone(),
+        author,
+        "fake",
+        "whsec_1",
+        "platinum",
+        Some("plink_platinum"),
+    )
+    .await
+    .unwrap();
+
+    // Neither older purchase was sold as plink_platinum: their renewals mint
+    // nothing and re-stamp nothing.
+    for purchase in ["sub_link", "sub_bare"] {
+        let (status, body) = deliver(
+            &state,
+            author,
+            serde_json::json!({ "id": format!("evt-renew-{purchase}"), "event": "payment",
+                                "purchase": purchase, "valid_until": future_secs() + 86_400 }),
+        )
+        .await;
+        assert!(status.is_success(), "acknowledged, never retried: {status}");
+        assert_eq!(
+            body["status"], "ignored",
+            "a renewal of {purchase}, recorded under the old mapping: {body}"
+        );
+        assert_eq!(body["reason"], "product_not_mapped");
+    }
+    let claims = state.db.list_payment_claims(&author).await.unwrap();
+    assert_eq!(claims.len(), 2, "nothing minted");
+    assert!(
+        claims.iter().all(|c| c.tier_name == "gold"),
+        "no older purchase moved onto platinum"
+    );
+
+    // A purchase of the mapped product still renews.
+    deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-plat", "event": "payment", "product": "plink_platinum",
+                            "purchase": "sub_plat", "valid_until": future_secs() }),
+    )
+    .await;
+    let (_, body) = deliver(
+        &state,
+        author,
+        serde_json::json!({ "id": "evt-plat-renew", "event": "payment",
+                            "purchase": "sub_plat", "valid_until": future_secs() + 86_400 }),
+    )
+    .await;
+    assert_ne!(body["status"], "ignored", "{body}");
 }

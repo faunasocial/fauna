@@ -69,12 +69,23 @@ public final class AtprotoSettingsVM {
             return
         }
         observerBox.target = self
+        let built: AtprotoSettingsMachine
         do {
-            machine = try await api.atprotoSettingsMachine(observer: observerBox)
+            built = try await api.atprotoSettingsMachine(observer: observerBox)
         } catch {
-            connectError = DisplayError.message(error)
+            // A concurrent build that succeeded owns the page; this one's
+            // failure is not the page's.
+            if machine == nil { connectError = DisplayError.message(error) }
             return
         }
+        // Re-entrant `configure` (a `.task` firing again mid-build): the build
+        // that finishes first wins; a later one refreshes it, never replaces it
+        // (same shape as `LabelerCatalogVM`).
+        guard machine == nil else {
+            await refresh()
+            return
+        }
+        machine = built
         await refresh()
     }
 

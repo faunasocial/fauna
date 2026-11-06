@@ -28,9 +28,8 @@ the real-engine ``second_real_faunamls_app`` fixture (tui is the lead app since
 1d-surface lead). The single-client mark-as-spam witness at the bottom
 (``test_mark_as_spam_trains_sealed_model``) needs no second engine, so it
 speaks for every app whose automation surface carries ``inject_inbound``:
-tui, linux, web, windows, macos and ios. android is left unmarked because its
-column runs on no development machine today (`feature-catalog.md` § Columns
-today); it gains its mark with the run that witnesses it.
+tui, linux, web, windows, macos, ios and android (android's debug TestAgent
+carries ``inject_inbound`` and its bubble overflow paints the same button).
 """
 
 from __future__ import annotations
@@ -106,6 +105,9 @@ def _wait_stored_model(db_path: str, actor_id_hex: str, until, timeout: float = 
 # docstring says so.
 @pytest.mark.linux
 @pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.real_conversations
 @pytest.mark.feature("moderation-queue")
 def test_train_correction_writes_sealed_model_at_rest(
     real_faunamls_app, second_real_faunamls_app, nest_instance
@@ -386,6 +388,7 @@ def test_mark_as_spam_writes_sealed_history_row_then_undo(
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("spam")
 def test_mark_as_spam_trains_sealed_model(logged_in_app, nest_instance, test_user):
     """The per-bubble ``dm-message-mark-as-spam-button`` trains the sealed

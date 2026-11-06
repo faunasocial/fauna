@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -252,6 +253,40 @@ def check_text(text: str) -> list[str]:
 
 OPEN = "in-review"
 
+#: The label every nest image carries its product version in — what "the
+#: version `:test` serves" and "the version the acceptance nest serves" are
+#: read off (the stage's hold, and the re-creation record the calendar's hold
+#: reads: org-nests.md § fauna.build → *Disposable*).
+VERSION_LABEL = "org.opencontainers.image.version"
+
+
+class ImageUnreadable(RuntimeError):
+    """The registry answered, but not with one readable version label."""
+
+
+def image_version(image: str, run) -> str | None:
+    """The version `image` (a tag or a digest ref) carries, read off the registry.
+
+    `run(argv)` returns a CompletedProcess (captured text). None when the
+    registry has no such image; every platform's :data:`VERSION_LABEL` must
+    agree, and anything else unreadable raises :class:`ImageUnreadable` — a
+    hold check fails closed on it.
+    """
+    out = run(["docker", "buildx", "imagetools", "inspect", image,
+               "--format", "{{json .Image}}"])
+    if out.returncode != 0:
+        if "not found" in out.stderr.lower():
+            return None
+        raise ImageUnreadable(f"cannot read {image} off the registry: {out.stderr.strip()}")
+    try:
+        images = json.loads(out.stdout)
+        versions = {img["config"]["Labels"][VERSION_LABEL] for img in images.values()}
+    except (json.JSONDecodeError, AttributeError, KeyError, TypeError) as exc:
+        raise ImageUnreadable(f"{image} carries no readable {VERSION_LABEL} label ({exc})") from None
+    if len(versions) != 1:
+        raise ImageUnreadable(f"{image}'s platforms disagree on {VERSION_LABEL}: {sorted(versions)}")
+    return versions.pop()
+
 
 def version_key(version: str) -> tuple[int, int, int]:
     major, minor, patch = (int(part) for part in version.split("-", 1)[0].split("."))
@@ -304,3 +339,41 @@ def hold_refusal(open_reviews: list[dict], *, serving: str, staging: str) -> str
         "never withdraws a review and never bypasses the hold."
     )
     return "\n".join(lines)
+
+
+# ── the calendar's hold ─────────────────────────────────────────────────────
+# Owner: docs/goal/architecture/org-nests.md § fauna.build → *Disposable* (the
+# ruling of 2026-11-01) and store-review.md § During a review, exemption (b).
+# The one caller is tests/e2e-unified/helpers/staging_box.py::recreation_verdict,
+# the acceptance nest's calendar (its trigger and its miss check).
+
+#: The states a submission takes once its review has been answered (or it
+#: went on to serve): the end of a calendar hold, read off the table's `since`.
+ANSWERED = ("approved", "rejected", "withdrawn", "serving")
+
+
+def calendar_hold(submissions: list[dict], *, serving: str | None) -> list[dict]:
+    """The open reviews that hold the acceptance nest's calendar.
+
+    An `in-review` submission of the version the box serves — at any store, on
+    any track — holds; one of another version does not (the reviewer meets the
+    box only through the build under review). Unlike the stage's hold there is
+    no binding window: what a re-creation drops is the reviewer's account
+    state, which no compatibility rule keeps. Empty when the served version is
+    unknown.
+    """
+    if serving is None:
+        return []
+    return [s for s in submissions if s["version"] == serving and s["state"] == OPEN]
+
+
+def review_answered_on(submissions: list[dict], *, serving: str | None) -> _dt.date | None:
+    """The latest day a review of `serving` was answered, or None.
+
+    The calendar reads it to give the trigger its lead once a hold ends, so
+    the miss check does not go red in the hours between a review closing and
+    the timer's next tick.
+    """
+    days = [s["since"] for s in submissions
+            if serving is not None and s["version"] == serving and s["state"] in ANSWERED]
+    return max(days, default=None)

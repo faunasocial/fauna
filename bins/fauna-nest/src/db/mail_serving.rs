@@ -92,6 +92,39 @@ impl crate::db::CacheDb {
         .context("upsert actor_mail_serving")?;
         Ok(())
     }
+
+    /// Read an actor's mail-off flag — the nest-side half of the user's
+    /// "Disable mail" (`docs/goal/behavior/mail-credentials.md` § Trigger
+    /// taxonomy, the Disable-mail row) — or `None` if the actor has never set
+    /// it (default ON). A different question from the serving opt-out above:
+    /// not "does this nest serve my mail" but "is my mail on at all". Only the
+    /// IMAP serving gate reads it (`ensure_actor_mail_enabled`).
+    pub async fn get_actor_mail_enabled(&self, actor: &[u8; 32]) -> Result<Option<bool>> {
+        let conn = self.conn.lock().await;
+        let raw: Option<i64> = conn
+            .query_row(
+                "SELECT enabled FROM actor_mail_enabled WHERE actor_id = ?1",
+                rusqlite::params![&actor[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("get actor_mail_enabled")?;
+        Ok(raw.map(|v| v != 0))
+    }
+
+    /// Upsert an actor's mail-off flag (`fauna.bridges.set_actor_mail_enabled`,
+    /// User-class, caller-scoped); the latest write wins.
+    pub async fn set_actor_mail_enabled(&self, actor: &[u8; 32], enabled: bool) -> Result<()> {
+        let now = super::now_epoch_secs();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO actor_mail_enabled (actor_id, enabled, set_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(actor_id) DO UPDATE SET enabled = ?2, set_at = ?3",
+            rusqlite::params![&actor[..], enabled as i64, now],
+        )
+        .context("upsert actor_mail_enabled")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +162,25 @@ mod tests {
             db.get_actor_mail_serving_enabled(&actor).await.unwrap(),
             Some(true)
         );
+    }
+
+    /// The mail-off flag: absent ⇒ `None` (default ON), settable both ways,
+    /// per actor, and independent of the serving opt-out row.
+    #[tokio::test]
+    async fn mail_enabled_flag_round_trips_per_actor() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let a = [0x31u8; 32];
+        let b = [0x32u8; 32];
+        assert_eq!(db.get_actor_mail_enabled(&a).await.unwrap(), None);
+
+        db.set_actor_mail_enabled(&a, false).await.unwrap();
+        assert_eq!(db.get_actor_mail_enabled(&a).await.unwrap(), Some(false));
+        assert_eq!(db.get_actor_mail_enabled(&b).await.unwrap(), None);
+        // The serving opt-out is a different row.
+        assert_eq!(db.get_actor_mail_serving_enabled(&a).await.unwrap(), None);
+
+        db.set_actor_mail_enabled(&a, true).await.unwrap();
+        assert_eq!(db.get_actor_mail_enabled(&a).await.unwrap(), Some(true));
     }
 
     #[tokio::test]

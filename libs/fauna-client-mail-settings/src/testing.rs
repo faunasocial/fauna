@@ -14,7 +14,9 @@ use fauna_mls::wrapped_blob::{
 use fauna_core::grant_event::GrantEvent;
 
 use crate::error::{NestError, SetMailEnabledError, SignerError};
-use crate::machine::{FetchedSpamModel, IdentitySigner, NestClient};
+use crate::machine::{
+    DavSealPubkeys, FetchedSpamModel, IdentitySigner, NestClient, RegisteredRecipientPubkeys,
+};
 use fauna_protocol::bridge_routing::EpochSealKey;
 use fauna_protocol::wrapped_blob::{
     HolderSealTarget, PutSpamModelOutcome, SpamModelHolderCopy, SpamModelPrecondition,
@@ -50,6 +52,9 @@ pub struct FakeNestState {
     /// registered via `provision_recipient_mls_pubkey` — see
     /// [`RecipientPubkeyRecord`].
     pub provision_recipient_pubkey: Vec<RecipientPubkeyRecord>,
+    /// The calendar and card pairs each `provision_recipient_mls_pubkey`
+    /// carried, aligned with [`Self::provision_recipient_pubkey`].
+    pub provision_recipient_dav_pubkeys: Vec<DavSealPubkeys>,
     /// If set, `fetch_own_recipient_pubkey` returns this error — the read
     /// the connect-time refresh takes before it re-seals.
     pub fail_fetch_recipient_pubkey_with: Option<NestError>,
@@ -69,6 +74,12 @@ pub struct FakeNestState {
     /// `actor_mail_serving` default-on (`.unwrap_or(true)`). A `set` records
     /// the call *and* updates this so a subsequent `get`/`hydrate` round-trips.
     pub mail_serving_enabled: Option<bool>,
+    /// Every `set_actor_mail_enabled` call's argument, in order.
+    pub set_actor_mail_enabled: Vec<bool>,
+    /// The per-actor mail-off flag the fake reads back. `None` ⇒ never set ⇒
+    /// `get_actor_mail_enabled` returns `true` (the nest's default-on); a `set`
+    /// records the call *and* updates this.
+    pub actor_mail_enabled: Option<bool>,
     /// If set, the matching provision call fails. Decremented on
     /// each call; the next call after it reaches zero succeeds.
     /// Use to simulate a mid-rotation transient nest failure.
@@ -82,9 +93,16 @@ pub struct FakeNestState {
     /// scoping); `Transient` simulates a connectivity failure.
     pub fail_set_mail_enabled_with: Option<NestError>,
     /// The box's `fauna.setup.status` report says it cannot enable mail: the
-    /// fake's `mail_unavailable_here` reads it, and `set_mail_enabled(true)`
+    /// fake's `deployment_status` reads it, and `set_mail_enabled(true)`
     /// answers the typed refusal, as the nest does. Default `false`.
     pub mail_unavailable_here: bool,
+    /// `fauna.setup.status`'s `email_enabled`, as `deployment_status` reports
+    /// it. Default `false`.
+    pub deployment_mail_enabled: bool,
+    /// `fauna.setup.status`'s `caldav_enabled`. Default `false`.
+    pub deployment_caldav_enabled: bool,
+    /// `fauna.setup.status`'s `carddav_enabled`. Default `false`.
+    pub deployment_carddav_enabled: bool,
     /// The flip alone answers the typed refusal while the read still says
     /// available — the box changed between the machine's read and its enable.
     pub refuse_set_mail_enabled_unavailable: bool,
@@ -187,6 +205,24 @@ pub struct FakeNestState {
     /// roster — lets a test assert an undiscoverable roster skips the heal without
     /// failing the rotation.
     pub fail_content_processor_holders_with: Option<NestError>,
+    /// A hold on `provision_wrapped_submission_token`: while a test holds this
+    /// lock's guard, the call parks before it records anything — an enable
+    /// stopped mid-flight with its credential wrapped and its sentinel standing.
+    pub hold_provision_submission_token: Option<NestHold>,
+    /// A hold on `get_mail_serving_enabled` — a hydrate parked between its
+    /// custody read and its snapshot fold.
+    pub hold_get_mail_serving_enabled: Option<NestHold>,
+}
+
+/// A test-held gate on one fake nest call: the call awaits the lock, so it
+/// parks for as long as the test keeps a guard of it.
+pub type NestHold = Arc<futures_util::lock::Mutex<()>>;
+
+/// Park until the test releases `hold` (no hold → no wait).
+async fn pass_hold(hold: Option<NestHold>) {
+    if let Some(hold) = hold {
+        drop(hold.lock().await);
+    }
 }
 
 impl FakeNestClient {
@@ -218,6 +254,13 @@ impl NestClient for FakeNestClient {
         &self,
         blob: WrappedSubmissionTokenBlob,
     ) -> Result<(), NestError> {
+        let hold = self
+            .inner
+            .lock()
+            .unwrap()
+            .hold_provision_submission_token
+            .clone();
+        pass_hold(hold).await;
         let mut s = self.inner.lock().unwrap();
         if s.fail_provision_submission_token_for_n_calls > 0 {
             s.fail_provision_submission_token_for_n_calls -= 1;
@@ -255,29 +298,42 @@ impl NestClient for FakeNestClient {
         actor_id: [u8; 32],
         pubkey: [u8; 32],
         mlkem_ek: Vec<u8>,
+        dav: DavSealPubkeys,
         epoch_keys: Option<Vec<EpochSealKey>>,
     ) -> Result<(), NestError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .provision_recipient_pubkey
+        let mut s = self.inner.lock().unwrap();
+        s.provision_recipient_pubkey
             .push((actor_id, pubkey, mlkem_ek, epoch_keys));
+        s.provision_recipient_dav_pubkeys.push(dav);
         Ok(())
     }
     async fn fetch_own_recipient_pubkey(
         &self,
         actor_id: [u8; 32],
-    ) -> Result<Option<[u8; 32]>, NestError> {
+    ) -> Result<Option<RegisteredRecipientPubkeys>, NestError> {
         let s = self.inner.lock().unwrap();
         if let Some(e) = &s.fail_fetch_recipient_pubkey_with {
             return Err(e.clone());
         }
-        // The nest's row is the last provision's (an atomic replace).
+        // The nest's row is the last provision's (an atomic replace), the
+        // three pairs read whole: a test seeding the row by hand pushes both
+        // vectors, as the provision does.
         Ok(s.provision_recipient_pubkey
             .iter()
+            .enumerate()
             .rev()
-            .find(|r| r.0 == actor_id)
-            .map(|r| r.1))
+            .find(|(_, r)| r.0 == actor_id)
+            .map(|(i, r)| {
+                let dav = s
+                    .provision_recipient_dav_pubkeys
+                    .get(i)
+                    .expect("a recipient-pubkey record without its DAV pairs");
+                RegisteredRecipientPubkeys {
+                    mail: r.1,
+                    calendar: dav.calendar_pubkey,
+                    card: dav.card_pubkey,
+                }
+            }))
     }
     async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
         Ok(fauna_protocol::discovery::capability::supports(
@@ -296,8 +352,14 @@ impl NestClient for FakeNestClient {
         s.set_mail_enabled.push(enabled);
         Ok(())
     }
-    async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
-        Ok(self.inner.lock().unwrap().mail_unavailable_here)
+    async fn deployment_status(&self) -> Result<crate::machine::DeploymentStatus, NestError> {
+        let s = self.inner.lock().unwrap();
+        Ok(crate::machine::DeploymentStatus {
+            mail_unavailable_here: s.mail_unavailable_here,
+            mail_enabled: s.deployment_mail_enabled,
+            caldav_enabled: s.deployment_caldav_enabled,
+            carddav_enabled: s.deployment_carddav_enabled,
+        })
     }
     async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
         let mut s = self.inner.lock().unwrap();
@@ -306,12 +368,33 @@ impl NestClient for FakeNestClient {
         Ok(())
     }
     async fn get_mail_serving_enabled(&self) -> Result<bool, NestError> {
+        let hold = self
+            .inner
+            .lock()
+            .unwrap()
+            .hold_get_mail_serving_enabled
+            .clone();
+        pass_hold(hold).await;
         // None ⇒ default-on, mirroring the nest's `.unwrap_or(true)`.
         Ok(self
             .inner
             .lock()
             .unwrap()
             .mail_serving_enabled
+            .unwrap_or(true))
+    }
+    async fn set_actor_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+        let mut s = self.inner.lock().unwrap();
+        s.set_actor_mail_enabled.push(enabled);
+        s.actor_mail_enabled = Some(enabled);
+        Ok(())
+    }
+    async fn get_actor_mail_enabled(&self) -> Result<bool, NestError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .actor_mail_enabled
             .unwrap_or(true))
     }
     async fn get_caldav_port(&self) -> Result<crate::state::DavListener, NestError> {
@@ -546,6 +629,58 @@ pub fn a_mail_export_snapshot(step: crate::ExportStep) -> crate::MailExportSnaps
         started_at: 0,
         last_progress_at: 0,
         status: crate::ExportStatus::Idle,
+        error: None,
+    }
+}
+
+/// One DMARC aggregate-report row — the shared fixture the linux and tui
+/// DMARC-reports page tests render (`a.test` as our domain, 9 of 10 passing).
+pub fn a_dmarc_report_row() -> crate::dmarc_reports::DmarcReportRowView {
+    crate::dmarc_reports::DmarcReportRowView {
+        our_domain: "a.test".into(),
+        submitter: "Peer <r@peer.test>".into(),
+        report_id: "r-1".into(),
+        begin_at: 1_760_000_000,
+        end_at: 1_760_086_400,
+        received_at: 1_760_090_000,
+        message_count: 10,
+        dmarc_pass: 9,
+    }
+}
+
+/// A loaded, idle DMARC-reports snapshot over `reports` — the shared fixture
+/// the linux and tui DMARC-reports page tests render.
+pub fn a_dmarc_reports_snapshot(
+    reports: Vec<crate::dmarc_reports::DmarcReportRowView>,
+) -> crate::dmarc_reports::DmarcReportsSnapshot {
+    use crate::dmarc_reports::{
+        DmarcCountRow, DmarcReportsSnapshot, DmarcReportsStatus, DmarcWindowTotals,
+    };
+    DmarcReportsSnapshot {
+        window_days: 30,
+        our_domain: None,
+        local_domains: vec!["a.test".into()],
+        loaded: true,
+        totals: DmarcWindowTotals {
+            message_count: 10,
+            report_count: reports.len() as u64,
+            submitter_count: 1,
+            dmarc_pass: 9,
+            dmarc_pass_percent: 90,
+            ..Default::default()
+        },
+        sources: vec![DmarcCountRow {
+            value: "192.0.2.1".into(),
+            count: 10,
+        }],
+        senders: vec![DmarcCountRow {
+            value: "a.test".into(),
+            count: 10,
+        }],
+        reports,
+        truncated: false,
+        opened: None,
+        status: DmarcReportsStatus::Idle,
         error: None,
     }
 }

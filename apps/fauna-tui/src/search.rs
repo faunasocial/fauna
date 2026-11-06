@@ -97,19 +97,14 @@ impl SearchState {
     }
 }
 
-/// Forward manager notifications into the render loop's `UiMessage` channel —
-/// the `TuiFeedObserver` shape. `on_changed` fires synchronously on whatever
-/// thread mutated, so it must not touch `App`; a fresh snapshot read per tick
-/// makes coalescing safe.
-struct TuiSearchObserver {
-    tx: UnboundedSender<UiMessage>,
-}
-
-impl SearchSnapshotObserver for TuiSearchObserver {
-    fn on_changed(&self) {
-        // A closed channel means the app is shutting down — nothing to notify.
-        let _ = self.tx.send(UiMessage::Data(DataMessage::SearchChanged));
-    }
+crate::app::tick_observer! {
+    /// Forward manager notifications into the render loop's `UiMessage` channel —
+    /// the `TuiFeedObserver` shape. `on_changed` fires synchronously on whatever
+    /// thread mutated, so it must not touch `App`; a fresh snapshot read per tick
+    /// makes coalescing safe.
+    TuiSearchObserver,
+    SearchSnapshotObserver,
+    UiMessage::Data(DataMessage::SearchChanged)
 }
 
 /// Build the page state at the post-auth hook. No initial fetch — there is no

@@ -2,7 +2,7 @@
 
 Owns: recipient-set-scheme
 Status: ratified — T20, the storage-group keying build design, ratified 2026-08-17 and refutable until the first group-scope build; the build began the same day, and § Implementation status today records which of its mechanics are code
-Authority: **how a storage group scope is keyed and who is in it** — R15's storage-group keying from ruling to buildable mechanics: scope birth and the authority seam, the roster kind (the per-writer roster cell, its authored `Removed`, the bound `Enrolled` entry), generations re-targeted onto the R14 machinery, the mint triggers, severance per axis (member removal, a member's fleet severance, an authority device's removal and the revocation kind), the membership witness, the concurrent-membership lattice, and the constraint discharges — with the build-out of each. **NOT owned here** — the classes of account data, the audience ladder (R13), the generation machinery (R14) and the export-confidentiality axis → [`account-data-taxonomy.md`](account-data-taxonomy.md); the key-material half (the group generation key, the group-reception keypair, the wrap format, the per-kind derivations) → [`key-material-hierarchy.md`](key-material-hierarchy.md) § Audience: a storage group; the ceremony that births a scope → [`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation; the rooms keyed on it → [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) and [`../behavior/community-rooms.md`](../behavior/community-rooms.md); the ratified decisions (R15 among them) and the cross-cutting status → [`account-data-plane.md`](account-data-plane.md). On conflict in those domains, raise it.
+Authority: **how a storage group scope is keyed and who is in it** — R15's storage-group keying from ruling to buildable mechanics: scope birth and the authority seam, the roster kind (the per-writer roster cell, its authored `Removed`, the bound `Enrolled` entry), generations re-targeted onto the R14 machinery, the mint triggers, severance per axis (member removal, a member's fleet severance, an authority device's removal and the revocation kind), the membership witness, the concurrent-membership lattice, and the constraint discharges — with the build-out of each. **NOT owned here** — the classes of account data, the audience ladder (R13), the generation machinery (R14) and the export-confidentiality axis → [`account-data-taxonomy.md`](account-data-taxonomy.md); the key-material half (the group generation key, the group-reception keypair, the wrap format, the per-kind derivations) → [`key-material-hierarchy.md`](key-material-hierarchy.md) § Audience: a storage group; the ceremony that births a scope → [`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation; the rooms keyed on it → [`../behavior/conversation-rooms.md`](../behavior/conversation-rooms.md) and [`../behavior/community-rooms.md`](../behavior/community-rooms.md); the ratified decisions (R15 among them) and the cross-cutting status → [`account-data-plane.md`](account-data-plane.md). On conflict in those domains, raise it.
 
 Last verified: 2026-09-28 (split verbatim; each ruling carries its own ratification date below)
 
@@ -32,7 +32,7 @@ by [`key-material-hierarchy.md`](key-material-hierarchy.md) § Audience: a
 storage group, never restated here. This section owns the **roster**, the
 **authority seam**, the **lattice**, the **membership witness**, and the
 **constraint discharges**. Consumer: offline share initiation
-([`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation) — the
+([`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation) — the
 ceremony itself is owned there.
 
 - **Scope birth + the authority seam.** A storage group scope is minted by an
@@ -58,13 +58,17 @@ ceremony itself is owned there.
   unchanged. The v1 *storage-group scope* — birth record, plane-data roster,
   machinery root, the two-party offline-share ceremony that births and
   delivers it — **is built and shipped** (2026-08-17 onward;
-  [`../behavior/p2p.md`](../behavior/p2p.md) § Offline share initiation owns
+  [`../behavior/p2p.md`](../behavior/p2p-shared-set.md) § Offline share initiation owns
   the shipped surfaces; the "still unbuilt" this line carried until
   2026-09-16 was stale), so the section is refutable only by a ruling, and
   every evolution of its records is additive (the at-rest rows are alpha
   data). What is NOT yet built: any roster writer beyond the deliver (no
   production `Removed` writer, no re-mint trigger, no authority-device
-  revocation publisher, no group-plane pump leg)
+  revocation publisher, no group-plane pump leg — the pump leg and the
+  scope's content kinds are designed, 2026-10-29, the content kinds and the
+  share server's group feed built the same day:
+  [`../behavior/group-set.md`](../behavior/group-set.md)
+  § Build design — the group set)
   — scopes today are two-party and written once, and they reach a reader
   only through ceremony adoption: there is no home-nest route for a group
   row, by the roster bullet's own "no nest write" rule.

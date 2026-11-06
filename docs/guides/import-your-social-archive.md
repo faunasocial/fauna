@@ -1,7 +1,6 @@
 # Bring your posts from Facebook
 
-Your old posts, photos and events can live in Fauna too — at the dates you
-posted them, visible to the same kind of people who could see them there.
+Your old posts, photos and events can live in Fauna too, at the dates you posted them. Unless you choose **Only me**, a public post can be seen on Fauna, a Friends-only post by the people who follow you, and everything else only by you.
 Fauna never talks to Facebook for this. You download the export archive
 Facebook gives you, and the Fauna app reads it on your own device.
 
@@ -30,8 +29,7 @@ steps:
 3. **What to import** — tick the categories you want. Posts, albums and events
    become your own Fauna content; comments, reactions, friends and message
    threads are kept inside the archive for later features and never
-   published. This step also tells you how many posts carry a recorded
-   audience: those import to it, the rest are visible only to you. Choose
+   published. This step also tells you how many posts carry a recorded audience: a public one can be seen on Fauna and a Friends-only one by the people who follow you, and every other post — whatever its audience there, or none recorded — is visible only to you. Choose
    **Only me** to keep everything private regardless. To import only part of
    the archive, fill in a from and/or to date (written like 2019-06-30): both
    days are included in full, counted in UTC.
@@ -47,9 +45,7 @@ steps:
 ## What you get
 
 - Each imported post shows a small archive badge and keeps its original date.
-- A post that was *Friends only* is visible to the people who follow you. A
-  post that was *Only me*, or whose audience the archive did not record, is
-  visible only to you.
+- A post that was *Friends only* is visible to the people who follow you. A post with any other audience there — Facebook's Only me, Friends of friends, Friends except… or a list of friends you picked — or whose audience the archive did not record, is visible only to you.
 - Your events land in your calendar, visible only to you, at their original
   times and places and with your own reply: an event you went to reads
   *Going*, one you declined *Declined*, one you marked interested

@@ -50,12 +50,18 @@ public sealed partial class InviteRequestView : UserControl
         // Reconcile once at construction in case relaunch hydration already
         // seeded PendingReview before this view rendered.
         ReconcilePollTimer();
+        // The joining rules may already be in hand (the machine's verified read
+        // landed before this view was built).
+        JoiningRules.Paint(vm.JoiningNestRules);
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         Bindings.Update();
         ReconcilePollTimer();
+        // nest-rules.md § Acceptance at joining: the read landing ticks the
+        // observer, so the rules appear above the terms notice when it does.
+        JoiningRules.Paint(ViewModel.JoiningNestRules);
     }
 
     /// <summary>

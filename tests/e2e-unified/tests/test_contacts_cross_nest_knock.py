@@ -132,13 +132,10 @@ def test_cross_nest_knock_reaches_the_peers_own_queue(
     # is session-scoped, so a fixed localpart would collide with an earlier run
     # of this test under another `--app`). No key packages needed — a knock is
     # the inbox plane, not MLS.
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
-    bob = register_handled_actor(
-        foreign["port"],
-        handle=f"bob{secrets.token_hex(4)}",
-        domain=authority,
-        base_url=foreign_url,
+    bob = admit_adult(
+        foreign, f"bob{secrets.token_hex(4)}", domain=authority, token=True,
     )
     bob_handle = f"{bob['handle']}@{authority}"
     alice_id = test_user["actor_id_hex"]
@@ -187,3 +184,82 @@ def test_cross_nest_knock_reaches_the_peers_own_queue(
         f"sending the cross-nest knock surfaced an error banner: "
         f"{app.error_text()!r}"
     )
+
+
+@pytest.mark.feature("contacts")
+def test_a_contact_row_opens_the_profile_their_own_nest_serves(
+    logged_in_app, nest_instance, test_user, cross_nest_foreign,
+):
+    """Contacts outcome 12: tapping the roster row of someone who lives on
+    another nest opens a profile carrying THAT nest's URL.
+
+    The opposite direction from outcome 5: Bob, on the FOREIGN nest, knocks on
+    Alice's HOME nest over federation, so the home nest stores the knock with
+    the verified origin (``peer_nest_id``). A knock sent locally would leave
+    ``home_nest_url`` ``None`` and prove nothing. Alice accepts through the UI
+    and taps the row. Exclusion class (8), as above: reading ``peer_url`` marks
+    it, and the foreign nest dials the home nest at ``nest_instance["peer_url"]``.
+    """
+    from common import build_email_inbox_payload
+    from helpers.admin_wire import admit_adult
+    from helpers.contacts_knocks import knock_row, open_people
+
+    app = logged_in_app
+    foreign = cross_nest_foreign
+    foreign_peer_url = foreign["peer_url"]
+    home_url = nest_instance["url"]
+    alice_hex = test_user["actor_id_hex"]
+
+    bob = admit_adult(foreign, f"bob{secrets.token_hex(4)}", domain=foreign["authority"], token=True)
+    bob_hex = bob["actor_id_hex"]
+
+    def _alice() -> WsRpcAdminClient:
+        return WsRpcAdminClient(
+            home_url,
+            actor_id=test_user["actor_id_bytes"],
+            signing_key=bytes(test_user["signing_key"]),
+        )
+
+    # The default `allow_knock` inbox holds a stranger's message as a knock; an
+    # earlier test may have changed it, so pin it and put back what was there.
+    with _alice() as c:
+        prior_mode = c.call("fauna.inbox.mode.get", {})["mode"]
+        if prior_mode != "allow_knock":
+            c.call("fauna.inbox.mode.set", {"mode": "allow_knock"})
+    try:
+        payload, _post_id = build_email_inbox_payload(
+            bob["signing_key"], alice_hex, "Hello", "May we be in touch?",
+            node_url=foreign["url"],
+        )
+        with WsRpcAdminClient(
+            foreign["url"],
+            actor_id=bob["actor_id_bytes"],
+            signing_key=bytes(bob["signing_key"]),
+        ) as c:
+            c.call(
+                "fauna.inbox.send",
+                {
+                    "recipient_actor_id": alice_hex,
+                    "recipient_nest_url": nest_instance["peer_url"],
+                    "payload_bytes": payload,
+                },
+            )
+
+        # Alice accepts through the UI, then taps Bob's roster row.
+        open_people(app)
+        app.contacts.accept_knock(knock_row(app, bob_hex))
+        app.contacts.open_contact_profile(bob_hex)
+
+        assert app.profile.wait_for_viewed_actor(bob_hex) == bob_hex, (
+            f"the row tap should open Bob's profile; error={app.error_text()!r}"
+        )
+        home = app.profile.wait_for_home_nest_url(foreign_peer_url)
+        assert home == foreign_peer_url, (
+            f"the profile should carry Bob's own nest {foreign_peer_url!r} "
+            f"(resolved from the knock's verified origin); it reads {home!r}; "
+            f"error={app.error_text()!r}"
+        )
+    finally:
+        if prior_mode != "allow_knock":
+            with _alice() as c:
+                c.call("fauna.inbox.mode.set", {"mode": prior_mode})

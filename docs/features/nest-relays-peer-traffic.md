@@ -44,20 +44,20 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+4baae748 docker |
-| linux | ✅ full | 0.1.2-dev+4baae748 docker |
-| windows | ✅ full | 0.1.2-dev+4baae748 docker |
-| macos | ✅ full | 0.1.2-dev+4baae748 docker |
-| ios | ✅ full | 0.1.2-dev+4baae748 docker |
-| android | ✅ full | 0.1.2-dev+4baae748 docker |
-| tui | ✅ full | 0.1.2-dev+4baae748 docker |
+| web | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| linux | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| windows | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| macos | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| ios | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| android | ✅ full | 0.1.5-dev+99dc4c58 standalone |
+| tui | ✅ full | 0.1.5-dev+99dc4c58 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_iroh_relay_sidecar_fetches_sealed_cert_and_serves` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_relay_reachable_via_sni_router_at_443` | nest (linux): passed |
 | 1 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_nest_info_advertises_relay_capability_and_url` | nest (linux): passed |
-| 2 | nest | `tests/e2e-unified/tests/api/test_relay_advertisement.py::test_a_nest_running_no_relay_advertises_none` | nest (linux): passed |
+| 2 | nest | `tests/e2e-unified/tests/api/test_relay_advertisement.py::test_a_nest_running_no_relay_advertises_none` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_a_nest_without_a_public_name_gives_no_relay_address` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_the_relay_reconnects_by_itself_after_the_nest_restarts` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_iroh_relay.py::test_image_runs_its_relay_with_nothing_switched_on` | nest (linux): passed |

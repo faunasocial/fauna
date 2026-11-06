@@ -239,6 +239,14 @@ pub struct FederationChannelPool {
     /// `nest_id` it is pinned to. Rebuilt wholesale from the rows and the
     /// admin roster by [`Self::set_pairing_targets`] — never a stored field.
     pairing_targets: std::sync::RwLock<HashMap<String, PairingTargetTrust>>,
+    /// Origins an address-proving dial ([`Self::prove_peer_address`]) was
+    /// admitted for, timestamped at admission: one try per origin per
+    /// [`ANNOUNCE_VERIFY_TTL`], whatever its outcome, so a peer re-declaring
+    /// an address it does not answer at buys at most one dial per window.
+    /// Bounded at [`MAX_DOMAIN_FAILURE_ENTRIES`] like the domain cache, so the
+    /// resident set is a function of the cap, never of how many identities
+    /// deliver ([`Self::begin_address_proof`]).
+    address_proof_attempts: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
 /// What this nest's pairing rows say about one peer URL
@@ -1083,6 +1091,58 @@ impl FederationChannelPool {
         }
     }
 
+    /// Admit one address-proving dial for `origin`, or refuse it: `false`
+    /// while an earlier attempt for the same origin is inside
+    /// [`ANNOUNCE_VERIFY_TTL`] (success or failure alike — the window bounds
+    /// the dials a peer can buy by re-declaring), or when the map holds
+    /// [`MAX_DOMAIN_FAILURE_ENTRIES`] live origins. Expired entries are swept
+    /// first, so a refusal at the cap always means that many origins are
+    /// genuinely inside the window.
+    pub(crate) async fn begin_address_proof(&self, origin: &[u8; 32]) -> bool {
+        let now = Instant::now();
+        let mut attempts = self.address_proof_attempts.lock().await;
+        attempts.retain(|_, at| now.duration_since(*at) < ANNOUNCE_VERIFY_TTL);
+        if attempts.contains_key(origin) || attempts.len() >= MAX_DOMAIN_FAILURE_ENTRIES {
+            return false;
+        }
+        attempts.insert(*origin, now);
+        true
+    }
+
+    /// Prove that the nest `expected_nest_id` answers at `peer_url`, and
+    /// nothing else: the discovery dial (with every rule an originated call
+    /// meets — `validate_peer_url`, the host class, the discovery trust rule)
+    /// must land on `expected_nest_id`, else [`PoolError::PeerMismatch`]; then
+    /// the channel is dialed, and its signed `fauna.federation.hello`
+    /// handshake stamps `proven_at` in [`Self::get_or_dial`] — the one place
+    /// it is ever written. No federation call is originated. The channel stays
+    /// pooled, so the next originated call to that peer reuses it.
+    ///
+    /// The handshake-only entry point a receiver uses when a verified peer
+    /// declared an address this nest never dialled and something it shows
+    /// would name the peer by that address
+    /// (`moderation_federation::prove_issuer_address`).
+    pub async fn prove_peer_address(
+        &self,
+        state: &Arc<AppState>,
+        peer_url: &str,
+        expected_nest_id: [u8; 32],
+    ) -> Result<(), PoolError> {
+        let resolved = self.resolve_peer_nest_id(peer_url).await?;
+        if resolved != expected_nest_id {
+            return Err(PoolError::PeerMismatch {
+                url: peer_url.to_string(),
+                expected: hex::encode(expected_nest_id),
+                resolved: hex::encode(resolved),
+            });
+        }
+        match self.get_or_dial(state, peer_url, expected_nest_id).await {
+            Ok(_) => Ok(()),
+            Err(DialError::ChannelUnsupported) => Err(PoolError::Unsupported),
+            Err(e) => Err(PoolError::Dial(e.to_string())),
+        }
+    }
+
     /// [`Self::originate`], refusing before the dial unless the nest answering at
     /// `peer_url` is the one the caller pinned.
     ///
@@ -1810,6 +1870,7 @@ pub async fn originate_folder_changes_record(
     path_sealed: Option<serde_bytes::ByteBuf>,
     derived_through: Option<i64>,
     is_resolution: Option<bool>,
+    deposited_by: Option<String>,
     signature: Option<serde_bytes::ByteBuf>,
     signer_key: Option<serde_bytes::ByteBuf>,
     signer_cert: Option<fauna_core::encoding::EmbedAsBytes>,
@@ -1827,6 +1888,7 @@ pub async fn originate_folder_changes_record(
         path_sealed,
         derived_through,
         is_resolution,
+        deposited_by,
         signature,
         signer_key,
         signer_cert,

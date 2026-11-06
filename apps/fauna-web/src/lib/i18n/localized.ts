@@ -76,7 +76,7 @@ export function resolveLocalizedNested(lt: LocalizedText | undefined | null): st
 
 /**
  * A `LocalizedText` whose template arguments may themselves be translatable
- * (mirrors `fauna_client_connected_apps::compose::ComposedText`): `nested`
+ * (mirrors `fauna_core::localized::ComposedText`): `nested`
  * maps an argument name to the text that fills it, and wins over `text.args`
  * of the same name.
  */

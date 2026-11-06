@@ -34,6 +34,7 @@ pub mod p2p_participation;
 pub mod places;
 #[cfg(feature = "account-port")]
 pub mod port;
+pub mod row_read_errors;
 pub mod snapshots;
 pub mod this_device;
 
@@ -59,6 +60,7 @@ pub use nest_api::{FakeCall, FakeDevicesNestApi, FakeWizardFactory};
 pub use observer::DevicesObserver;
 pub use p2p_participation::{P2pParticipationPaint, p2p_participation_paint};
 pub use places::place_rows;
+pub use row_read_errors::RowReadErrors;
 pub use snapshots::*;
 pub use this_device::this_device_row;
 

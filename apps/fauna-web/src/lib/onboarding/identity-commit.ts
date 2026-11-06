@@ -5,7 +5,7 @@
 // undo (`identityCommitFailed`); this is web's report to it.
 
 import { t } from '../i18n/strings.ts';
-import { rejectionText } from '../rejection.ts';
+import { localizedRejectionText } from '../rejection.ts';
 
 export interface IdentityCommitSteps {
   /** The registry write (`accountsPersistConfirmedIdentity`): rejects on a
@@ -28,6 +28,6 @@ export async function commitConfirmedIdentity(
     await steps.persist(secret, append);
   } catch (e) {
     steps.log(e);
-    steps.commitFailed(t.onboarding.session_error.persist_successor({ message: rejectionText(e, String(e)) }));
+    steps.commitFailed(localizedRejectionText(e) ?? t.onboarding.session_error.persist_identity);
   }
 }

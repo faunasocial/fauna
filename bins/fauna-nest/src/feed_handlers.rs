@@ -158,6 +158,7 @@ fn post_item(p: &FeedPostOut) -> FeedPostItem {
         reposted_post_id: p.reposted_post_id.as_ref().map(hex::encode),
         viewer_repost_id: p.viewer_repost_id.as_ref().map(hex::encode),
         viewer_liked: p.viewer_liked,
+        reactions: p.reactions.clone(),
         // Gated-to-tier marker (`content_meta.gated_tier` — plaintext-floor
         // attribute, `ui/feed.md` § Encryption at rest): drives the apps'
         // `gated-post-badge`. Additive + `None`-default on the wire.
@@ -493,6 +494,8 @@ fn feed_author_posts_handler() -> RpcHandler {
                 author,
                 req.cursor,
                 req.limit,
+                req.search.as_deref(),
+                req.sources.as_deref(),
             )
             .await
             .map_err(rpc_error_from_api)?;
@@ -634,6 +637,8 @@ pub(crate) fn principal_feed_author_posts_handler() -> crate::principal_handlers
                 author,
                 req.cursor,
                 req.limit,
+                req.search.as_deref(),
+                req.sources.as_deref(),
             )
             .await
             .map_err(rpc_error_from_api)?;

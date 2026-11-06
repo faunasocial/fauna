@@ -456,6 +456,82 @@ async fn retiring_the_engine_ends_the_loop_a_failed_build_left_installed() {
     drop(session);
 }
 
+/// **An identity change retires the outgoing account's receive loop**
+/// (`account-scoping.md` § The scoping taxonomy, corollary 2: the loops that
+/// WRITE account-scoped state are retired by the same drop). The manager
+/// outlives the shell teardown and the predecessor session is held in three
+/// languages, so neither the session-closed arm nor the engine hand-over (which
+/// fires only at the NEXT build) ends it: between a sign-out and the next
+/// sign-in a still-live loop swept the outgoing account's channels into the
+/// manager the sign-out had just cleared, and the incoming account inherited
+/// them (the 2026-10-29 store reviewer walk: a reviewer signed in fresh and was
+/// shown the tester's own thread).
+///
+/// Like the hand-over test, `session` stays alive across the assertion: that
+/// live binding is the stranded reference. Reds without the identity arm.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_change_ends_the_outgoing_sessions_receive_loop() {
+    let inbox = WatchingMailbox::new();
+    let session = session(Arc::clone(&inbox));
+    let manager = session.manager();
+
+    let loop_session = Arc::clone(&session);
+    tokio::spawn(async move { loop_session.start_receive_loop().await });
+    await_cycles(&session, |_, completed| completed >= 1, "the launch cycle").await;
+
+    // The sign-out's canonical drop.
+    manager.clear_for_identity_change();
+
+    let deadline = tokio::time::Instant::now() + CYCLE_BUDGET;
+    while !session.receive_cycles().ended() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the outgoing account's receive loop was still running {CYCLE_BUDGET:?} after \
+             the identity change — it would sweep that account's channels into the \
+             manager the incoming account reads"
+        );
+        // sleep-ok: the poll interval of a deadline wait, not the assertion.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        session.receive_cycles().exit(),
+        Some(ReceiveLoopExit::IdentityChanged),
+        "the retired loop must name the identity change as its exit"
+    );
+    assert!(
+        !manager.receive_stopped(),
+        "an identity change reported the receive rail stopped to the app"
+    );
+    drop(session);
+}
+
+/// The harness's between-tests wipe is NOT an identity change: every app's e2e
+/// command table speaks `clear_for_test` with the session still signed in (tui's
+/// `conversations_disable_real_faunamls`), so it must leave the live loop
+/// receiving.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_between_tests_wipe_leaves_the_receive_loop_running() {
+    let inbox = WatchingMailbox::new();
+    let session = session(Arc::clone(&inbox));
+    let manager = session.manager();
+
+    let loop_session = Arc::clone(&session);
+    tokio::spawn(async move { loop_session.start_receive_loop().await });
+    await_cycles(&session, |_, completed| completed >= 1, "the launch cycle").await;
+
+    manager.clear_for_test();
+    let before = session.receive_cycles().completed();
+    session.poke_receive_cycle();
+    await_cycles(
+        &session,
+        |_, completed| completed > before,
+        "a cycle after the wipe",
+    )
+    .await;
+    assert!(!session.receive_cycles().ended(), "the wipe ended the loop");
+    drop(session);
+}
+
 /// An INBOX whose every fetch panics — a receive pass dying inside a rail, the
 /// shape of the three-day web outage (a `RefCell` borrow panicking inside
 /// `poll_conversations` on every tick), reproduced on the native loop.

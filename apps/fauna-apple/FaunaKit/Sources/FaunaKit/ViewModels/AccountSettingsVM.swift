@@ -44,7 +44,9 @@ public class AccountSettingsVM {
     // encrypted-device restore. Toggling rewrites the keychain items (see
     // `KeychainStore.setICloudBackup`).
     public var iCloudBackupEnabled = false
-    private let keychain = KeychainStore()
+    /// Why the toggle went back to OFF. Cleared by the next flip.
+    public var iCloudBackupError: String?
+    private let keychain: KeychainStore
 
     private var api: APIClient?
     /// Every error banner here shares Account's `error-message` with the stolen
@@ -53,8 +55,13 @@ public class AccountSettingsVM {
     /// (``StolenCeremonyHold``).
     private let ceremonyHold: StolenCeremonyHold
 
-    public init(ceremonyHold: StolenCeremonyHold? = nil) {
+    public convenience init(ceremonyHold: StolenCeremonyHold? = nil) {
+        self.init(ceremonyHold: ceremonyHold, keychain: KeychainStore())
+    }
+
+    init(ceremonyHold: StolenCeremonyHold?, keychain: KeychainStore) {
         self.ceremonyHold = ceremonyHold ?? .shared
+        self.keychain = keychain
     }
 
     /// Write one of this page's error banners — unless it is an error and the
@@ -73,10 +80,15 @@ public class AccountSettingsVM {
     }
 
     /// Flip iCloud backup and re-read the persisted state, so the toggle always mirrors what
-    /// actually landed in the keychain rather than an optimistic UI guess.
+    /// actually landed in the keychain rather than an optimistic UI guess. A copy that could
+    /// not land leaves the toggle OFF and says so.
     public func setICloudBackup(_ enabled: Bool) {
-        keychain.setICloudBackup(enabled: enabled)
+        iCloudBackupError = nil
+        let landed = keychain.setICloudBackup(enabled: enabled)
         iCloudBackupEnabled = keychain.iCloudBackupEnabled()
+        if !landed {
+            report(\.iCloudBackupError, L.settings.errors.icloudBackup)
+        }
     }
 
     public func configure(api: APIClient) {

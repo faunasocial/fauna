@@ -1,0 +1,30 @@
+#!/bin/bash
+# The cargo shim: every `cargo` resolved on a PATH that carries this directory
+# first is this file, which hands the call to the front that placed it — so a
+# cargo nobody saw as the command (a bare line in a recipe body, a cargo a script
+# or a tool spawns) still runs behind the cargo boundary, and on a dev machine
+# still reaches the compile cache's one decision.
+#
+# The front names itself in two variables, never one word-split string, so a
+# path with a space survives: FAUNA_CARGO_FRONT, the front script's absolute
+# path, and FAUNA_CARGO_FRONT_PYTHON, the interpreter it runs under. The dev
+# fleet's build front names itself when it puts this directory first on a
+# grant's PATH; on a CI runner the shipped helper `scripts/cargo-boundary.py`
+# is the front. The shim takes its own directory off PATH and execs the front
+# with `--held -- cargo "$@"`: the front decides for THIS cargo's arguments and
+# cwd, then runs the real cargo. cmd.exe never runs an extensionless file, so on
+# Windows a `cargo-win.cmd` line keeps its own front.
+# Owner: docs/goal/architecture/build-compile-cache.md § The boundary's scope and
+# what OFF means, decision (6), part (ii).
+#
+# Found on PATH with no front named (a PATH copied out of a grant): says so once
+# and runs the real cargo plain — never a decision of its own.
+set -euo pipefail
+here="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
+PATH="$(printf '%s\n' "$PATH" | tr ':' '\n' | { grep -vxF "$here" || true; } | paste -sd: -)"
+export PATH
+if [ -z "${FAUNA_CARGO_FRONT:-}" ] || [ -z "${FAUNA_CARGO_FRONT_PYTHON:-}" ]; then
+    echo "[cargo-shim] no front named (FAUNA_CARGO_FRONT / FAUNA_CARGO_FRONT_PYTHON unset): cargo runs plain" >&2
+    exec cargo "$@"
+fi
+exec "$FAUNA_CARGO_FRONT_PYTHON" "$FAUNA_CARGO_FRONT" --held -- cargo "$@"

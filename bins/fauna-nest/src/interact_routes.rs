@@ -39,20 +39,35 @@ pub(crate) struct InteractOutcome {
     pub counts: Option<fauna_protocol::posts::PostEngagementCounts>,
 }
 
-/// Read the post's counters straight after the act. Best-effort by design: the
-/// counters are a display nicety, so a read failure degrades to `None` (the
-/// client keeps rendering what it had) rather than failing an interaction that
-/// already succeeded.
-async fn counts_after_act(
+/// Read a local post's counters for the calling actor — the one read the
+/// post-act reply and the single-post read `fauna.posts.get` both serve.
+/// Best-effort by design: the counters are a display nicety, so a read failure
+/// degrades to `None` (the client keeps rendering what it had) rather than
+/// failing an interaction or a read that already succeeded. The per-emoji
+/// reaction tally rides along for the calling actor, read as the feed's
+/// viewer-state pass reads it (`feed.md` § Layout & flow → *Reaction posts
+/// count and paint*, ruling 5); a tally read failure serves the four counts
+/// without it. Which rows the nest counts at all is the caller's question.
+pub(crate) async fn post_counts_best_effort(
     state: &Arc<AppState>,
+    actor: &[u8; 32],
     post_id_bytes: &[u8; 32],
 ) -> Option<fauna_protocol::posts::PostEngagementCounts> {
     let c = state.db.get_engagement_counts(post_id_bytes).await.ok()?;
+    let reactions = state
+        .db
+        .get_reaction_tally(post_id_bytes, Some(actor))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("post counts reaction tally: {e}");
+            Vec::new()
+        });
     Some(fauna_protocol::posts::PostEngagementCounts {
         like_count: c.like_count,
         reply_count: c.reply_count,
         repost_count: c.repost_count,
         quote_count: c.quote_count,
+        reactions,
         extra: std::collections::BTreeMap::new(),
     })
 }
@@ -70,11 +85,12 @@ fn bridged_ack_carries_counts(action: &str) -> bool {
 #[cfg(any(feature = "activitypub", feature = "nostr"))]
 async fn local_row_ack_counts(
     state: &Arc<AppState>,
+    actor: &[u8; 32],
     action: &str,
     post_id_bytes: &[u8; 32],
 ) -> Option<fauna_protocol::posts::PostEngagementCounts> {
     if bridged_ack_carries_counts(action) {
-        counts_after_act(state, post_id_bytes).await
+        post_counts_best_effort(state, actor, post_id_bytes).await
     } else {
         None
     }
@@ -255,7 +271,7 @@ pub(crate) async fn interact_with_post_core(
                     Ok(InteractOutcome {
                         source: source.clone(),
                         result: json!({ "ok": true }),
-                        counts: counts_after_act(state, &post_id_bytes).await,
+                        counts: post_counts_best_effort(state, &actor, &post_id_bytes).await,
                     })
                 }
                 "unlike" => {
@@ -267,6 +283,46 @@ pub(crate) async fn interact_with_post_core(
                         &fauna_core::data::ContentHash::from_digest_raw(post_id_bytes),
                         "like",
                     );
+                    // A post-carried like (`feed.md` § Layout & flow →
+                    // *Reaction posts count and paint*, ruling 1): the key's
+                    // row names the caller's own `Upvote` post, so withdraw
+                    // that post through the ordinary deletion path — which
+                    // reverses the row and the counter once — and no like
+                    // stands on the wire that its actor took back.
+                    if let Ok(Some(Some(carrier))) = state
+                        .db
+                        .get_engagement_event_data(&like_event.digest())
+                        .await
+                        && let Ok(carrier) = <[u8; 32]>::try_from(carrier.as_slice())
+                    {
+                        let tombstone = fauna_core::data::Tombstone {
+                            author: fauna_core::identity::ActorId(actor),
+                            post_id: fauna_core::data::PostId::from_digest_dag_cbor(carrier),
+                            created_at: fauna_core::data::Timestamp::now(),
+                        };
+                        match crate::routes::delete_post_core(
+                            state,
+                            actor,
+                            &tombstone,
+                            carrier,
+                            crate::routes::RenderSite::Now,
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(crate::routes::PostDeleteError::NotAuthor) => {
+                                return Err(ApiError::forbidden(
+                                    "the like is carried by a post the caller did not author",
+                                ));
+                            }
+                            Err(crate::routes::PostDeleteError::Internal(msg)) => {
+                                return Err(ApiError::internal(msg));
+                            }
+                        }
+                        // The delete's own reversal removed the row only if it
+                        // still named the carrier; a stale row (the carrier
+                        // already gone) falls through to the plain delete.
+                    }
                     match state.db.delete_engagement_event(&like_event.digest()).await {
                         Ok(true) => {
                             if let Err(e) = state
@@ -283,7 +339,7 @@ pub(crate) async fn interact_with_post_core(
                     Ok(InteractOutcome {
                         source: source.clone(),
                         result: json!({ "ok": true }),
-                        counts: counts_after_act(state, &post_id_bytes).await,
+                        counts: post_counts_best_effort(state, &actor, &post_id_bytes).await,
                     })
                 }
                 // `unrepost` removes the caller's own repost *post* —
@@ -383,7 +439,7 @@ pub(crate) async fn interact_with_post_core(
                         "target_post_id": post_id_hex,
                         "source": source,
                     }),
-                    counts: counts_after_act(state, &post_id_bytes).await,
+                    counts: post_counts_best_effort(state, &actor, &post_id_bytes).await,
                 }),
             }
         }
@@ -421,7 +477,7 @@ pub(crate) async fn interact_with_post_core(
             Ok(InteractOutcome {
                 source: "nostr".into(),
                 result,
-                counts: local_row_ack_counts(state, action, &post_id_bytes).await,
+                counts: local_row_ack_counts(state, &actor, action, &post_id_bytes).await,
             })
         }
         #[cfg(feature = "activitypub")]
@@ -438,7 +494,7 @@ pub(crate) async fn interact_with_post_core(
             Ok(InteractOutcome {
                 source: "activitypub".into(),
                 result,
-                counts: local_row_ack_counts(state, action, &post_id_bytes).await,
+                counts: local_row_ack_counts(state, &actor, action, &post_id_bytes).await,
             })
         }
         "email" => Err(ApiError::bad_request(

@@ -29,11 +29,11 @@ use fauna_mls::engine::MlsEngine;
 use fauna_mls::types::ChannelId;
 
 use crate::backend::{
-    BackendError, ConversationsPush, ConversationsRpc, CustodyCeremonySink, FolderCustodySink,
-    FolderGateSink, GroupReceptionKeys, InboundMailSource, InboxDrainSource, IndexBuilderLauncher,
-    MlsSyncLauncher, OutboundMailSink, PeerAnchorSweepLauncher, RoomCeremonyRpc,
-    RoomGenerationReader, RoomRosterReader, RoomRosterReporter, RoomSeams, SchedulingSink,
-    SelfAddress, ShareEndpointsSink, SuccessionWitness,
+    ArchiveSignalSink, BackendError, ConversationsPush, ConversationsRpc, CustodyCeremonySink,
+    FolderCustodySink, FolderGateSink, GroupReceptionKeys, InboundMailSource, InboxDrainSource,
+    IndexBuilderLauncher, MlsSyncLauncher, OutboundMailSink, PeerAnchorSweepLauncher,
+    RoomCeremonyRpc, RoomGenerationReader, RoomRosterReader, RoomRosterReporter, RoomSeams,
+    SchedulingSink, SelfAddress, ShareEndpointsSink, SuccessionWitness,
 };
 // `ConvPushEvent` is used only by the native receive loop (`start_receive_loop`);
 // the wasm SPA drives its own loop. `WelcomeChannelKind` is also the dispatch key
@@ -224,6 +224,12 @@ pub struct ConversationsSession {
     /// Native-only; the wasm build spawns no tasks and has no tokio.
     #[cfg(not(target_arch = "wasm32"))]
     closed: tokio::sync::watch::Sender<()>,
+    /// The manager's identity change, as seen from this session's build
+    /// ([`ConversationsManager::clear_for_identity_change`]): subscribed in
+    /// [`Self::from_manager`], so a change after the build — even one before
+    /// [`Self::start_receive_loop`] — retires this session's loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    identity: tokio::sync::watch::Receiver<u64>,
     /// The moderation **local-detection store** this session owns — the encrypted-mode
     /// social-content moderation signal (`docs/goal/behavior/moderation.md` § Layout &
     /// flow: the moderation queue is the union of the server obligation rows and the
@@ -297,6 +303,11 @@ pub enum ReceiveLoopExit {
     /// The engine this loop drives was retired — a hand-over
     /// ([`crate::backends::fauna_mls::EngineRetired`]).
     EngineRetired,
+    /// The account this session serves was signed out or switched away from
+    /// ([`ConversationsManager::clear_for_identity_change`]) — its writer
+    /// retired by the same drop, before it can sweep that account's channels
+    /// into the manager the next account reads.
+    IdentityChanged,
     /// A receive pass panicked. The loop is **not** restarted in place: the
     /// panic's broken invariant is unknowable — `std` locks the pass held are
     /// poisoned and the MLS engine's in-memory group state may be half-applied —
@@ -318,6 +329,7 @@ impl ReceiveLoopExit {
         match self {
             Self::SessionClosed => "closed",
             Self::EngineRetired => "retired",
+            Self::IdentityChanged => "identity-changed",
             Self::Panicked => "panicked",
         }
     }
@@ -327,6 +339,7 @@ impl ReceiveLoopExit {
             Self::SessionClosed => 1,
             Self::EngineRetired => 2,
             Self::Panicked => 3,
+            Self::IdentityChanged => 4,
         }
     }
 
@@ -335,6 +348,7 @@ impl ReceiveLoopExit {
             1 => Some(Self::SessionClosed),
             2 => Some(Self::EngineRetired),
             3 => Some(Self::Panicked),
+            4 => Some(Self::IdentityChanged),
             _ => None,
         }
     }
@@ -531,6 +545,8 @@ impl ConversationsSession {
         // when a Rust-native app keeps one manager singleton across logins.
         let local_detections = Arc::new(Mutex::new(LocalDetectionStore::new()));
         manager.set_local_detection_store(Arc::clone(&local_detections));
+        #[cfg(not(target_arch = "wasm32"))]
+        let identity = manager.session_generation_watch();
         Arc::new(Self {
             manager,
             fauna_mls,
@@ -552,6 +568,8 @@ impl ConversationsSession {
             bridged_cursor: Arc::default(),
             #[cfg(not(target_arch = "wasm32"))]
             closed: tokio::sync::watch::channel(()).0,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity,
             local_detections,
             receive_cycles: Arc::new(ReceiveCycles::default()),
             #[cfg(not(target_arch = "wasm32"))]
@@ -967,6 +985,47 @@ impl ConversationsSession {
         self.fauna_mls
             .send_share_endpoints(channel_hex, bytes)
             .await
+    }
+
+    /// Register the archive-link ingest seam ([`ArchiveSignalSink`] —
+    /// `archive-import.md` § Linking and merging (phase two), ruling 2). The
+    /// same priority-#2 pass-through: the glue wires the archive-import
+    /// machine's `link` module at login, beside the custody sink, so this
+    /// crate keeps no archive semantics. Unset is a supported state — every
+    /// signal is skipped, tallied, and repeated by its sender's next round.
+    pub fn set_archive_signal_sink(&self, sink: Arc<dyn ArchiveSignalSink>) {
+        self.fauna_mls.set_archive_signal_sink(sink);
+    }
+
+    /// The pair channel (hex) an archive-link signal to `contact` rides: the
+    /// existing two-member chat channel with them, or one bootstrapped with
+    /// nothing posted, whose thread stays unlisted until a chat message
+    /// arrives. See `fauna_mls::archive_channel_for`, which owns the full
+    /// statement.
+    pub async fn archive_channel_for(
+        &self,
+        contact: fauna_core::identity::ActorId,
+        peer_domain: Option<String>,
+    ) -> Result<String, BackendError> {
+        crate::backends::fauna_mls::archive_channel_for(
+            &self.fauna_mls,
+            &self.manager,
+            contact,
+            peer_domain,
+        )
+        .await
+    }
+
+    /// Post one archive-link signal (the verbatim `ArchiveSignal` bytes) to a
+    /// pair channel [`Self::archive_channel_for`] named — never a bubble on
+    /// either side. ⚠ **Not Commit-free**, as every door here; see
+    /// `FaunaMlsBackend::send_archive_signal`.
+    pub async fn send_archive_signal(
+        &self,
+        channel_hex: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), BackendError> {
+        self.fauna_mls.send_archive_signal(channel_hex, bytes).await
     }
 
     /// Post one custody-ceremony payload (the verbatim
@@ -1388,6 +1447,14 @@ impl ConversationsSession {
     /// own state object rather than re-deriving the counts in Kotlin.
     pub fn mls_folded_commits_json(&self) -> String {
         crate::state_json::mls_folded_commits_json(&self.backend()).to_string()
+    }
+
+    /// This session's `mls_bound_channels` observable, JSON-encoded (a sorted
+    /// array of channel hex ids) — the UniFFI twin of
+    /// [`crate::state_json::mls_bound_channels_json`], the same passthrough
+    /// shape as [`Self::mls_folded_commits_json`].
+    pub fn mls_bound_channels_json(&self) -> String {
+        crate::state_json::mls_bound_channels_json(&self.backend()).to_string()
     }
 }
 
@@ -2102,6 +2169,7 @@ impl ConversationsSession {
         // A's store held by A's own zombie (`account-scoping.md` § Implementation
         // status → the `tui (in-memory)` ledger row).
         let mut closed = self.closed();
+        let mut identity = self.identity.clone();
 
         // The hand-over signal ([`crate::backends::fauna_mls::EngineRetired`]),
         // the second of this loop's two exits. `closed` above covers "my holder
@@ -2525,6 +2593,10 @@ impl ConversationsSession {
                 if retired.is_retired() {
                     return ReceiveLoopExit::EngineRetired;
                 }
+                // `Err` is the manager gone, which ends this loop too.
+                if identity.has_changed().unwrap_or(true) {
+                    return ReceiveLoopExit::IdentityChanged;
+                }
                 tokio::select! {
                     _ = closed.wait() => {
                         return ReceiveLoopExit::SessionClosed;
@@ -2534,6 +2606,11 @@ impl ConversationsSession {
                     // never performs.
                     _ = retired.wait() => {
                         return ReceiveLoopExit::EngineRetired;
+                    }
+                    // The sign-out's drop: the next account must not inherit
+                    // a sweep of this one's channels.
+                    _ = identity.changed() => {
+                        return ReceiveLoopExit::IdentityChanged;
                     }
                     _ = ticker.tick() => {
                         // The missed-push / disconnected-window backstop.

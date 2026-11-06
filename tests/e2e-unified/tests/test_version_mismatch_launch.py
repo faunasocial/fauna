@@ -25,7 +25,7 @@ rejects the *connect handshake*, so the launch silent challenge is what fires):
 2. Pre-seed the app's file-backed credential store with a throwaway identity +
    the degraded nest's URL BEFORE launch, so the launch machine hydrates and runs
    the silent challenge against it (the authenticated-relaunch path) — case 1 of
-   ``apps/fauna-linux/src/main.rs`` (identity + nest_url →
+   ``apps/fauna-linux/src/lib.rs`` (identity + nest_url →
    ``launch_silent_challenge_flow``), and ``App::route_locked_store`` →
    ``launch::start`` on tui (``apps/fauna-tui/src/app.rs``). On apple the same
    seeded store is what ``checkKeychainOnLaunch`` hydrates before it runs the
@@ -472,6 +472,9 @@ def signed_in_on_dedicated_nest(request, app, nest_mode, tmp_path_factory):
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("upgrades-never-lose-data")
 def test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface(
     signed_in_on_dedicated_nest,

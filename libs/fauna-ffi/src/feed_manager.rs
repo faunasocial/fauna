@@ -62,6 +62,13 @@ impl FfiFeedManager {
             inner: Arc::new(inner),
         })
     }
+
+    /// The wrapped manager, for the factory's seam wiring
+    /// (`archive_import::wire_archive_comments`).
+    #[cfg_attr(not(feature = "archive-import"), allow(dead_code))]
+    pub(crate) fn inner(&self) -> &FeedManager<Arc<NestClient>> {
+        &self.inner
+    }
 }
 
 // ── Synchronous surface ──────────────────────────────────────────────────────
@@ -192,6 +199,19 @@ impl FfiFeedManager {
         self.inner.refresh_feeds().await;
     }
 
+    /// Re-read the folded archive comments (`archive-import.md` § What each
+    /// category becomes → *Placement under the owner's own post*) onto
+    /// `PostSummary.archive_comments`, then notify — called on every visit to
+    /// the feed, so an import finished since login folds without a re-login
+    /// (tui's `feed::refresh_archive_comments`). A no-op when the factory
+    /// registered no source; a failed read keeps what the last read folded.
+    pub async fn refresh_archive_comments(&self) -> Result<(), FfiError> {
+        self.inner
+            .refresh_archive_comments()
+            .await
+            .map_err(|e| crate::general_err(format!("read the archive comments: {e}")))
+    }
+
     /// Refresh the subscribed bridge-feed list (`fauna.bridges.feeds.list`) — the
     /// `bridge-feed-unsubscribe-button` rows. Called once on entering the page;
     /// subscribe/unsubscribe refresh it.
@@ -244,6 +264,20 @@ impl FfiFeedManager {
     /// Mirrors `select_feed(None)` = local; sets `snapshot().trending_selected`.
     pub async fn select_trending_feed(&self) {
         self.inner.select_trending_feed().await;
+    }
+
+    /// Select the imported-posts selection for one archive platform
+    /// (`feed.md` § State & data shape → *The imported-posts selection*): the
+    /// own actor's posts whose origin platform is `token`. Sets
+    /// `snapshot().imported_selected`.
+    pub async fn select_imported(&self, token: String) {
+        self.inner.select_imported(token).await;
+    }
+
+    /// Leave the imported-posts selection for the local feed
+    /// (`feed-imported-clear`).
+    pub async fn clear_imported(&self) {
+        self.inner.clear_imported().await;
     }
 
     /// Update the search term and **re-query** the selected feed
@@ -589,6 +623,20 @@ impl FfiFeedManager {
     pub async fn like(&self, post_id: String) -> Result<(), FfiError> {
         self.inner
             .like(post_id)
+            .await
+            .map_err(|e| FfiError::General { msg: e })
+    }
+
+    /// React / un-react with `emoji` (`post-reaction-pill`) — one verb, toggle
+    /// semantics off the target row's group `viewer_react_id` (`feed.md`
+    /// § Layout & flow → *Reaction posts count and paint*, ruling 4): absent →
+    /// composes the caller's wordless `Reference::React` post; present →
+    /// deletes it. The tally is read back from the nest, never guessed. A
+    /// bridged post, or one the loaded window cannot answer for, is refused
+    /// and nothing is composed.
+    pub async fn react(&self, post_id: String, emoji: String) -> Result<(), FfiError> {
+        self.inner
+            .react(post_id, emoji)
             .await
             .map_err(|e| FfiError::General { msg: e })
     }
@@ -1166,6 +1214,23 @@ impl FfiCueTracker {
     pub fn drain_all(&self, wall_now_ms: u64) -> Vec<CueObservation> {
         self.lock().drain_all(wall_now_ms)
     }
+
+    /// An inline player's reading on `post_id`'s media, both in one unit (a
+    /// shell passes `CMTime` seconds as-is): the tracker keeps the peak until
+    /// the post's exposure is emitted, so the shell passes
+    /// `media_played_pm: None` and keeps no maximum of its own. See
+    /// [`fauna_feed::CueTracker::note_played`].
+    pub fn note_played(&self, post_id: String, position: f64, duration: f64) {
+        self.lock().note_played(&post_id, position, duration);
+    }
+
+    /// Whether `post_id`'s inline player is engaged — `true` on activation
+    /// (the tap, loading included) and on play/resume, `false` on pause, end,
+    /// error or teardown. An engaged media row is attended whatever its
+    /// visible fraction. See [`fauna_feed::CueTracker::note_playing`].
+    pub fn note_playing(&self, post_id: String, playing: bool) {
+        self.lock().note_playing(&post_id, playing);
+    }
 }
 
 // ── The engagement-cue test clock (test-helpers) ─────────────────────────────
@@ -1303,6 +1368,17 @@ impl FfiFeedManager {
             .set_cue_rollup_for_test(content_ids)
             .await
             .map_err(|e| FfiError::General { msg: e })
+    }
+
+    /// The live engagement-cue engine's verdict for `content_id`, and whether
+    /// it has hydrated from the nest yet — the JSON `{hydrated, verdict}`
+    /// (`verdict` kebab-case or null), the same reply linux's and web's
+    /// `feed_cue_verdict_for_test` carry: how a second seat witnesses that it
+    /// starts from the rollup the first collected. See
+    /// [`fauna_feed::FeedManager::cue_verdict_for_test`].
+    pub fn cue_verdict_for_test(&self, content_id: String) -> String {
+        let (hydrated, verdict) = self.inner.cue_verdict_for_test(&content_id);
+        serde_json::json!({ "hydrated": hydrated, "verdict": verdict }).to_string()
     }
 
     /// Arm the one-shot hold on the NEXT reload (`feed_hold_next_reload`). See
@@ -1457,6 +1533,25 @@ mod tests {
         assert_eq!(snap.selected_feed, None);
         assert!(!snap.trending_selected);
         assert_eq!(snap.author_selected, None);
+    }
+
+    /// The cue-verdict face crosses as the `{hydrated, verdict}` JSON every
+    /// app's `feed_cue_verdict_for_test` publishes: a manager that never
+    /// hydrated reads as not hydrated and holds no verdict.
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn the_cue_verdict_face_crosses_as_the_shared_json() {
+        let nest = NestClient::new(
+            "wss://127.0.0.1:0/ws".into(),
+            ActorKeypair::from_secret([3u8; 32]),
+        );
+        let mgr = FfiFeedManager::new(nest, [3u8; 32]);
+        let read: serde_json::Value =
+            serde_json::from_str(&mgr.cue_verdict_for_test("aa".into())).unwrap();
+        assert_eq!(
+            read,
+            serde_json::json!({ "hydrated": false, "verdict": null })
+        );
     }
 
     /// The author window face hands back a SEPARATE manager selecting the

@@ -150,6 +150,39 @@ fn try_open_with_candidates(
     None
 }
 
+/// A request carrying real calendar and card pairs — the halves an app
+/// derives from its MSEK (`owner-key-material.md` § Path B-sibling-5 / -6) and
+/// every registration carries as required fields. Struct-update the mail
+/// fields over it.
+fn dav_pairs() -> ProvisionRecipientMlsPubkeyRequest {
+    use fauna_mls::wrapped_blob::{
+        DavKind, derive_dav_root, derive_recipient_dav_hpke_keypair,
+        derive_recipient_dav_xwing_keypair,
+    };
+    let msek = [0x3Cu8; 32];
+    let pair = |kind: DavKind| {
+        let root = derive_dav_root(kind, &msek);
+        (
+            ByteBuf::from(derive_recipient_dav_hpke_keypair(kind, &root).1.to_vec()),
+            ByteBuf::from(
+                derive_recipient_dav_xwing_keypair(kind, &root)
+                    .public
+                    .mlkem_encaps_key()
+                    .to_vec(),
+            ),
+        )
+    };
+    let (calendar_pubkey, calendar_mlkem_ek) = pair(DavKind::Calendar);
+    let (card_pubkey, card_mlkem_ek) = pair(DavKind::Card);
+    ProvisionRecipientMlsPubkeyRequest {
+        calendar_pubkey,
+        calendar_mlkem_ek,
+        card_pubkey,
+        card_mlkem_ek,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn windowed_mail_grant_opens_in_window_dark_past_held_epochs_renew_extends() {
     let (base, state, _tmp) = start_epoch_nest().await;
@@ -206,6 +239,7 @@ async fn windowed_mail_grant_opens_in_window_dark_past_held_epochs_renew_extends
                 .to_vec(),
         ),
         epoch_keys: Some(epoch_keys),
+        ..dav_pairs()
     };
     let reply: ProvisionReply = nest
         .request(

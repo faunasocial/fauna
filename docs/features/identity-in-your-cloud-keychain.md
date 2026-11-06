@@ -14,15 +14,14 @@ absences:
 
 ## What a user gets
 
-On iPhone and Mac you can choose to keep a copy of your identity in your
-iCloud Keychain as well as on the device. It is off until you turn it on, so
-by default your identity stays on the one device. With it on, a new iPhone or
-Mac restored from your Apple account, with iCloud Keychain on, finds your
-identity when the app first starts there. Turning it off removes the copy
-from iCloud Keychain and nothing more: every device that already has your
-identity keeps it. Adding a device and your recovery kit remain the main ways
-to have your identity in more than one place; the cloud copy is an extra you
-can opt into.
+On iPhone and Mac you can choose to keep a copy of your identity in your iCloud
+Keychain as well as on the device. It is off until you turn it on, so by default
+your identity stays out of iCloud. With it on, a new iPhone or Mac restored from
+your Apple account, with iCloud Keychain on, finds your identity when the app
+first starts there. Turning it off removes the copy from iCloud Keychain and
+nothing more: every device that already has your identity keeps it. Adding a
+device and your recovery kit remain the main ways to have your identity in more
+than one place; the cloud copy is an extra you can opt into.
 
 ## Coverage contract
 
@@ -31,9 +30,10 @@ Stamped 2026-10-21 at 77c610862e.
 1. [app] You can choose to have your identity key kept in your device account's cloud keychain as well, and it is off until you turn it on — `docs/goal/architecture/apps/common.md` § Credential storage
    - `tests/e2e-unified/tests/test_icloud_backup_toggle.py::test_icloud_backup_toggle_defaults_off_and_round_trips`
 2. [app] Turning that copy off on one device never removes your identity from another device that has it on — `docs/goal/architecture/apps/common.md` § Credential storage
-   - (none)
+   - `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_turning_the_copy_off_keeps_this_devices_working_copy`
 3. [app] A new iPhone or Mac restored from your Apple account, with iCloud Keychain on, finds your identity when the app first starts there — `docs/goal/architecture/apps/common.md` § Credential storage
-   - (none)
+   - `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_a_restored_device_finds_the_identity_from_the_circle_copy`
+   - `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device`
 
 ## Status
 
@@ -43,14 +43,15 @@ Stamped 2026-10-21 at 77c610862e.
 | web | — absent | |
 | linux | — absent | |
 | windows | — absent | |
-| macos |  no run recorded | |
-| ios |  no run recorded | |
+| macos | ⚠ partial | 0.1.5-dev+3f9f2b95 standalone |
+| ios | ✅ full | 0.1.5-dev+2b3552a6 standalone |
 | android | — absent | |
 | tui | — absent | |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_icloud_backup_toggle.py::test_icloud_backup_toggle_defaults_off_and_round_trips` | — |
-| 2 | app | (none) | — |
-| 3 | app | (none) | — |
+| 1 | app | `tests/e2e-unified/tests/test_icloud_backup_toggle.py::test_icloud_backup_toggle_defaults_off_and_round_trips` | macos (macos): passed, ios (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_turning_the_copy_off_keeps_this_devices_working_copy` | ios (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_a_restored_device_finds_the_identity_from_the_circle_copy` | ios (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_icloud_backup_copy.py::test_the_copy_carries_the_identity_and_a_restored_device_is_a_new_device` | ios (macos): passed |
 <!-- features-render:end -->

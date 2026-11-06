@@ -43,6 +43,7 @@
     hexFull,
     shortId,
     accountRestoreFromCustodian,
+    accountEscrowHolders,
   } from '#lib/wasm';
   import { readRestoreAnswer, restoreRunningText, type RestoreReading } from '#lib/nests-custody-restore';
   import { sessionDevicesMachine } from '#lib/devices-session';
@@ -214,6 +215,12 @@
   // badge (`participant-escrow-holder-badge`) is a declared absence here
   // (`nests.md` § Implementation status today).
   let custodyNestRows = $state<CustodyHolderRowView[]>([]);
+  // Who holds this account's generation-key escrow, as lowercase hex
+  // (`accountEscrowHolders`) — the escrow-holder role badge (participants.md
+  // § The participant model → Roles) goes on the nest row whose identity is
+  // one of them: derived from recorded escrow receipts, never asserted by the
+  // nest itself.
+  let escrowHolders = $state<string[]>([]);
   let restoreOutcome = $state<TrustRestoreOutcome | null>(null);
   let forwardView = $state<ForwardQueueView | null>(null);
   let loading = $state(true);
@@ -316,6 +323,11 @@
     // already painted rather than telling the owner their custodians are gone.
     const facet = await custodyFacetLoad(session.machine, id.secretHex);
     if (facet) custodyNestRows = facet.rows.filter((r) => r.custodian_nest_url !== null);
+    // The escrow-holder badge's source, read beside the custody fold (linux's
+    // shape): the account store's recorded escrow receipts. A null read keeps
+    // the badges already painted.
+    const holders = await accountEscrowHolders();
+    if (holders) escrowHolders = holders;
   }
 
   // Restore from a custodian nest (`nests.md` § Trust facet — restore from a
@@ -447,6 +459,10 @@
     rehydrate().catch((e) => {
       error = e instanceof Error ? e.message : String(e);
     });
+    // The custody load is per-visit too: it fetches the receipts custodian nests
+    // staged, and a device alone on this account gets no store-change notice
+    // when one lands there.
+    void loadCustodyNests().catch(() => {});
   });
 
   // The store-change notice (`#lib/store-change`): the custody facet folds
@@ -748,6 +764,9 @@
           <div class="nest-meta">
             <span class="mono" data-testid={IDS.NESTS_ITEM_NEST_ID}>{shortNestId(p.nest_id)}</span>
           </div>
+          {#if escrowHolders.includes(p.nest_id.toLowerCase())}
+            <span class="caption escrow-badge" data-testid={IDS.PARTICIPANT_ESCROW_HOLDER_BADGE}>{t.nests.escrow_holder_badge}</span>
+          {/if}
           {#if !p.is_home}
             <div class="nest-meta">
               <span class="caption">{t.nests.capabilities_label}</span>

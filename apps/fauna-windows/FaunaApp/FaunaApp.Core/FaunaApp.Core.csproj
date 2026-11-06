@@ -18,21 +18,29 @@
   <PropertyGroup Condition="'$(FaunaE2eAgent)'=='true'">
     <DefineConstants>$(DefineConstants);FAUNA_E2E_AGENT</DefineConstants>
   </PropertyGroup>
+  <!-- ── The store flavors' one property per member — see FaunaApp.csproj.
+       `/p:FaunaStoreSafe=true` sets both; it comes first so the groups below
+       read the members after it. ── -->
+  <PropertyGroup Condition="'$(FaunaStoreSafe)'=='true'">
+    <FaunaExcisePayments>true</FaunaExcisePayments>
+    <FaunaExciseP2pShare>true</FaunaExciseP2pShare>
+  </PropertyGroup>
   <!-- ── The `payments` compile condition — see FaunaApp.csproj for the full
        rationale. Mirrored here for the same reason FAUNA_E2E_AGENT is: MSBuild
        does not propagate a DefineConstants added in a referencing project, and
        Core is where the whole payments glue lives (INestRpcClient's payments
        region, NestRpcClient's FfiPaymentsClient calls, ProfileViewModel's §4/§5
-       state, SubscriptionsSettingsViewModel). `/p:FaunaStoreSafe=true` is a
-       GLOBAL property, so it does reach this project through the reference. ── -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+       state, SubscriptionsSettingsViewModel). `/p:FaunaExcisePayments=true` (or
+       `/p:FaunaStoreSafe=true`) is a GLOBAL property, so it does reach this
+       project through the reference. ── -->
+  <PropertyGroup Condition="'$(FaunaExcisePayments)'!='true'">
     <DefineConstants>$(DefineConstants);PAYMENTS</DefineConstants>
   </PropertyGroup>
   <!-- ── The `p2p-share` condition — its own define because `p2p-share` is its own
        registry member, not a subset of `payments` (one condition per member,
        dynamic-features.md § Platform-family surface excision). Core carries the
        offline-share ceremony doors (INestRpcClient / NestRpcClient). ── -->
-  <PropertyGroup Condition="'$(FaunaStoreSafe)'!='true'">
+  <PropertyGroup Condition="'$(FaunaExciseP2pShare)'!='true'">
     <DefineConstants>$(DefineConstants);P2P_SHARE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>

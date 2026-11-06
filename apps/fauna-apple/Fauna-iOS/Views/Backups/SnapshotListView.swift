@@ -18,16 +18,22 @@ struct SnapshotListView: View {
                     get: { vm.selectedFolder ?? "" },
                     set: { selectFolder($0) }
                 )) {
-                    ForEach(folderNames, id: \.self) { Text($0) }
+                    // Tagged by the row's `name` (a kind entry's label key, the
+                    // locale-stable selection value), painted by its label.
+                    ForEach(vm.snapshot?.folders ?? [], id: \.name) { row in
+                        Text(BackupsMachineVM.folderLabel(row)).tag(row.name)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .accessibilityIdentifier(Ids.backupFolderSelector)
-                // Driver `select("backup-folder-selector", <name>)` runs the same
-                // selection path the Picker's binding does; `value` reads the
-                // machine's current selection. One Entry (read + select).
+                // Driver `select("backup-folder-selector", <key or label>)` runs
+                // the same selection path the Picker's binding does; `value` reads
+                // the machine's current selection. One Entry (read + select).
                 .automationSelect(Ids.backupFolderSelector,
-                                  value: { vm.selectedFolder }) { name in
+                                  value: { vm.selectedFolder },
+                                  options: { vm.folderOptionLabels },
+                                  optionKeys: { vm.folderOptionKeys }) { name in
                     selectFolder(name)
                 }
 
@@ -58,7 +64,7 @@ struct SnapshotListView: View {
                 // reliably above the greedy snapshot List AND the apple-bridge
                 // `safeTap` can scroll to reach the divergence banner / inline modal.
                 ScrollView {
-                    RestoreSectionView()
+                    RestoreSectionView(snapshotsChanged: vm.snapshotsChanged)
                         .padding(.horizontal)
                 }
                 .frame(maxHeight: 400)
@@ -278,13 +284,6 @@ struct SnapshotListView: View {
                 }
             }
         }
-    }
-
-    /// The actor's real folders, from the machine's owner-scoped
-    /// `fauna.folders.list` read — never a hardcoded universe, and never the
-    /// `fauna.sync.backup_status` read the ratified selector source replaced.
-    private var folderNames: [String] {
-        (vm.snapshot?.folders ?? []).map(\.name)
     }
 
     /// See `BackupsMachineVM.selectFolder` — the equality guard inside it is

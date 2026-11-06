@@ -12,7 +12,7 @@
   // every gesture back through the machine. No folder / conflict HTTP and no
   // wizard logic in the SPA (priority #2). Behaviour + IDs:
   // docs/goal/ui/folders.md, ui.yaml § folders.
-  import { identity } from '#lib/store';
+  import { identity, reconnectTick } from '#lib/store';
   import { nodeUrl } from '#lib/api';
   import {
     ensureWasm,
@@ -45,6 +45,7 @@
     toggledPlaceRow,
     followPublicFolder,
     unfollowPublicFolder,
+    createRowReadErrors,
     type NestPlaceEdit,
     type VersionRetentionEdit,
   } from '#lib/wasm-folders';
@@ -87,7 +88,7 @@
     type WizardDevice,
     type WizardSnapshot,
   } from '#lib/devices-machine';
-  import type { DevicesMachine } from '../../../static/fauna_wasm_folders.js';
+  import type { DevicesMachine, RowReadErrors } from '../../../static/fauna_wasm_folders.js';
   import { IDS } from '#lib/generated/uiIds';
 
   // The page-level error surface is the Settings shell's shared MessageBanner
@@ -103,6 +104,7 @@
   // state they write); it must not outlive an in-place identity change.
   const poll = createActorScopedPoll(15000);
   let unsubPush: (() => void) | null = null;
+  let unsubReconnect: (() => void) | null = null;
   let unlisten: (() => void) | null = null;
 
   // UI-only view state (no domain state — that all lives in the machine).
@@ -237,17 +239,18 @@
   // WsRpcClient `foldersActorMembers` face (not carried on the keyless
   // DevicesMachine snapshot), keyed by set name. Eager-loaded for shared sets
   // (`mls_group_id != null`) so a collapsed row can paint its `folder-shared-badge`;
-  // lazy-loaded on first expand otherwise. A read failure degrades to an empty
-  // roster WITHOUT the page error (a missing badge is not a user-facing error — and
-  // the affordances e2e asserts no error after expanding an unshared set).
+  // lazy-loaded on first expand otherwise. A read failure on an open row degrades
+  // to an empty roster and says so (`rowReads`, below); the eager badge read stays
+  // silent, a missing badge not being a user-facing error, and nothing would re-run
+  // it to retire the text. An unshared set answers an empty roster, not an error.
   let actorMembers = $state<Record<string, FolderActorMember[]>>({});
   // Per-set device activity (fauna.folders.devices), keyed by set name — the
   // ordinary sync change signal, distinct from FolderSummary's
   // cached_snapshot_count/cached_total_bytes (snapshot-only). Lazy-loaded on
   // first expand, and re-fetched on every fauna.sync.changed push so the
   // remote-change nudge is actually visible (file-sync.md § Implementation
-  // status today). A read failure degrades to an empty list, same as
-  // actorMembers.
+  // status today). A read failure degrades to an empty list and says so, same
+  // as actorMembers.
   let deviceActivity = $state<Record<string, FolderDevice[]>>({});
   // Per-set DEVICE roster (fauna.folders.members.list), projected into the rows
   // the device-place editor paints (`placeRows` — the one shared flags-first
@@ -255,7 +258,7 @@
   // like deviceActivity, and RE-READ after every place write: the row must show
   // the nest's answer, not an optimistic local flip
   // (ui/folders.md § Implementation status today). A read failure degrades to an
-  // empty list — the section simply does not paint.
+  // empty list and says so, so the section does not paint.
   let placeRowsBySet = $state<Record<string, PlaceRow[]>>({});
   // Per-set destination places (docs/goal/behavior/backup-destinations.md §
   // Ordinary-folder coverage), keyed by set name — which of the owner's
@@ -263,7 +266,7 @@
   // Lazy-loaded on first expand, same shape as deviceActivity; every
   // attach/detach re-fetches rather than flipping locally (non-optimistic,
   // matching linux's `populate_folder_destinations`). A read failure degrades
-  // to an empty list — an absent section is not a user-facing error.
+  // to an empty list and says so.
   let destinationPlaces = $state<Record<string, FolderDestinationPlace[]>>({});
   // The `folder-destination-attach-select` value per set, keyed by set name —
   // defaults to the first attachable destination so a single-destination
@@ -302,13 +305,44 @@
     return (actorMembers[fsName] ?? []).filter((m) => m.role === 'member');
   }
 
-  async function loadActorMembers(fsName: string): Promise<void> {
+  // The rows' reads, by wire kind: the `rowReads` key and, as on the other
+  // apps, the banner's prefix.
+  const READ_ACTORS = 'fauna.folders.members.list_actors';
+  const READ_PLACES = 'fauna.folders.members.list';
+  const READ_ACTIVITY = 'fauna.folders.devices';
+  const READ_DESTINATIONS = 'fauna.backup.destination.list';
+
+  // What each open row's reads put on the banner (folders.md § Errors & edge
+  // cases): a read's next good answer retires exactly its own text, so an error
+  // painted while the nest was away leaves when it answers again.
+  let rowReads: RowReadErrors | null = null;
+
+  function rowReadAnswered(read: string, set: string): void {
+    if (rowReads?.retire(read, set, error)) error = '';
+  }
+
+  function rowReadFailed(read: string, set: string, e: unknown): void {
+    const text = `${read}: ${detail(e)}`;
+    error = text;
+    rowReads?.put(read, set, text);
+  }
+
+  /** The open row closes: nothing will re-run its reads to retire their text. */
+  function closeExpandedRow(): void {
+    const set = expandedFs;
+    expandedFs = null;
+    if (set && rowReads?.retireSet(set, error)) error = '';
+  }
+
+  async function loadActorMembers(fsName: string, badgeOnly = false): Promise<void> {
     const id = $identity;
     if (!id) return;
     try {
       actorMembers[fsName] = await foldersActorMembers(id.secretHex, fsName);
-    } catch {
+      if (!badgeOnly) rowReadAnswered(READ_ACTORS, fsName);
+    } catch (e: unknown) {
       actorMembers[fsName] = [];
+      if (!badgeOnly) rowReadFailed(READ_ACTORS, fsName, e);
     }
   }
 
@@ -317,8 +351,10 @@
     if (!id) return;
     try {
       deviceActivity[fsName] = await foldersDevices(id.secretHex, fsName);
-    } catch {
+      rowReadAnswered(READ_ACTIVITY, fsName);
+    } catch (e: unknown) {
       deviceActivity[fsName] = [];
+      rowReadFailed(READ_ACTIVITY, fsName, e);
     }
   }
 
@@ -330,8 +366,10 @@
         await foldersMembers(id.secretHex, name),
         snap?.devices ?? [],
       );
-    } catch {
+      rowReadAnswered(READ_PLACES, name);
+    } catch (e: unknown) {
       placeRowsBySet[name] = [];
+      rowReadFailed(READ_PLACES, name, e);
     }
   }
 
@@ -340,9 +378,23 @@
     if (!id) return;
     try {
       destinationPlaces[fs.name] = await foldersDestinationsList(id.secretHex, fs.id);
-    } catch {
+      rowReadAnswered(READ_DESTINATIONS, fs.name);
+    } catch (e: unknown) {
       destinationPlaces[fs.name] = [];
+      rowReadFailed(READ_DESTINATIONS, fs.name, e);
     }
+  }
+
+  /** Every read of the row on screen, whose good answers retire what they put
+   *  up: the `devices` surface's row half (`transport.md` § Which surfaces a
+   *  push invalidates). */
+  function rereadExpandedRow(): void {
+    const fs = snap?.folders.find((f) => f.name === expandedFs);
+    if (!fs) return;
+    void loadActorMembers(fs.name);
+    void loadDeviceActivity(fs.name);
+    void loadPlaceRows(fs.name);
+    void loadDestinationPlaces(fs);
   }
 
   /** Attach `destinationId` (the select's current value — resolved at the call
@@ -396,7 +448,7 @@
   function loadSharedBadges(): void {
     for (const fs of snap?.folders ?? []) {
       if (fs.mls_group_id && actorMembers[fs.name] === undefined) {
-        void loadActorMembers(fs.name);
+        void loadActorMembers(fs.name, true);
       }
     }
   }
@@ -405,7 +457,9 @@
     if (!machine) return;
     const raw = machine.snapshotJson();
     snap = raw ? (JSON.parse(raw) as DevicesSnapshot) : null;
-    error = snap?.error ? resolveLocalized(snap.error) : '';
+    // A row read's text outlives a tick: its own next answer retires it.
+    const machineError = snap?.error ? resolveLocalized(snap.error) : '';
+    if (machineError || !rowReads?.owns(error)) error = machineError;
     loadSharedBadges();
   }
 
@@ -436,6 +490,7 @@
       const session = await sessionDevicesMachine(id.secretHex, () => applySnapshot());
       machine = session.machine;
       unlisten = session.unlisten;
+      rowReads = createRowReadErrors();
       // Paint the last-known rows now; the refresh below brings them current.
       applySnapshot();
       ready = true;
@@ -448,7 +503,7 @@
       // An identity change landing during the awaits above already ran the drop;
       // starting the poll now would resurrect the outgoing actor's loop.
       poll.start(sameActor, () => {
-        machine?.refresh();
+        machine?.resync();
         void loadPendingShares();
       });
       // Remote-change nudge (file-sync.md § Remote-change nudge): the nest
@@ -467,14 +522,28 @@
       // exact-match check never did (the 15s poll above already backstops it,
       // so this closes the gap sooner rather than closing a break).
       unsubPush = onPushEvent((kind) => {
-        if (!staleSurfacesForPushKind(kind).media) return;
-        machine?.refresh();
+        const stale = staleSurfacesForPushKind(kind);
+        if (!stale.media && !stale.devices) return;
+        machine?.resync();
         void loadPendingShares();
         // Same blanket-refresh shape as the reads above: no per-set filtering
         // in the push payload reaches this callback, so re-fetch whichever
         // row is currently expanded — the only one with device activity
         // visible on screen right now.
-        if (expandedFs) void loadDeviceActivity(expandedFs);
+        if (stale.devices) rereadExpandedRow();
+        else if (expandedFs) void loadDeviceActivity(expandedFs);
+      });
+      // A socket gap swallows pushes and fails the open row's reads, so a
+      // reconnect is the `devices` surface's other edge. `reconnectTick` fires
+      // once on subscribe: skip that seed value.
+      let firstTick = true;
+      unsubReconnect = reconnectTick.subscribe(() => {
+        if (firstTick) {
+          firstTick = false;
+          return;
+        }
+        machine?.resync();
+        rereadExpandedRow();
       });
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
@@ -487,7 +556,7 @@
   // re-read's own body at once; the default conflict policy (a sync-prefs
   // state entry) re-reads too, keeping its painted value on a failure.
   const unsubStoreChange = onStoreChange(() => {
-    machine?.refresh();
+    machine?.resync();
     void loadPendingShares();
     const id = $identity;
     if (id) void rereadDefaultConflictPolicy(id.secretHex);
@@ -496,6 +565,7 @@
   onDestroy(() => {
     poll.dispose();
     unsubPush?.();
+    unsubReconnect?.();
     unsubStoreChange();
     unlisten?.();
   });
@@ -510,7 +580,7 @@
     if (!machine || !name) return;
     await machine.deleteFolder(name);
     pendingDeleteFs = null;
-    expandedFs = null;
+    closeExpandedRow();
     applySnapshot();
   }
 
@@ -667,9 +737,10 @@
 
   function toggleExpand(fs: FolderSummary): void {
     if (expandedFs === fs.name) {
-      expandedFs = null;
+      closeExpandedRow();
       return;
     }
+    closeExpandedRow();
     expandedFs = fs.name;
     editIncludePaths = joinPathsField(fs.include_paths);
     editExcludePaths = joinPathsField(fs.exclude_paths);
@@ -1083,7 +1154,7 @@
     await machine.setFolderPaths(name, include, exclude);
     // Collapse so the next expand reads back the nest-authoritative, stored
     // paths from the refreshed snapshot (proves the round-trip).
-    expandedFs = null;
+    closeExpandedRow();
     savingPaths = false;
     applySnapshot();
   }
@@ -1113,7 +1184,7 @@
     );
     // Collapse so the next expand re-seeds from the refreshed snapshot — the
     // round-trip proof, and the only way a cleared knob visibly comes back blank.
-    expandedFs = null;
+    closeExpandedRow();
     savingNestPlace = false;
     applySnapshot();
   }

@@ -26,7 +26,7 @@ import urllib.request
 import pytest
 
 from actions.api_actor import ApiActor
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID
+from helpers.e2e_session import e2e_login_device_id
 from i18n.strings import S
 
 pytestmark = pytest.mark.tier_3
@@ -121,7 +121,7 @@ def _login_to_bridges_nest(app, bridges_nest, request):
                 "secret_hex": secret_hex,
                 "handle": "e2e-user",
                 "actor_id": user["actor_id_hex"],
-                "device_id": E2E_LOGIN_DEVICE_ID,
+                "device_id": e2e_login_device_id(app),
             },
             "nav": {"stack": [{"view": "feed"}]},
         })
@@ -604,9 +604,9 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from conftest import _login_app_as
     from helpers.waiting import wait_until
+    from helpers.admin_wire import admit_adult
     from helpers.family_wire import (
         DEFAULT_WARD_POLICY,
-        admit_adult_directly,
         admit_ward,
     )
     from tests.test_family import _unique_suffix
@@ -614,7 +614,7 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
     app.bridges.require_source_request_supported()
 
     suffix = _unique_suffix()
-    guardian = admit_adult_directly(bridges_nest, f"feedask-guardian-{suffix}")
+    guardian = admit_adult(bridges_nest, f"feedask-guardian-{suffix}")
     ward = admit_ward(bridges_nest, guardian, f"feedask-ward-{suffix}")
     ward_actor = bytes.fromhex(ward["actor_id_hex"])
 
@@ -817,6 +817,12 @@ def _leave_and_return(app) -> None:
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+# android's `SettingRow` Switch carries `bridge-setting[<key>]` and saves in
+# `onCheckedChange`; marked, not yet run on a device.
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("bridges")
 def test_a_card_setting_saves_on_change(bridges_logged_in_app, bridges_nest):
     """Flip `auto_accept_follows` on the linked card: the nest has it at once,
@@ -857,6 +863,12 @@ def test_a_card_setting_saves_on_change(bridges_logged_in_app, bridges_nest):
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+# android's `SettingRow` paints the toggle and the committed number field under
+# `bridge-setting[<key>]`; marked, not yet run on a device.
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("bridges")
 def test_the_search_toggle_and_cap_persist(bridges_logged_in_app, bridges_nest):
     """Turn `show_in_search` off and set `limit_posts_in_search` on the card:
@@ -910,6 +922,12 @@ FOLLOW_ACTOR_URI = "https://alice.invalid/users/alice"
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+# android's follow rows read `followDisplay` (nickname, else id) under
+# `bridge-follow-item`; marked, not yet run on a device.
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("bridges")
 def test_a_follow_keeps_its_nickname(bridges_logged_in_app, bridges_nest):
     """Follow by the actor URI with the nickname "Alice": the row reads
@@ -948,6 +966,12 @@ def test_a_follow_keeps_its_nickname(bridges_logged_in_app, bridges_nest):
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+# android's card paints `<label>: <display>` under `bridge-identity`; marked,
+# not yet run on a device.
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("bridges")
 def test_the_card_shows_the_linked_identity(bridges_logged_in_app, bridges_nest):
     """`bridge-identity` reads the identity the nest reports for the linked

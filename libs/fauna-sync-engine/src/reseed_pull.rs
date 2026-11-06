@@ -23,9 +23,10 @@ use fauna_core::file_download::FileDownloadKeys;
 
 use crate::reseed::BlobPushSink;
 
+pub use fauna_client_backup::reseed::PullBackPreflight;
 pub use fauna_client_sync::reseed_pull::{
     CUSTODY_UNADDRESSABLE, FolderNaming, NestPullBack, PullBackDestination, PullBackTarget,
-    fetch_as_is, folder_names_from_coverage,
+    PulledPath, folder_names_from_coverage, preflight, pull_as_is,
 };
 
 /// The leg as the driver runs it natively: [`NestPullBack`] over the owner's
@@ -69,6 +70,78 @@ pub struct NativePullBack<'a> {
     /// The account's folder custody: each restored folder's target set is
     /// prepared in it, and the re-homed rows are signed under its nonces.
     pub folder_keys: std::sync::Arc<dyn fauna_client_folders::FolderKeyStore>,
+    /// This device's audit store: its generation pins at the destination
+    /// are what the preflight judges each ledger against
+    /// (`client-device-custodian.md` § *What the pull-back trusts the holder
+    /// for*). `None` is a face that has no store to hand (the original ffi
+    /// entry): every ledger reads unvouched.
+    pub audit: Option<&'a dyn fauna_client_backup::audit::AuditStateStore>,
+    /// The preflight whose lines the owner confirmed ([`pull_back_preflight`]).
+    /// `None` is an app whose confirm does not show the lines yet: the run
+    /// takes a fresh preflight whole — the ledger walk applies, but the owner
+    /// was shown nothing.
+    pub accepted: Option<PullBackPreflight>,
+}
+
+/// Everything the pull-back's preflight needs from a native app — a read of
+/// the surviving copy against this device's own record, no write anywhere.
+#[cfg(feature = "pull-back")]
+pub struct NativePullBackPreflight<'a> {
+    /// The owner's identity seed: the destination session's keypair and the
+    /// `NestBackupKey` the ledgers open under derive from it.
+    pub owner_secret: [u8; 32],
+    /// The surviving nest-kind destination row the owner pressed.
+    pub destination: &'a BackupDestination,
+    /// This device's audit store — its pins at the destination.
+    pub audit: &'a dyn fauna_client_backup::audit::AuditStateStore,
+}
+
+/// **The pull-back's preflight, hosted** — the press on a nest-kind row's
+/// `backup-destination-reseed-button`, before the confirm opens
+/// (`ui/backups.md` § Restore after losing the nest): connect to the
+/// destination as the owner, held to its enrolled identity, and run the shared
+/// [`preflight`] under the owner's `NestBackupKey` against this device's pins.
+/// The confirm renders `fauna_client_backup::reseed::preflight_lines` of the
+/// answer and hands it back as [`NativePullBack::accepted`]. `Err` is a failed
+/// gesture: no confirm opens.
+#[cfg(feature = "pull-back")]
+pub async fn pull_back_preflight(
+    input: NativePullBackPreflight<'_>,
+) -> std::result::Result<PullBackPreflight, String> {
+    use std::sync::Arc;
+
+    use fauna_core::crypto::NestBackupKey;
+    use fauna_core::data::DestinationKind;
+    use fauna_core::identity::ActorKeypair;
+
+    let destination = input.destination;
+    if !matches!(destination.kind_view(), DestinationKind::Nest { .. }) {
+        return Err(format!(
+            "{} is not a nest, so there is no copy to pull back over the network",
+            destination.destination_id
+        ));
+    }
+    let pins = fauna_client_backup::reseed::DevicePins::from_store(
+        input.audit,
+        &destination.destination_id,
+    )?;
+    let dest =
+        crate::recovery::connect_enrolled_destination(destination, input.owner_secret, "restore")
+            .await?;
+    let seam = PullSeam {
+        client: fauna_client_backup::BackupClient::new(Arc::clone(&dest)),
+    };
+    let fetcher = fauna_client::ForeignPublicChunkFetcher::new(&destination.destination_nest_url);
+    preflight(
+        &PullBackDestination {
+            seam: &seam,
+            bytes: &fetcher,
+        },
+        &FileDownloadKeys::owner(NestBackupKey::derive(&input.owner_secret)),
+        ActorKeypair::from_secret(input.owner_secret).actor_id().0,
+        &pins,
+    )
+    .await
 }
 
 /// How a pull-back ended once the shared driver reached its verdict.
@@ -116,6 +189,12 @@ pub async fn pull_back_from_destination(
             destination.destination_id
         ));
     }
+    let pins = match input.audit {
+        Some(audit) => {
+            fauna_client_backup::reseed::DevicePins::from_store(audit, &destination.destination_id)?
+        }
+        None => fauna_client_backup::reseed::DevicePins::default(),
+    };
     let keypair = ActorKeypair::from_secret(input.owner_secret);
     let target = input.target;
     let target_url = target.nest_url();
@@ -160,26 +239,30 @@ pub async fn pull_back_from_destination(
     let bytes = crate::nest_client::SyncClient::new(Arc::clone(target.auth()), &input.device_id);
     let sink = crate::reseed::SyncClientSink { client: &bytes };
     let custody: Arc<dyn fauna_client_folders::FolderKeyReader> = input.folder_keys.clone();
-    let leg = NativePullBackLeg(
-        NestPullBack::new(
-            PullBackDestination {
-                seam: &seam,
-                bytes: &fetcher,
-            },
-            PullBackTarget {
-                bytes: &sink,
-                nest: &*target,
-                device_id: hex::encode(input.device_id),
-            },
-            keypair.actor_id().0,
-        )
-        .with_folder_names(names)
-        .with_rehome_signing(fauna_client_folders::record_signing(
-            Arc::clone(&target),
-            &keypair,
-            custody,
-        )),
-    );
+    let mut pull = NestPullBack::new(
+        PullBackDestination {
+            seam: &seam,
+            bytes: &fetcher,
+        },
+        PullBackTarget {
+            bytes: &sink,
+            nest: &*target,
+            device_id: hex::encode(input.device_id),
+        },
+        keypair.actor_id().0,
+        FileDownloadKeys::owner(NestBackupKey::derive(&input.owner_secret)),
+    )
+    .with_pins(pins)
+    .with_folder_names(names)
+    .with_rehome_signing(fauna_client_folders::record_signing(
+        Arc::clone(&target),
+        &keypair,
+        custody,
+    ));
+    if let Some(accepted) = input.accepted {
+        pull = pull.with_acceptance(accepted);
+    }
+    let leg = NativePullBackLeg(pull);
 
     let nest_key = NestBackupKey::derive(&input.owner_secret);
     let outcome = fauna_client_backup::reseed::run_reseed(
@@ -196,6 +279,11 @@ pub async fn pull_back_from_destination(
         Arc::clone(&dest),
         input.store,
         input.owner_secret,
+        restored_nest_id,
+        // The box this ceremony replaced: the one whose list holds the row,
+        // read under this nest's identity above (a rebuild re-presents its
+        // identity; a rotated box's list is re-filed under the new one, and its
+        // seat is the carry's). A seat held by any other box is refused.
         restored_nest_id,
         destination,
         &outcome,

@@ -19,12 +19,20 @@ public record MediaItem(
     /// <summary>Folder-relative path. Not shown as a column; used as the row's
     /// <c>AutomationProperties.Name</c> so FlaUI can count <c>media-item</c> rows.</summary>
     string Path,
-    /// <summary>The readable folder this item belongs to (the
-    /// <c>media-folder-filter</c> key). Not a column — it is the scope half of the
-    /// <c>(folder, path)</c> pair <c>MediaMachine::{file_versions, restore_version}</c>
-    /// take, so <c>media-item-detail</c> can list this file's versions
-    /// (file-sync.md § File Versions — a bare path_hash is ambiguous across sets).</summary>
+    /// <summary>The name of the readable folder this item belongs to — a label two
+    /// sets can share. Not a column; the <c>(folder, path)</c> pair the gestures that
+    /// still take a name use (<c>restore_version</c>, <c>download_file</c>,
+    /// <c>open_share_create</c>).</summary>
     string Folder,
+    /// <summary>The <c>media-folder-filter</c> value that scopes to this item's own
+    /// set — an own set's name, a shared set's <c>local:&lt;id&gt;</c>
+    /// (<c>MediaItemSummary.filterValue</c>, minted in shared Rust). What the detail
+    /// surface hands <c>MediaMachine::{file_versions, delete}</c>, so a shared set's
+    /// item lists and tombstones in ITS row, never in an own set of the same name
+    /// (media.md § Encryption at rest → <i>The filter and the upload target address
+    /// the row</i>, (b); file-sync.md § File Versions — a bare path_hash is ambiguous
+    /// across sets).</summary>
+    string FilterValue,
     ulong SizeBytes,
     ulong UpdatedAt,
     /// <summary>

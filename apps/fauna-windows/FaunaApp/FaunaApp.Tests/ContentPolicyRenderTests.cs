@@ -21,7 +21,7 @@ namespace FaunaApp.Tests;
 /// both live in the WinUI app assembly this project deliberately does not
 /// reference — see <see cref="DmArm"/>.</para>
 ///
-/// <para>Guardian floors trigger at a hard-coded 500‰
+/// <para>A guardian category rule at the default level triggers at 500‰
 /// (<c>GUARDIAN_FLOOR_TRIGGER_PERMILLE</c>) independent of the viewer's own
 /// slider, so every fixture below uses 900‰ ("well above") / 100‰ ("well below")
 /// and never sits on that boundary.</para>
@@ -42,11 +42,11 @@ public class ContentPolicyRenderTests : IDisposable
     public ContentPolicyRenderTests() => ContentPolicyCache.Reset();
     public void Dispose() => ContentPolicyCache.Reset();
 
-    /// <summary>A guardian who blocks the <c>nsfw</c> category and inherits the
+    /// <summary>A guardian who blocks the <c>nsfw</c> category and writes no rule for the
     /// rest — the supervised-ward shape.</summary>
     private static void GuardianBlocksNsfw() =>
         ContentPolicyCache.SetGuardianPolicy(
-            FfiContentPolicyFixture.Make(nsfw: "block"));
+            FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block));
 
     /// <summary>The every-user half (moderation.md § Categories &amp; enforcement
     /// item 1): the viewer's OWN spam/phishing thresholds, no guardian involved.
@@ -67,7 +67,7 @@ public class ContentPolicyRenderTests : IDisposable
     // ── Feed post-card (FeedViewModel.FeedPostItem + FeedPage.xaml gates) ──
 
     /// <summary>
-    /// A guardian <c>block</c> floor over the post's labels paints the
+    /// A guardian <c>block</c> rule over the post's labels paints the
     /// <c>content-policy-blocked-notice</c> IN PLACE OF the body: the normal-content
     /// gate is off and the blocked gate is on. The notice naming the policy — rather
     /// than the post vanishing — is the ward-transparency claim (family-safety.md
@@ -191,7 +191,7 @@ public class ContentPolicyRenderTests : IDisposable
     /// <summary>
     /// The verdict is part of <c>ContentEquals</c>, so a policy that hydrates AFTER
     /// the feed's first paint makes the affected row compare unequal and rebuild on
-    /// the next observer tick — i.e. the floor actually reaches already-rendered
+    /// the next observer tick — i.e. the guardian rule actually reaches already-rendered
     /// posts. Without this the reconcile would keep the un-enforced row forever.
     /// </summary>
     [Fact]
@@ -285,7 +285,7 @@ public class ContentPolicyRenderTests : IDisposable
     /// <b>The ordering claim on the live DM composition:</b> a message that is BOTH
     /// guardian-blocked AND muted renders the blocked notice, never the muted
     /// placeholder — the muted arm carries a reveal button, so taking it would hand
-    /// the viewer a way past the guardian's floor.
+    /// the viewer a way past the guardian's rule.
     /// </summary>
     [Fact]
     public void Dm_Block_OutranksTheMutedArm()

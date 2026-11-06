@@ -45,6 +45,7 @@ public sealed partial class SettingsShellPage : Page
             [SettingsNavigation.Web] = SubWeb,
             [SettingsNavigation.Subscriptions] = SubSubscriptions,
             [SettingsNavigation.Devices] = SubDevices,
+            [SettingsNavigation.Sessions] = SubSessions,
             [SettingsNavigation.Folders] = SubFolders,
             [SettingsNavigation.Nostr] = SubNostr,
             [SettingsNavigation.Atproto] = SubAtproto,
@@ -53,6 +54,7 @@ public sealed partial class SettingsShellPage : Page
             [SettingsNavigation.MailSpam] = SubMailSpam,
             [SettingsNavigation.MailExport] = SubMailExport,
             [SettingsNavigation.MailImport] = SubMailImport,
+            [SettingsNavigation.ArchiveImport] = SubArchiveImport,
             [SettingsNavigation.MailLists] = SubMailLists,
             [SettingsNavigation.MailListMembers] = SubMailListMembers,
             [SettingsNavigation.LinkedNests] = SubLinkedNests,
@@ -78,18 +80,25 @@ public sealed partial class SettingsShellPage : Page
     /// <summary>
     /// Give every rail row its <c>settings-nav-row[&lt;key&gt;]</c> id (ui.yaml
     /// <c>navigation.sub_page_nav_rows</c>) so a test reaches any Settings sub-page
-    /// by clicking the rail. The Account row stays untagged: its older id,
-    /// <c>account-settings-link</c>, lives on the Status page.
+    /// by clicking the rail — but the Account row, which keeps its older id
+    /// <c>account-settings-link</c> (ui.yaml <c>keeps_older_id</c>), the one element
+    /// carrying it, so a click on it opens Settings → Account.
     /// </summary>
     private void TagRailRows()
     {
         foreach (var entry in SettingsNav.MenuItems)
         {
-            if (entry is NavigationViewItem { Tag: string tag } item && tag != SettingsNavigation.Account)
+            if (entry is not NavigationViewItem { Tag: string tag } item)
             {
-                var key = PageKeyByTag.TryGetValue(tag, out var mapped) ? mapped : tag;
-                AutomationProperties.SetAutomationId(item, $"{FaunaApp.UiIds.Ids.SettingsNavRow}[{key}]");
+                continue;
             }
+            if (tag == SettingsNavigation.Account)
+            {
+                AutomationProperties.SetAutomationId(item, FaunaApp.UiIds.Ids.AccountSettingsLink);
+                continue;
+            }
+            var key = PageKeyByTag.TryGetValue(tag, out var mapped) ? mapped : tag;
+            AutomationProperties.SetAutomationId(item, $"{FaunaApp.UiIds.Ids.SettingsNavRow}[{key}]");
         }
     }
 
@@ -107,6 +116,15 @@ public sealed partial class SettingsShellPage : Page
         {
             _clients = clients;
         }
+    }
+
+    /// <summary>Leaving the settings shell — for another tab, or with MainPage on a
+    /// sign-out — ends the sub-page in its inner frame, which otherwise never gets an
+    /// <c>OnNavigatedFrom</c> of its own (<see cref="NestedFrame"/>).</summary>
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        NestedFrame.EndPage(SettingsContentFrame, nameof(SettingsShellPage));
+        base.OnNavigatedFrom(e);
     }
 
     private void Page_Loaded(object sender, RoutedEventArgs e)
@@ -199,6 +217,7 @@ public sealed partial class SettingsShellPage : Page
         SettingsNavigation.Web => typeof(SettingsWebPage),
         SettingsNavigation.Subscriptions => typeof(SettingsSubscriptionsPage),
         SettingsNavigation.Devices => typeof(DevicesPage),
+        SettingsNavigation.Sessions => typeof(SettingsSessionsPage),
         SettingsNavigation.Folders => typeof(FoldersPage),
         SettingsNavigation.Nostr => typeof(NostrPage),
         SettingsNavigation.Atproto => typeof(AtprotoPage),
@@ -207,6 +226,7 @@ public sealed partial class SettingsShellPage : Page
         SettingsNavigation.MailSpam => typeof(SettingsMailSpamPage),
         SettingsNavigation.MailExport => typeof(SettingsMailExportPage),
         SettingsNavigation.MailImport => typeof(SettingsMailImportPage),
+        SettingsNavigation.ArchiveImport => typeof(ArchiveImportPage),
         SettingsNavigation.MailLists => typeof(SettingsMailListsPage),
         SettingsNavigation.MailListMembers => typeof(SettingsMailListMembersPage),
         SettingsNavigation.LinkedNests => typeof(SettingsLinkedNestsPage),

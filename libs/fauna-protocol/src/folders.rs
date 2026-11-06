@@ -4401,19 +4401,36 @@ pub const MAX_DEPOSIT_BYTES: usize = 1 << 20;
 /// filesystem component limit, so adoption never has to truncate.
 pub const MAX_DEPOSIT_NAME_BYTES: usize = 255;
 
-/// Is `name` a file name a deposit may carry: one non-empty path component —
-/// no separator of either platform, no NUL or other control character, not
-/// `.` or `..` — of at most [`MAX_DEPOSIT_NAME_BYTES`]? Shared by both doors
-/// and by adoption, which lands the item under exactly this name.
+/// The longest media type a deposit may carry, in bytes. The type is sealed
+/// into the item's header, so an unbounded one would park bytes no quota
+/// counted; a media type is far shorter (RFC 6838 §4.2 caps each half at 127).
+pub const MAX_DEPOSIT_CONTENT_TYPE_BYTES: usize = 255;
+
+/// Is `name` a file name a deposit may carry: one non-empty path component of
+/// at most [`MAX_DEPOSIT_NAME_BYTES`] that every seat's platform lands as an
+/// ordinary visible file? Refused: a separator of either platform, a NUL or
+/// other control character; a leading `.` (`.`, `..`, and a dotfile such as
+/// `.envrc` — hidden, never uploaded by the scanner, and a stage's shape);
+/// and the names Windows will not create — a forbidden character
+/// (`fauna_core::windows_names::WINDOWS_FORBIDDEN_NAME_CHARS`, the `:` of a
+/// drive prefix like `C:x` among them), a reserved device name with any
+/// extension (`CON`, `nul.txt`, `COM1`), or a trailing `.` or space, which a
+/// Windows seat's guarded apply would refuse, leaving the item parked for
+/// ever. Shared by both doors and by adoption, which lands the item under
+/// exactly this name.
 #[must_use]
 pub fn is_deposit_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_DEPOSIT_NAME_BYTES
-        && name != "."
-        && name != ".."
-        && !name
-            .chars()
-            .any(|c| c == '/' || c == '\\' || c.is_control())
+        && !name.starts_with('.')
+        && !name.ends_with(['.', ' '])
+        && !fauna_core::windows_names::is_windows_device_name(name)
+        && !name.chars().any(|c| {
+            c == '/'
+                || c == '\\'
+                || c.is_control()
+                || fauna_core::windows_names::WINDOWS_FORBIDDEN_NAME_CHARS.contains(&c)
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -4428,6 +4445,12 @@ pub struct FolderDepositRequest {
     pub content_type: String,
     /// The file's bytes, at most [`MAX_DEPOSIT_BYTES`].
     pub body: ByteBuf,
+    /// The depositor's Ed25519 signature over the [`DepositStatement`] of this
+    /// deposit, under its attested writer key (`folder-deposit.md` § The
+    /// depositor signs, the owner's device verifies). Additive 2026-11-05;
+    /// empty = unsigned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sig: ByteBuf,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -4458,12 +4481,114 @@ pub struct DepositEnvelope {
     /// How many sealed [`DepositPart`]s carry the body; `0` = `body` holds it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub parts: u32,
+    /// The depositor's attested Ed25519 writer key, as the nest saw it on the
+    /// caller's session — written by the nest, never named by the request, so
+    /// a principal cannot claim another's (`folder-deposit.md` § The
+    /// depositor signs, the owner's device verifies). Additive 2026-11-05.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub writer: Option<[u8; 32]>,
+    /// The depositor's signature over the item's [`DepositStatement`], under
+    /// `writer`. Additive 2026-11-05; empty = unsigned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sig: ByteBuf,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
+}
+
+/// The domain tag every [`DepositStatement`] begins with — NUL-terminated, so
+/// it is self-delimiting (the convention of `fauna_core::account_entry_crypto`'s
+/// in-seal signature).
+pub const DEPOSIT_STATEMENT_TAG: &[u8] = b"fauna.folder-deposit.v1\0";
+
+/// What a depositor signs: one deposit into one folder (`folder-deposit.md`
+/// § The depositor signs, the owner's device verifies, ruling 1). The bytes
+/// are a fixed layout, so a remote server in any language needs only BLAKE3
+/// and Ed25519 to produce them:
+///
+/// [`DEPOSIT_STATEMENT_TAG`] ∥ `folder_id` (8 bytes big-endian, two's
+/// complement) ∥ `len` (8 bytes big-endian) ∥ `hash` (BLAKE3 of the whole
+/// body, 32 bytes) ∥ BLAKE3(`name` UTF-8) ∥ BLAKE3(`content_type` UTF-8).
+///
+/// The variable fields are hashed, so none needs a length prefix. The nest
+/// verifies a deposit's signature under the caller's attested writer key; the
+/// owner's device rebuilds the statement from what it opened and verifies it
+/// again under the envelope's `writer`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepositStatement {
+    /// The folder's row id.
+    pub folder_id: i64,
+    /// The file's name, as the request carried it.
+    pub name: String,
+    /// The declared media type, as the request carried it (empty = unknown).
+    pub content_type: String,
+    /// The whole body's length in bytes.
+    pub len: u64,
+    /// BLAKE3 of the whole body.
+    pub hash: [u8; 32],
+}
+
+/// Why a [`DepositStatement`] signature was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DepositStatementError {
+    /// The deposit carried no signature.
+    #[error("deposit carries no signature")]
+    Missing,
+    /// The signature does not verify over the statement under the writer key
+    /// (a wrong length, a weak or malformed key, or a forgery).
+    #[error("deposit signature does not verify")]
+    BadSignature,
+}
+
+impl DepositStatement {
+    /// The statement over a body held whole — its length and BLAKE3 computed
+    /// here.
+    #[must_use]
+    pub fn for_body(folder_id: i64, name: &str, content_type: &str, body: &[u8]) -> Self {
+        Self {
+            folder_id,
+            name: name.to_string(),
+            content_type: content_type.to_string(),
+            len: body.len() as u64,
+            hash: *blake3::hash(body).as_bytes(),
+        }
+    }
+
+    /// The exact bytes signed (layout on [`DepositStatement`]).
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(DEPOSIT_STATEMENT_TAG.len() + 8 + 8 + 32 * 3);
+        out.extend_from_slice(DEPOSIT_STATEMENT_TAG);
+        out.extend_from_slice(&self.folder_id.to_be_bytes());
+        out.extend_from_slice(&self.len.to_be_bytes());
+        out.extend_from_slice(&self.hash);
+        out.extend_from_slice(blake3::hash(self.name.as_bytes()).as_bytes());
+        out.extend_from_slice(blake3::hash(self.content_type.as_bytes()).as_bytes());
+        out
+    }
+
+    /// Sign the statement with the depositor's writer key.
+    #[must_use]
+    pub fn sign(&self, key: &ed25519_dalek::SigningKey) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        key.sign(&self.signing_bytes()).to_bytes()
+    }
+
+    /// Does `sig` verify over this statement under `writer`? Strict
+    /// verification, weak keys refused (`fauna_core::identity::verify_detached`).
+    pub fn verify(&self, writer: &[u8; 32], sig: &[u8]) -> Result<(), DepositStatementError> {
+        if sig.is_empty() {
+            return Err(DepositStatementError::Missing);
+        }
+        if fauna_core::identity::verify_detached(writer, &self.signing_bytes(), sig) {
+            Ok(())
+        } else {
+            Err(DepositStatementError::BadSignature)
+        }
+    }
 }
 
 // ── deposits larger than one message: begin → part… → commit ───────────────
@@ -4535,6 +4660,15 @@ pub struct FolderDepositCommitRequest {
     /// How many parts the body has: exactly the indices `0..parts` must be
     /// staged.
     pub parts: u32,
+    /// BLAKE3 of the whole body — the [`DepositStatement`]'s `hash`, carried
+    /// because the nest cannot hash sealed parts (it sums their length).
+    /// Additive 2026-11-05; empty = unsigned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hash: ByteBuf,
+    /// The depositor's signature over the [`DepositStatement`] of the whole
+    /// deposit. Additive 2026-11-05; empty = unsigned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sig: ByteBuf,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -4637,7 +4771,15 @@ mod deposit_tests {
 
     #[test]
     fn a_deposit_name_is_one_plain_component() {
-        for good in ["report.pdf", "a", "näme with spaces.txt", ".hidden"] {
+        for good in [
+            "report.pdf",
+            "a",
+            "näme with spaces.txt",
+            "archive.tar.gz",
+            "console.log",
+            "COM10",
+            "a. b",
+        ] {
             assert!(is_deposit_name(good), "{good:?}");
         }
         let long = "x".repeat(MAX_DEPOSIT_NAME_BYTES + 1);
@@ -4650,6 +4792,23 @@ mod deposit_tests {
             "nul\0",
             "tab\tname",
             long.as_str(),
+            // A dotfile: hidden, and never uploaded by the scanner.
+            ".hidden",
+            ".envrc",
+            // Shapes a Windows seat's guarded apply refuses.
+            "C:x",
+            "file:stream",
+            "what?",
+            "a*b",
+            "a<b>",
+            "a|b",
+            "\"q\"",
+            "CON",
+            "nul.txt",
+            "Com1.log",
+            "LPT9",
+            "trailing.",
+            "trailing ",
         ] {
             assert!(!is_deposit_name(bad), "{bad:?}");
         }
@@ -4662,10 +4821,133 @@ mod deposit_tests {
             content_type: "application/pdf".into(),
             body: ByteBuf::from(b"%PDF".to_vec()),
             parts: 0,
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = crate::encode_canonical(&env).expect("encodes");
         let back: DepositEnvelope = crate::decode_strict(&bytes).expect("decodes");
         assert_eq!(back, env);
+    }
+
+    /// The writer and signature ride the envelope as byte strings and round-trip;
+    /// an envelope without them encodes as before (additive).
+    #[test]
+    fn a_signed_envelope_round_trips_and_an_unsigned_one_omits_the_fields() {
+        let unsigned = DepositEnvelope {
+            name: "a".into(),
+            ..Default::default()
+        };
+        let bytes = crate::encode_canonical(&unsigned).expect("encodes");
+        let value: crate::Value = crate::decode_strict(&bytes).expect("decodes");
+        let crate::Value::Map(map) = value else {
+            panic!("a map")
+        };
+        assert!(!map.contains_key("writer") && !map.contains_key("sig"));
+
+        let signed = DepositEnvelope {
+            name: "a".into(),
+            writer: Some([7u8; 32]),
+            sig: ByteBuf::from(vec![9u8; 64]),
+            ..Default::default()
+        };
+        let bytes = crate::encode_canonical(&signed).expect("encodes");
+        let back: DepositEnvelope = crate::decode_strict(&bytes).expect("decodes");
+        assert_eq!(back, signed);
+        let value: crate::Value = crate::decode_strict(&bytes).expect("decodes");
+        let crate::Value::Map(map) = value else {
+            panic!("a map")
+        };
+        assert_eq!(
+            map.get("writer"),
+            Some(&crate::Value::Bytes(vec![7u8; 32])),
+            "writer is a CBOR byte string"
+        );
+    }
+
+    fn statement() -> DepositStatement {
+        DepositStatement::for_body(-2, "report.pdf", "application/pdf", b"%PDF-1.7 hello")
+    }
+
+    /// The fixed layout, pinned to exact bytes: a remote depositor in any
+    /// language must produce these from the same inputs.
+    #[test]
+    fn the_statement_layout_is_pinned_to_golden_bytes() {
+        let st = statement();
+        let bytes = st.signing_bytes();
+        // Structure, field by field.
+        assert_eq!(&bytes[..24], b"fauna.folder-deposit.v1\0");
+        assert_eq!(
+            &bytes[24..32],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe]
+        );
+        assert_eq!(&bytes[32..40], &14u64.to_be_bytes());
+        assert_eq!(&bytes[40..72], blake3::hash(b"%PDF-1.7 hello").as_bytes());
+        assert_eq!(&bytes[72..104], blake3::hash(b"report.pdf").as_bytes());
+        assert_eq!(
+            &bytes[104..136],
+            blake3::hash(b"application/pdf").as_bytes()
+        );
+        assert_eq!(bytes.len(), 136);
+        // And whole, so a change to any hash input or order shows here.
+        assert_eq!(hex::encode(&bytes), GOLDEN_STATEMENT_HEX);
+    }
+
+    const GOLDEN_STATEMENT_HEX: &str = concat!(
+        "6661756e612e666f6c6465722d6465706f7369742e763100", // tag
+        "fffffffffffffffe",                                 // folder id -2
+        "000000000000000e",                                 // length 14
+        "0f07843928829ba286ef6763592bba1a5b80c3cca823f4a50d6dad9fee77b171", // BLAKE3(body)
+        "80d28b09433e9e4b7b8cca1c082a154fc2dbadaa81eced26db119dac53f8328e", // BLAKE3(name)
+        "0632ff855fbef6db5c6570a937522ba66b213ac1287a381d7460b88bbf53ee35", // BLAKE3(type)
+    );
+
+    #[test]
+    fn a_signed_statement_verifies_and_every_tampered_field_fails() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let writer = key.verifying_key().to_bytes();
+        let st = statement();
+        let sig = st.sign(&key);
+        assert_eq!(st.verify(&writer, &sig), Ok(()));
+
+        let tampered = [
+            DepositStatement {
+                folder_id: 3,
+                ..st.clone()
+            },
+            DepositStatement {
+                name: "report2.pdf".into(),
+                ..st.clone()
+            },
+            DepositStatement {
+                content_type: "text/plain".into(),
+                ..st.clone()
+            },
+            DepositStatement {
+                len: 15,
+                ..st.clone()
+            },
+            DepositStatement {
+                hash: [0u8; 32],
+                ..st.clone()
+            },
+        ];
+        for t in tampered {
+            assert_eq!(
+                t.verify(&writer, &sig),
+                Err(DepositStatementError::BadSignature),
+                "{t:?}"
+            );
+        }
+        let other = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            st.verify(&other, &sig),
+            Err(DepositStatementError::BadSignature)
+        );
+        assert_eq!(
+            st.verify(&writer, &sig[..63]),
+            Err(DepositStatementError::BadSignature)
+        );
+        assert_eq!(st.verify(&writer, &[]), Err(DepositStatementError::Missing));
     }
 }

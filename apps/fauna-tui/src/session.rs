@@ -93,8 +93,13 @@ pub fn install_disk_pin_store() {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
+    // On windows under e2e the child agent runs on its own `--data-dir`, so the
+    // store keeps a read replica where that agent reads (`transport-trust.md`
+    // § Pin custody across processes, *an isolated agent reads its app's
+    // replica*); `None` on unix, where the agent inherits this launch's home.
+    let replica = fauna_client_sync::agent_spawner::spawned_agent_pin_replica_dir();
     fauna_client::trust::install_pin_store(Arc::new(
-        fauna_client::cert_binding::DiskPinStore::open_in_dir(&dir),
+        fauna_client::cert_binding::DiskPinStore::open_in_dir_mirrored_to(&dir, replica.as_deref()),
     ));
 }
 
@@ -274,44 +279,39 @@ pub fn session_account_handle(app: &App) -> Option<String> {
 /// Stops when the watch's sender goes (the bearer source was dropped), when
 /// the UI channel closes, or when the bearer source starts minting for another
 /// actor — a launch machine outlives one session's account, and its next
-/// account's identity must never land on this one's registry row.
+/// account's identity must never land on this one's registry row. Both actor
+/// checks live in the one shared follower
+/// ([`NestClient::follow_self_identity`]), pinned in `fauna-client`.
 fn spawn_self_identity_follow(
     app: &App,
     client: &NestClient,
     actor_id: String,
     tx: &UnboundedSender<UiMessage>,
 ) {
-    let Some(mut identity) = client.subscribe_self_identity() else {
+    let Some(mut follower) = client.follow_self_identity() else {
         // Every session client tui builds (`NestClient::new`'s challenge mint,
         // or the launch machine's bearer) can say; a source that cannot is a
         // wiring fault, never a reason to dial.
         tracing::warn!("[session] the session client cannot say who it is signed in as");
         return;
     };
-    let bearer = client.auth().bearer();
     let registry = registry(app);
     let tx = tx.clone();
     tokio::spawn(async move {
-        loop {
-            if let Some(minted_for) = bearer.bearer_actor_id()
-                && fauna_core::hex32::encode(&minted_for) != actor_id
-            {
+        // The shared follower judges every value against the session's actor
+        // (`fauna_client::SelfIdentityFollower`) and ends on another's.
+        while let Some(minted) = follower.next().await {
+            if tx.is_closed() {
                 return;
             }
-            let current = identity.borrow_and_update().clone();
-            if let Some(minted) = current {
-                apply_self_identity(
-                    &registry,
-                    &actor_id,
-                    minted.handle,
-                    minted.domain,
-                    minted.tier,
-                    &tx,
-                );
-            }
-            if identity.changed().await.is_err() || tx.is_closed() {
-                return;
-            }
+            apply_self_identity(
+                &registry,
+                &actor_id,
+                minted.handle,
+                minted.domain,
+                minted.tier,
+                &tx,
+            );
         }
     });
 }
@@ -857,6 +857,7 @@ pub fn establish(
         attested_predecessors.actor_ids(),
         &predecessor_chain,
         succession_corpus,
+        registry(app),
     );
     // The conversations manager rides the same hook, then the real
     // `ConversationsSession` (MLS engine + `NestConversationsRpc` + the unified
@@ -898,6 +899,17 @@ pub fn establish(
     // which lands after login: it resolves this slot per payload.
     let runtime = app.settings.account_runtime.clone();
     let mail_store = app.settings.mail_store();
+    // The folded archive comments under the owner's imported posts ride the
+    // same archive-folder seam as the `Archive` rail just below.
+    if let Some(manager) = app.feed.manager.clone() {
+        crate::feed::wire_archive_comments(
+            &manager,
+            Arc::clone(&client),
+            secret,
+            runtime.clone(),
+            Arc::clone(&mail_store),
+        );
+    }
     crate::conversations::conv_backend::start_conversations_session(
         &mut app.conversations,
         Arc::clone(&client),
@@ -945,6 +957,9 @@ pub fn establish(
         nest_url,
         secret,
         app.settings.mail_store(),
+        // The archive links the conversations session just wired (phase two
+        // of archive import): the rows' link prompts read them.
+        app.conversations.archive_links.clone(),
         tx,
         app.session_generation,
     );
@@ -1266,6 +1281,10 @@ pub fn establish(
                 // Desktop: the per-OS constant. Only a sandboxed mobile shell
                 // supplies its own container.
                 store_container: None,
+                // The app default the engine host registers under too
+                // (`devices.md` § Device names): the ceremony's register-create
+                // names the machine's row with it.
+                device_label: Some(crate::sync_agent::DEVICE_LABEL.to_string()),
             },
             Arc::clone(&client),
             nest_url,
@@ -2030,10 +2049,9 @@ pub(crate) fn persist_confirmed_identity(
         fauna_client_accounts::persist_confirmed_identity(&sink.registry, secret_hex, sink.append)
     {
         tracing::error!("[onboarding] committing the confirmed identity: {e}");
-        machine.identity_commit_failed(add_refusal_line(
-            &e,
-            fauna_i18n::strings::onboarding::session_error::persist_successor,
-        ));
+        machine.identity_commit_failed(add_refusal_line(&e, |_| {
+            fauna_i18n::strings::onboarding::session_error::PERSIST_IDENTITY.to_string()
+        }));
     }
 }
 
@@ -3012,8 +3030,12 @@ pub fn sign_out(app: &mut App, reason: fauna_client_account_runtime::StopReason)
     // the handle's death) — but the SEAT must not outlive the session: rule 5
     // ties the listener to participation, and a signed-out session
     // participates in nothing. Dropping the state releases this side's Arc;
-    // the listener closes when the glue task's clone follows (≤ one pump
-    // tick). Clears the panel-bound ceremony seat by the same rule.
+    // the listener closes when the glue task's clone follows, which it lets go
+    // at the runtime's `closed()` event. Clears the panel-bound ceremony seat
+    // by the same rule. The seat's group feed — a second connection to the
+    // account store — is NOT left to those drops: the shared stop above
+    // releases it and waits its serving thread closed before the erase runs
+    // (`fauna_client_account_runtime::await_second_connections`).
     #[cfg(feature = "p2p-share")]
     {
         app.settings.offline_share = crate::offline_share::OfflineShareState::default();
@@ -4012,8 +4034,9 @@ pub(crate) mod tests {
         }
     }
 
-    fn minted(handle: &str) -> Option<fauna_nest_http::MintedIdentity> {
+    fn minted(actor_id: [u8; 32], handle: &str) -> Option<fauna_nest_http::MintedIdentity> {
         Some(fauna_nest_http::MintedIdentity {
+            actor_id,
             handle: handle.into(),
             domain: "nest.example".into(),
             tier: "free".into(),
@@ -4058,14 +4081,15 @@ pub(crate) mod tests {
         let my_hex = registry(&app)
             .add_account(&fauna_core::hex32::encode(me.secret_bytes()), None, None)
             .expect("my row");
+        let my_actor = me.actor_id().0;
         let mint = Arc::new(WatchedMint {
-            actor: std::sync::Mutex::new(me.actor_id().0),
+            actor: std::sync::Mutex::new(my_actor),
             identity: tokio::sync::watch::Sender::new(None),
         });
         let client = client_over(Arc::clone(&mint), me);
 
         spawn_self_identity_follow(&app, &client, my_hex.clone(), &tx);
-        mint.identity.send_replace(minted("alice"));
+        mint.identity.send_replace(minted(my_actor, "alice"));
         next_self_address_refresh(&mut rx).await;
 
         let row = registry(&app)
@@ -4086,7 +4110,7 @@ pub(crate) mod tests {
             Some("alice@nest.example".into())
         );
 
-        mint.identity.send_replace(minted("alice2"));
+        mint.identity.send_replace(minted(my_actor, "alice2"));
         next_self_address_refresh(&mut rx).await;
         let row = registry(&app)
             .list()
@@ -4111,17 +4135,19 @@ pub(crate) mod tests {
         let my_hex = registry(&app)
             .add_account(&fauna_core::hex32::encode(me.secret_bytes()), None, None)
             .expect("my row");
+        let my_actor = me.actor_id().0;
         let mint = Arc::new(WatchedMint {
-            actor: std::sync::Mutex::new(me.actor_id().0),
-            identity: tokio::sync::watch::Sender::new(minted("alice")),
+            actor: std::sync::Mutex::new(my_actor),
+            identity: tokio::sync::watch::Sender::new(minted(my_actor, "alice")),
         });
         let client = client_over(Arc::clone(&mint), me);
 
         spawn_self_identity_follow(&app, &client, my_hex.clone(), &tx);
         next_self_address_refresh(&mut rx).await;
 
-        *mint.actor.lock().unwrap() = ActorKeypair::generate().actor_id().0;
-        mint.identity.send_replace(minted("someone-else"));
+        let other = ActorKeypair::generate().actor_id().0;
+        *mint.actor.lock().unwrap() = other;
+        mint.identity.send_replace(minted(other, "someone-else"));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
                 .await
@@ -4134,6 +4160,45 @@ pub(crate) mod tests {
             .find(|a| a.actor_id == my_hex)
             .expect("my row");
         assert_eq!(row.handle.as_deref(), Some("alice"));
+    }
+
+    /// The race the bearer check alone left open: the
+    /// follower asked "does the bearer mint for me?" and then read the watch,
+    /// and the machine could move to another account in between. Here the
+    /// bearer still names this session's actor while the watch already holds
+    /// another account's identity — the follower must judge the value it
+    /// read, so that identity never lands on this row.
+    #[tokio::test]
+    async fn an_identity_minted_for_another_actor_never_lands_even_when_the_bearer_check_passed() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = test_app();
+        let me = ActorKeypair::generate();
+        let my_hex = registry(&app)
+            .add_account(&fauna_core::hex32::encode(me.secret_bytes()), None, None)
+            .expect("my row");
+        let other = ActorKeypair::generate().actor_id().0;
+        let mint = Arc::new(WatchedMint {
+            actor: std::sync::Mutex::new(me.actor_id().0),
+            identity: tokio::sync::watch::Sender::new(minted(other, "someone-else")),
+        });
+        let client = client_over(Arc::clone(&mint), me);
+
+        spawn_self_identity_follow(&app, &client, my_hex.clone(), &tx);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
+                .await
+                .is_err(),
+            "the follower must not merge an identity minted for another actor"
+        );
+        let row = registry(&app)
+            .list()
+            .into_iter()
+            .find(|a| a.actor_id == my_hex)
+            .expect("my row");
+        assert_eq!(
+            row.handle, None,
+            "another account's handle landed on my row"
+        );
     }
 }
 

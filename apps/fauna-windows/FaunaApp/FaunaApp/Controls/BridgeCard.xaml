@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   One bridge's card — the shared `bridge-card` component (ui.yaml `bridge-card`:
-  bridge-action-button + settings rows + follows). Extracted 2026-07-31 from the
+  bridge-action-button + settings rows + follows + follow requests). Extracted 2026-07-31 from the
   inline DataTemplate that lived in BridgesPage.xaml, so a SECOND surface can embed
   the identical widget tree: the AT Protocol page's Linked-account panel
   (ui/atproto.md § Layout & flow item 3 — "reused verbatim from the Bridges page …
@@ -46,16 +46,20 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Grid.Column="0" x:Name="NameText"
                    Style="{StaticResource BodyStrongTextBlockStyle}" />
 
-        <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.6">
-            <Run x:Name="IdentityRun" />
-            <Run Text=" " />
-            <Run x:Name="ModeRun" Foreground="{ThemeResource SystemAccentColor}" />
-        </TextBlock>
+        <!-- `bridge-identity`: the linked account's identity, "<label>: <display>"
+             (bridges.md § User actions). Its own TextBlock, AutomationId only and NO
+             Name (a get_text target), so the mode beside it is never read with it. -->
+        <StackPanel Grid.Row="1" Grid.Column="0" Orientation="Horizontal" Spacing="6" Opacity="0.6">
+            <TextBlock x:Name="IdentityText" Visibility="Collapsed"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeIdentity}" />
+            <TextBlock x:Name="ModeText" Foreground="{ThemeResource SystemAccentColor}" />
+        </StackPanel>
 
         <Button Grid.RowSpan="2" Grid.Column="1" x:Name="ActionButton"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeActionButton}"
@@ -77,36 +81,52 @@
         <StackPanel x:Name="SettingsPanel" Grid.Row="2" Grid.ColumnSpan="2"
                     Spacing="4" Margin="0,8,0,0" />
 
-        <!-- Follows list -->
-        <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Margin="0,8,0,0"
+        <!-- Follows (bridges.md § Follows, § User actions) on a LINKED card whose
+             provider supports them: the add row (`bridge-follow-id-input` +
+             `bridge-follow-petname-input` + `bridge-add-follow-button`) and one row per
+             follow, built in RenderFollows, painting the shared `follow_display`
+             (nickname, else id) with its `bridge-follow-remove`. The container's Name
+             is what keeps UIA from pruning a bare panel (memory
+             reference_winui_flaui_datatemplate_name). -->
+        <StackPanel x:Name="FollowsPanel" Grid.Row="3" Grid.ColumnSpan="2"
+                    Spacing="4" Margin="0,8,0,0"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFollowsList}"
                     AutomationProperties.Name="bridge-follows-list"
                     Visibility="Collapsed">
-            <ListView SelectionMode="None">
-                <ListView.ItemTemplate>
-                    <DataTemplate>
-                        <!-- Literal ids — this DataTemplate has no x:DataType, so
-                             `{x:Bind ids:Ids.…}` silently drops here; see
-                             Controls/RecipientPicker.xaml. -->
-                        <Grid Padding="4" ColumnSpacing="8"
-                              AutomationProperties.AutomationId="bridge-follow-item"
-                              AutomationProperties.Name="{Binding}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding}" VerticalAlignment="Center" />
-                            <Button Grid.Column="1"
-                                    AutomationProperties.AutomationId="bridge-follow-remove"
-                                    Content="&#xE711;" FontFamily="Segoe MDL2 Assets"
-                                    FontSize="10" Padding="4,2" />
-                        </Grid>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
-            <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeAddFollowButton}"
-                    Content="&#xE710;" FontFamily="Segoe MDL2 Assets"
-                    Padding="6,2" HorizontalAlignment="Left" />
+            <TextBlock x:Name="FollowsHeading" Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="FollowIdInput"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFollowIdInput}"
+                         TextChanged="FollowIdInput_TextChanged" />
+                <TextBox x:Name="FollowPetnameInput" Grid.Column="1"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFollowPetnameInput}" />
+                <Button x:Name="AddFollowButton" Grid.Column="2" IsEnabled="False"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeAddFollowButton}"
+                        Click="AddFollowButton_Click" />
+            </Grid>
+            <StackPanel x:Name="FollowRows" Spacing="4" />
+        </StackPanel>
+
+        <!-- Follow requests (bridges.md § Follow requests), under the follows list on a
+             LINKED card whose provider declares supports_follow_requests (ActivityPub).
+             `bridge-follow-requests-list` is the HEADING itself (ui.yaml: "Heading of
+             the follow requests … with their count"), kept at a zero count when nothing
+             waits; the rows are its siblings, built in RenderFollowRequests. The
+             heading carries an AutomationId and NO Name: it is a get_text target, and
+             FlaUI's GetText on a panel would join every descendant TextBlock — row
+             text and button labels included (memory
+             reference_windows_flaui_gettext_dynamic_label_no_name). -->
+        <StackPanel x:Name="FollowRequestsPanel" Grid.Row="4" Grid.ColumnSpan="2"
+                    Spacing="4" Margin="0,8,0,0" Visibility="Collapsed">
+            <TextBlock x:Name="FollowRequestsHeading"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeFollowRequestsList}"
+                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <StackPanel x:Name="FollowRequestRows" Spacing="4" />
         </StackPanel>
 
         <!-- Why linking is unavailable, painted BESIDE the (disabled) action button
@@ -115,7 +135,7 @@
              AutomationId but deliberately NO AutomationProperties.Name: this is a
              get_text target, and a static Name makes FlaUI return the Name instead
              of the text (memory reference_windows_flaui_gettext_dynamic_label_no_name). -->
-        <TextBlock Grid.Row="4" Grid.ColumnSpan="2" x:Name="LinkBlockedReason"
+        <TextBlock Grid.Row="5" Grid.ColumnSpan="2" x:Name="LinkBlockedReason"
                    AutomationProperties.AutomationId="{x:Bind ids:Ids.BridgeLinkBlockedReason}"
                    Margin="0,8,0,0" Opacity="0.8" TextWrapping="Wrap"
                    Visibility="Collapsed" />
@@ -128,7 +148,7 @@
              independent asks, each with its own verdict) and EMPTY in the common case:
              both inputs are supervised-only by construction, so the card re-tests no
              supervision. -->
-        <StackPanel Grid.Row="5" Grid.ColumnSpan="2" x:Name="SourceAskPanel"
+        <StackPanel Grid.Row="6" Grid.ColumnSpan="2" x:Name="SourceAskPanel"
                     Spacing="4" Margin="0,8,0,0" Visibility="Collapsed" />
 
         <!-- Feed-subscription shim (bridge-feed-subscriptions / bridge-feed-item /

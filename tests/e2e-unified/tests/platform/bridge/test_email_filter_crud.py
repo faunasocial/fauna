@@ -1,137 +1,63 @@
 """E2E test: Email filter CRUD — create and delete email filters.
 
-Alice generates an identity, registers, and navigates to the settings page.
-She creates an email filter, verifies it appears in the list, then
-deletes it and verifies it's gone.
+The web twin of `tests/test_settings.py::test_email_filter_crud`, stricter in
+the three things that test leaves out: the empty state's text, the action a row
+states, and which row survives a delete.
 """
-
-from common import port_base_url, register_user
-from playwright.sync_api import sync_playwright, expect
 
 import pytest
 
-# Drives the web SPA via Playwright — a web-client test, not client-independent.
-# The `web` marker is authoritative in conftest's --client deselection, so this is
-# dropped under a non-web run (e.g. `--client windows --include-independent`)
-# instead of running a web test inside it.
+# Drives the web SPA — a web-client test, not client-independent. The `web`
+# marker is authoritative in conftest's --client deselection, so this is dropped
+# under a non-web run (e.g. `--client windows --include-independent`) instead of
+# running a web test inside it.
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
+NO_FILTERS_TEXT = "No email filters configured"
 
-def generate_identity(page, base_url: str) -> str:
-    """Navigate to Settings, generate a new identity, return the ActorId."""
-    page.goto(f"{base_url}/app/settings")
-    page.wait_for_load_state("networkidle")
-    page.click("button:has-text('Generate new identity')")
-    code = page.locator("code").first
-    expect(code).to_be_visible(timeout=5_000)
-    return code.inner_text()
+
+def _shows_empty_state(app) -> bool:
+    return NO_FILTERS_TEXT in str(app.driver.eval_js("document.body.innerText"))
 
 
 @pytest.mark.feature("mail-filter-rules")
-def test_email_filter_create_and_delete(two_nodes):
+def test_email_filter_create_and_delete(logged_in_app):
     """Alice creates an email filter and then deletes it.
 
     Verifies:
-    1. Initial state shows "No email filters configured"
-    2. Clicking "Add Filter" shows the form
-    3. Creating a filter adds it to the list with correct name and action
-    4. Creating a second filter shows both
-    5. Deleting the first filter removes it, second remains
-    6. Deleting the last filter returns to "No email filters" message
+    1. With no filters the page says "No email filters configured"
+    2. Creating a filter adds it to the list with correct name and action
+    3. Creating a second filter shows both
+    4. Deleting the first filter removes it, second remains
+    5. Deleting the last filter returns to the "No email filters" message
     """
-    port_a = two_nodes["port_a"]
-    base_a = port_base_url(port_a)
+    app = logged_in_app
+    settings = app.settings
+    settings.navigate()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        console_logs = []
+    # The seat is shared across the session, so an earlier test's filter may
+    # still be listed; the empty state is what this test starts from.
+    while settings.filter_count() > 0:
+        settings.delete_filter(0)
+    assert _shows_empty_state(app), f"no filters listed, no empty state; error={app.error_text()!r}"
 
-        ctx = browser.new_context(base_url=base_a)
-        alice = ctx.new_page()
-        alice.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
+    settings.create_email_filter(
+        name="Block spam sender", rule_type="SenderIs",
+        rule_value="spammer@evil.test", action="Discard",
+    )
+    assert settings.filter_names() == ["Block spam sender"]
+    assert "Discard" in settings.filter_action(0)
+    assert not _shows_empty_state(app), "the empty state must go once a filter is listed"
 
-        try:
-            # --- Step 1: Generate identity and register ---
-            alice_id = generate_identity(alice, base_a)
-            print(f"Alice ID: {alice_id}")
+    settings.create_email_filter(
+        name="Allow trusted", rule_type="SenderDomain",
+        rule_value="trusted.test", action="Allow",
+    )
+    assert settings.filter_names() == ["Block spam sender", "Allow trusted"]
 
-            register_user(port_a, alice_id, admin_signing_key=two_nodes["admin_sk_a"])
-            alice.evaluate("localStorage.setItem('fauna_registered', 'true')")
+    settings.delete_filter(0)
+    assert settings.filter_names() == ["Allow trusted"]
 
-            alice.goto(f"{base_a}/app/settings")
-            alice.wait_for_load_state("networkidle")
-
-            # --- Step 2: Verify initial empty state ---
-            no_filters = alice.locator("text=No email filters configured")
-            expect(no_filters).to_be_visible(timeout=10_000)
-            print("No filters initially")
-
-            # --- Step 3: Open the filter form ---
-            alice.click('[data-testid="add-filter-btn"]')
-            filter_name_input = alice.locator('[data-testid="filter-name-input"]')
-            expect(filter_name_input).to_be_visible(timeout=5_000)
-            print("Filter form opened")
-
-            # --- Step 4: Create first filter (block spam sender) ---
-            alice.fill('[data-testid="filter-name-input"]', "Block spam sender")
-            alice.locator('[data-testid="filter-rule-type"]').select_option("SenderIs")
-            alice.fill('[data-testid="filter-rule-value"]', "spammer@evil.com")
-            alice.locator('[data-testid="filter-action-select"]').select_option("Discard")
-            alice.click('[data-testid="create-filter"]')
-
-            # Wait for filter to appear in list
-            filter_item = alice.locator('[data-testid="filter-item"]').first
-            expect(filter_item).to_be_visible(timeout=10_000)
-
-            filter_name = filter_item.locator('[data-testid="filter-name"]')
-            expect(filter_name).to_contain_text("Block spam sender")
-
-            filter_action = filter_item.locator('[data-testid="filter-action"]')
-            expect(filter_action).to_contain_text("Discard")
-            print("First filter created: Block spam sender (Discard)")
-
-            # --- Step 5: Create second filter (allow trusted domain) ---
-            alice.click('[data-testid="add-filter-btn"]')
-            alice.fill('[data-testid="filter-name-input"]', "Allow trusted")
-            alice.locator('[data-testid="filter-rule-type"]').select_option("SenderDomain")
-            alice.fill('[data-testid="filter-rule-value"]', "trusted.com")
-            alice.locator('[data-testid="filter-action-select"]').select_option("Allow")
-            alice.click('[data-testid="create-filter"]')
-
-            # Wait for two filters
-            filters = alice.locator('[data-testid="filter-item"]')
-            expect(filters).to_have_count(2, timeout=10_000)
-            print("Two filters now exist")
-
-            # --- Step 6: Delete the first filter ---
-            first_filter = alice.locator('[data-testid="filter-item"]').first
-            first_filter.locator('[data-testid="filter-delete"]').click()
-
-            # Wait for only one filter
-            expect(filters).to_have_count(1, timeout=10_000)
-
-            # Verify the remaining filter is "Allow trusted"
-            remaining = alice.locator('[data-testid="filter-item"]').first
-            remaining_name = remaining.locator('[data-testid="filter-name"]')
-            expect(remaining_name).to_contain_text("Allow trusted")
-            print("First filter deleted, 'Allow trusted' remains")
-
-            # --- Step 7: Delete the last filter ---
-            remaining.locator('[data-testid="filter-delete"]').click()
-
-            # Verify back to empty state
-            no_filters = alice.locator("text=No email filters configured")
-            expect(no_filters).to_be_visible(timeout=10_000)
-            print("All filters deleted, back to empty state")
-
-            print("Email filter CRUD: PASSED")
-
-        except Exception:
-            print(f"\n=== FAILURE DEBUG ===")
-            print(f"Console ({len(console_logs)} messages):")
-            for line in console_logs[-30:]:
-                print(f"  {line}")
-            raise
-        finally:
-            ctx.close()
-            browser.close()
+    settings.delete_filter(0)
+    assert settings.filter_count() == 0
+    assert _shows_empty_state(app), f"no filters listed, no empty state; error={app.error_text()!r}"

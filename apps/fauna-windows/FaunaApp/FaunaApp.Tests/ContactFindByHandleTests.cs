@@ -45,12 +45,35 @@ public class ContactFindByHandleTests
     }
 
     [Fact]
+    public void ClassifyRecipientInput_BareLocalpart_IsHomeNestHandleWithEmptyDomain()
+    {
+        // A bare localpart (no `@`) names the account on the nest the user is signed
+        // into (contacts.md § Layout & flow region 3, ratified 2026-11-05): the shared
+        // classifier answers the handle kind with an EMPTY domain slot, which the
+        // lookup forwards as it is so find_user takes the home-nest probe alone.
+        var c = ClassifyRecipientInput("justtext");
+        Assert.Equal(RecipientKind.Handle, c.Kind);
+        Assert.Equal("justtext", c.User);
+        Assert.Equal("", c.Domain);
+        Assert.Equal("", c.ActorId);
+
+        // 64 non-hex chars with no `@` is a bare localpart too, not an actor id.
+        var z = ClassifyRecipientInput(new string('z', 64));
+        Assert.Equal(RecipientKind.Handle, z.Kind);
+        Assert.Equal(new string('z', 64), z.User);
+        Assert.Equal("", z.Domain);
+    }
+
+    [Fact]
     public void ClassifyRecipientInput_Invalid_SurfacesFindError()
     {
-        // Neither 64-hex nor user@domain → invalid (the branch that sets
-        // contact-find-error). 64 non-hex chars with no `@` is still invalid.
-        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("justtext").Kind);
-        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput(new string('z', 64)).Kind);
+        // Neither a 64-hex actor id nor a handle → invalid (the branch that sets
+        // contact-find-error, before any nest hop): whitespace-bearing input, another
+        // rail's `npub1…` / `did:…`, an `@…`-prefixed form, empty, null.
+        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("not a handle").Kind);
+        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("npub1abcdef").Kind);
+        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("did:plc:abcdef").Kind);
+        Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("@alice@example.com").Kind);
         Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput("").Kind);
         Assert.Equal(RecipientKind.Invalid, ClassifyRecipientInput(null).Kind);
     }
@@ -82,6 +105,54 @@ public class ContactFindByHandleTests
         Assert.Equal(RecipientKind.Handle, c.Kind);
         Assert.Equal("bob", c.User);
         Assert.Equal("domain2.example", c.Domain);
+    }
+
+    [Fact]
+    public async Task FindRecipientActorId_BareLocalpart_AsksFindUserWithEmptyDomain_TakesSlotZero()
+    {
+        // The folder-share picker's handle leg (FoldersPage.ShareFolderAsync) runs the
+        // SAME shared find_user lookup the contacts find does: a bare localpart reaches
+        // it with the classifier's EMPTY domain slot unchanged, so find_user probes the
+        // home nest alone (contacts.md § Layout & flow region 3), and the actor id is
+        // slot 0 of [actor_id, handle, domain, nest_url].
+        (string Home, string User, string? Domain)? asked = null;
+        var c = ClassifyRecipientInput("alice");
+
+        var actorId = await FindRecipientActorIdAsync("https://home.example", c, (h, u, d) =>
+        {
+            asked = (h, u, d);
+            return Task.FromResult(new[] { new string('a', 64), "alice", "home.example", "" });
+        });
+
+        Assert.Equal(("https://home.example", "alice", (string?)""), asked);
+        Assert.Equal(new string('a', 64), actorId);
+    }
+
+    [Fact]
+    public async Task FindRecipientActorId_QualifiedHandle_CarriesTypedDomain()
+    {
+        // A qualified handle keeps working: the typed domain rides to find_user as typed.
+        (string Home, string User, string? Domain)? asked = null;
+        var c = ClassifyRecipientInput("bob@peer.example");
+
+        var actorId = await FindRecipientActorIdAsync("https://home.example", c, (h, u, d) =>
+        {
+            asked = (h, u, d);
+            return Task.FromResult(new[] { new string('b', 64), "bob", "peer.example", "https://peer.example" });
+        });
+
+        Assert.Equal(("https://home.example", "bob", (string?)"peer.example"), asked);
+        Assert.Equal(new string('b', 64), actorId);
+    }
+
+    [Fact]
+    public async Task FindRecipientActorId_NotFound_Throws()
+    {
+        // A miss is find_user's throw, surfaced unchanged — the picker's catch is what
+        // maps it to the not-found resolve state.
+        var c = ClassifyRecipientInput("nobody");
+        await Assert.ThrowsAnyAsync<Exception>(() => FindRecipientActorIdAsync(
+            "https://home.example", c, (_, _, _) => throw new InvalidOperationException("not found")));
     }
 
     private static ContactsViewModel VmFinding(MockNestRpcClient rpc, string nestUrl) =>

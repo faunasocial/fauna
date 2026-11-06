@@ -338,7 +338,7 @@ pub enum HydrationCommand {
     /// a `setattr`) of a placeholder, and completes the kernel's request once the
     /// answer arrives (`on-demand-files-linux.md` § Linux FUSE binding, *Hydrate on
     /// open*). Several may run at once, and two for one `rel` share one download
-    /// ([`serve_materialize_batch`]). Linux-FUSE-driven in production.
+    /// (`PlatformRequests::start`). Linux-FUSE-driven in production.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Materialize { rel: String, reply: LoopReply },
     /// The user unlinked a **placeholder** through the mount: record the delete
@@ -560,6 +560,26 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// (`file-sync.md` § Third-party deposit ingress). A host must say what it
     /// does here; a test host answers with a no-op it owns.
     async fn adopt_deposits(&self, folder: &str) -> Vec<String>;
+
+    /// One sibling row pull — the same-account leg's nest-down folder pull
+    /// ([`fauna_sync_engine::always_resident::pull_siblings`], the one the
+    /// always-resident root runs after its nest pull), run by
+    /// [`serve_hydration_root`] after its startup fold, after every re-pull
+    /// (rescan, reconnect, nudge) and on each admission
+    /// ([`Self::sibling_admissions`]). A sibling's row lands as the share leg's
+    /// rows land on this root: provisional, its body written whole, and the
+    /// placeholder fold's reconcile retires it when the nest's sequenced row
+    /// arrives (`p2p.md` § Same-account nest-down folder transfer). **Required,
+    /// never defaulted:** until 2026-11-05 this root ran no sibling pull, so a
+    /// seat whose folders are on-demand — every windows seat — received nothing
+    /// from its other devices while the nest was down. A host must say what it
+    /// does here; a test host answers with one it owns.
+    async fn pull_siblings(&self, folder: &str);
+
+    /// The sibling registry's admission signal ([`SyncEngine::sibling_admissions`]),
+    /// the loop's trigger for a freshly admitted sibling's pull — `None` when the
+    /// host holds no registry (the arm then stays pending).
+    fn sibling_admissions(&self) -> Option<watch::Receiver<u64>>;
 
     /// Answer one invoke-and-reply [`EngineCommand`] the pipe server routed to
     /// this root — the confirm of the mass-delete floor's *"apply N deletions"*
@@ -865,6 +885,14 @@ impl HydrationHost for SyncEngine {
 
     async fn adopt_deposits(&self, folder: &str) -> Vec<String> {
         fauna_sync_engine::always_resident::adopt_parked_deposits(self, folder).await
+    }
+
+    async fn pull_siblings(&self, folder: &str) {
+        fauna_sync_engine::always_resident::pull_siblings(self, folder).await
+    }
+
+    fn sibling_admissions(&self) -> Option<watch::Receiver<u64>> {
+        SyncEngine::sibling_admissions(self)
     }
 }
 
@@ -1385,14 +1413,38 @@ async fn assert_recorded_in_sync<H: HydrationHost, I: PlaceholderInvalidator + ?
     abs: &Path,
     rel: &str,
 ) -> Result<bool> {
+    let keeps_own_record = hydrator.keeps_own_record(rel).await;
+    assert_in_sync_on_proof(
+        invalidator,
+        abs,
+        rel,
+        keeps_own_record,
+        hydrator.is_recorded_content(rel),
+    )
+    .await
+}
+
+/// [`assert_recorded_in_sync`]'s steps with the engine's two answers handed in — for a
+/// caller that holds the folder's state DB but no engine (the pipe server's *Free up
+/// space*, whose stale-refusal repair is the pin reaction's). `keeps_own_record` is
+/// the holder-keeps gate's row answer; `proof` is the step-4 proof, polled only after
+/// the USN is read, so a write landing during it refuses the assertion. One road: the
+/// steps, their order and the USN condition are the same for every caller.
+pub(crate) async fn assert_in_sync_on_proof<I: PlaceholderInvalidator + ?Sized>(
+    invalidator: &I,
+    abs: &Path,
+    rel: &str,
+    keeps_own_record: bool,
+    proof: impl std::future::Future<Output = bool>,
+) -> Result<bool> {
     if !invalidator.is_cloud_file(abs) {
         invalidator.anchor(abs, rel)?;
     }
-    if hydrator.keeps_own_record(rel).await && !invalidator.is_pinned(abs) {
+    if keeps_own_record && !invalidator.is_pinned(abs) {
         invalidator.pin(abs).await?;
     }
     let usn = invalidator.usn(abs)?;
-    if !hydrator.is_recorded_content(rel).await {
+    if !proof.await {
         return Ok(false);
     }
     invalidator.set_in_sync(abs, usn).await?;
@@ -2576,20 +2628,24 @@ async fn free_space<H: HydrationHost, I: PlaceholderInvalidator>(
     Ok(())
 }
 
-/// A *Free up space* sweep in flight on an off-disk root
-/// ([`EngineCommand::FreeLocationSpace`]): the files still to visit and the tally the
-/// host reads back. The serve loop takes ONE file per turn, in its lowest-priority arm,
-/// so a hydrate-on-open waits for at most one file's proof (`on-demand-files.md` § The
-/// free-up-space gesture where the OS offers none). Dropping it — the sweep done, or the
-/// root torn down mid-sweep — marks the tally no longer running.
-struct FreeSpaceSweep {
+/// A *Free up space* sweep in flight ([`EngineCommand::FreeLocationSpace`]): the files
+/// still to visit and the tally the host reads back. On an off-disk root the serve loop
+/// takes ONE file per turn, in its lowest-priority arm, so a hydrate-on-open waits for at
+/// most one file's proof (`on-demand-files.md` § The free-up-space gesture where the OS
+/// offers none); on a cloud-files root the pipe server walks it on a task of its own,
+/// yielding between files (`pipe_server::handle_free_location_space`). Dropping it — the
+/// sweep done, or the root torn down mid-sweep — marks the tally no longer running.
+pub(crate) struct FreeSpaceSweep {
     files: std::collections::VecDeque<(String, u64)>,
     tally: Arc<std::sync::Mutex<FreeSpaceTally>>,
 }
 
 impl FreeSpaceSweep {
     /// Start a sweep over `files`, zeroing `tally` and marking it running.
-    fn start(files: Vec<(String, u64)>, tally: Arc<std::sync::Mutex<FreeSpaceTally>>) -> Self {
+    pub(crate) fn start(
+        files: Vec<(String, u64)>,
+        tally: Arc<std::sync::Mutex<FreeSpaceTally>>,
+    ) -> Self {
         if let Ok(mut t) = tally.lock() {
             *t = FreeSpaceTally {
                 running: true,
@@ -2602,7 +2658,13 @@ impl FreeSpaceSweep {
         }
     }
 
-    fn record(&self, outcome: SweepOutcome, size: u64) {
+    /// The next file to visit, with its recorded size; `None` once the walk is done.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn next_file(&mut self) -> Option<(String, u64)> {
+        self.files.pop_front()
+    }
+
+    pub(crate) fn record(&self, outcome: SweepOutcome, size: u64) {
         let Ok(mut t) = self.tally.lock() else {
             return;
         };
@@ -2626,9 +2688,10 @@ impl Drop for FreeSpaceSweep {
     }
 }
 
-/// Where one file of a sweep landed ([`sweep_one`]).
+/// Where one file of a sweep landed ([`sweep_one`]; on a cloud-files root
+/// `pipe_server::sweep_one_cfapi`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepOutcome {
+pub(crate) enum SweepOutcome {
     Freed,
     /// The dehydration gate refused ([`KeptOnlyCopy`]).
     KeptUnsynced,
@@ -2831,9 +2894,9 @@ impl RootBoot<fn()> {
 ///    population, and the first browse lists every tracked `Placeholder` row back,
 ///    which is why the sweep must already have seen what the downtime deleted;
 /// 5. everything else where it always was: the fold's stale-hydrated invalidation
-///    (it dehydrates through cfapi, so it needs the connection), the watcher, the
-///    ✅ flips of what the sweep uploaded, the corpus passes, the pin sweep, the
-///    serve loop.
+///    (it dehydrates through cfapi, so it needs the connection), the startup sibling
+///    pull, the watcher, the ✅ flips of what the sweep uploaded, the corpus passes,
+///    the pin sweep, the serve loop.
 ///
 /// **The relay serve runs beside the loop, never as an arm of it.** `serve` is
 /// this folder's asks from the host's relay seat (`file-sync.md` § Relay
@@ -2968,10 +3031,13 @@ async fn drive_hydration_root<H, I, C, G>(
     // (`on-demand-files-linux.md` § Linux FUSE binding, the flips rule). Keep it here.
     let _connection = (boot.connect)();
 
-    // From the connection on the platform may ask, and every platform call this loop makes
-    // can wait on a fetch only the loop answers: so each one is made with the platform's
-    // requests answered meanwhile ([`PlatformCall`]).
-    let requests = PlatformRequests::new(hydrator, &sync_root, event_tx.as_ref(), cmd_rx);
+    // From the connection on the platform may ask, and nothing the loop waits on may hold its
+    // answer up (`on-demand-files.md` § *A placeholder describes the version its row
+    // resolves*, the rule *Nothing the serve loop waits on holds up the root*): every wait
+    // below — the rest of the boot, each arm of the serve loop, and each platform call made
+    // inside either ([`PlatformCall`]) — is awaited through [`PlatformRequests::answer_while`],
+    // which answers the platform's fetches, listings and hydrations until it is back.
+    let requests = PlatformRequests::new(hydrator, &sync_root, event_tx.as_ref(), cmd_rx, &cancel);
     let invalidator = AnsweringWhileOut {
         binding: &invalidator,
         requests: &requests,
@@ -2980,89 +3046,106 @@ async fn drive_hydration_root<H, I, C, G>(
     // The re-describes owed to placeholders left behind their rows, tried by the serve
     // loop's own last arm.
     let mut pending = PendingRedescribes::default();
-    if let Some(fold) = startup_fold {
-        apply_fold(
-            hydrator,
-            &invalidator,
-            &sync_root,
-            fold,
-            event_tx.as_ref(),
-            &mut pending,
-            "startup",
-        )
-        .await
-    }
+    // The sibling registry's admission signal — subscribed before the startup sibling
+    // pull below, so an admission landing during it is still seen.
+    let mut admissions = hydrator.sibling_admissions();
+    let (mut local, rescan_interval) = requests
+        .answer_while(async {
+            if let Some(fold) = startup_fold {
+                apply_fold(
+                    hydrator,
+                    &invalidator,
+                    &sync_root,
+                    fold,
+                    event_tx.as_ref(),
+                    &mut pending,
+                    "startup",
+                )
+                .await
+            }
+            // The startup sibling pull, behind the nest's rows as the always-resident
+            // loop runs its own behind its first pull (`p2p-shared-set-build.md`
+            // § Build design — the same-account row leg, decision 4) — whether or not
+            // the nest answered `prepare`: with it down, siblings are the only peers
+            // there are. After the connect, so a landed body is written into a root
+            // the OS already serves; before the watcher starts, so the landing's own
+            // write never reaches the upload door as an event.
+            hydrator.pull_siblings(&folder).await;
 
-    // ── The two-way half ──────────────────────────────────────────────────────────
-    //
-    // An on-demand root uploads local edits, exactly as an always-resident one does
-    // (`on-demand-files.md` § On-Demand Files → *Sync direction*): on-demand is a storage
-    // choice, never a direction choice. This is the SHARED watcher/debouncer/uploader
-    // the always-resident loop drives (`always_resident::LocalWrites`) — one uploader,
-    // not a second implementation grown inside the hydration host (priorities #2/#4).
-    //
-    // `LocalWrites::is_user_write` is what makes a watcher safe on a *cfapi* root: our
-    // own `CfExecute(TRANSFER_PLACEHOLDERS)` materializes files that the OS reports as
-    // ordinary `Created` events, and `was_recent_download` does not cover placeholder
-    // creation — so the placeholder guard is applied at the source.
-    //
-    // A failed watcher start is NOT fatal: the root still serves hydration, and the
-    // rescan tick's `converge` still catches local edits (a slower path, but a real
-    // one). Going one-way here would silently drop the user's edits, which is the very
-    // bug this closes — so it is loud.
-    let mut local = match LocalWrites::start(&sync_root) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            tracing::error!(
-                folder = %fauna_core::log_redact::log_folder_name(&folder),
-                error = %e,
-                "watcher start failed on the on-demand root: local edits will only be picked up \
-                 by the rescan tick, not live. A tracked file's change MUST still be uploaded."
-            );
-            None
-        }
-    };
+            // ── The two-way half ──────────────────────────────────────────────────────
+            //
+            // An on-demand root uploads local edits, exactly as an always-resident one does
+            // (`on-demand-files.md` § On-Demand Files → *Sync direction*): on-demand is a
+            // storage choice, never a direction choice. This is the SHARED
+            // watcher/debouncer/uploader the always-resident loop drives
+            // (`always_resident::LocalWrites`) — one uploader, not a second implementation
+            // grown inside the hydration host (priorities #2/#4).
+            //
+            // `LocalWrites::is_user_write` is what makes a watcher safe on a *cfapi* root: our
+            // own `CfExecute(TRANSFER_PLACEHOLDERS)` materializes files that the OS reports as
+            // ordinary `Created` events, and `was_recent_download` does not cover placeholder
+            // creation — so the placeholder guard is applied at the source.
+            //
+            // A failed watcher start is NOT fatal: the root still serves hydration, and the
+            // rescan tick's `converge` still catches local edits (a slower path, but a real
+            // one). Going one-way here would silently drop the user's edits, which is the very
+            // bug this closes — so it is loud.
+            let local = match LocalWrites::start(&sync_root) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    tracing::error!(
+                        folder = %fauna_core::log_redact::log_folder_name(&folder),
+                        error = %e,
+                        "watcher start failed on the on-demand root: local edits will only be \
+                         picked up by the rescan tick, not live. A tracked file's change MUST \
+                         still be uploaded."
+                    );
+                    None
+                }
+            };
 
-    // The boot sweep's recorded uploads (the edits made while the service was down)
-    // flip to the platform ✅ exactly as the watcher path's do (below), or the file
-    // keeps Explorer's sync-pending arrows until the next *live* edit (live
-    // 2026-07-17 startup-converge race). After the connect — the in-sync assertion
-    // is a cfapi call — and BEFORE the pin sweep, so an edited-then-unpinned file is
-    // already in-sync when its dehydrate runs.
-    flip_recorded_in_sync(hydrator, &invalidator, &sync_root, &recorded).await;
-    flip_clean_ancestor_dirs(hydrator, &invalidator, &sync_root, &recorded).await;
+            // The boot sweep's recorded uploads (the edits made while the service was down)
+            // flip to the platform ✅ exactly as the watcher path's do (below), or the file
+            // keeps Explorer's sync-pending arrows until the next *live* edit (live
+            // 2026-07-17 startup-converge race). After the connect — the in-sync assertion
+            // is a cfapi call — and BEFORE the pin sweep, so an edited-then-unpinned file is
+            // already in-sync when its dehydrate runs.
+            flip_recorded_in_sync(hydrator, &invalidator, &sync_root, &recorded).await;
+            flip_clean_ancestor_dirs(hydrator, &invalidator, &sync_root, &recorded).await;
 
-    // The corpus passes — what a start owes the folder's at-rest bytes, on this
-    // root exactly as on an always-resident one: the pre-bind re-seal, the
-    // audience convergence (a flip made while this seat was down), the
-    // post-succession re-seal, then the posture refresh + per-tick pair
-    // (audience + website) the rescan tick below keeps re-running. AFTER
-    // converge, so the passes see the uploads it just recorded; BEFORE the pin
-    // sweep, so nothing is dehydrated under a pass that could still read it
-    // locally (a cloud-only entry is fetched from the nest either way). Until
-    // 2026-09-27 this root ran none of them — and never refreshed its posture,
-    // so it kept the build-time audience for ever — so an owner's public window
-    // never declassified an on-demand folder's back-catalogue and the flip back
-    // never re-sealed it.
-    hydrator.converge_corpus_at_start(&folder).await;
-    hydrator.refresh_and_converge_corpus(&folder).await;
-    // Third-party deposits parked while this seat was down — after the startup
-    // fold, so an item another seat already adopted is found landed.
-    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
-    // The residency reading the refresh just installed reaches the disk: a body
-    // the holder-keeps gate now keeps is pinned before anything may evict it.
-    pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
+            // The corpus passes — what a start owes the folder's at-rest bytes, on this
+            // root exactly as on an always-resident one: the pre-bind re-seal, the
+            // audience convergence (a flip made while this seat was down), the
+            // post-succession re-seal, then the posture refresh + per-tick pair
+            // (audience + website) the rescan tick below keeps re-running. AFTER
+            // converge, so the passes see the uploads it just recorded; BEFORE the pin
+            // sweep, so nothing is dehydrated under a pass that could still read it
+            // locally (a cloud-only entry is fetched from the nest either way). Until
+            // 2026-09-27 this root ran none of them — and never refreshed its posture,
+            // so it kept the build-time audience for ever — so an owner's public window
+            // never declassified an on-demand folder's back-catalogue and the flip back
+            // never re-sealed it.
+            hydrator.converge_corpus_at_start(&folder).await;
+            hydrator.refresh_and_converge_corpus(&folder).await;
+            // Third-party deposits parked while this seat was down — after the startup
+            // fold, so an item another seat already adopted is found landed.
+            adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+            // The residency reading the refresh just installed reaches the disk: a body
+            // the holder-keeps gate now keeps is pinned before anything may evict it.
+            pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
 
-    // Heal pin flips made while the service was down (Explorer's cloud verbs write
-    // pin state whether or not the provider is up). AFTER converge, so an
-    // edited-then-unpinned file is uploaded before its dehydrate is attempted.
-    react_to_pin_sweep(hydrator, &invalidator, &sync_root, event_tx.as_ref()).await;
+            // Heal pin flips made while the service was down (Explorer's cloud verbs write
+            // pin state whether or not the provider is up). AFTER converge, so an
+            // edited-then-unpinned file is uploaded before its dehydrate is attempted.
+            react_to_pin_sweep(hydrator, &invalidator, &sync_root, event_tx.as_ref()).await;
 
-    // The steady-state inbound-change signal. Read the cadence AFTER `prepare`, so
-    // the control plane it rides is already open; a failed read degrades to the
-    // shared default rather than leaving the host without a tick (the re-pull is
-    // also how a host that came up against a down nest recovers).
-    let rescan_interval = hydrator.rescan_interval().await;
+            // The steady-state inbound-change signal. Read the cadence AFTER `prepare`, so
+            // the control plane it rides is already open; a failed read degrades to the
+            // shared default rather than leaving the host without a tick (the re-pull is
+            // also how a host that came up against a down nest recovers).
+            (local, hydrator.rescan_interval().await)
+        })
+        .await;
     fauna_sync_engine::always_resident::log_rescan_armed(&folder, rescan_interval);
     let mut rescan_tick = tokio::time::interval(rescan_interval);
     rescan_tick.tick().await; // consume the immediate first tick — `prepare` just folded
@@ -3081,18 +3164,18 @@ async fn drive_hydration_root<H, I, C, G>(
         if sweep.as_ref().is_some_and(|s| s.files.is_empty()) {
             sweep = None;
         }
-        // What the platform asked while a call of the loop's own was out and was left for
-        // after it — a notice, a FUSE request — in the order it came; and the re-describes
-        // the requests answered meanwhile owed.
+        // What the platform asked while a wait of the loop's own was out and was left for
+        // after it — a notice, an unlink — in the order it came; and the re-describes the
+        // requests answered meanwhile owed.
         while let Some(cmd) = requests.take_later() {
-            if let Some(rel) = serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await {
-                pending.owe(rel);
-            }
+            requests.serve(cmd).await;
         }
         for rel in requests.take_owed() {
             pending.owe(rel);
         }
 
+        // Every arm below is awaited through `requests.answer_while`: the platform is
+        // answered across the arm's own waits, not only between arms.
         tokio::select! {
             biased;
 
@@ -3104,7 +3187,7 @@ async fn drive_hydration_root<H, I, C, G>(
             // recv + an interval tick), so racing it here can never drop an event it had
             // already taken. `pending()` when the watcher is absent/closed — the root goes
             // on serving hydration, and `converge` on the rescan tick remains the backstop.
-            write = next_local_write(&mut local, hydrator) => {
+            write = next_local_write(&mut local, hydrator) => requests.answer_while(async {
                 // A pin flip on a hydrated file arrives as an ordinary Modified event
                 // and lands in this batch (measured: CfSetPinState is attribute-only,
                 // and ReadDirectoryChangesW reports it like any modification), so the
@@ -3135,10 +3218,15 @@ async fn drive_hydration_root<H, I, C, G>(
                 for rel in pin_rels {
                     react_to_pin(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await;
                 }
-            }
+            }).await,
 
-            _ = rescan_tick.tick() => {
+            _ = rescan_tick.tick() => requests.answer_while(async {
                 repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "rescan").await;
+                // Nest first, then siblings — every re-pull below takes the same
+                // order (`p2p-shared-set-build.md` § Build design — the same-account
+                // row leg, decision 4). With no nest answering, this tick and the
+                // admission arm are the only triggers.
+                hydrator.pull_siblings(&folder).await;
                 adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
                 // Inbound first, then outbound. A file edited locally *and* moved on the nest
                 // is safe in this order: `apply_stale_hydrated`'s dehydrate REFUSES a file
@@ -3160,15 +3248,16 @@ async fn drive_hydration_root<H, I, C, G>(
                 // Pin backstop, after converge for the same edit-survival reason: catches
                 // flips the watcher missed and dirty-at-flip-time files converge just uploaded.
                 react_to_pin_sweep(hydrator, &invalidator, &sync_root, event_tx.as_ref()).await;
-            }
+            }).await,
 
             // The socket came back. Anything recorded while it was down is waiting
             // in `changes.list` — fold it now instead of at the next tick.
             res = reconnected.changed(), if watch_reconnects => match res {
-                Ok(()) => {
+                Ok(()) => requests.answer_while(async {
                     repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "reconnect").await;
+                    hydrator.pull_siblings(&folder).await;
                     adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
-                }
+                }).await,
                 Err(_) => watch_reconnects = false,
             },
 
@@ -3176,12 +3265,22 @@ async fn drive_hydration_root<H, I, C, G>(
             // signalled a new sync record in this set, so fold it now rather
             // than at the next tick — the same re-pull the tick and the
             // reconnect edge run, as the resident loop's nudge arm pulls.
-            Some(()) = fauna_core::select_pending::recv_or_pending(&mut wake_rx) => {
+            Some(()) = fauna_core::select_pending::recv_or_pending(&mut wake_rx) => requests.answer_while(async {
                 repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "nudge").await;
+                hydrator.pull_siblings(&folder).await;
                 // A deposit's nudge reaches the owner's seats alone; the pass is
                 // one list call when nothing is parked.
                 adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
-            }
+            }).await,
+
+            // A sibling was admitted (a new or replaced channel): pull its rows now
+            // rather than a tick from now — the fourth trigger the always-resident
+            // loop has (`p2p-shared-set-build.md` § Build design — the same-account
+            // row leg, decision 4). A registry gone for good parks the arm.
+            admitted = fauna_sync_engine::always_resident::next_admission(&mut admissions) => match admitted {
+                Some(()) => requests.answer_while(hydrator.pull_siblings(&folder)).await,
+                None => admissions = None,
+            },
 
             // Invoke-and-reply command from the pipe server (the mass-delete
             // floor's confirm, a share-ingest page) — answered through the
@@ -3192,72 +3291,58 @@ async fn drive_hydration_root<H, I, C, G>(
             // are the root's binding's (an off-disk root's; cfapi roots take both
             // from the OS shell and never send them). So is a restore's apply to a
             // copy the binding keeps: it takes the fold's own stale-hydrated road.
-            Some(cmd) = fauna_core::select_pending::recv_or_pending(&mut engine_cmd_rx) => match cmd {
-                EngineCommand::FreeSpace { rel, reply } => {
-                    let _ = reply.send(
-                        free_space(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await,
-                    );
-                }
-                // A press while a sweep runs joins it: the files are already queued.
-                EngineCommand::FreeLocationSpace { tally, reply } => {
-                    if sweep.is_some() {
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        match hydrator.on_device_files().await {
-                            Ok(files) => {
-                                tracing::info!(folder = %fauna_core::log_redact::log_folder_name(&folder), files = files.len(), "free-up-space sweep accepted");
-                                sweep = Some(FreeSpaceSweep::start(files, tally));
-                                let _ = reply.send(Ok(()));
-                            }
-                            Err(e) => {
-                                let _ = reply.send(Err(e.context("listing the files on this device")));
+            Some(cmd) = fauna_core::select_pending::recv_or_pending(&mut engine_cmd_rx) => requests.answer_while(async {
+                match cmd {
+                    EngineCommand::FreeSpace { rel, reply } => {
+                        let _ = reply.send(
+                            free_space(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await,
+                        );
+                    }
+                    // A press while a sweep runs joins it: the files are already queued.
+                    EngineCommand::FreeLocationSpace { tally, reply } => {
+                        if sweep.is_some() {
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            match hydrator.on_device_files().await {
+                                Ok(files) => {
+                                    tracing::info!(folder = %fauna_core::log_redact::log_folder_name(&folder), files = files.len(), "free-up-space sweep accepted");
+                                    sweep = Some(FreeSpaceSweep::start(files, tally));
+                                    let _ = reply.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e.context("listing the files on this device")));
+                                }
                             }
                         }
                     }
-                }
-                EngineCommand::SetPinned { rel, pinned, reply } => {
-                    let _ = reply.send(
-                        set_pin(hydrator, &invalidator, &sync_root, &rel, pinned, event_tx.as_ref())
-                            .await,
-                    );
-                }
-                EngineCommand::ApplyStaleHydrated { row, reply } => {
-                    let applied = apply_stale_hydrated(
-                        hydrator,
-                        &invalidator,
-                        &sync_root,
-                        std::slice::from_ref(&row),
-                        event_tx.as_ref(),
-                    )
-                    .await;
-                    let _ = reply.send(Ok(applied == 1));
-                }
-                cmd => hydrator.answer_engine_command(cmd).await,
-            },
-
-            cmd = requests.next() => match cmd {
-                // A hydration opens a batch: the loop keeps serving listings (and
-                // starts further hydrations) while it downloads, and serves the
-                // rest after it (`serve_materialize_batch`).
-                Some(HydrationCommand::Materialize { rel, reply }) => {
-                    serve_materialize_batch(
-                        hydrator,
-                        rel,
-                        reply,
-                        &requests,
-                        &sync_root,
-                        event_tx.as_ref(),
-                        &cancel,
-                    )
-                    .await;
-                }
-                Some(cmd) => {
-                    if let Some(rel) =
-                        serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await
-                    {
-                        pending.owe(rel);
+                    EngineCommand::SetPinned { rel, pinned, reply } => {
+                        let _ = reply.send(
+                            set_pin(hydrator, &invalidator, &sync_root, &rel, pinned, event_tx.as_ref())
+                                .await,
+                        );
                     }
+                    EngineCommand::ApplyStaleHydrated { row, reply } => {
+                        let applied = apply_stale_hydrated(
+                            hydrator,
+                            &invalidator,
+                            &sync_root,
+                            std::slice::from_ref(&row),
+                            event_tx.as_ref(),
+                        )
+                        .await;
+                        let _ = reply.send(Ok(applied == 1));
+                    }
+                    cmd => hydrator.answer_engine_command(cmd).await,
                 }
+            }).await,
+
+            // A request the loop takes itself is served as every request it answers while
+            // a wait is out — started, and answered alongside whatever the platform asks
+            // until it is done (`PlatformRequests::serve`): a hydration goes on serving
+            // listings and further hydrations while it downloads, a second one of the same
+            // file joining it.
+            cmd = requests.next() => match cmd {
+                Some(cmd) => requests.serve(cmd).await,
                 // All senders dropped (the platform binding is gone).
                 None => break,
             },
@@ -3266,13 +3351,17 @@ async fn drive_hydration_root<H, I, C, G>(
             // (`PendingRedescribes`), made as every platform call is, answering the
             // platform meanwhile. Last: nothing waits on them.
             () = redescribe_retry_due(pending.due) => {
-                try_pending_redescribes(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending).await;
+                requests
+                    .answer_while(try_pending_redescribes(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending))
+                    .await;
             }
 
             // One file of the *Free up space* sweep. Lowest of all: a sweep never
             // outranks an open — every request above is served before the next file.
             (rel, size) = next_sweep_file(&mut sweep) => {
-                let outcome = sweep_one(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await;
+                let outcome = requests
+                    .answer_while(sweep_one(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()))
+                    .await;
                 if let Some(s) = &sweep {
                     s.record(outcome, size);
                 }
@@ -3281,29 +3370,72 @@ async fn drive_hydration_root<H, I, C, G>(
     }
 }
 
-/// The platform's requests of a served root — the fetches, listings and notices its binding
-/// sends ([`HydrationCommand`]) — and the one place the serve loop takes them from, so that
-/// it can go on answering them while a platform call of its own is out
+/// The platform's requests of a served root — the fetches, listings, hydrations and notices its
+/// binding sends ([`HydrationCommand`]) — and the one place the serve loop takes them from, so
+/// that it can go on answering them across every wait it makes
 /// ([`answer_while`](Self::answer_while)).
 struct PlatformRequests<'a, H> {
     hydrator: &'a H,
     sync_root: &'a Path,
     event_tx: Option<&'a broadcast::Sender<Event>>,
+    /// The root's cancellation: a hydration in flight fails at once when it fires.
+    cancel: &'a CancellationToken,
     rx: std::cell::RefCell<mpsc::UnboundedReceiver<HydrationCommand>>,
-    /// Taken while a call was out, and nothing the platform waits on — an eviction's notice,
-    /// a FUSE request: served once the arm that made the call is done, in the order they came.
+    /// The binding is gone: nothing more will be asked.
+    closed: std::cell::Cell<bool>,
+    /// The requests started while a wait was out and not yet done, shared by every
+    /// [`answer_while`](Self::answer_while) out at once.
+    serving: std::cell::RefCell<futures_util::stream::FuturesUnordered<Serving<'a>>>,
+    /// Each hydration running, by file, with the requests waiting on it: a second request for
+    /// a file already downloading joins it — one download, every waiter answered.
+    hydrating: std::cell::RefCell<std::collections::HashMap<String, Vec<LoopReply>>>,
+    /// How many [`answer_while`](Self::answer_while) are out: one per arm, and one more for a
+    /// platform call made inside it.
+    levels: std::cell::Cell<usize>,
+    /// Taken while a wait was out, and nothing the platform waits on — an eviction's notice, an
+    /// unlink: served once the arm that waited is done, in the order they came.
     later: std::cell::RefCell<std::collections::VecDeque<HydrationCommand>>,
-    /// The re-describes the requests answered while a call was out owed ([`serve_command`]),
-    /// for the loop's [`PendingRedescribes`].
+    /// The re-describes the requests answered owed ([`serve_command`]), for the loop's
+    /// [`PendingRedescribes`].
     owed: std::cell::RefCell<Vec<String>>,
 }
 
+/// A request [`PlatformRequests::start`]ed, in flight.
+type Serving<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Served> + 'a>>;
+
+/// A request [`PlatformRequests::start`]ed, done.
+enum Served {
+    /// Served whole; the file it left owed a re-describe, if any ([`serve_command`]).
+    Answered(Option<String>),
+    /// A hydration's download is back. Its row is marked in the same poll
+    /// ([`finish_materialize`]), so no scan meets the landed bytes under an unmarked row.
+    Hydrated(String, Result<Option<ContentHash>>),
+}
+
 /// What [`PlatformRequests::answer_while`] woke for.
-enum WhileOut<T> {
-    /// The call is back.
-    Back(Result<T>),
+enum Woke<T> {
+    /// The wait is back, and this level may leave.
+    Back(T),
+    /// A request started meanwhile is done.
+    Served(Served),
     /// The platform asked meanwhile (`None`: the binding is gone).
     Asked(Option<HydrationCommand>),
+}
+
+/// One [`PlatformRequests::answer_while`] out, counted for as long as it is.
+struct Level<'c>(&'c std::cell::Cell<usize>);
+
+impl<'c> Level<'c> {
+    fn enter(levels: &'c std::cell::Cell<usize>) -> Self {
+        levels.set(levels.get() + 1);
+        Self(levels)
+    }
+}
+
+impl Drop for Level<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
 }
 
 impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
@@ -3312,12 +3444,18 @@ impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
         sync_root: &'a Path,
         event_tx: Option<&'a broadcast::Sender<Event>>,
         rx: mpsc::UnboundedReceiver<HydrationCommand>,
+        cancel: &'a CancellationToken,
     ) -> Self {
         Self {
             hydrator,
             sync_root,
             event_tx,
+            cancel,
             rx: std::cell::RefCell::new(rx),
+            closed: Default::default(),
+            serving: Default::default(),
+            hydrating: Default::default(),
+            levels: Default::default(),
             later: Default::default(),
             owed: Default::default(),
         }
@@ -3329,7 +3467,7 @@ impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
         std::future::poll_fn(|cx| self.rx.borrow_mut().poll_recv(cx)).await
     }
 
-    /// The oldest request left for after a call ([`Self::later`]).
+    /// The oldest request left for after a wait ([`Self::later`]).
     fn take_later(&self) -> Option<HydrationCommand> {
         self.later.borrow_mut().pop_front()
     }
@@ -3339,41 +3477,125 @@ impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
         self.later.borrow_mut().push_back(cmd);
     }
 
-    /// The re-describes owed while calls were out ([`Self::owed`]).
+    /// The re-describes owed while waits were out ([`Self::owed`]).
     fn take_owed(&self) -> Vec<String> {
         std::mem::take(&mut *self.owed.borrow_mut())
     }
 
-    /// Await `call`, answering the platform's fetches and listings until it is back — the
-    /// requests a platform call can be waiting on, which only this loop answers. Anything
-    /// else the platform sends meanwhile is left for after the arm
-    /// ([`Self::take_later`]), so the arm's work and the engine see no request but those.
-    /// A call on another file is not held up by a fetch, nor a call that answers at once
-    /// (a binding whose calls wait on nothing): it is back before anything is asked.
-    async fn answer_while<T>(&self, mut call: PlatformCall<'_, T>) -> Result<T> {
+    /// Serve `cmd`, a request the loop took itself: start it, and answer the platform until it,
+    /// and everything started meanwhile, is done — [`Self::answer_while`] over a wait already
+    /// back.
+    async fn serve(&self, cmd: HydrationCommand) {
+        self.start(cmd);
+        self.answer_while(std::future::ready(())).await
+    }
+
+    /// Await `wait` — a step of the boot, an arm of the serve loop, a platform call made inside
+    /// either — answering the platform's fetches, listings and hydrations until it is back
+    /// (`on-demand-files.md` § *A placeholder describes the version its row resolves*, the rule
+    /// *Nothing the serve loop waits on holds up the root*). Each is started as it comes and
+    /// runs alongside the wait, which goes on being polled: a request never waits for the arm,
+    /// nor the arm for a request (an engine lock or a transfer permit the arm holds). A second
+    /// hydration of one file joins the first. Anything else the platform sends meanwhile is
+    /// left for after the arm, in order ([`Self::take_later`]), so the engine sees no request
+    /// but those.
+    ///
+    /// Re-entered by a platform call made inside an arm ([`AnsweringWhileOut`]): every level
+    /// answers alike and shares what was started; an inner one leaves as soon as its wait is
+    /// back, and the last one out leaves only once everything started is done — a hydration
+    /// that arrives as the wait completes is still finished inside. A wait that is back at once
+    /// is back before anything is asked.
+    async fn answer_while<F: std::future::Future>(&self, wait: F) -> F::Output {
+        use futures_util::StreamExt as _;
         use std::task::Poll;
+
+        let _level = Level::enter(&self.levels);
+        let mut wait = std::pin::pin!(wait);
+        let mut back = None;
         loop {
             let woke = std::future::poll_fn(|cx| {
-                if let Poll::Ready(outcome) = call.as_mut().poll(cx) {
-                    return Poll::Ready(WhileOut::Back(outcome));
+                if back.is_none()
+                    && let Poll::Ready(output) = wait.as_mut().poll(cx)
+                {
+                    back = Some(output);
                 }
-                self.rx.borrow_mut().poll_recv(cx).map(WhileOut::Asked)
+                let last_out = self.levels.get() == 1;
+                if !(last_out && !self.serving.borrow().is_empty())
+                    && let Some(output) = back.take()
+                {
+                    return Poll::Ready(Woke::Back(output));
+                }
+                if let Poll::Ready(Some(served)) = self.serving.borrow_mut().poll_next_unpin(cx) {
+                    return Poll::Ready(Woke::Served(served));
+                }
+                if !self.closed.get()
+                    && let Poll::Ready(asked) = self.rx.borrow_mut().poll_recv(cx)
+                {
+                    return Poll::Ready(Woke::Asked(asked));
+                }
+                Poll::Pending
             })
             .await;
             match woke {
-                WhileOut::Back(outcome) => return outcome,
-                WhileOut::Asked(Some(
-                    cmd @ (HydrationCommand::Fetch { .. } | HydrationCommand::Populate { .. }),
-                )) => {
-                    if let Some(rel) =
-                        serve_command(self.hydrator, cmd, self.sync_root, self.event_tx).await
-                    {
-                        self.owed.borrow_mut().push(rel);
-                    }
+                Woke::Back(output) => return output,
+                Woke::Served(served) => self.finish(served).await,
+                Woke::Asked(Some(
+                    cmd @ (HydrationCommand::Fetch { .. }
+                    | HydrationCommand::Populate { .. }
+                    | HydrationCommand::Materialize { .. }),
+                )) => self.start(cmd),
+                Woke::Asked(Some(cmd)) => self.leave_for_later(cmd),
+                Woke::Asked(None) => self.closed.set(true),
+            }
+        }
+    }
+
+    /// Start answering `cmd` alongside whatever wait is out; [`Self::answer_while`] drives it.
+    fn start(&self, cmd: HydrationCommand) {
+        let (hydrator, sync_root, event_tx, cancel) =
+            (self.hydrator, self.sync_root, self.event_tx, self.cancel);
+        let serving: Serving<'a> = match cmd {
+            HydrationCommand::Materialize { rel, reply } => {
+                let mut hydrating = self.hydrating.borrow_mut();
+                if let Some(waiting) = hydrating.get_mut(&rel) {
+                    waiting.push(reply);
+                    return;
                 }
-                WhileOut::Asked(Some(cmd)) => self.leave_for_later(cmd),
-                // Nothing more will be asked.
-                WhileOut::Asked(None) => return call.await,
+                hydrating.insert(rel.clone(), vec![reply]);
+                Box::pin(async move {
+                    // The root going away fails every waiter at once, and dropping the
+                    // download removes its temp file.
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => Err(anyhow::anyhow!("the on-demand root is stopping")),
+                        outcome = materialize(hydrator, &rel, sync_root) => outcome,
+                    };
+                    Served::Hydrated(rel, outcome)
+                })
+            }
+            cmd => Box::pin(async move {
+                Served::Answered(serve_command(hydrator, cmd, sync_root, event_tx).await)
+            }),
+        };
+        self.serving.borrow_mut().push(serving);
+    }
+
+    /// The tail of a request [`Self::start`]ed: the re-describe it owes, or its hydration's
+    /// mark and answers.
+    async fn finish(&self, served: Served) {
+        match served {
+            Served::Answered(owed) => self.owed.borrow_mut().extend(owed),
+            Served::Hydrated(rel, outcome) => {
+                let replies = self.hydrating.borrow_mut().remove(&rel).unwrap_or_default();
+                finish_materialize(
+                    self.hydrator,
+                    &rel,
+                    outcome,
+                    self.sync_root,
+                    self.event_tx,
+                    &replies,
+                )
+                .await
             }
         }
     }
@@ -3381,13 +3603,13 @@ impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
 
 /// The serve loop's binding: every [`PlatformCall`] is made through
 /// [`PlatformRequests::answer_while`], every other call goes straight through.
-struct AnsweringWhileOut<'a, H, I> {
-    binding: &'a I,
-    requests: &'a PlatformRequests<'a, H>,
+struct AnsweringWhileOut<'r, 'a, H, I> {
+    binding: &'r I,
+    requests: &'r PlatformRequests<'a, H>,
 }
 
 impl<H: HydrationHost, I: PlaceholderInvalidator> PlaceholderInvalidator
-    for AnsweringWhileOut<'_, H, I>
+    for AnsweringWhileOut<'_, '_, H, I>
 {
     fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_> {
         Box::pin(self.requests.answer_while(self.binding.dehydrate(abs_path)))
@@ -3556,9 +3778,8 @@ async fn serve_command<H: HydrationHost>(
             // agrees with its row untouched.
             Some(rel)
         }
-        // Reached only for a hydration left for after a platform call
-        // (`PlatformRequests::take_later`): the loop opens a batch for every other
-        // (`serve_materialize_batch`).
+        // A lone hydration. The serve loop never hands one here: it starts every hydration
+        // through `PlatformRequests::start`, where a second open of the file joins the first.
         HydrationCommand::Materialize { rel, reply } => {
             let outcome = materialize(hydrator, &rel, sync_root).await;
             finish_materialize(hydrator, &rel, outcome, sync_root, event_tx, &[reply]).await;
@@ -3695,85 +3916,6 @@ async fn finish_materialize<H: HydrationHost>(
     };
     for reply in replies {
         answer(reply, outcome.clone());
-    }
-}
-
-/// Serve a hydration and everything that arrives while it runs.
-///
-/// A download is the one long wait the driving loop has, and a FUSE root's
-/// users wait on the loop for listings too: so while the batch is open the loop
-/// goes on serving [`HydrationCommand::Populate`], starts every further
-/// [`HydrationCommand::Materialize`] alongside the running ones (a second
-/// request for a `rel` already downloading joins it — one download, every
-/// waiter answered), and leaves everything else for after the batch
-/// ([`PlatformRequests::take_later`]), served once the last download is done.
-///
-/// Deliberately narrow: only downloads overlap — with each other and with
-/// listings, whose engine work is a synchronous DB read. The write half, the
-/// sweeps and the corpus passes stay strictly one at a time on the engine, as
-/// they are on every other root, because they hold the engine across awaits
-/// of their own.
-#[allow(clippy::too_many_arguments)]
-async fn serve_materialize_batch<H: HydrationHost>(
-    hydrator: &H,
-    first_rel: String,
-    first_reply: LoopReply,
-    requests: &PlatformRequests<'_, H>,
-    sync_root: &Path,
-    event_tx: Option<&broadcast::Sender<Event>>,
-    cancel: &CancellationToken,
-) {
-    use futures_util::StreamExt as _;
-    use futures_util::stream::FuturesUnordered;
-
-    let start = |rel: String| async move {
-        let outcome = materialize(hydrator, &rel, sync_root).await;
-        (rel, outcome)
-    };
-    let mut waiting: std::collections::HashMap<String, Vec<LoopReply>> =
-        std::collections::HashMap::from([(first_rel.clone(), vec![first_reply])]);
-    let mut running = FuturesUnordered::new();
-    running.push(start(first_rel));
-    let mut channel_open = true;
-
-    while !running.is_empty() {
-        tokio::select! {
-            biased;
-
-            // The root is going away: every waiter is answered (its request
-            // fails), and dropping the downloads removes their temp files.
-            _ = cancel.cancelled() => {
-                for replies in waiting.values() {
-                    for reply in replies {
-                        answer(reply, Err("the on-demand root is stopping".into()));
-                    }
-                }
-                return;
-            }
-
-            Some((rel, outcome)) = running.next() => {
-                let replies = waiting.remove(&rel).unwrap_or_default();
-                finish_materialize(hydrator, &rel, outcome, sync_root, event_tx, &replies).await;
-            }
-
-            cmd = requests.next(), if channel_open => match cmd {
-                Some(HydrationCommand::Materialize { rel, reply }) => {
-                    if let Some(replies) = waiting.get_mut(&rel) {
-                        replies.push(reply);
-                    } else {
-                        waiting.insert(rel.clone(), vec![reply]);
-                        running.push(start(rel));
-                    }
-                }
-                Some(HydrationCommand::Populate { parent_rel, sink }) => {
-                    if let Err(e) = serve_populate(hydrator, &*sink, &parent_rel).await {
-                        tracing::warn!(path = %fauna_core::log_redact::log_path(&parent_rel), error = ?e, "directory population failed");
-                    }
-                }
-                Some(other) => requests.leave_for_later(other),
-                None => channel_open = false,
-            },
-        }
     }
 }
 
@@ -4052,6 +4194,14 @@ mod tests {
         /// Held closed (`false`), every download waits until it opens — so a test
         /// can prove what the loop serves while a hydration is in flight.
         download_gate: Option<watch::Receiver<bool>>,
+        /// Every `upload_file(rel)` call, recorded as it starts.
+        uploads: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Held closed, every upload waits until it opens — the loop's upload of a
+        /// local write, out on a slow uplink.
+        upload_gate: Option<watch::Receiver<bool>>,
+        /// Held closed, every `repull()` waits until it opens (once counted) — the
+        /// loop's re-pull, out against a slow nest.
+        repull_gate: Option<watch::Receiver<bool>>,
         /// Every `handle_delete(rel)` call — a placeholder unlinked through a
         /// FUSE mount reaches the host here.
         deleted: Arc<std::sync::Mutex<Vec<String>>>,
@@ -4060,6 +4210,14 @@ mod tests {
         /// The engine's verdict per rel for a folded delete; absent → `Applied`,
         /// which hands the rel (as a relative path) to the binding's `remove`.
         delete_answers: std::collections::HashMap<String, FoldedDeleteOutcome>,
+        /// The loop's nest and sibling passes in the order they ran: `repull` and
+        /// `pull_siblings` push their names — what pins a sibling pull behind
+        /// every re-pull and at each admission.
+        trigger_log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        /// The sibling registry's admission watch. A test bumps the sender to
+        /// admit a sibling; kept alive here so the loop's arm stays pending in
+        /// every other test.
+        admissions: Arc<(watch::Sender<u64>, watch::Receiver<u64>)>,
     }
 
     /// The fake host's canned `ApplyHeldDeletes` verdict.
@@ -4106,9 +4264,14 @@ mod tests {
                 engine_commands: Default::default(),
                 downloads: Default::default(),
                 download_gate: None,
+                uploads: Default::default(),
+                upload_gate: None,
+                repull_gate: None,
                 deleted: Default::default(),
                 folded_deletes: Default::default(),
                 delete_answers: Default::default(),
+                trigger_log: Default::default(),
+                admissions: Arc::new(watch::channel(0)),
             }
         }
     }
@@ -4153,10 +4316,11 @@ mod tests {
             false
         }
 
-        async fn upload_file(
-            &self,
-            _rel: &str,
-        ) -> Result<fauna_sync_engine::engine::UploadOutcome> {
+        async fn upload_file(&self, rel: &str) -> Result<fauna_sync_engine::engine::UploadOutcome> {
+            self.uploads.lock().unwrap().push(rel.to_string());
+            if let Some(gate) = &self.upload_gate {
+                gate.clone().wait_for(|open| *open).await?;
+            }
             Ok(Default::default())
         }
 
@@ -4265,6 +4429,7 @@ mod tests {
         }
 
         async fn repull(&self) -> Result<PlaceholderFold> {
+            self.trigger_log.lock().unwrap().push("repull");
             let n = {
                 let mut calls = self.repull_calls.lock().unwrap();
                 *calls += 1;
@@ -4276,6 +4441,9 @@ mod tests {
                 && n >= *limit
             {
                 cancel.cancel();
+            }
+            if let Some(gate) = &self.repull_gate {
+                gate.clone().wait_for(|open| *open).await?;
             }
             self.repulls
                 .lock()
@@ -4329,6 +4497,15 @@ mod tests {
             self.adopt_records.clone()
         }
 
+        async fn pull_siblings(&self, _folder: &str) {
+            self.trigger_log.lock().unwrap().push("pull_siblings");
+            self.boot_log.lock().unwrap().push("pull_siblings");
+        }
+
+        fn sibling_admissions(&self) -> Option<watch::Receiver<u64>> {
+            Some(self.admissions.1.clone())
+        }
+
         async fn answer_engine_command(&self, cmd: EngineCommand) {
             match cmd {
                 EngineCommand::ApplyHeldDeletes { reply } => {
@@ -4337,6 +4514,13 @@ mod tests {
                         .unwrap()
                         .push("ApplyHeldDeletes");
                     let _ = reply.send(Ok(FAKE_APPLIED));
+                }
+                EngineCommand::RestoreRetainedVersion { reply, .. } => {
+                    self.engine_commands
+                        .lock()
+                        .unwrap()
+                        .push("RestoreRetainedVersion");
+                    let _ = reply.send(Ok(()));
                 }
                 #[cfg(feature = "p2p-share")]
                 EngineCommand::ShareIngest { reply, .. } => {
@@ -4964,7 +5148,7 @@ mod tests {
             relative_path: rel.to_string(),
             manifest_hash: fauna_core::data::ContentHash::from_digest_raw([fill; 32]),
             size_bytes: 99,
-            content_key_version: None,
+            content_stamp: None,
             remote_mtime: 900,
             version_num: 1,
             signed_as: None,
@@ -5944,6 +6128,287 @@ mod tests {
         );
     }
 
+    /// A fetch the platform sends after the fold's re-describe is out — a program opening the
+    /// file as the update waits on another fetch of it — is answered from inside the arm that
+    /// made the update: the platform call's answering is re-entered inside the arm's own
+    /// (`PlatformRequests::answer_while`), and the inner one answers as the outer does.
+    #[test]
+    fn a_fetch_arriving_during_a_platform_call_inside_an_engine_arm_is_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 6, 1_700_000_000);
+        let fetch = Arc::new(RecordingSink::default());
+        let invalidator = FakeInvalidator {
+            supersede_waits_on: [(abs.clone(), fetch.clone())].into_iter().collect(),
+            ..Default::default()
+        };
+        // The edit lands as the loop starts: the reconnect arm's re-pull folds it.
+        let reconnect = Arc::new(watch::channel(0u64));
+        reconnect.0.send(1).unwrap();
+
+        serve_until_timed(
+            FakeHydrator {
+                bytes: Some(vec![b'n'; 248]),
+                rows: Some(vec![prow("f.txt", 248, 1_700_000_100)]),
+                repulls: Arc::new(std::sync::Mutex::new(
+                    [Ok(PlaceholderFold {
+                        repointed: vec![prow("f.txt", 248, 1_700_000_100)],
+                        ..Default::default()
+                    })]
+                    .into_iter()
+                    .collect(),
+                )),
+                reconnect,
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            // Well after the re-describe went out, waiting on this very fetch.
+            vec![(
+                Duration::from_millis(1500),
+                HydrationCommand::Fetch {
+                    rel: "f.txt".into(),
+                    offset: 0,
+                    length: 6,
+                    file_size: 6,
+                    sink: Box::new(fetch.clone()),
+                },
+            )],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert!(
+            *fetch.failed.lock().unwrap(),
+            "the fetch is answered while the arm's update waits on it"
+        );
+        assert!(
+            invalidator.timed_out.lock().unwrap().is_empty(),
+            "the update never waits out cfapi's timeout"
+        );
+        assert_eq!(
+            invalidator.superseded.lock().unwrap().first(),
+            Some(&(abs, 248, 1_700_000_100)),
+            "…and the re-describe lands"
+        );
+    }
+
+    // ── the serve loop answers the platform across every wait it makes ──
+
+    /// The bytes every fetch in these tests is served, and the size the platform asks for.
+    const CLOUD_BYTES: &[u8] = b"cloud bytes";
+
+    /// A fetch of all of `rel`, into `sink`.
+    fn fetch_into(rel: &str, sink: &Arc<RecordingSink>) -> HydrationCommand {
+        HydrationCommand::Fetch {
+            rel: rel.into(),
+            offset: 0,
+            length: -1,
+            file_size: CLOUD_BYTES.len() as i64,
+            sink: Box::new(sink.clone()),
+        }
+    }
+
+    /// Whether `sink`'s fetch has been answered with bytes.
+    fn fetched(sink: &RecordingSink) -> bool {
+        !sink.data.lock().unwrap().is_empty()
+    }
+
+    /// Poll `done` on the real clock for up to `within`; whether it came to hold.
+    async fn held_within(done: impl Fn() -> bool, within: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        while !done() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
+    }
+
+    /// Run `run_hydration_loop` over `root` on a REAL clock — a live watcher drives the upload
+    /// arm — with the remote-change nudge wired, beside `driver`, which is handed the
+    /// platform's request channel and the nudge. The loop is cancelled once the driver is done,
+    /// and the driver's answer returned: a driver that parked an arm lets it go first.
+    fn drive_real_loop<T, D: std::future::Future<Output = T>>(
+        hydrator: FakeHydrator,
+        root: &Path,
+        driver: impl FnOnce(mpsc::UnboundedSender<HydrationCommand>, mpsc::Sender<()>) -> D,
+    ) -> T {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (wake_tx, wake_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        loop_runtime().block_on(async move {
+            let driven = async {
+                let answer = driver(tx, wake_tx).await;
+                stop.cancel();
+                answer
+            };
+            let (answer, ()) = tokio::join!(
+                driven,
+                run_hydration_loop(
+                    hydrator,
+                    FakeInvalidator::default(),
+                    rx,
+                    None,
+                    root.to_path_buf(),
+                    "docs".to_string(),
+                    cancel,
+                    Some(wake_rx),
+                    None,
+                ),
+            );
+            answer
+        })
+    }
+
+    /// **A fetch is answered while the loop uploads a local write** (`on-demand-files.md`
+    /// § *A placeholder describes the version its row resolves*, the rule *Nothing the serve
+    /// loop waits on holds up the root*): with the upload parked, a fetch sent meanwhile is
+    /// answered before it is let go. Until the rule was built the local-write arm awaited the
+    /// upload answering nothing, so every open of a cloud-only file waited for it.
+    #[test]
+    fn a_fetch_is_answered_while_the_loop_uploads_a_local_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (gate, upload_gate) = watch::channel(false);
+        let uploads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let corpus_starts = Arc::new(std::sync::Mutex::new(0usize));
+        let sink = Arc::new(RecordingSink::default());
+        let (uploading, booted, fetch) = (uploads.clone(), corpus_starts.clone(), sink.clone());
+
+        let answered = drive_real_loop(
+            FakeHydrator {
+                bytes: Some(CLOUD_BYTES.to_vec()),
+                uploads: uploads.clone(),
+                upload_gate: Some(upload_gate),
+                corpus_starts,
+                ..Default::default()
+            },
+            root,
+            |requests, _wake| async move {
+                // The watcher is up once the boot reaches its corpus passes.
+                assert!(
+                    held_within(|| *booted.lock().unwrap() > 0, Duration::from_secs(5)).await,
+                    "the root boots"
+                );
+                std::fs::write(root.join("edited.txt"), b"a local edit").unwrap();
+                assert!(
+                    held_within(
+                        || !uploading.lock().unwrap().is_empty(),
+                        Duration::from_secs(10)
+                    )
+                    .await,
+                    "the watcher hands the edit to the uploader"
+                );
+                requests.send(fetch_into("cloud.txt", &fetch)).unwrap();
+                let answered = held_within(|| fetched(&fetch), Duration::from_secs(5)).await;
+                gate.send_replace(true);
+                answered
+            },
+        );
+
+        assert!(
+            answered,
+            "the fetch is answered while the upload is out, not after it"
+        );
+        assert_eq!(*uploads.lock().unwrap(), vec!["edited.txt".to_string()]);
+    }
+
+    /// **A fetch is answered while the loop re-pulls the nest** — the nudge arm's re-pull
+    /// parked, as against a nest that is slow or down.
+    #[test]
+    fn a_fetch_is_answered_while_the_loop_repulls_the_nest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gate, repull_gate) = watch::channel(false);
+        let repull_calls = Arc::new(std::sync::Mutex::new(0usize));
+        let sink = Arc::new(RecordingSink::default());
+        let (repulls, fetch) = (repull_calls.clone(), sink.clone());
+
+        let answered = drive_real_loop(
+            FakeHydrator {
+                bytes: Some(CLOUD_BYTES.to_vec()),
+                repull_calls,
+                repull_gate: Some(repull_gate),
+                ..Default::default()
+            },
+            dir.path(),
+            |requests, wake| async move {
+                wake.send(()).await.unwrap();
+                assert!(
+                    held_within(|| *repulls.lock().unwrap() > 0, Duration::from_secs(5)).await,
+                    "the nudge's re-pull is out"
+                );
+                requests.send(fetch_into("cloud.txt", &fetch)).unwrap();
+                let answered = held_within(|| fetched(&fetch), Duration::from_secs(5)).await;
+                gate.send_replace(true);
+                answered
+            },
+        );
+
+        assert!(
+            answered,
+            "the fetch is answered while the re-pull is out, not after it"
+        );
+    }
+
+    /// What the loop does not answer while an arm is out — the OS's notice of its own
+    /// evictions — waits for the arm, in the order it came; a fetch sent after the notices is
+    /// answered meanwhile all the same.
+    #[test]
+    fn notices_sent_while_an_arm_is_out_wait_for_it_in_order_and_a_fetch_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gate, repull_gate) = watch::channel(false);
+        let repull_calls = Arc::new(std::sync::Mutex::new(0usize));
+        let placeheld = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::new(RecordingSink::default());
+        let (repulls, noticed, fetch) = (repull_calls.clone(), placeheld.clone(), sink.clone());
+
+        let (answered, noticed_meanwhile, noticed_after) = drive_real_loop(
+            FakeHydrator {
+                bytes: Some(CLOUD_BYTES.to_vec()),
+                repull_calls,
+                repull_gate: Some(repull_gate),
+                placeheld: placeheld.clone(),
+                ..Default::default()
+            },
+            dir.path(),
+            |requests, wake| async move {
+                wake.send(()).await.unwrap();
+                assert!(
+                    held_within(|| *repulls.lock().unwrap() > 0, Duration::from_secs(5)).await,
+                    "the nudge's re-pull is out"
+                );
+                for rel in ["first.txt", "second.txt"] {
+                    requests
+                        .send(HydrationCommand::Dehydrate { rel: rel.into() })
+                        .unwrap();
+                }
+                requests.send(fetch_into("cloud.txt", &fetch)).unwrap();
+                let answered = held_within(|| fetched(&fetch), Duration::from_secs(5)).await;
+                let noticed_meanwhile = noticed.lock().unwrap().clone();
+                gate.send_replace(true);
+                let noticed_after = held_within(
+                    || noticed.lock().unwrap().len() == 2,
+                    Duration::from_secs(5),
+                )
+                .await;
+                (answered, noticed_meanwhile, noticed_after)
+            },
+        );
+
+        assert!(answered, "the fetch is answered while the re-pull is out");
+        assert!(
+            noticed_meanwhile.is_empty(),
+            "a notice waits for the arm: {noticed_meanwhile:?}"
+        );
+        assert!(noticed_after, "…and is served once the arm is done");
+        assert_eq!(
+            *placeheld.lock().unwrap(),
+            vec!["first.txt".to_string(), "second.txt".to_string()],
+            "in the order the notices came"
+        );
+    }
+
     /// The program whose open was refused can hold the file past the first try, so a
     /// refused try is owed again, with a backoff — the re-describe lands once the file is
     /// let go, with no other open.
@@ -6192,14 +6657,22 @@ mod tests {
     /// `connect` (the stale-hydrated invalidation included), so a re-seal reads
     /// local rows that already hold everything the nest held at start — never
     /// the head a seat last saw before a peer's newer edit
-    /// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
+    /// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)). The
+    /// startup sibling pull sits between them, where the always-resident loop
+    /// runs its own: behind the nest's rows, ahead of the corpus passes.
     #[test]
     fn the_boot_sweep_runs_before_the_root_connects() {
         assert_eq!(
             boot_order(FakeHydrator::default(), false),
-            vec!["prepare", "converge", "connect", "corpus_at_start"],
-            "a kept registration keeps its marks and sweeps before connecting; the corpus \
-             passes run behind the startup fold"
+            vec![
+                "prepare",
+                "converge",
+                "connect",
+                "pull_siblings",
+                "corpus_at_start"
+            ],
+            "a kept registration keeps its marks and sweeps before connecting; the sibling \
+             pull and the corpus passes run behind the startup fold"
         );
     }
 
@@ -6215,6 +6688,7 @@ mod tests {
                 "clear_seen_all",
                 "converge",
                 "connect",
+                "pull_siblings",
                 "corpus_at_start"
             ]
         );
@@ -6397,6 +6871,125 @@ mod tests {
             "a nudge must re-pull the nest now, not wait out the rescan tick"
         );
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    // ── the same-account leg's sibling pull (`p2p.md` § Same-account nest-down
+    //    folder transfer) ──
+
+    /// Drive the loop over `host` until its trigger log holds `n` entries, then
+    /// cancel it; `None` when the 5 s budget ran out first.
+    fn trigger_log_after(
+        host: FakeHydrator,
+        wake_rx: Option<mpsc::Receiver<()>>,
+        n: usize,
+    ) -> (Option<()>, Vec<&'static str>) {
+        let log = host.trigger_log.clone();
+        let polled = log.clone();
+        let done = drive_loop_with_inbox(host, wake_rx, None, async move {
+            while polled.lock().unwrap().len() < n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let got = log.lock().unwrap().clone();
+        (done, got)
+    }
+
+    /// **A seat whose folder is on-demand asks its siblings for rows** — after the
+    /// startup fold and after every re-pull, the nudge's here: nest first, then
+    /// siblings, as the always-resident loop orders them (`p2p-shared-set-build.md`
+    /// § Build design — the same-account row leg, decision 4). Until 2026-11-05
+    /// this root ran no sibling pull at all, so with the nest down a windows seat
+    /// (whose every bound folder is this root) received nothing from its other
+    /// devices.
+    #[test]
+    fn loop_pulls_siblings_after_the_startup_fold_and_a_nudges_repull() {
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        assert!(wake_tx.try_send(()).is_ok());
+        let (done, log) = trigger_log_after(FakeHydrator::default(), Some(wake_rx), 3);
+        assert!(
+            done.is_some(),
+            "the on-demand loop never pulled its siblings behind the nudge's re-pull: {log:?}"
+        );
+        assert_eq!(log, vec!["pull_siblings", "repull", "pull_siblings"]);
+    }
+
+    /// …and behind the reconnect edge's re-pull: the moment the nest answers
+    /// again, its rows first, then whatever a sibling still serves.
+    #[test]
+    fn loop_pulls_siblings_after_a_reconnects_repull() {
+        let host = FakeHydrator::default();
+        host.reconnect.0.send(1).unwrap();
+        let (done, log) = trigger_log_after(host, None, 3);
+        assert!(
+            done.is_some(),
+            "the on-demand loop never pulled its siblings behind the reconnect's re-pull: {log:?}"
+        );
+        assert_eq!(log, vec!["pull_siblings", "repull", "pull_siblings"]);
+    }
+
+    /// …and behind the rescan tick's — with no nest answering, the tick and an
+    /// admission are the only triggers there are.
+    #[test]
+    fn the_rescan_tick_pulls_siblings_after_its_repull() {
+        let (_cmd_tx, rx) = mpsc::unbounded_channel::<HydrationCommand>();
+        let cancel = CancellationToken::new();
+        let hydrator = FakeHydrator {
+            interval: Some(Duration::from_secs(300)),
+            stop_after_repulls: Some((1, cancel.clone())),
+            ..Default::default()
+        };
+        let log = hydrator.trigger_log.clone();
+        loop_runtime().block_on(async move {
+            tokio::time::pause();
+            run_hydration_loop(
+                hydrator,
+                FakeInvalidator::default(),
+                rx,
+                None,
+                PathBuf::from(r"C:\Root"),
+                "docs".to_string(),
+                cancel,
+                None,
+                None,
+            )
+            .await;
+        });
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["pull_siblings", "repull", "pull_siblings"],
+            "the tick's re-pull must be followed by a sibling pull"
+        );
+    }
+
+    /// The fourth trigger on this root: a sibling the dial pass admits is pulled
+    /// at its admission, with no re-pull between — the tick here never fires.
+    #[test]
+    fn loop_pulls_a_sibling_at_its_admission() {
+        let host = FakeHydrator::default();
+        let log = host.trigger_log.clone();
+        let admit = host.admissions.clone();
+        let polled = log.clone();
+        let done = drive_loop_with_inbox(host, None, None, async move {
+            // The barrier: the startup pass has run, so only the admission arm can
+            // pull now.
+            while polled.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            admit.0.send_modify(|n| *n += 1);
+            while polled.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let log = log.lock().unwrap().clone();
+        assert!(
+            done.is_some(),
+            "an admission did not trigger a sibling pull on the on-demand root: {log:?}"
+        );
+        assert_eq!(
+            log,
+            vec!["pull_siblings", "pull_siblings"],
+            "the admission alone pulled — no re-pull between"
+        );
     }
 
     #[test]

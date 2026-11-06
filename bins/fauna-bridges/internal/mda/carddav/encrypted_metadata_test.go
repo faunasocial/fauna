@@ -28,7 +28,7 @@ func TestSealCollectionMetadataIsCanonicalDagCbor(t *testing.T) {
 	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{
 		Displayname: "Contacts",
 		Description: "",
-	}, fx.leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCardPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -68,7 +68,7 @@ func fixtureRecordOpener(t *testing.T, fx reportFixture) *mailfauna.MailRecordOp
 	if err != nil {
 		t.Fatalf("cap.Decrypt: %v", err)
 	}
-	opener, err := mailfauna.NewMailRecordOpener(snapshotPlaintext)
+	opener, err := mailfauna.NewRecordOpener(cap, snapshotPlaintext)
 	if err != nil {
 		t.Fatalf("NewMailRecordOpener: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSealUnsealCollectionMetadataRoundTrip(t *testing.T) {
 		Displayname: "Work",
 		Description: "colleagues",
 	}
-	sealed, err := SealCollectionMetadata(want, fx.leaf.Pubkey, nil)
+	sealed, err := SealCollectionMetadata(want, fixtureCardPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -108,8 +108,7 @@ func TestSealUnsealCollectionMetadataRoundTrip(t *testing.T) {
 // provisioned an MLS snapshot yet) surfaces as an error rather than a panic or
 // empty success, so ListAddressBooks can log + skip the book.
 func TestUnsealCollectionMetadataNilSnapshotErrors(t *testing.T) {
-	fx := newReportFixture(t)
-	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: "X"}, fx.leaf.Pubkey, nil)
+	sealed, err := SealCollectionMetadata(EncryptedCollectionMetadata{Displayname: "X"}, fixtureCardPubkey(), nil)
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}

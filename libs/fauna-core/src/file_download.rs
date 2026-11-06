@@ -29,9 +29,8 @@
 //! the browser's fetch. Chunk fetching is handed to the implementer as a **batch**
 //! (`fetch_chunks`) precisely so each target keeps its own concurrency strategy —
 //! a `tokio` buffered stream natively, `Promise.all` on the web — without this
-//! module depending on a runtime. Mirrors the
-//! [`MediaBlobFetcher`](https://docs.rs/) seam in `fauna-media-machine`, down to
-//! the `MaybeSendSync` + dual-`async_trait` arm.
+//! module depending on a runtime, through the `MaybeSendSync` + dual-`async_trait`
+//! arm.
 //!
 //! # Integrity (load-bearing — do not drop the verify)
 //!
@@ -53,12 +52,12 @@
 //! - **Sealed chunks are self-anchoring.** [`chunk_crypto`](crate::chunk_crypto)
 //!   derives each chunk's key *and* nonce from its **plaintext** content hash, so
 //!   a ciphertext substituted for another chunk simply fails to decrypt — the
-//!   seal is content-bound by construction, with no AAD needed. (Contrast the
-//!   sibling `MediaBlobFetcher` thumbnail path, whose framed
-//!   `decrypt_backup_chunk` seal is *not* content-bound: there a different blob
-//!   sealed under the same key decrypts cleanly, and the content-address check is
-//!   the only thing that catches the swap — security review. Do not
-//!   carry that reasoning over to this walk; the mechanisms differ.)
+//!   seal is content-bound by construction, with no AAD needed. (Contrast a
+//!   framed `decrypt_backup_chunk` blob, whose seal is *not* content-bound:
+//!   there a different blob sealed under the same key decrypts cleanly, and a
+//!   content-address check is the only thing that catches the swap — security
+//!   review. Do not carry that reasoning over to this walk; the
+//!   mechanisms differ.)
 //! - **A plaintext manifest's chunks have no other anchor.** When
 //!   `stored_hashes` is `None`, the stored bytes are passed through
 //!   undecrypted, so nothing authenticates the *bodies* but the whole-file
@@ -72,6 +71,7 @@
 
 use anyhow::{Context, Result};
 
+use crate::blob_seal::SealStamp;
 use crate::chunk::ChunkManifest;
 use crate::crypto::OwnerSealKey;
 use crate::data::ContentHash;
@@ -84,8 +84,7 @@ use crate::folder_keys::FolderContentKeys;
 /// [`download_file_bytes_by_manifest`], so every app shares one policy.
 ///
 /// `MaybeSendSync` + the dual `async_trait` arm let the one seam serve native
-/// (`Send + Sync`, spawnable) and wasm (single-threaded, `!Send`) — the identical
-/// pattern `fauna-media-machine`'s `MediaBlobFetcher` uses.
+/// (`Send + Sync`, spawnable) and wasm (single-threaded, `!Send`).
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait BlobFetcher: crate::MaybeSendSync {
@@ -569,6 +568,14 @@ pub struct FileDownloadKeys {
     /// that gate, so they live here instead, read by
     /// [`Self::retired_content_open_roots`] only.
     pub retired_content_keys: Option<FolderContentKeys>,
+    /// A **group set**'s content-key ring, keyed by 32-byte generation id
+    /// (`p2p-shared-set-build.md` § Build design — the group set, decision 4).
+    /// Present exactly for a set bound under a group scope; it then answers
+    /// every open by the record's [`SealStamp::Generation`] alone
+    /// ([`Self::group_open_roots`]) — no owner root, no folder generation, no
+    /// plaintext, and a generation the ring lacks is KEY-PENDING, the posture
+    /// of a missing M2 generation.
+    pub group_keys: Option<crate::group_content::GroupContentKeys>,
     /// Whether the **record being opened** verified as this holder's own
     /// signed change record of this set, on a set it owns — consulted for
     /// exactly one question: may an **unstamped** record of a content-keyed set
@@ -670,7 +677,9 @@ impl FileDownloadKeys {
     /// and the manifest is plaintext. PERMANENT: the same bytes refetch the
     /// same shape.
     fn check_sealed_only(&self, manifest: &ChunkManifest) -> Result<()> {
-        if self.sealed_only && manifest.stored_hashes.is_none() {
+        // A group set's bytes always rest sealed under a generation key: a
+        // plaintext manifest there authenticates nothing, whoever served it.
+        if (self.sealed_only || self.group_keys.is_some()) && manifest.stored_hashes.is_none() {
             return Err(crate::apply_failure::permanent(
                 crate::apply_failure::PermanentApplyFailure::PLAINTEXT_REFUSED,
                 "plaintext manifest (no stored_hashes) refused by a sealed-only reader — \
@@ -694,7 +703,7 @@ impl FileDownloadKeys {
             self.mls_group_id.as_deref(),
             // A served set is content-keyed whether or not this holder has
             // its keys in hand: keyless must fail closed, never owner-key.
-            self.content_keys.is_some() || self.served,
+            self.content_keys.is_some() || self.served || self.group_keys.is_some(),
             self.backup_key.as_ref(),
         )
     }
@@ -705,7 +714,47 @@ impl FileDownloadKeys {
     /// below asks, so a served set cannot be missed by a site that only knew
     /// about the group marker.
     pub fn is_content_keyed(&self) -> bool {
-        self.mls_group_id.is_some() || self.served
+        self.mls_group_id.is_some() || self.served || self.group_keys.is_some()
+    }
+
+    /// The group family's open roots — `Some` whenever the group family is in
+    /// play (this reader holds a group ring, or the record names a generation
+    /// id), `None` to leave the folder and owner arms to answer.
+    ///
+    /// Fail-closed both ways: a ring holder never falls through to an owner,
+    /// folder or plaintext root (a group set has no pre-bind content and no
+    /// `u64` version — decision 2), and a generation-stamped record never opens
+    /// under anything but its own generation's key. A generation the ring
+    /// lacks is KEY-PENDING ([`crate::apply_failure::key_pending`]): a
+    /// generation arrives with the scope's mint rows, exactly as a missing M2
+    /// generation arrives with custody.
+    fn group_open_roots(&self, stamp: Option<SealStamp>) -> Result<Option<Vec<[u8; 32]>>> {
+        let generation = stamp.and_then(SealStamp::generation);
+        let Some(ring) = self.group_keys.as_ref() else {
+            if let Some(g) = generation {
+                anyhow::bail!(
+                    "content_open_roots: a record stamped with group generation {} reached a \
+                     reader holding no group ring — failing closed",
+                    hex::encode(&g[..8])
+                );
+            }
+            return Ok(None);
+        };
+        let Some(g) = generation else {
+            anyhow::bail!(
+                "content_open_roots: a group set's record carries no generation id ({stamp:?}) — \
+                 a group set has no unstamped or versioned content; refusing to guess a root"
+            );
+        };
+        match ring.key(&g) {
+            Some(key) => Ok(Some(vec![*key])),
+            None => Err(crate::apply_failure::key_pending(format!(
+                "content_open_roots: this holder lacks group generation {} (removed member, or \
+                 its mint not yet walked) — failing closed rather than fall through to an \
+                 owner/plaintext root",
+                hex::encode(&g[..8])
+            ))),
+        }
     }
 
     /// Every owner-audience `chunk_crypto` root this reader may **open** a chunk
@@ -769,13 +818,13 @@ impl FileDownloadKeys {
     /// transient whoever signed. A stamped record is left as it is: no owner
     /// root is offered to it at all (ruling (10)(c), [`Self::stamp_bound_roots`],
     /// which classes its own failure).
-    fn finalize_open<T>(&self, content_key_version: Option<u64>, opened: Result<T>) -> Result<T> {
-        finalize_signer_bound(self.signer_bound_is_final(content_key_version), opened)
+    fn finalize_open<T>(&self, content_stamp: Option<SealStamp>, opened: Result<T>) -> Result<T> {
+        finalize_signer_bound(self.signer_bound_is_final(content_stamp), opened)
     }
 
     /// Whether [`Self::finalize_open`] marks a failed open of this record final.
-    fn signer_bound_is_final(&self, content_key_version: Option<u64>) -> bool {
-        content_key_version.is_none() && matches!(self.record_signer, RecordSigner::Predecessor(_))
+    fn signer_bound_is_final(&self, content_stamp: Option<SealStamp>) -> bool {
+        content_stamp.is_none() && matches!(self.record_signer, RecordSigner::Predecessor(_))
     }
 
     /// Candidate `chunk_crypto` roots for a bound set's stamped generation.
@@ -1078,7 +1127,7 @@ pub async fn fetch_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: &ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
 ) -> Result<ChunkManifest> {
     let manifest_bytes = fetcher
         .fetch_manifest(manifest_hash)
@@ -1138,8 +1187,8 @@ pub async fn fetch_manifest(
         return Ok(manifest);
     }
     keys.finalize_open(
-        content_key_version,
-        open_sealed_manifest(keys, manifest, content_key_version),
+        content_stamp,
+        open_sealed_manifest(keys, manifest, content_stamp),
     )
 }
 
@@ -1161,20 +1210,24 @@ fn finalize_signer_bound<T>(is_final: bool, opened: Result<T>) -> Result<T> {
 fn open_sealed_manifest(
     keys: &FileDownloadKeys,
     manifest: ChunkManifest,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
 ) -> Result<ChunkManifest> {
     let owner_roots = keys.owner_open_roots();
-    let roots = if let Some(roots) = keys.stamp_bound_roots(content_key_version)? {
+    let roots = if let Some(roots) = keys.group_open_roots(content_stamp)? {
+        roots
+    } else if let Some(roots) =
+        keys.stamp_bound_roots(content_stamp.and_then(SealStamp::version))?
+    {
         roots
     } else if !owner_roots.is_empty() {
         owner_roots
     } else {
-        keys.content_open_roots(content_key_version)?
+        keys.content_open_roots(content_stamp.and_then(SealStamp::version))?
             .filter(|roots| !roots.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "sealed manifest but no open root for generation \
-                     {content_key_version:?} (fail closed)"
+                     {content_stamp:?} (fail closed)"
                 )
             })?
     };
@@ -1246,7 +1299,7 @@ pub async fn fetch_decoded_chunks(
     keys: &FileDownloadKeys,
     manifest: &ChunkManifest,
     relative_path: &str,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
 ) -> Result<Vec<Vec<u8>>> {
     // Address the blob store by the content-addressed STORE key (the ciphertext
     // hash for a sealed set, else the plaintext hash), then decrypt under the
@@ -1257,8 +1310,8 @@ pub async fn fetch_decoded_chunks(
         .await?;
 
     keys.finalize_open(
-        content_key_version,
-        resolve_chunk_open_policy(keys, manifest, relative_path, content_key_version)
+        content_stamp,
+        resolve_chunk_open_policy(keys, manifest, relative_path, content_stamp)
             .and_then(|policy| open_chunk_window(&policy, &manifest.chunk_hashes, chunk_data)),
     )
 }
@@ -1285,7 +1338,7 @@ fn resolve_chunk_open_policy(
     keys: &FileDownloadKeys,
     manifest: &ChunkManifest,
     relative_path: &str,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
 ) -> Result<ChunkOpenPolicy> {
     if manifest.stored_hashes.is_none() {
         // [`fetch_manifest`] already refused it for a sealed-only reader; this
@@ -1293,7 +1346,10 @@ fn resolve_chunk_open_policy(
         keys.check_sealed_only(manifest)?;
         return Ok(ChunkOpenPolicy::Plaintext);
     }
-    if let Some(roots) = keys.stamp_bound_roots(content_key_version)? {
+    if let Some(roots) = keys.group_open_roots(content_stamp)? {
+        return Ok(ChunkOpenPolicy::Roots(roots));
+    }
+    if let Some(roots) = keys.stamp_bound_roots(content_stamp.and_then(SealStamp::version))? {
         return Ok(ChunkOpenPolicy::Roots(roots));
     }
     let owner_roots = keys.owner_open_roots();
@@ -1304,7 +1360,7 @@ fn resolve_chunk_open_policy(
         // (`FileDownloadKeys::predecessor_backup_keys`).
         return Ok(ChunkOpenPolicy::Roots(owner_roots));
     }
-    if let Some(roots) = keys.content_open_roots(content_key_version)? {
+    if let Some(roots) = keys.content_open_roots(content_stamp.and_then(SealStamp::version))? {
         if roots.is_empty() {
             // Part (D)'s arm under the per-signer bound, for a signer this
             // holder cannot place: `finalize_open` makes it final.
@@ -1460,17 +1516,17 @@ impl ManifestWalk {
         fetcher: &dyn BlobFetcher,
         keys: &FileDownloadKeys,
         manifest_hash: ContentHash,
-        content_key_version: Option<u64>,
+        content_stamp: Option<SealStamp>,
         relative_path: &str,
     ) -> Result<Self> {
         if !crate::path_guard::is_safe_relative_path(relative_path) {
             anyhow::bail!("unsafe path rejected: {relative_path}");
         }
-        let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_key_version).await?;
-        let signer_bound_is_final = keys.signer_bound_is_final(content_key_version);
+        let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_stamp).await?;
+        let signer_bound_is_final = keys.signer_bound_is_final(content_stamp);
         let policy = finalize_signer_bound(
             signer_bound_is_final,
-            resolve_chunk_open_policy(keys, &manifest, relative_path, content_key_version),
+            resolve_chunk_open_policy(keys, &manifest, relative_path, content_stamp),
         )?;
         let store_keys = manifest.store_keys();
         if store_keys.len() != manifest.chunk_hashes.len()
@@ -1556,17 +1612,11 @@ pub async fn verify_file_by_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
 ) -> Result<ContentHash> {
-    let walk = ManifestWalk::open(
-        fetcher,
-        keys,
-        manifest_hash,
-        content_key_version,
-        relative_path,
-    )
-    .await?;
+    let walk =
+        ManifestWalk::open(fetcher, keys, manifest_hash, content_stamp, relative_path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut total = 0u64;
     for i in 0..walk.window_count() {
@@ -1611,7 +1661,7 @@ pub async fn download_file_to_path_by_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
     dest: &std::path::Path,
 ) -> Result<ContentHash> {
@@ -1619,7 +1669,7 @@ pub async fn download_file_to_path_by_manifest(
         fetcher,
         keys,
         manifest_hash,
-        content_key_version,
+        content_stamp,
         relative_path,
         dest,
     )
@@ -1636,18 +1686,12 @@ pub async fn download_file_to_path_and_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
     dest: &std::path::Path,
 ) -> Result<(ContentHash, ChunkManifest)> {
-    let walk = ManifestWalk::open(
-        fetcher,
-        keys,
-        manifest_hash,
-        content_key_version,
-        relative_path,
-    )
-    .await?;
+    let walk =
+        ManifestWalk::open(fetcher, keys, manifest_hash, content_stamp, relative_path).await?;
 
     let write_walk = async {
         use std::io::Write;
@@ -1708,18 +1752,12 @@ pub async fn download_file_bytes_by_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
 ) -> Result<Vec<u8>> {
-    download_file_bytes_and_manifest(
-        fetcher,
-        keys,
-        manifest_hash,
-        content_key_version,
-        relative_path,
-    )
-    .await
-    .map(|(bytes, _)| bytes)
+    download_file_bytes_and_manifest(fetcher, keys, manifest_hash, content_stamp, relative_path)
+        .await
+        .map(|(bytes, _)| bytes)
 }
 
 /// [`download_file_bytes_by_manifest`], also handing back the opened
@@ -1728,15 +1766,15 @@ pub async fn download_file_bytes_and_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
 ) -> Result<(Vec<u8>, ChunkManifest)> {
     if !crate::path_guard::is_safe_relative_path(relative_path) {
         anyhow::bail!("unsafe path rejected: {relative_path}");
     }
-    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_key_version).await?;
+    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_stamp).await?;
     let chunk_data =
-        fetch_decoded_chunks(fetcher, keys, &manifest, relative_path, content_key_version).await?;
+        fetch_decoded_chunks(fetcher, keys, &manifest, relative_path, content_stamp).await?;
 
     // Reassemble in memory and verify the file hash. Callers (the cfapi FETCH_DATA
     // callback, the web blob download) chunk the transfer themselves, so we hand
@@ -1759,9 +1797,9 @@ pub async fn file_len_by_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
 ) -> Result<u64> {
-    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_key_version).await?;
+    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_stamp).await?;
     Ok(manifest.total_size)
 }
 
@@ -1788,7 +1826,7 @@ pub async fn download_file_range_by_manifest(
     fetcher: &dyn BlobFetcher,
     keys: &FileDownloadKeys,
     manifest_hash: ContentHash,
-    content_key_version: Option<u64>,
+    content_stamp: Option<SealStamp>,
     relative_path: &str,
     offset: u64,
     len: u64,
@@ -1796,7 +1834,7 @@ pub async fn download_file_range_by_manifest(
     if !crate::path_guard::is_safe_relative_path(relative_path) {
         anyhow::bail!("unsafe path rejected: {relative_path}");
     }
-    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_key_version).await?;
+    let manifest = fetch_manifest(fetcher, keys, &manifest_hash, content_stamp).await?;
     let end = offset.saturating_add(len).min(manifest.total_size);
     if offset >= end {
         return Ok(Vec::new());
@@ -1824,8 +1862,8 @@ pub async fn download_file_range_by_manifest(
         return Ok(Vec::new());
     };
     let policy = keys.finalize_open(
-        content_key_version,
-        resolve_chunk_open_policy(keys, &manifest, relative_path, content_key_version),
+        content_stamp,
+        resolve_chunk_open_policy(keys, &manifest, relative_path, content_stamp),
     )?;
     let store_keys = manifest.store_keys();
     let window = &store_keys[first..=last];
@@ -1837,10 +1875,7 @@ pub async fn download_file_range_by_manifest(
     // per hash, each verified to address its recorded content — so, unlike
     // the whole-file walks, there is no file-level hash to fall back on and
     // nothing left to re-check here.
-    let opened = keys.finalize_open(
-        content_key_version,
-        open_chunk_window(&policy, hashes, bodies),
-    )?;
+    let opened = keys.finalize_open(content_stamp, open_chunk_window(&policy, hashes, bodies))?;
     let mut out = Vec::with_capacity((end - offset) as usize);
     let mut pos = first_start;
     for plain in &opened {
@@ -2319,6 +2354,169 @@ mod tests {
         crate::crypto::BackupKey::from_bytes([0x51u8; 32])
     }
 
+    /// A group set's two generations: the tip `TIP` and a retained `OLD`.
+    const GROUP_TIP: [u8; 32] = [0x7au8; 32];
+    const GROUP_OLD: [u8; 32] = [0x7bu8; 32];
+
+    fn group_ring(tip_only: bool) -> crate::group_content::GroupContentKeys {
+        let tip = crate::crypto::GenerationKey::from_bytes([0x11u8; 32]);
+        let old = crate::crypto::GenerationKey::from_bytes([0x22u8; 32]);
+        let held: Vec<(&[u8; 32], &crate::crypto::GenerationKey)> = if tip_only {
+            vec![(&GROUP_TIP, &tip)]
+        } else {
+            vec![(&GROUP_TIP, &tip), (&GROUP_OLD, &old)]
+        };
+        crate::group_content::GroupContentKeys::from_generation_keys(Some(GROUP_TIP), held)
+    }
+
+    /// Seal `bytes` the way the engine's upload does for a group set — under
+    /// the ring's key for `generation`, stamped with its id — and stock a
+    /// fetcher with the manifest and chunks.
+    fn seal_group_file(
+        ring: &crate::group_content::GroupContentKeys,
+        generation: [u8; 32],
+        bytes: &[u8],
+    ) -> (FakeFetcher, ContentHash, Option<SealStamp>) {
+        let key = *ring
+            .key(&generation)
+            .expect("the ring holds the generation");
+        let sealed = crate::blob_seal::seal_blob(
+            bytes,
+            Some((key, Some(SealStamp::Generation(generation)))),
+        )
+        .unwrap();
+        let mut fetcher = FakeFetcher::default();
+        fetcher.put(&sealed.manifest_hash, sealed.manifest_bytes.clone());
+        for (k, body) in &sealed.chunks {
+            fetcher.put(k, body.clone());
+        }
+        (fetcher, sealed.manifest_hash, sealed.content_stamp)
+    }
+
+    fn group_reader(ring: crate::group_content::GroupContentKeys) -> FileDownloadKeys {
+        FileDownloadKeys {
+            // Owner material present on purpose: a group reader must never
+            // reach for it.
+            backup_key: Some(owner_key().into()),
+            group_keys: Some(ring),
+            ..Default::default()
+        }
+    }
+
+    /// Decision 4's read side: a blob sealed under a group ring's tip carries
+    /// the tip's generation id as its stamp and opens by that id — and a body
+    /// sealed under a retained generation opens by ITS id, never the tip's.
+    #[tokio::test]
+    async fn a_group_blob_sealed_under_the_tip_opens_by_its_generation_id() {
+        let ring = group_ring(false);
+        let tip_key = *ring.tip().expect("a tip").1;
+        let body = vec![b'g'; 9000];
+        let (fetcher, hash, stamp) = seal_group_file(&ring, GROUP_TIP, &body);
+        assert_eq!(stamp, Some(SealStamp::Generation(GROUP_TIP)));
+        assert_ne!(
+            tip_key, [0x11u8; 32],
+            "the content key is derived from the generation key, never the key itself"
+        );
+        let got =
+            download_file_bytes_by_manifest(&fetcher, &group_reader(ring), hash, stamp, "a.bin")
+                .await
+                .expect("the tip's body opens by its generation id");
+        assert_eq!(got, body);
+
+        let ring = group_ring(false);
+        let (fetcher, hash, stamp) = seal_group_file(&ring, GROUP_OLD, b"older body");
+        let got =
+            download_file_bytes_by_manifest(&fetcher, &group_reader(ring), hash, stamp, "b.bin")
+                .await
+                .expect("a retained generation's body opens by its own id");
+        assert_eq!(got, b"older body");
+    }
+
+    /// A row naming a generation this member's ring lacks is KEY-PENDING (the
+    /// mint may not have been walked yet) — never a fall-through to the owner
+    /// root the reader also holds, nor to plaintext.
+    #[tokio::test]
+    async fn a_group_row_naming_a_generation_the_ring_lacks_is_key_pending() {
+        let (fetcher, hash, stamp) = seal_group_file(&group_ring(false), GROUP_OLD, b"x");
+        let err = download_file_bytes_by_manifest(
+            &fetcher,
+            &group_reader(group_ring(true)),
+            hash,
+            stamp,
+            "c.bin",
+        )
+        .await
+        .expect_err("a generation the ring lacks opens nothing");
+        assert!(
+            crate::apply_failure::is_key_pending(&err),
+            "a missing generation waits for its mint, as a missing M2 generation does: {err:#}"
+        );
+    }
+
+    /// The group family is closed both ways: a ring holder refuses an
+    /// unstamped or version-stamped row (a group set has no `u64` version and
+    /// no pre-bind content), and a reader with no ring refuses a
+    /// generation-stamped row — no owner root is ever offered across.
+    #[tokio::test]
+    async fn the_group_family_never_crosses_to_an_owner_or_folder_root() {
+        let ring = group_ring(false);
+        let (fetcher, hash, _) = seal_group_file(&ring, GROUP_TIP, b"y");
+        for wrong in [None, Some(SealStamp::Version(1))] {
+            let err = download_file_bytes_by_manifest(
+                &fetcher,
+                &group_reader(group_ring(false)),
+                hash,
+                wrong,
+                "d.bin",
+            )
+            .await
+            .expect_err("a group reader opens only by a generation id");
+            assert!(!crate::apply_failure::is_key_pending(&err), "{err:#}");
+        }
+        let err = download_file_bytes_by_manifest(
+            &fetcher,
+            &FileDownloadKeys::owner(owner_key()),
+            hash,
+            Some(SealStamp::Generation(GROUP_TIP)),
+            "d.bin",
+        )
+        .await
+        .expect_err("an owner-only reader holds no group ring");
+        assert!(format!("{err:#}").contains("no group ring"), "{err:#}");
+    }
+
+    /// A folder set's version path is the family it always was: a version
+    /// stamp still opens under its M2 generation with a ring-less reader.
+    #[tokio::test]
+    async fn a_folder_version_stamp_still_opens_under_its_generation() {
+        let content = crate::folder_keys::FolderContentKeys::genesis([0x44u8; 32], 1);
+        let sealed = crate::blob_seal::seal_blob(
+            b"folder body",
+            Some((*content.current_key(), Some(SealStamp::Version(1)))),
+        )
+        .unwrap();
+        let mut fetcher = FakeFetcher::default();
+        fetcher.put(&sealed.manifest_hash, sealed.manifest_bytes.clone());
+        for (k, body) in &sealed.chunks {
+            fetcher.put(k, body.clone());
+        }
+        let keys = FileDownloadKeys {
+            mls_group_id: Some(vec![1]),
+            content_keys: Some(content),
+            ..Default::default()
+        };
+        let got = download_file_bytes_by_manifest(
+            &fetcher,
+            &keys,
+            sealed.manifest_hash,
+            sealed.content_stamp,
+            "e.bin",
+        )
+        .await
+        .expect("the folder family is unchanged");
+        assert_eq!(got, b"folder body");
+    }
+
     /// The web Backups case end to end: a sealed owner-only file walks back to
     /// its plaintext over nothing but the blob seam.
     #[tokio::test]
@@ -2461,7 +2659,7 @@ mod tests {
             &fetcher,
             &keys,
             manifest_hash,
-            Some(served_generation.current_version()),
+            Some(SealStamp::Version(served_generation.current_version())),
             "docs/served-while-on.bin",
         )
         .await
@@ -2753,9 +2951,15 @@ mod tests {
             ..Default::default()
         };
 
-        download_file_bytes_by_manifest(&fetcher, &keys, manifest_hash, Some(1), "shared/f.bin")
-            .await
-            .expect_err("a bound reader must not fall through to a predecessor owner root");
+        download_file_bytes_by_manifest(
+            &fetcher,
+            &keys,
+            manifest_hash,
+            Some(SealStamp::Version(1)),
+            "shared/f.bin",
+        )
+        .await
+        .expect_err("a bound reader must not fall through to a predecessor owner root");
     }
 
     /// Opening offers candidates; **sealing must commit to exactly one root**, and
@@ -3059,7 +3263,7 @@ mod tests {
 
             // The manifest arm.
             let (fetcher, manifest_hash, _) = seal_file_and_manifest(&root, &[b"successor's"]);
-            let err = fetch_manifest(&fetcher, &keys, &manifest_hash, Some(7))
+            let err = fetch_manifest(&fetcher, &keys, &manifest_hash, Some(SealStamp::Version(7)))
                 .await
                 .expect_err(&case);
             assert_eq!(
@@ -3071,10 +3275,15 @@ mod tests {
             // The chunk arm (a manifest with no sealed hashes reaches it
             // directly), whole-buffer and bounded walk alike.
             let (fetcher, manifest_hash, _) = seal_file(&root, &[b"successor's"]);
-            let err =
-                download_file_bytes_by_manifest(&fetcher, &keys, manifest_hash, Some(7), "f.bin")
-                    .await
-                    .expect_err(&case);
+            let err = download_file_bytes_by_manifest(
+                &fetcher,
+                &keys,
+                manifest_hash,
+                Some(SealStamp::Version(7)),
+                "f.bin",
+            )
+            .await
+            .expect_err(&case);
             assert_eq!(
                 crate::apply_failure::permanent_reason(&err),
                 stamp_bound,
@@ -3085,7 +3294,7 @@ mod tests {
                 &fetcher,
                 &keys,
                 manifest_hash,
-                Some(7),
+                Some(SealStamp::Version(7)),
                 "f.bin",
                 &dir.path().join("f.bin"),
             )
@@ -3116,10 +3325,15 @@ mod tests {
             };
             let (fetcher, manifest_hash, expected) =
                 seal_file_and_manifest(served.current_key(), &[b"sealed while served"]);
-            let got =
-                download_file_bytes_by_manifest(&fetcher, &keys, manifest_hash, stamp, "f.bin")
-                    .await
-                    .unwrap_or_else(|e| panic!("{signer:?}: {e:#}"));
+            let got = download_file_bytes_by_manifest(
+                &fetcher,
+                &keys,
+                manifest_hash,
+                stamp.map(SealStamp::Version),
+                "f.bin",
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{signer:?}: {e:#}"));
             assert_eq!(got, expected, "{signer:?}");
         }
         let (fetcher, manifest_hash, expected) =
@@ -3833,15 +4047,21 @@ mod tests {
             &[b"owner-keyed bytes"],
         );
         let keys = bound_owner_keys(1, [0x61u8; 32]);
-        download_file_bytes_by_manifest(&fetcher, &keys, manifest_hash, Some(1), "s/f.bin")
-            .await
-            .expect_err("a stamped record opens under its generation alone");
+        download_file_bytes_by_manifest(
+            &fetcher,
+            &keys,
+            manifest_hash,
+            Some(SealStamp::Version(1)),
+            "s/f.bin",
+        )
+        .await
+        .expect_err("a stamped record opens under its generation alone");
         let dir = tempfile::tempdir().unwrap();
         download_file_to_path_by_manifest(
             &fetcher,
             &keys,
             manifest_hash,
-            Some(1),
+            Some(SealStamp::Version(1)),
             "s/f.bin",
             &dir.path().join("f.bin"),
         )
@@ -3935,7 +4155,7 @@ mod tests {
             &fetcher,
             &keys,
             manifest_hash,
-            Some(content.current_version()),
+            Some(SealStamp::Version(content.current_version())),
             "docs/from-dav.txt",
         )
         .await

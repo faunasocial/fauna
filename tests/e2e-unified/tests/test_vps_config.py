@@ -21,7 +21,7 @@ import json
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 from helpers.waiting import wait_until
 from i18n.strings import S
 
@@ -98,7 +98,8 @@ def test_vps_config_preselects_dns_provider_when_capable(app, fake_cloud):
 def test_vps_config_server_types_after_verify(app, fake_cloud):
     """After ``vps-verify-button`` succeeds, server types render as radios
     (≤5). The verify probe hits the ``fake_cloud`` stub's datacenters +
-    server_types endpoints (web-only — see the helper's skip)."""
+    server_types endpoints (every app the helper's ``set-provider-base-urls``
+    gate admits)."""
     app.onboarding.go_to_vps_config_with_verified("hetzner",
                                                   {"api-token": "MOCK"},
                                                   fake_cloud)
@@ -122,16 +123,10 @@ def test_vps_server_types_follow_the_location(app, fake_cloud):
     each type differently per location — ``cx23`` is 4.51 in Falkenstein and
     5.17 in Helsinki — so the first radio's price is the listing's witness.
 
-    Drives the real ``verify_vps`` (the verified helper: web + linux + tui);
-    web omits the location picker, so it runs on linux + tui."""
-    if not (app.driver.is_linux() or app.driver.is_tui()):
-        skip_unbuilt(
-            app.driver,
-            surface="the vps-location-picker over a real verify",
-            detail="the verified helper runs on web + linux + tui and web omits "
-            "the picker; the other apps lack set_provider_base_urls",
-            tracked="installers/vps.md",
-        )
+    Drives the real ``verify_vps`` (the verified helper: web + linux + tui +
+    macos + ios + windows); web omits the location picker, so it runs on the
+    others (gate: ``require_offers_follow_the_location``)."""
+    app.onboarding.require_offers_follow_the_location()
     app.onboarding.go_to_vps_config_with_verified("hetzner",
                                                   {"api-token": "MOCK"},
                                                   fake_cloud)
@@ -173,21 +168,7 @@ def test_vps_location_picker_renders_and_selects(app):
     not ``'fsn1-dc14'`` (the name); the seam (``MacVpsConfigView``/``VpsConfigView``
     ``locationPicker``) now maps id<->name both directions. iOS shares the fix and
     is verified green here via a harness ``--client ios`` run."""
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the vps-location-picker",
-            detail="runs on linux + macos + ios + tui (apps/fauna-tui/src/"
-            "wizard/vps_config.rs paints the full onboarding.md § 5 VPS "
-            "wizard); web/windows/android are the remaining cross-app "
-            "follow-on",
-            tracked="installers/vps.md",
-        )
+    require_surface(app.driver, "vps-location-picker")
     locations = [
         {"id": "fsn1", "name": "fsn1-dc14", "city": "Falkenstein", "country": "DE"},
         {"id": "nbg1", "name": "nbg1-dc3", "city": "Nuremberg", "country": "DE"},
@@ -235,21 +216,6 @@ def test_vps_config_mail_mode_toggle_gates_server_types(app):
     bridge so the gate is exercised against known RAM sizes (a 1 GB + a 4 GB
     plan) rather than whatever the live provider returns.
     """
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_web()
-        or app.driver.is_windows()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the vps-config-mail-mode-toggle RAM gate",
-            detail="runs on web + linux + windows + macos + ios + tui; "
-            "android widens once host-emulator e2e lands.",
-            tracked="installers/vps.md",
-        )
     app.onboarding.go_to_vps_config()
     # Seed mail-ON first, then the provider + two plans, so the per-provider
     # section renders with the toggle checked (in sync with machine state).

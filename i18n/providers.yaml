@@ -353,11 +353,9 @@ modes:
       - { step: dns_config,    require_capability: dns }
       - { step: server_config, require_capability: vps }
   managed:
-    # Placeholder for future managed-subdomain broker. Disabled today; the
-    # UI renders a "coming soon" state. Keep the mode so clients don't
-    # fork behavior.
+    # Placeholder for future managed-subdomain broker. Disabled today, and no
+    # app offers it. Keep the mode so clients don't fork behavior.
     disabled: true
-    disabled_reason_key: provisioning.managed.disabled
   byo:
     # User runs fauna-nest themselves via Docker. No provider pickers.
     steps: []

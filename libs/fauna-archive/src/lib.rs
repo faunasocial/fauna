@@ -19,6 +19,7 @@
 pub mod error;
 pub mod external_id;
 pub mod facebook;
+pub mod instagram;
 pub mod model;
 pub mod parser;
 pub mod reader;

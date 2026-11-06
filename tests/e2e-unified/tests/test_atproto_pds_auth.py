@@ -56,7 +56,7 @@ USER_ROTATION_PUB = "did:key:zDnaembgSGUhZULN2Caob4HLJPaxBh92N7rtH21TErzqf8HQo" 
 @pytest.mark.feature("atproto")
 def test_atproto_pds_f1_auth_core_end_to_end(nest_binary, atproto_bridge_e2e_binary, tmp_path_factory):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -183,9 +183,7 @@ def test_atproto_pds_f1_auth_core_end_to_end(nest_binary, atproto_bridge_e2e_bin
 
         # ── Seed alice + provision her app credential (the fixture verifier)
         # over the User-class kind, connecting AS alice (self-scoped). ──
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=handle_domain, base_url=nest["url"],
-        )
+        alice = admit_adult(nest, "alice", domain=handle_domain, token=True)
         alice_ws = WsRpcAdminClient(
             nest["url"],
             actor_id=alice["actor_id_bytes"],

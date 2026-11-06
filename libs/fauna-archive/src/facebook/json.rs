@@ -199,7 +199,13 @@ pub fn media_ref(v: &Value) -> Option<ArchiveMediaRef> {
 
 /// A Facebook display name → actor ref (names only; no IDs in these files).
 pub fn actor(name: &str) -> ExternalActorRef {
-    ExternalActorRef::new(Platform::Facebook, None, &clean(name))
+    actor_on(Platform::Facebook, name)
+}
+
+/// A display name → a name-only actor ref on `platform` (the Messenger thread
+/// files, which both Meta exports share, name people by display name alone).
+pub fn actor_on(platform: Platform, name: &str) -> ExternalActorRef {
+    ExternalActorRef::new(platform, None, &clean(name))
 }
 
 /// `"tags": ["Name"]` or `"tags": [{"name": "Name"}]` → actor refs.

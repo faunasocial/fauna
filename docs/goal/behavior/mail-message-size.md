@@ -717,3 +717,22 @@ owns mail's constants, enforcement points, and reply codes.
     deliberately not the same as endorsing it; every app now renders the bubble well inside it,
     and the test prints each app's open-to-bubble time (`[over-frame] bubble rendered …`), so
     it is measured wherever the test runs.
+- **tui regressed on the same body and stalled its UI thread 44 s+ — FIXED 2026-11-02.** The background tester found the tui leg of
+  `test_mail_client_receive_over_frame_reference.py` red on `linux`: the automation bridge
+  answered 504 because the UI thread did not return to its loop. Cause: whole-body work re-done
+  on every frame, several times over. Measured in a debug build on the test's ~3 MiB body, one
+  `RenderDocument::to_plaintext` costs ~60 ms, and a frame cost ~730 ms, about twelve such
+  walks: (1) the shared `thread_detail` projection re-parsed every loaded body through
+  `markdown_to_plaintext` to keep a 240-char reply-quote snippet (~260 ms, and tui projects the
+  open thread on every frame); (2) the page derived each body's plaintext three times (the
+  policy scorer input, the muted-word match, the bubble's registry text); (3) the paint
+  stripped control characters from, and laid out, the whole body although the pane shows forty
+  rows of it. Fixed: the reply-quote snippet parses only the thread-list snippet's bounded
+  prefix (shared Rust, so every app's projection gets it; `thread_detail` ~2 ms); tui derives a
+  body's plaintext once per pass and skips the muted-word match with an empty list (apple's
+  short-circuit above); tui sanitizes and paints only the scrolled-to rows, each clipped past
+  the pane's edge. A frame is now about one body walk (~70 ms), the walk the registry's
+  whole-body `get_text` needs. `fauna-tui`'s
+  `a_three_mib_mail_body_costs_a_frame_about_one_body_walk` pins it: a frame under four walks
+  and the projection under one, both timed against a walk of the same body in the same test, so
+  machine load scales both sides.

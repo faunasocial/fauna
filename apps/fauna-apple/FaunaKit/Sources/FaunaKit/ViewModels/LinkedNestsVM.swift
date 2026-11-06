@@ -215,6 +215,56 @@ public final class LinkedNestsVM: MachineBackedVM {
         }
     }
 
+    /// The restore notice's state (`nests-custody-restore-notice`) — tui's
+    /// `RestoreNotice`: in flight, then the runtime's outcome.
+    public enum RestoreNotice: Equatable {
+        case running
+        case done(FfiCustodianRestoreOutcome)
+
+        /// Whether the form closes — the shared `closes_form` decision (a
+        /// reached custodian closes it; every failure keeps it open with the
+        /// address kept), never a rule restated here.
+        public var closesForm: Bool {
+            if case .done(let outcome) = self { return custodianRestoreClosesForm(outcome: outcome) }
+            return false
+        }
+
+        /// The notice text: the shared `notice_parts`, each part resolved
+        /// nested (the revoked reason is itself a key) and joined by a space.
+        public var text: String {
+            switch self {
+            case .running: return L.nests.custodyRestoreRunning
+            case .done(let outcome):
+                return custodianRestoreNotice(outcome: outcome)
+                    .map(renderLocalizedTextNested)
+                    .joined(separator: " ")
+            }
+        }
+    }
+
+    /// The last restore from a custodian nest this page ran; `nil` until one ran.
+    public internal(set) var restoreNotice: RestoreNotice?
+
+    /// Restore from a custodian nest (`nests.md` § Trust facet — restore from a
+    /// custodian nest) — both entries, the typed address and a custodian row's
+    /// own, dispatch the one shared runtime command. A `Failed` outcome (the
+    /// gesture could not run) reaches `error-message`, never the notice; then
+    /// the page re-reads so a restored custodian row paints beside the notice.
+    public func restoreFromCustodian(_ raw: String) async {
+        let url = raw.trimmingCharacters(in: .whitespaces)
+        guard !url.isEmpty, restoreNotice != .running, let api = configuredApi else { return }
+        errorMessage = nil
+        restoreNotice = .running
+        let outcome = await api.restoreFromCustodian(url: url)
+        if case .failed(let reason) = outcome {
+            restoreNotice = nil
+            errorMessage = reason
+        } else {
+            restoreNotice = .done(outcome)
+        }
+        await hydrate()
+    }
+
     /// Dispatch a user action; the machine runs it to completion (or records an
     /// error on the snapshot), then we re-read.
     public func dispatch(_ action: LinkedNestsAction) async { await dispatchToMachine(action) }

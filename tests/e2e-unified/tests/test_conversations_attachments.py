@@ -43,6 +43,7 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.windows,
     pytest.mark.tui,
+    pytest.mark.android,
 ]
 
 # A real 1x1 PNG so `gdk::Texture::from_bytes` / `NSImage`/`UIImage` actually

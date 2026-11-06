@@ -46,8 +46,8 @@ import pytest
 
 from actions.api_actor import ApiActor
 from common.auth import create_actor_and_register
-from helpers.app_surface import app_name, skip_unbuilt
-from helpers.e2e_session import E2E_LOGIN_DEVICE_ID, login_as
+from helpers.app_surface import require_surface
+from helpers.e2e_session import e2e_login_device_id, login_as
 from helpers.mail_dedicated_nest import login_as_nest_admin
 from i18n.strings import S
 from helpers.room_seats import (  # noqa: F401 — room_app/room_seat_pair are pytest fixtures adopted by import
@@ -70,7 +70,6 @@ pytestmark = [
     pytest.mark.linux,
 ]
 
-_BUILT_APPS = ("tui", "web", "macos", "ios", "windows", "android", "linux")
 
 # The shared words every app renders (i18n `moderation.report.*`,
 # `notifications.row_abuse_report_*`, en.yaml).
@@ -97,17 +96,6 @@ def _poll(check, budget_s, tag):
             return
         time.sleep(0.25)
     raise AssertionError(f"{tag}: not reached within {budget_s}s")
-
-
-def _require_built(app, surface):
-    if app_name(app.driver) not in _BUILT_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface=surface,
-            detail="user-initiated reporting (moderation.md § User-initiated "
-            "reporting) is built on tui first",
-            tracked="",
-        )
 
 
 def _other_actor(nest_instance):
@@ -178,7 +166,7 @@ def _login_reporter(app, nest_instance, reporter, request=None):
         nest_instance,
         reporter,
         handle=reporter["handle"],
-        device_id=E2E_LOGIN_DEVICE_ID,
+        device_id=e2e_login_device_id(app),
         request=request,
         spa_url_fixture="spa_url" if request is not None else None,
         wait_for_id="feed-tab",
@@ -196,7 +184,6 @@ def test_a_report_reaches_the_admin_queue_and_the_outcome_returns(app, nest_inst
     helpers: a fresh reporter, the post's author (headless), and the nest
     admin. The reporter is never the admin — the nest deliberately rings no
     doorbell for a report the admin filed themselves."""
-    _require_built(app, "report-sheet")
     token = uuid.uuid4().hex[:10]
     text = f"report target {token}"
     note = f"note {token}"
@@ -290,8 +277,6 @@ def test_a_report_reaches_the_admin_queue_and_the_outcome_returns(app, nest_inst
     )
 
 
-_FEDERATED_APPS = ("tui", "linux", "web")
-
 # A discovery poll fires the moment its feed is created; the budget covers the
 # federation channel's first dial to a TLS peer plus the index write.
 _DISCOVERY_BUDGET_S = 90.0
@@ -301,15 +286,7 @@ _FEDERATION_BUDGET_S = 90.0
 
 
 def _require_federated_built(app):
-    if app_name(app.driver) not in _FEDERATED_APPS:
-        skip_unbuilt(
-            app.driver,
-            surface="report-sheet",
-            detail="the UI-driven two-nest leg of user-initiated reporting "
-            "(moderation.md § User-initiated reporting → Routing) is driven on "
-            "tui first",
-            tracked="",
-        )
+    require_surface(app.driver, "federated-report-sheet")
 
 
 def _wait_for_post_id(app, post_id, tag):
@@ -455,7 +432,6 @@ def test_an_account_report_shows_in_the_ledger_and_can_be_withdrawn(
     """profile → report the account → the Moderation ledger lists it open →
     withdraw → it reads withdrawn and offers no second withdraw."""
     app = logged_in_app
-    _require_built(app, "profile-report-button")
     app.profile.require_state_protocol_actor_nav_supported()
     other, _ = _other_actor(nest_instance)
 
@@ -498,7 +474,6 @@ def test_blocking_an_author_hides_their_posts_until_unblocked(logged_in_app, nes
     """block from the profile → the author's post leaves the blocker's feed →
     unblock → it returns (moderation.md § Corollary — block also hides)."""
     app = logged_in_app
-    _require_built(app, "profile-block-button")
     app.profile.require_state_protocol_actor_nav_supported()
     other, actor = _other_actor(nest_instance)
     text = f"blocked author's post {uuid.uuid4().hex[:10]}"
@@ -626,7 +601,6 @@ def test_a_received_message_is_reported_from_its_menu_and_its_text_goes_only_if_
     (convention 8 carve-out (b), as ``bootstrap_room`` seeds a room); every
     reporter and admin step is the app."""
     sender, reporter = room_seat_pair
-    _require_built(reporter.app, "dm-message-report-button")
     token = uuid.uuid4().hex[:10]
     attached = f"attached message {token}"
     withheld = f"withheld message {token}"
@@ -689,7 +663,6 @@ def test_a_restricted_posts_text_reaches_the_admins_when_ticked(app, nest_instan
     The author sells the post through their own composer — their act, in the
     app, under their own login; the reporter and the admin follow on the same
     driver through the shared session helpers."""
-    _require_built(app, "report-include-text-checkbox")
     token = uuid.uuid4().hex[:10]
     preview = f"restricted teaser {token}"
     note = f"note {token}"
@@ -751,7 +724,6 @@ def test_reporting_a_post_can_block_its_author_in_the_same_step(logged_in_app, n
     author's profile shows them blocked (moderation.md § What a report
     carries — ``block_author`` chains the existing block)."""
     app = logged_in_app
-    _require_built(app, "report-block-author-checkbox")
     app.profile.require_state_protocol_actor_nav_supported()
     other, actor = _other_actor(nest_instance)
     text = f"report and block {uuid.uuid4().hex[:10]}"
@@ -780,7 +752,6 @@ def test_reporting_is_not_offered_on_your_own_post_or_profile(logged_in_app):
     (moderation.md § App surface — the verbs are gated ``!is_own``). The own
     message's menu is the message journey's first step."""
     app = logged_in_app
-    _require_built(app, "feed-post-report-button")
     text = f"my own post {uuid.uuid4().hex[:10]}"
     app.feed.navigate()
     app.feed.create_post(text)
@@ -813,7 +784,6 @@ def test_reporting_an_account_hides_everything_it_wrote(logged_in_app, nest_inst
     (moderation.md § Corollary — an account's actor id on the hidden list
     hides everything that account authored)."""
     app = logged_in_app
-    _require_built(app, "profile-report-button")
     app.profile.require_state_protocol_actor_nav_supported()
     other, actor = _other_actor(nest_instance)
     token = uuid.uuid4().hex[:10]

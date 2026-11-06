@@ -100,8 +100,9 @@ public class ContactsViewModelTests
         var rpc = new MockNestRpcClient();
         var vm = new ContactsViewModel(rpc);
 
-        // 64 chars but not hex and no `@` — classify_recipient classifies "invalid".
-        await vm.LookUpRecipientCommand.ExecuteAsync(new string('z', 64));
+        // Whitespace-bearing, no `@` — classify_recipient classifies "invalid" (a
+        // single bare token would be a home-nest handle, contacts.md region 3).
+        await vm.LookUpRecipientCommand.ExecuteAsync("not a handle");
 
         Assert.NotNull(vm.ActorIdError);
         Assert.Null(vm.ActorIdResult);
@@ -2002,7 +2003,12 @@ internal static class BackupsTestData
 
     public static uniffi.fauna_backups_machine.BackupFolderRow Folder(
         string name, long count = 0, long? last = null) =>
-        new(name, count, last);
+        new(name, count, last, null);
+
+    /// A kind entry: `name` is its i18n label key, `kind` the wire message kind.
+    public static uniffi.fauna_backups_machine.BackupFolderRow KindEntry(
+        string labelKey, string kind, long count = 0, long? last = null) =>
+        new(labelKey, count, last, kind);
 
     public static uniffi.fauna_backups_machine.SnapshotRow Row(
         long id, long createdAt = 1_752_000_000, long files = 3, long bytes = 4096,
@@ -2014,7 +2020,11 @@ internal static class BackupsTestData
 
     public static uniffi.fauna_backups_machine.SnapshotDetail Detail(
         long id, params uniffi.fauna_backups_machine.SnapshotFileRow[] files) =>
-        new(id, "", null, files);
+        new(id, "", null, files, null);
+
+    /// The detail of a kind entry's snapshot: no files, `message_kind` set.
+    public static uniffi.fauna_backups_machine.SnapshotDetail KindDetail(long id, string kind) =>
+        new(id, "", null, Array.Empty<uniffi.fauna_backups_machine.SnapshotFileRow>(), kind);
 
     public static uniffi.fauna_backups_machine.SnapshotFileRow File(
         string path, long size = 512, string fileType = "regular") =>
@@ -2098,9 +2108,28 @@ public class BackupsViewModelTests
             ["backups/backup_reseed_reenroll_failed"] =
                 "Your data is back on this nest, but this device could not sign up again as its "
                 + "backup: {reason}. Add this device as a backup destination to keep a copy here.",
+            ["backups/backup_reseed_pull_back_confirm_title"] = "Restore the copy on {name} to this nest?",
+            ["backups/backup_reseed_pull_back_confirm_body"] =
+                "This copies the backup {name} holds onto this nest and makes it live again. Nothing is "
+                + "deleted, here or on {name}. If this nest already holds your data, it stops rather than "
+                + "mixing the two.",
+            ["backups/backup_reseed_pull_back_reenroll_failed"] =
+                "Your data is back on this nest, but {name} could not be set up again as its backup: "
+                + "{reason}. Add {name} as a backup destination again to keep a copy there.",
             ["backups/reseed_result_whole"] = "Your data is back on this nest.",
             ["backups/reseed_set_mail"] = "Mail",
             ["backups/reseed_set_restored"] = "{set}: {count} restored",
+            ["events/calendar"] = "Calendar",
+            ["backups/kind_snapshot_restores_below"] =
+                "This snapshot holds messages, not files. Restore it from the Restore section below.",
+            // The whole-snapshot restore lines (§ Whole-snapshot restore).
+            ["backups/snapshot_restore_progress"] = "Restoring snapshot #{id} into {path}…",
+            ["backups/snapshot_restore_done"] = "Restored {files} files ({size}) into {path}",
+            ["backups/snapshot_restore_partial"] =
+                "Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}",
+            ["backups/snapshot_restore_failed"] = "Restore failed: {message}",
+            ["backups/snapshot_restore_destination_not_absolute"] =
+                "Enter the full path of a folder to restore into (starting with / or ~/), not {path}",
         };
 
         public string Get(string key) => Map.TryGetValue(key, out var v) ? v : key;
@@ -2134,11 +2163,196 @@ public class BackupsViewModelTests
         await vm.LoadCommand.ExecuteAsync(null);
 
         Assert.Contains("Refresh", machine.Calls);
-        Assert.Equal(new[] { "documents", "photos" }, vm.FolderNames);
+        Assert.Equal(new[] { "documents", "photos" }, vm.FolderOptions.Select(o => o.Name));
         Assert.Equal("documents", vm.SelectedFolder);
         Assert.Equal(2, vm.Snapshots.Count);
         Assert.Equal(7, vm.Snapshots[0].Id);
         Assert.Null(vm.ErrorMessage);
+    }
+
+    /// § Snapshot-list shape → *Kind entries*: a kind entry's `name` is its i18n
+    /// label key. The selector paints the key RESOLVED ("Mail") and keeps the key
+    /// as the option's value — the locale-stable selection key the machine takes
+    /// back. A folder row paints its own name. Before this leg the windows
+    /// selector painted "backups.reseed_set_mail".
+    [Fact]
+    public void Apply_KindEntry_PaintsItsResolvedLabel_AndKeepsTheKeyAsValue()
+    {
+        var machine = new FakeBackupsMachine
+        {
+            Current = BackupsTestData.Snapshot(
+                folders: new[]
+                {
+                    BackupsTestData.Folder("documents"),
+                    BackupsTestData.KindEntry("backups.reseed_set_mail", "mail"),
+                    BackupsTestData.KindEntry("events.calendar", "calendar"),
+                },
+                selected: "backups.reseed_set_mail"),
+        };
+        var vm = WithMachine(machine);
+
+        Assert.Equal(
+            new[] { "documents", "backups.reseed_set_mail", "events.calendar" },
+            vm.FolderOptions.Select(o => o.Name));
+        Assert.Equal(new[] { "documents", "Mail", "Calendar" }, vm.FolderOptions.Select(o => o.Label));
+        Assert.Equal("backups.reseed_set_mail", vm.SelectedFolder);
+    }
+
+    /// A kind entry's snapshot holds messages, not files: its detail paints one
+    /// line pointing at the Restore section, never an empty file list without a
+    /// reason. A folder snapshot's detail paints no such line.
+    [Fact]
+    public void Apply_KindSnapshotDetail_PaintsTheRestoresBelowLine()
+    {
+        var machine = new FakeBackupsMachine
+        {
+            Current = BackupsTestData.Snapshot(
+                detail: BackupsTestData.KindDetail(9, "mail")),
+        };
+        var vm = WithMachine(machine);
+
+        Assert.Equal(9, vm.OpenSnapshotId);
+        Assert.Empty(vm.DetailFiles);
+        Assert.Equal(
+            "This snapshot holds messages, not files. Restore it from the Restore section below.",
+            vm.DetailNoticeText);
+
+        machine.Current = BackupsTestData.Snapshot(
+            detail: BackupsTestData.Detail(10, BackupsTestData.File("a.txt")));
+        vm.Apply();
+
+        Assert.Null(vm.DetailNoticeText);
+        Assert.Single(vm.DetailFiles);
+    }
+
+    /// A kind entry's snapshot restores from the Restore section's local picker,
+    /// so a snapshot just taken must be listed there without a page re-entry:
+    /// every gesture that changes which snapshots exist re-reads the picker. The
+    /// user's pick stays put while it is still listed.
+    [Fact]
+    public async Task CreateSnapshot_RereadsTheRestorePicker_KeepingThePick()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[]
+            {
+                MockNestRpcClient.MakeSnapshotSummary(7, "mail"),
+                MockNestRpcClient.MakeSnapshotSummary(5, "calendar"),
+            },
+        };
+        var vm = WithMachine(new FakeBackupsMachine(), rpc);
+        await vm.LoadRestoreAsync();
+        vm.SelectedRestoreSnapshot = vm.RestoreSnapshots[1];
+        var reread = 0;
+        vm.RestoreSnapshotsReread += () => reread++;
+
+        rpc.NextMessageKindSnapshots = new[]
+        {
+            MockNestRpcClient.MakeSnapshotSummary(9, "mail"),
+            MockNestRpcClient.MakeSnapshotSummary(7, "mail"),
+            MockNestRpcClient.MakeSnapshotSummary(5, "calendar"),
+        };
+        await vm.CreateSnapshotCommand.ExecuteAsync(null);
+
+        Assert.Equal(new long[] { 9, 7, 5 }, vm.RestoreSnapshots.Select(o => o.Id));
+        Assert.Equal(5, vm.SelectedRestoreSnapshot?.Id);
+        Assert.Equal(1, reread);
+    }
+
+    /// The pick falls back to the first listed snapshot once the one it held is
+    /// gone (deleted from under it), as on page entry.
+    [Fact]
+    public async Task Reread_FallsBackToTheFirstSnapshot_WhenThePickIsGone()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[]
+            {
+                MockNestRpcClient.MakeSnapshotSummary(7, "mail"),
+                MockNestRpcClient.MakeSnapshotSummary(5, "calendar"),
+            },
+        };
+        var vm = WithMachine(new FakeBackupsMachine(), rpc);
+        await vm.LoadRestoreAsync();
+        vm.SelectedRestoreSnapshot = vm.RestoreSnapshots[1];
+
+        rpc.NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(7, "mail") };
+        await vm.DeleteSnapshotCommand.ExecuteAsync(5L);
+
+        Assert.Equal(7, vm.SelectedRestoreSnapshot?.Id);
+    }
+
+    /// Exactly the gestures that change which snapshots exist re-read the picker:
+    /// create, delete, undelete, immediate delete and prune execute. A read-only
+    /// gesture (select, open, check, the prune PREVIEW) does not.
+    [Fact]
+    public async Task OnlyGesturesThatChangeWhichSnapshotsExist_RereadThePicker()
+    {
+        var rpc = new MockNestRpcClient();
+        var machine = new FakeBackupsMachine
+        {
+            Current = BackupsTestData.Snapshot(rows: new[] { BackupsTestData.Row(4) }),
+            ImmediateDeleteAnswer = true,
+        };
+        var vm = WithMachine(machine, rpc);
+        int Rereads() => rpc.Calls.Count(c => c == "MessageKindSnapshotList");
+
+        var mutating = new (string Name, Func<Task> Run)[]
+        {
+            ("create", () => vm.CreateSnapshotCommand.ExecuteAsync(null)),
+            ("delete", () => vm.DeleteSnapshotCommand.ExecuteAsync(4L)),
+            ("undelete", () => vm.UndeleteSnapshotCommand.ExecuteAsync(4L)),
+            ("immediate delete", () =>
+            {
+                vm.OpenImmediateDelete(4);
+                return vm.ConfirmImmediateDeleteAsync();
+            }),
+            ("prune execute", () => vm.PruneExecuteAsync()),
+        };
+        foreach (var (name, run) in mutating)
+        {
+            var before = Rereads();
+            await run();
+            Assert.True(Rereads() == before + 1, $"{name} did not re-read restore-snapshot-select");
+        }
+
+        var readOnly = new (string Name, Func<Task> Run)[]
+        {
+            ("select", () => vm.SelectFolderCommand.ExecuteAsync("documents")),
+            ("open", () => vm.OpenSnapshotAsync(4)),
+            ("check", () => vm.CheckIntegrityCommand.ExecuteAsync(null)),
+            ("prune preview", () => vm.PruneCommand.ExecuteAsync(null)),
+        };
+        foreach (var (name, run) in readOnly)
+        {
+            var before = Rereads();
+            await run();
+            Assert.True(Rereads() == before, $"{name} re-read restore-snapshot-select");
+        }
+    }
+
+    /// A failed re-read keeps what the picker paints and raises nothing: the
+    /// gesture itself succeeded, and the page's next whole read reports a real
+    /// fault.
+    [Fact]
+    public async Task FailedReread_KeepsThePicker_AndRaisesNoError()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(7, "mail") },
+        };
+        var vm = WithMachine(new FakeBackupsMachine(), rpc);
+        await vm.LoadRestoreAsync();
+        var reread = 0;
+        vm.RestoreSnapshotsReread += () => reread++;
+
+        rpc.NextError = "socket dropped";
+        await vm.CreateSnapshotCommand.ExecuteAsync(null);
+
+        Assert.Equal(new long[] { 7 }, vm.RestoreSnapshots.Select(o => o.Id));
+        Assert.Equal(7, vm.SelectedRestoreSnapshot?.Id);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(0, reread);
     }
 
     /// The § Snapshot-list shape *Row content contract*: a row renders at least a
@@ -2373,6 +2587,45 @@ public class BackupsViewModelTests
         Assert.True(vm.PruneExecutable);
         Assert.Contains(vm.PrunePreviewLines, l => l.Contains("2 would be deleted"));
         Assert.Contains(vm.PrunePreviewLines, l => l.Contains("#9"));
+        Assert.Contains("2 would be deleted", vm.PrunePreviewVerdict);
+    }
+
+    /// The verdict (the first preview line) is exposed on its own so the page can
+    /// fold it into the panel's UIA name: each policy state reads differently, and
+    /// no preview reads empty.
+    [Fact]
+    public async Task PrunePreviewVerdict_DiffersPerPolicyState()
+    {
+        var machine = new FakeBackupsMachine
+        {
+            Current = BackupsTestData.Snapshot(
+                selected: "documents",
+                preview: BackupsTestData.Preview(uniffi.fauna_backups_machine.PolicyState.NotSet)),
+        };
+        var vm = WithMachine(machine);
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Contains("No retention policy", vm.PrunePreviewVerdict);
+        var notSet = vm.PrunePreviewVerdict;
+
+        machine.Current = BackupsTestData.Snapshot(
+            selected: "documents",
+            preview: BackupsTestData.Preview(uniffi.fauna_backups_machine.PolicyState.Unparseable));
+        vm.Apply();
+        Assert.NotEmpty(vm.PrunePreviewVerdict);
+        Assert.NotEqual(notSet, vm.PrunePreviewVerdict);
+        var unparseable = vm.PrunePreviewVerdict;
+
+        machine.Current = BackupsTestData.Snapshot(
+            selected: "documents",
+            preview: BackupsTestData.Preview(uniffi.fauna_backups_machine.PolicyState.Applied));
+        vm.Apply();
+        Assert.NotEmpty(vm.PrunePreviewVerdict);
+        Assert.NotEqual(notSet, vm.PrunePreviewVerdict);
+        Assert.NotEqual(unparseable, vm.PrunePreviewVerdict);
+
+        machine.Current = BackupsTestData.Snapshot(selected: "documents", preview: null);
+        vm.Apply();
+        Assert.Equal("", vm.PrunePreviewVerdict);
     }
 
     /// Architectural rule 6: a check that COMPLETES with findings is a result, not
@@ -2632,6 +2885,185 @@ public class BackupsViewModelTests
         Assert.Empty(saver.Saved);
     }
 
+    // ── Whole-snapshot restore — ui/backups.md § Whole-snapshot restore ──
+
+    /// An absolute destination on the machine running the tests — the shared
+    /// resolver refuses anything else.
+    private static readonly string RestoreDestination =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fauna-restored");
+
+    private static (BackupsViewModel Vm, MockNestRpcClient Rpc, FakeBackupsMachine Machine)
+        FolderSnapshotOpen(long id = 7)
+    {
+        var rpc = new MockNestRpcClient();
+        var machine = new FakeBackupsMachine
+        {
+            Current = BackupsTestData.Snapshot(
+                selected: "documents",
+                detail: BackupsTestData.Detail(id, BackupsTestData.File("a.txt"))),
+        };
+        return (WithMachine(machine, rpc, deviceId: "ab12"), rpc, machine);
+    }
+
+    /// The four `snapshot-restore-*` controls belong to an open FOLDER snapshot.
+    /// A kind entry's snapshot restores from the Restore section, so the panel
+    /// is hidden on its detail (linux `snapshot_restore.rs`, tui
+    /// `detail_elements`); with no snapshot open there is nothing to restore.
+    [Fact]
+    public void SnapshotRestore_ShowsOnAFolderDetailOnly()
+    {
+        var (vm, _, machine) = FolderSnapshotOpen();
+        Assert.True(vm.SnapshotRestoreVisible);
+
+        machine.Current = BackupsTestData.Snapshot(detail: BackupsTestData.KindDetail(9, "mail"));
+        vm.Apply();
+        Assert.False(vm.SnapshotRestoreVisible);
+
+        machine.Current = BackupsTestData.Snapshot();
+        vm.Apply();
+        Assert.False(vm.SnapshotRestoreVisible);
+    }
+
+    /// § *Destination*: the button is disabled until a destination is chosen.
+    [Fact]
+    public void SnapshotRestore_ButtonWaitsForADestination()
+    {
+        var (vm, _, _) = FolderSnapshotOpen();
+        Assert.False(vm.CanRestoreSnapshot);
+
+        vm.SnapshotRestoreDestination = "   ";
+        Assert.False(vm.CanRestoreSnapshot);
+
+        vm.SnapshotRestoreDestination = RestoreDestination;
+        Assert.True(vm.CanRestoreSnapshot);
+    }
+
+    /// The restore runs the free FFI fn over the open snapshot and this seat's
+    /// device, into the resolved destination, and words the outcome through the
+    /// shared result text: the count, the size and where.
+    [Fact]
+    public async Task SnapshotRestore_WritesTheResultLine_OverTheFreeFn()
+    {
+        var (vm, rpc, _) = FolderSnapshotOpen();
+        rpc.NextSnapshotRestore = new FfiRestoreSummary(3, 2048, 0, Array.Empty<string>());
+        vm.SnapshotRestoreDestination = $"  {RestoreDestination} ";
+
+        await vm.RestoreSnapshotCommand.ExecuteAsync(null);
+
+        Assert.Equal(("ab12", 7ul, RestoreDestination), rpc.LastSnapshotRestore);
+        Assert.Equal($"Restored 3 files (2 KB) into {RestoreDestination}", vm.SnapshotRestoreResultText);
+        Assert.Null(vm.SnapshotRestoreProgressText);
+        Assert.False(vm.SnapshotRestoreRunning);
+        Assert.True(vm.CanRestoreSnapshot);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    /// § *Outcome*: a partial result lists the files not written and is a
+    /// RESULT — never routed to `error-message`.
+    [Fact]
+    public async Task SnapshotRestore_PartialResult_ListsTheUnwrittenFiles_NeverTheErrorLine()
+    {
+        var (vm, rpc, _) = FolderSnapshotOpen();
+        rpc.NextSnapshotRestore = new FfiRestoreSummary(2, 100, 0, new[] { "docs/b.txt", "c.bin" });
+        vm.SnapshotRestoreDestination = RestoreDestination;
+
+        await vm.RestoreSnapshotCommand.ExecuteAsync(null);
+
+        Assert.Equal(
+            $"Restored 2 files into {RestoreDestination}; 2 failed their integrity check and were not "
+            + "written: docs/b.txt, c.bin",
+            vm.SnapshotRestoreResultText);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    /// § *Outcome*: a restore that failed before the walk shows the failure in
+    /// the same result line, never `error-message`.
+    [Fact]
+    public async Task SnapshotRestore_FailureBeforeTheWalk_PaintsTheResultLine_NeverTheErrorLine()
+    {
+        var (vm, rpc, _) = FolderSnapshotOpen();
+        rpc.NextSnapshotRestoreError = "x is not a directory — choose a directory to restore into";
+        vm.SnapshotRestoreDestination = RestoreDestination;
+
+        await vm.RestoreSnapshotCommand.ExecuteAsync(null);
+
+        Assert.Equal(
+            "Restore failed: x is not a directory — choose a directory to restore into",
+            vm.SnapshotRestoreResultText);
+        Assert.Null(vm.SnapshotRestoreProgressText);
+        Assert.False(vm.SnapshotRestoreRunning);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    /// § *Destination*: a path that is not absolute is refused before any fetch,
+    /// in the result line.
+    [Fact]
+    public async Task SnapshotRestore_RelativeDestination_IsRefusedBeforeAnyFetch()
+    {
+        var (vm, rpc, _) = FolderSnapshotOpen();
+        vm.SnapshotRestoreDestination = "restored";
+
+        await vm.RestoreSnapshotCommand.ExecuteAsync(null);
+
+        Assert.DoesNotContain("RestoreSnapshotToDir", rpc.Calls);
+        Assert.Equal(
+            "Enter the full path of a folder to restore into (starting with / or ~/), not restored",
+            vm.SnapshotRestoreResultText);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    /// While the walk runs: the progress line names the snapshot and the
+    /// destination, the button is disabled, and no result line stands.
+    [Fact]
+    public async Task SnapshotRestore_WhileRunning_ShowsProgress_AndDisablesTheButton()
+    {
+        var (vm, rpc, _) = FolderSnapshotOpen();
+        rpc.SnapshotRestoreGate = new TaskCompletionSource();
+        rpc.NextSnapshotRestore = new FfiRestoreSummary(1, 10, 0, Array.Empty<string>());
+        vm.SnapshotRestoreDestination = RestoreDestination;
+
+        var run = vm.RestoreSnapshotCommand.ExecuteAsync(null);
+
+        Assert.True(vm.SnapshotRestoreRunning);
+        Assert.False(vm.CanRestoreSnapshot);
+        Assert.Equal($"Restoring snapshot #7 into {RestoreDestination}…", vm.SnapshotRestoreProgressText);
+        Assert.Null(vm.SnapshotRestoreResultText);
+
+        rpc.SnapshotRestoreGate.SetResult();
+        await run;
+
+        Assert.False(vm.SnapshotRestoreRunning);
+        Assert.Null(vm.SnapshotRestoreProgressText);
+        Assert.NotNull(vm.SnapshotRestoreResultText);
+    }
+
+    /// Another snapshot opening resets the panel: the previous outcome is not
+    /// the new snapshot's, and a run still in flight for the old one never
+    /// paints over it.
+    [Fact]
+    public async Task SnapshotRestore_AnotherSnapshotOpening_ResetsThePanel()
+    {
+        var (vm, rpc, machine) = FolderSnapshotOpen();
+        vm.SnapshotRestoreDestination = RestoreDestination;
+        await vm.RestoreSnapshotCommand.ExecuteAsync(null);
+        Assert.NotNull(vm.SnapshotRestoreResultText);
+
+        rpc.SnapshotRestoreGate = new TaskCompletionSource();
+        var run = vm.RestoreSnapshotCommand.ExecuteAsync(null);
+        machine.Current = BackupsTestData.Snapshot(
+            detail: BackupsTestData.Detail(8, BackupsTestData.File("b.txt")));
+        vm.Apply();
+
+        Assert.Null(vm.SnapshotRestoreResultText);
+        Assert.Null(vm.SnapshotRestoreProgressText);
+        Assert.False(vm.SnapshotRestoreRunning);
+
+        rpc.SnapshotRestoreGate.SetResult();
+        await run;
+        Assert.Null(vm.SnapshotRestoreResultText);
+        Assert.Equal(RestoreDestination, vm.SnapshotRestoreDestination);
+    }
+
     // ── Backup destinations (management) — backups.md § Manage backup destinations ──
 
     [Fact]
@@ -2656,6 +3088,47 @@ public class BackupsViewModelTests
         Assert.Equal("b.example.com", vm.Destinations[1].Label);
         Assert.Equal("id-b", vm.Destinations[1].Id);
         Assert.Null(vm.ErrorMessage);
+        Assert.False(vm.DestinationsLoadRefused);
+    }
+
+    /// A load the first-listing gate refuses shows the reason on error-message and
+    /// marks the load refused, so the page paints no empty state
+    /// (account-client-lifecycle.md § The first listing, clause (4)).
+    [Fact]
+    public async Task LoadDestinations_FirstListingRefusal_ShowsReasonAndIsRefused()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinationsListException = new FfiException.General("Needs a connection to your nest"),
+        };
+        var vm = new BackupsViewModel(rpc);
+
+        await vm.LoadDestinationsAsync();
+
+        Assert.Equal("Needs a connection to your nest", vm.ErrorMessage);
+        Assert.True(vm.DestinationsLoadRefused);
+        Assert.Empty(vm.Destinations);
+
+        rpc.NextDestinationsListException = null;
+        await vm.LoadDestinationsAsync();
+
+        Assert.False(vm.DestinationsLoadRefused);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task LoadDestinations_OtherFailure_IsNotARefusal()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinationsListException = new FfiException.General("disk exploded"),
+        };
+        var vm = new BackupsViewModel(rpc);
+
+        await vm.LoadDestinationsAsync();
+
+        Assert.Equal("disk exploded", vm.ErrorMessage);
+        Assert.False(vm.DestinationsLoadRefused);
     }
 
     [Fact]
@@ -3030,6 +3503,59 @@ public class BackupsViewModelTests
         Assert.False(vm.RecoverRunning);
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
+    /// The e2e forced pass (`backup_audit_run_now`) landing on a page whose own
+    /// destination read has not finished loads the list itself and audits it: a
+    /// pass over a list not read yet would audit nothing and still ack
+    /// (convention 11).
+    [Fact]
+    public async Task RunAuditNow_OnAListNotReadYet_ReadsItAndRunsThePass()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite") },
+            NextAuditRows = new[] { OfferedAuditRow("d1", true) },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice, auditStatePath: "state.json");
+
+        await vm.RunAuditNowAsync(0);
+
+        Assert.Single(vm.Destinations);
+        Assert.Equal(1, rpc.Calls.Count(c => c == "BackupAuditRunPass"));
+        Assert.True(Assert.Single(vm.AuditAlerts).OfferRecover);
+    }
+
+    /// With no audit state path (no signed-in actor) the forced pass cannot run,
+    /// so it says so instead of acking a no-op (convention 11).
+    [Fact]
+    public async Task RunAuditNow_WithNoAuditStatePath_FailsLoudly()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite") },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => vm.RunAuditNowAsync(0));
+        Assert.DoesNotContain("BackupAuditRunPass", rpc.Calls);
+    }
+
+    /// A forced pass that fails throws, where the page's own refresh degrades to
+    /// the prior banners: the command must not ack a pass that never completed
+    /// (convention 11).
+    [Fact]
+    public async Task RunAuditNow_AFailedPassThrows()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        rpc.NextError = "the account runtime is not running";
+
+        await vm.RefreshAuditAsync();
+        Assert.True(Assert.Single(vm.AuditAlerts).OfferRecover);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => vm.RunAuditNowAsync(0));
+    }
+#endif
+
     /// While a run is in flight every recover button is disarmed and the result
     /// carries the running line.
     [Fact]
@@ -3402,10 +3928,11 @@ public class BackupsViewModelTests
         Assert.True(vm.ReseedOnOrphanedStore);
     }
 
-    /// This device's own custodian row carries it; a nest row (its pull-back
-    /// leg is not built) and another device's row do not.
+    /// This device's own custodian row carries it, and so does a surviving
+    /// nest's row (windows hosts the nest-held pull-back); another device's row
+    /// does not.
     [Fact]
-    public async Task ReseedRows_PaintOnThisDevicesOwnRowOnly()
+    public async Task ReseedRows_PaintOnThisDevicesOwnRowAndANestRow()
     {
         var rpc = new MockNestRpcClient
         {
@@ -3423,16 +3950,18 @@ public class BackupsViewModelTests
         Assert.False(vm.ReseedOnOrphanedStore);
         Assert.True(vm.ReseedOnRow("dest-client"));
         Assert.False(vm.ReseedOnRow("dest-other"));
-        Assert.False(vm.ReseedOnRow("dest-nest"));
+        Assert.True(vm.ReseedOnRow("dest-nest"));
     }
 
-    /// No agent on this device ⇒ it hosts no store, so no row offers a restore.
+    /// No agent on this device ⇒ it hosts no store, so neither its own row nor
+    /// an orphaned store offers a restore — but a nest row still does: the
+    /// pull-back runs in the app, with no agent behind it.
     [Fact]
-    public async Task ReseedRows_NoAgentPaintsNothing()
+    public async Task ReseedRows_NoAgentPaintsOnlyTheNestRow()
     {
         var rpc = new MockNestRpcClient
         {
-            NextDestinations = new List<FfiBackupDestinationView> { ClientDeviceRow() },
+            NextDestinations = new List<FfiBackupDestinationView> { ClientDeviceRow(), NestRow() },
         };
         var vm = WithAgent(rpc, null);
 
@@ -3440,6 +3969,111 @@ public class BackupsViewModelTests
 
         Assert.False(vm.ReseedOnOrphanedStore);
         Assert.False(vm.ReseedOnRow("dest-client"));
+        Assert.True(vm.ReseedOnRow("dest-nest"));
+    }
+
+    /// A nest row's confirm names the nest whose copy it pulls back; this
+    /// device's own row (and the orphaned store's, no source) keeps the
+    /// custodian wording.
+    [Fact]
+    public async Task ReseedConfirm_OnANestRowNamesTheNest()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new List<FfiBackupDestinationView> { ClientDeviceRow(), NestRow() },
+        };
+        var vm = WithAgent(rpc, new FakeAgentChannel { StoreBytes = 4096 });
+        await vm.LoadDestinationsAsync();
+
+        Assert.Equal("Restore the copy on Backup nest to this nest?", vm.ReseedConfirmTitle("dest-nest"));
+        Assert.Contains("the backup Backup nest holds", vm.ReseedConfirmBody("dest-nest"));
+        Assert.DoesNotContain("{name}", vm.ReseedConfirmBody("dest-nest"));
+        Assert.Equal(Strings.Get("backups/backup_reseed_confirm_title"), vm.ReseedConfirmTitle("dest-client"));
+        Assert.Equal(Strings.Get("backups/backup_reseed_confirm_body"), vm.ReseedConfirmBody(null));
+    }
+
+    /// The confirm on a nest row runs the pull-back from THAT row, in the app —
+    /// never the agent's custodian ceremony, and with no agent at all.
+    [Fact]
+    public async Task Reseed_OnANestRowRunsThePullBackNotTheAgent()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new List<FfiBackupDestinationView> { NestRow() },
+            NextPullBackResult = ReseedWhole(),
+        };
+        var vm = WithAgent(rpc, null);
+        await vm.LoadDestinationsAsync();
+
+        var ok = await vm.ReseedAsync("dest-nest");
+
+        Assert.True(ok);
+        Assert.Equal(new[] { (ThisDevice, "dest-nest") }, rpc.PullBackCalls);
+        Assert.Empty(rpc.ReseedDeviceIds);
+        Assert.StartsWith("Your data is back on this nest.", vm.ReseedResultText);
+        Assert.Null(vm.ErrorMessage);
+        Assert.False(vm.ReseedRunning);
+    }
+
+    /// This device's own row still runs the agent's ceremony.
+    [Fact]
+    public async Task Reseed_OnThisDevicesOwnRowRunsTheAgentCeremony()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new List<FfiBackupDestinationView> { ClientDeviceRow(), NestRow() },
+            NextReseedResult = ReseedWhole(),
+        };
+        var vm = WithAgent(rpc, new FakeAgentChannel { StoreBytes = 4096 });
+        await vm.LoadDestinationsAsync();
+
+        var ok = await vm.ReseedAsync("dest-client");
+
+        Assert.True(ok);
+        Assert.Equal(new[] { ThisDevice }, rpc.ReseedDeviceIds);
+        Assert.Empty(rpc.PullBackCalls);
+    }
+
+    /// A pull-back whose re-enrollment failed keeps the result and names the
+    /// nest it pulled from.
+    [Fact]
+    public async Task Reseed_PullBackReenrollFailureNamesTheNest()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new List<FfiBackupDestinationView> { NestRow() },
+            NextPullBackResult = ReseedWhole() with { @reenrollError = "list read failed" },
+        };
+        var vm = WithAgent(rpc, null);
+        await vm.LoadDestinationsAsync();
+
+        var ok = await vm.ReseedAsync("dest-nest");
+
+        Assert.False(ok);
+        Assert.StartsWith("Your data is back on this nest.", vm.ReseedResultText);
+        Assert.Contains("Backup nest could not be set up again", vm.ErrorMessage ?? "");
+        Assert.Contains("list read failed", vm.ErrorMessage!);
+        Assert.DoesNotContain("{name}", vm.ErrorMessage!);
+    }
+
+    /// A pull-back stop renders as any stop does: on error-message, no result.
+    [Fact]
+    public async Task Reseed_PullBackStopRendersOnErrorMessage()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new List<FfiBackupDestinationView> { NestRow() },
+            NextPullBackException = new FfiException.General("destination unreachable"),
+        };
+        var vm = WithAgent(rpc, null);
+        await vm.LoadDestinationsAsync();
+
+        var ok = await vm.ReseedAsync("dest-nest");
+
+        Assert.False(ok);
+        Assert.Null(vm.ReseedResultText);
+        Assert.Contains("destination unreachable", vm.ErrorMessage ?? "");
+        Assert.False(vm.ReseedRunning);
     }
 
     /// A whole verdict renders the shared result lines — each resolved NESTED,
@@ -3771,6 +4405,60 @@ public class BackupsViewModelTests
         Assert.False(vm.RestoreConfirmEnabled);             // mismatch
         vm.RestoreConfirmInput = "7";
         Assert.True(vm.RestoreConfirmEnabled);              // typed id == selected snapshot id
+    }
+
+    [Fact]
+    public void RestoreKinds_AreTheFiveKindsInKindEntriesOrder()
+    {
+        // backups.md § Restore from backup destination: five checkboxes, in
+        // fauna_backups_machine::KIND_ENTRIES order, each named by its label key.
+        Assert.Equal(
+            new[] { "mail", "calendar", "card", "post", "conv" },
+            BackupsViewModel.RestoreKinds.Select(k => k.Token).ToArray());
+        Assert.Equal(
+            new[]
+            {
+                "backups/restore_kinds_mail", "backups/restore_kinds_calendar",
+                "backups/restore_kinds_contacts", "backups/restore_kinds_posts",
+                "backups/restore_kinds_conversations",
+            },
+            BackupsViewModel.RestoreKinds.Select(k => k.LabelKey).ToArray());
+    }
+
+    [Fact]
+    public async Task LoadRestore_NamesASnapshotsKindByItsCheckboxLabel_NotTheWireToken()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(9, "card") },
+        };
+        var vm = new BackupsViewModel(rpc);
+
+        await vm.LoadRestoreAsync();
+
+        Assert.Equal($"{Strings.Get("backups/restore_kinds_contacts")} (#9)", vm.RestoreSnapshots[0].Label);
+        Assert.Equal("card", vm.RestoreSnapshots[0].Kind);
+    }
+
+    [Fact]
+    public async Task FrictionBar_StaysDisarmedWhileThePickedSnapshotsKindIsUnticked()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(7, "card") },
+        };
+        var vm = new BackupsViewModel(rpc);
+        await vm.LoadRestoreAsync();
+        vm.RestoreConfirmInput = "7";
+        Assert.True(vm.RestoreConfirmEnabled);
+
+        vm.SetRestoreKindTicked(2, false);                 // contacts unticked
+        Assert.False(vm.IsRestoreKindTicked(2));
+        Assert.False(vm.RestoreConfirmEnabled);
+
+        vm.SetRestoreKindTicked(0, false);                 // another kind: no effect on the pick
+        vm.SetRestoreKindTicked(2, true);
+        Assert.True(vm.RestoreConfirmEnabled);
     }
 
     [Fact]

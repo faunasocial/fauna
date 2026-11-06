@@ -40,6 +40,7 @@ pub fn perform(req: &ElementReq) -> Value {
             Some(w) => json!({ "text": find::text_of(&w) }),
             None => json!({ "error": "not found" }),
         },
+        ElementKind::Texts => json!({ "texts": texts(scope, id) }),
         ElementKind::Attr => json!({ "value": attr(scope, id, &req.arg, req.index) }),
         ElementKind::Click => match find::find_indexed_scoped(scope, id, req.index) {
             Some(w) => gate(&w, "click", req).unwrap_or_else(|| actuate_click(&w)),
@@ -71,6 +72,18 @@ pub fn perform(req: &ElementReq) -> Value {
             Some(w) => scroll_into_view(&w),
             None => json!({ "error": "not found" }),
         },
+        // Ungated for the same reason: positioning, not actuation.
+        ElementKind::ScrollToBottomFraction => {
+            match find::find_indexed_scoped(scope, id, req.index) {
+                Some(w) => match req.arg.parse::<f64>() {
+                    Ok(fraction) if (0.0..=1.0).contains(&fraction) => {
+                        scroll_to_bottom_fraction(&w, fraction)
+                    }
+                    _ => json!({ "error": format!("fraction {:?} is not in 0..=1", req.arg) }),
+                },
+                None => json!({ "error": "not found" }),
+            }
+        }
         ElementKind::Key => match find::find_indexed_scoped(scope, id, req.index) {
             Some(w) => gate(&w, "key", req).unwrap_or_else(|| press_key(&w, &req.arg)),
             None => json!({ "error": "not found" }),
@@ -91,6 +104,19 @@ pub fn perform(req: &ElementReq) -> Value {
         ElementKind::Registry => super::registry::snapshot_json(),
         ElementKind::ClipboardText => clipboard_text(),
     }
+}
+
+/// Every `id` match's text, in the order `/element/text?index=i` reads them —
+/// one find, then N reads. Element 0 is what `find_indexed_scoped(…, 0)`
+/// resolves (the mapped match, which may not be the first in tree order), the
+/// rest strict tree order, so the list equals the per-index loop exactly.
+fn texts(scope: &[fauna_e2e_agent::ScopeStep], id: &str) -> Vec<String> {
+    let all = find::find_all_scoped(scope, id);
+    let mut out: Vec<String> = all.iter().map(find::text_of).collect();
+    if let (Some(first), Some(w)) = (out.first_mut(), find::find_scoped(scope, id)) {
+        *first = find::text_of(&w);
+    }
+    out
 }
 
 /// The display clipboard's text, read from GDK's own clipboard object — what
@@ -493,10 +519,6 @@ fn picture_of(w: &gtk::Widget) -> Option<gtk::Picture> {
         .ok()
 }
 
-/// Targeted scroll-into-view: center the widget in its nearest
-/// `ScrolledWindow` ancestor's viewport by driving the real vadjustment — the
-/// same adjustment the engagement-cue viewport observer samples, so an e2e
-/// dwell driven through this is an honest exposure, not an injected one.
 /// The `gtk::Video` that is `w` or one of its direct children — where
 /// `video-thumbnail` hosts its player.
 fn video_in(w: &gtk::Widget) -> Option<gtk::Video> {
@@ -536,6 +558,10 @@ fn nearest_scrolled_window(w: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
     None
 }
 
+/// Targeted scroll-into-view: center the widget in its nearest
+/// `ScrolledWindow` ancestor's viewport by driving the real vadjustment — the
+/// same adjustment the engagement-cue viewport observer samples, so an e2e
+/// dwell driven through this is an honest exposure, not an injected one.
 fn scroll_into_view(w: &gtk::Widget) -> Value {
     let Some(scrolled) = nearest_scrolled_window(w) else {
         return json!({ "error": "no scrollable ancestor" });
@@ -548,6 +574,40 @@ fn scroll_into_view(w: &gtk::Widget) -> Value {
     } else {
         json!({ "error": "could not compute bounds" })
     }
+}
+
+/// Targeted scroll to the bottom edge (`ElementKind::ScrollToBottomFraction`):
+/// move the nearest `ScrolledWindow`'s real vadjustment — the one the
+/// engagement-cue viewport observer samples — so that `fraction` of the
+/// widget's height shows above the viewport's bottom edge, then answer the
+/// fraction actually reached. The reading is the widget's bounds before the
+/// move, shifted by the adjustment's real change (read back after the set, so a
+/// clamp at either end of the list is measured, never assumed); the child's
+/// allocation catches up on the next frame, and the shift is exact by
+/// construction.
+fn scroll_to_bottom_fraction(w: &gtk::Widget, fraction: f64) -> Value {
+    let Some(scrolled) = nearest_scrolled_window(w) else {
+        return json!({ "error": "no scrollable ancestor" });
+    };
+    let Some(bounds) = w.compute_bounds(&scrolled) else {
+        return json!({ "error": "could not compute bounds" });
+    };
+    let (top, height) = (f64::from(bounds.y()), f64::from(bounds.height()));
+    if height <= 0.0 {
+        return json!({ "error": "the element has no height to place" });
+    }
+    let viewport = f64::from(scrolled.height());
+    let adj = scrolled.vadjustment();
+    let before = adj.value();
+    // The widget's top lands at `viewport - fraction * height`.
+    let wanted = before + top - (viewport - fraction * height);
+    adj.set_value(wanted.clamp(
+        adj.lower(),
+        (adj.upper() - adj.page_size()).max(adj.lower()),
+    ));
+    let new_top = top - (adj.value() - before);
+    let visible = (new_top + height).min(viewport) - new_top.max(0.0);
+    json!({ "found": true, "fraction": (visible.max(0.0) / height).min(1.0) })
 }
 
 /// Actuate a "click". Native `Switch`/`SwitchRow` flip their state directly

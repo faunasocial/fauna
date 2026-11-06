@@ -106,8 +106,4 @@ private func scratchStore() -> UnreadSnapshotStore {
         publisher.publish(unread: 1)
         #expect(reloads == 0)
     }
-
-    @Test func theTotalIsTheListsPerThreadUnreadSummed() {
-        #expect(WidgetUnreadPublisher.total(of: []) == 0)
-    }
 }

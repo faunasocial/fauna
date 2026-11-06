@@ -9,6 +9,10 @@
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
+    <Page.Resources>
+        <local:BoolToVisibilityConverter x:Key="BoolToVis" />
+    </Page.Resources>
+
     <!--
       The dedicated AT Protocol settings page (docs/goal/ui/atproto.md, ratified
       2026-07-22). windows was the LAST app without it — linux/apple 2026-07-23,
@@ -24,9 +28,10 @@
       reveal rules, the gate verdict, the greying reason and the transition card's copy
       are ALL machine-composed — this file decides nothing (priority #2).
 
-      Visibility is applied from code-behind rather than through x:Bind converters, both
-      because the codebase has no shared bool->Visibility converter (NostrPage does the
-      same) and because a nested x:Bind call is rejected by the merge gate.
+      Panel Visibility is applied from code-behind rather than through x:Bind converters
+      (NostrPage does the same; a nested x:Bind call is rejected by the merge gate). The
+      one converter binding is the credential row's reveal control: a DataTemplate row
+      has no code-behind to set it from.
 
       600x600 DIP VIEWPORT: `is_visible` is `!IsOffscreen`, so anything below the
       ScrollViewer fold reads invisible to the e2e. The selector and its four rungs must
@@ -145,8 +150,7 @@
                 <StackPanel x:Name="CardLines" Spacing="4" />
                 <CheckBox x:Name="HistoryBackfill" Visibility="Collapsed"
                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoHistoryBackfill}"
-                          Click="HistoryBackfill_Click"
-                          Content="{loc:Localize Key=atproto_settings/history_backfill_label}" />
+                          Click="HistoryBackfill_Click" />
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <Button x:Name="ConfirmBtn"
                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoDepthConfirm}"
@@ -180,7 +184,10 @@
                 <controls:BridgeCard x:Name="LinkedBridgeCard"
                                      ActionClick="LinkedBridgeAction_Click"
                                      SettingChanged="LinkedBridgeSetting_Changed"
-                                     SourceAskClick="LinkedBridgeSourceAsk_Click" />
+                                     SourceAskClick="LinkedBridgeSourceAsk_Click"
+                                     FollowRequestAnswer="LinkedBridgeFollowRequest_Answer"
+                                     FollowAdd="LinkedBridgeFollow_Add"
+                                     FollowRemove="LinkedBridgeFollow_Remove" />
             </StackPanel>
 
             <!-- ── 3b. Hosted panel (at, or staged toward, a hosted level) ────
@@ -238,13 +245,6 @@
 
                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
                            Text="{loc:Localize Key=atproto_settings/app_credentials_heading}" />
-                <ToggleSwitch x:Name="ExternalAppsToggle"
-                              AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoExternalAppsEnable}"
-                              Toggled="ExternalApps_Toggled"
-                              Header="{loc:Localize Key=atproto_settings/external_apps_toggle}" />
-                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                           TextWrapping="Wrap"
-                           Text="{loc:Localize Key=atproto_settings/external_apps_hint}" />
                 <Button x:Name="MintBtn"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.AtprotoAppCredentialMint}"
                         Click="Mint_Click"
@@ -278,6 +278,7 @@
                                 <Button Grid.Column="1" Tag="{Binding}" Click="Reveal_Click"
                                         AutomationProperties.AutomationId="atproto-app-credential-reveal"
                                         IsEnabled="{Binding CanReveal}"
+                                        Visibility="{Binding ShowReveal, Converter={StaticResource BoolToVis}}"
                                         Content="{Binding RevealText}" />
                                 <Button Grid.Column="2" Tag="{Binding}" Click="RevokeCredential_Click"
                                         AutomationProperties.AutomationId="atproto-app-credential-revoke"
@@ -286,6 +287,17 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+            </StackPanel>
+
+            <!-- Split OUT of FullPdsPanel (same reason as HostedHandleText above: a
+                 Collapsed parent hides every descendant). ui/atproto.md § Layout &
+                 flow, the delegation paragraph (ruled 2026-10-23): the held row is
+                 gated on the delegation, not the level — it renders whole at every
+                 level where a verified delegation exists; the EMPTY state and the
+                 first-grant button stay full-PDS-only. Shown by ApplyVm when
+                 ShowFullPds || ShowDelegationRow, so inside this panel
+                 `!ShowDelegationRow` already means "full PDS, no delegation". -->
+            <StackPanel x:Name="DelegationPanel" Spacing="8" Visibility="Collapsed">
 
                 <!-- ── The D10 authoring-delegation row (atproto-pds-full.md § App
                      surface) — what authorizes an external ATProto app to *post* as

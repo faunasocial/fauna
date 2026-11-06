@@ -11,6 +11,7 @@ members = [
     "libs/fauna-wasm-onboarding",
     "libs/fauna-wasm-panic-hook",
     "libs/fauna-ffi",
+    "libs/fauna-ffi-cdylib",
     "libs/fauna-index",
     "libs/fauna-provisioning",
     "libs/fauna-onboarding-machine",
@@ -59,6 +60,8 @@ members = [
     "libs/fauna-acme-http01",
     "libs/fauna-client-dns",
     "libs/fauna-pebble-testkit",
+    "libs/fauna-alloc-probe",
+    "libs/fauna-test-tracing",
     "libs/fauna-client-drafts",
     "libs/fauna-client-email",
     "libs/fauna-client-feed",
@@ -154,6 +157,7 @@ members = [
     "bins/fauna-sandbox",
     "bins/fauna-sign",
     "bins/fauna-emulator-ctl",
+    "bins/fauna-reports-pass",
     "apps/fauna-windows/fauna-bridge-service",
     "apps/fauna-windows/fauna-nest-service",
     "apps/fauna-windows/shell-ext",
@@ -168,6 +172,7 @@ members = [
     "services/fauna-cors-proxy",
     "services/fauna-front-door",
     "tools/check-additive-evolution",
+    "tools/kache-launcher",
 ]
 exclude = [
     "libs/fauna-mls/fuzz",
@@ -178,7 +183,7 @@ resolver = "2"
 [workspace.package]
 # The product version — the fleet-wide source of truth every other surface
 # copies (docs/goal/architecture/product-version.md; version-lockstep gate).
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/faunasocial/fauna"
@@ -503,7 +508,7 @@ globset = "0.4"
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Compression
-zstd = "0.13"
+zstd = "0.14"
 
 # QR code encoding (module matrix only). `default-features = false` drops the crate's
 # sole dependency (`image`) — clients render the matrix with their own toolkit, so we

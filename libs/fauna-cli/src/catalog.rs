@@ -1748,7 +1748,7 @@ pub const CATALOG: &[Tool] = &[
         id: ToolId::AdminDomainAdd,
         name: "admin_domain_add",
         title: "Add a mail domain",
-        description: "As the server's admin: host mail for another domain, once the server already has an active main domain (the first domain becomes the permanent main one, which the admin adds in their own app). Adding a domain that is already active changes nothing.",
+        description: "As the server's admin: host mail for another domain, once the server already has an active primary domain (the first domain becomes the primary one, which can never be removed, only renamed onto a different domain; the admin adds it in their own app). Adding a domain that is already active changes nothing.",
         page: "admin-dns",
         arms: ADMIN_DNS,
         annotations: ADMIN_WRITE,
@@ -2633,6 +2633,28 @@ mod tests {
         assert_eq!((actor, account), (Some(hex.as_str()), Some("bob.example")));
         assert!(resource("nest://profile?mode=x").is_none());
         assert!(resource("nest://profile?account=").is_none());
+    }
+
+    /// The organisation's published document (`apps/cli.md` § Open
+    /// decisions 1) is this client's only if it names the URL it is served at,
+    /// and a PAR is held to its declared `scope` by exact membership
+    /// (`authorization-server.md` § Scope grammar) — so an arm the catalog
+    /// gains without the document gaining it too would refuse every admin's
+    /// connect. This reds the build instead: the document changes only through
+    /// a public-texts request.
+    #[test]
+    fn the_published_client_document_names_this_client_and_every_arm() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/sites/fauna-social/apps/cli/client-metadata.json"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            doc["client_id"].as_str(),
+            Some(fauna_protocol::principals::CLI_CLIENT_ID)
+        );
+        assert_eq!(doc["scope"].as_str(), Some(consent_scope(true).as_str()));
     }
 
     #[test]

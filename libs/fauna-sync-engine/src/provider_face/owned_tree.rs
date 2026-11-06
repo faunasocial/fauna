@@ -195,6 +195,16 @@ impl OwnedTree {
         remove_if_present(&self.path_in(BodyRoot::Cache, rel))
     }
 
+    /// Drop every body this tree keeps for `rel`, kept root and cache root — a
+    /// remote delete the shared verdict applied
+    /// ([`crate::engine::SyncEngine::apply_folded_deletes`]): the verdict has
+    /// already proved a kept-root body is no edit the nest lacks.
+    pub fn drop_bodies(&self, rel: &str) -> Result<()> {
+        let rel = check_rel(rel)?;
+        remove_if_present(&self.path_in(BodyRoot::Kept, rel))?;
+        remove_if_present(&self.path_in(BodyRoot::Cache, rel))
+    }
+
     // ---- Reads ----
 
     /// Open `rel` for reading: its body's path, hydrating it into the cache
@@ -1018,6 +1028,7 @@ mod tests {
                     size: r.head.len() as u64,
                     mtime: 0,
                     content_version: content_version(r.recorded, Some(manifest_of(&r.head))),
+                    kept: false,
                 })
                 .collect())
         }

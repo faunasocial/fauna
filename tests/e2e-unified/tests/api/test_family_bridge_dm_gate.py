@@ -43,9 +43,9 @@ from helpers.client_metadata_server import (
     manifest_payload,
     sign_manifest,
 )
+from helpers.admin_wire import admit_adult
 from helpers.family_wire import (
     actor_ws,
-    admit_adult_directly,
     admit_ward,
     blocked_dm_peers,
     decide_dm_peer,
@@ -114,7 +114,7 @@ def _held_ward(nest) -> tuple[dict, dict]:
     the consent nest's own user is, because the bridge's consent ceremony
     completes as an identity. One anonymous invite-request submit."""
     tail = os.urandom(3).hex()
-    guardian = admit_adult_directly(nest, f"dmgate-guardian-{tail}")
+    guardian = admit_adult(nest, f"dmgate-guardian-{tail}")
     ward = admit_ward(nest, guardian, f"dmgate-ward-{tail}")
     ward["actor_id_bytes"] = bytes.fromhex(ward["actor_id_hex"])
     set_ward_policy(nest, guardian, ward, unknown_peer_dm="hold")

@@ -348,6 +348,17 @@ pub trait BackupStateStore: MaybeSendSync {
     /// destination, and every mark of the account. The empty state (stamp 0)
     /// when the box keeps no list.
     async fn backup_state(&self, source_nest: [u8; 32]) -> Result<BackupState, StoreError>;
+    /// [`Self::backup_state`] read on the way to a write — the read
+    /// [`crate::mutate_backup`] composes its gesture over. A writer never
+    /// degrades, so a seam that can wait out a transient
+    /// [`LEDGER_NOT_READY`] does it here ([`ResolvingLedgerStore`]); every
+    /// other reader keeps the refusal at once.
+    async fn backup_state_for_write(
+        &self,
+        source_nest: [u8; 32],
+    ) -> Result<BackupState, StoreError> {
+        self.backup_state(source_nest).await
+    }
     /// Every box's list row the account holds — the all-boxes read.
     async fn backup_destination_lists(&self) -> Result<Vec<BackupDestinationsRow>, StoreError>;
     /// Replace `source_nest`'s list and answer that box's state as it now
@@ -437,6 +448,33 @@ where
             fauna_sleep::sleep(LEDGER_READY_POLL).await;
         }
         (self.resolve)().ok_or_else(|| not_ready(save))
+    }
+
+    /// `call` on the handle, waiting out — inside the one
+    /// [`LEDGER_READY_WAIT`] — both an assembly still in flight and a read
+    /// gate that refuses as [`LEDGER_NOT_READY`]: a replica just bound
+    /// refuses its scopes until the first listing and the escrowed keys land
+    /// (`account-client-lifecycle.md` § The client-side lifecycle → *The
+    /// first listing*, clauses (4) and (5)), typically within a pump or two.
+    /// A refusal it cannot wait out ([`LEDGER_AWAITING_SIBLING`] — another
+    /// device must act) and every other answer return at once. Only for a
+    /// read on the way to a write: a gated call wrote nothing, so it is safe
+    /// to repeat.
+    async fn settled<T, Fut>(&self, call: impl Fn(H) -> Fut) -> Result<T, StoreError>
+    where
+        Fut: core::future::Future<Output = Result<T, StoreError>>,
+    {
+        let polls = LEDGER_READY_WAIT.as_millis() / LEDGER_READY_POLL.as_millis();
+        for _ in 0..polls {
+            if let Some(handle) = (self.resolve)() {
+                match call(handle).await {
+                    Err(StoreError::Load(m) | StoreError::Save(m)) if m == LEDGER_NOT_READY => {}
+                    answer => return answer,
+                }
+            }
+            fauna_sleep::sleep(LEDGER_READY_POLL).await;
+        }
+        call((self.resolve)().ok_or_else(|| not_ready(false))?).await
     }
 }
 
@@ -593,6 +631,14 @@ where
 {
     async fn backup_state(&self, source_nest: [u8; 32]) -> Result<BackupState, StoreError> {
         self.current(false).await?.backup_state(source_nest).await
+    }
+
+    async fn backup_state_for_write(
+        &self,
+        source_nest: [u8; 32],
+    ) -> Result<BackupState, StoreError> {
+        self.settled(|h| async move { h.backup_state(source_nest).await })
+            .await
     }
 
     async fn backup_destination_lists(&self) -> Result<Vec<BackupDestinationsRow>, StoreError> {

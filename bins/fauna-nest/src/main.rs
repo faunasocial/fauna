@@ -199,6 +199,10 @@ struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The commit this binary was compiled from, expanded HERE — the crate that
+    // is the artifact — and handed to the library before anything can serve
+    // health (`build_identity` owns why the library never reads it itself).
+    fauna_nest::build_identity::stamp(fauna_build_commit::commit!());
     // Default to `info` when RUST_LOG is unset so operational startup/status
     // events are visible out of the box — matching the rest of the server fleet
     // (fauna-router, fauna-sync, fauna-sni-router). Without this default the

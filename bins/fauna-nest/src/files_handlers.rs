@@ -108,6 +108,7 @@ fn row_to_info(
         derived_through: r.derived_through,
         is_resolution: r.is_resolution,
         is_retention: r.is_retention,
+        deposited_by: r.deposited_by.as_ref().map(hex::encode),
         signature: r.signature.clone().map(ByteBuf::from),
         signer_key: r.signer_key.clone().map(ByteBuf::from),
         // Reader-stamped, never on the wire: a reader sets it from its own

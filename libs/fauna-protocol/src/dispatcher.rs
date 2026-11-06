@@ -329,7 +329,15 @@ impl RpcDispatcher {
                                 }
                             }
                         }
-                        Some(Err(_)) | None => break,
+                        // The transport's own reason is the only record of why
+                        // this side ended the connection (an oversized frame,
+                        // a protocol violation, a reset): the supervisor that
+                        // reconnects sees only that the stream ended.
+                        Some(Err(e)) => {
+                            tracing::info!("ws read ended on a transport error: {e}");
+                            break;
+                        }
+                        None => break,
                     }
                 }
             };

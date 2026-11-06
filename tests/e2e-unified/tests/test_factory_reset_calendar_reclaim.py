@@ -38,9 +38,10 @@ follow-up (tracked internally). The one tier_3 variant that DID fail —
 keeping a *stale* session across the reset (no re-onboard) — is not the live flow
 (the live test re-onboards), so it is not asserted here.
 
-Linux-only: the linux Events page is the encrypted-CalDAV-store (`bridge_caldav_*`)
-surface where the live symptom appears (events.md Decision B); all apps use the same
-`bridge_caldav` store; the other apps are not exercised here.
+Apps: linux, macos, ios, tui and web (the surface `calendar-after-reclaim`). The linux
+Events page is the encrypted-CalDAV-store (`bridge_caldav_*`) surface where the live
+symptom appears (events.md Decision B); every built app's Events page drives the same
+store through the shared events actions. windows and android are not exercised here yet.
 """
 
 import uuid
@@ -49,7 +50,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from common.nest import factory_reset_and_restart
-from helpers.app_surface import skip_unbuilt
+from helpers import caldav_roundtrip as rt
+from helpers.app_surface import require_surface
+from helpers.e2e_session import e2e_login_device_id, login_as
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tier1]
 
@@ -61,29 +64,34 @@ def _future_dt(days_ahead: int, hour: int, minute: int = 0) -> str:
     )
 
 
-def _login_admin_as_user(app, nest) -> None:
-    """Log the linux app in as the nest admin on the regular (feed) shell.
+@pytest.fixture
+def reclaimable_spa_url(spa_proxy_for, reclaimable_nest):
+    """SPA proxy → this test's `reclaimable_nest`, so the web seat reaches it
+    without CORS. Resolved lazily by `login_as` on web only, so a native run never
+    builds the SPA."""
+    return spa_proxy_for(reclaimable_nest["url"])
+
+
+def _login_admin_as_user(app, nest, request) -> None:
+    """Log the app in as the nest admin on the regular (feed) shell, through the
+    shared `login_as` seam — its live-session barrier (convention 14) waits until
+    the app's account runtime reports the admin actor, and its web leg goes
+    through the SPA proxy.
 
     The admin is the calendar actor — mirroring the live CalDAV test, where the
-    linux app is the admin throughout. The admin survives
-    ``factory_reset_and_restart`` (re-claimed with the same identity), so the same
-    session re-points at the same actor on the re-claimed nest.
+    app is the admin throughout. The admin survives ``factory_reset_and_restart``
+    (re-claimed with the same identity), so the same session re-points at the same
+    actor on the re-claimed nest.
     """
-    from conftest import _relaunch_trusting_nest
-
-    _relaunch_trusting_nest(app.driver, nest)
-    admin = nest["admin"]
-    app.driver.set_state({
-        "session": {
-            "authenticated": True,
-            "node_url": nest["url"],
-            "secret_hex": bytes(admin["signing_key"]).hex(),
-            "handle": "admin",
-            "actor_id": admin["actor_id_hex"],
-            "device_id": "test-device-reclaim",
-        },
-        "nav": {"stack": [{"view": "feed"}]},
-    })
+    login_as(
+        app,
+        nest,
+        nest["admin"],
+        handle="admin",
+        device_id=e2e_login_device_id(app),
+        request=request,
+        spa_url_fixture="reclaimable_spa_url",
+    )
 
 
 def _enable_mail_and_open_events(app) -> None:
@@ -95,12 +103,21 @@ def _enable_mail_and_open_events(app) -> None:
 def _create_event_and_assert_visible(app, summary: str, *, phase: str) -> None:
     """Select Personal + create an event + assert it renders — the exact user
     action that failed live (actions/events.py:68 "Event did not appear")."""
-    count = app.count("calendar-item")
-    assert count >= 1, (
-        f"{phase}: the Personal calendar should be present; got {count} "
-        f"calendars (CalendarsLoaded: {count}). error={app.error_text()!r}"
-    )
-    app.events.select_calendar("Personal")
+    # The page loads its calendars on ENTRY, and an entry that raced the
+    # enable-mail provisioning reads none; `wait_calendars_ready` re-enters the
+    # page until the nest-provisioned calendar lists, failing self-diagnosing
+    # past its deadline — so a calendar that never provisions after the
+    # re-claim (the live `CalendarsLoaded: 0` class) still goes red, while a
+    # bare `count("calendar-item")` read on first entry raced the load on tui
+    # (convention 14).
+    rt.wait_calendars_ready(app)
+    try:
+        app.events.select_calendar("Personal")
+    except TimeoutError as exc:
+        raise AssertionError(
+            f"{phase}: the Personal calendar should be present. "
+            f"error={app.error_text()!r}; {exc}"
+        ) from exc
     app.events.create_event(summary, start=_future_dt(7, 10), end=_future_dt(7, 11))
     assert any(summary in s for s in app.events.event_summaries()), (
         f"{phase}: event {summary!r} created in Personal should be visible. "
@@ -109,25 +126,17 @@ def _create_event_and_assert_visible(app, summary: str, *, phase: str) -> None:
 
 
 @pytest.mark.feature("factory-reset")
-def test_calendar_works_after_factory_reset_reclaim(app, reclaimable_nest):
+def test_calendar_works_after_factory_reset_reclaim(app, reclaimable_nest, request):
     """The Personal calendar must provision AND accept an event after
     factory_reset → re-claim (same identity) → enable-mail, exactly as on a first
     claim. Fresh re-onboard = the faithful live flow.
     """
-    if not app.driver.is_linux():
-        skip_unbuilt(
-            app.driver,
-            surface="the encrypted-CalDAV calendar-after-reclaim observation",
-            detail="the linux Events page is the observation surface for "
-            "this cycle; the other apps are the remaining cross-app "
-            "follow-on",
-            tracked="caldav-server.md",
-        )
+    require_surface(app.driver, "calendar-after-reclaim")
 
     nest = reclaimable_nest
 
     # ── Phase 1: fresh-claim baseline (proves the operation works) ──────────
-    _login_admin_as_user(app, nest)
+    _login_admin_as_user(app, nest, request)
     _enable_mail_and_open_events(app)
     _create_event_and_assert_visible(
         app, f"baseline-{uuid.uuid4().hex[:8]}", phase="phase 1 (fresh claim)"
@@ -142,7 +151,7 @@ def test_calendar_works_after_factory_reset_reclaim(app, reclaimable_nest):
     # phase-2-only failure is the recoverability regression.
     factory_reset_and_restart(nest)
     app.driver.reset()
-    _login_admin_as_user(app, nest)
+    _login_admin_as_user(app, nest, request)
     _enable_mail_and_open_events(app)
     _create_event_and_assert_visible(
         app, f"reclaim-{uuid.uuid4().hex[:8]}", phase="phase 2 (after re-claim)"

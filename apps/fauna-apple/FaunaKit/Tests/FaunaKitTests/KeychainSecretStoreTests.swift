@@ -13,6 +13,7 @@ import Foundation
 /// Hermetic: `FAUNA_E2E_BRIDGE` forces `KeychainStore` into its in-memory mode, so no real
 /// Keychain is touched (same idiom as `KeychainAccessibilityTests`).
 @MainActor
+@Suite(.sharedKeychain)
 struct KeychainSecretStoreTests {
     /// 32 bytes of hex — the same fixture secret the shared crate's tests use.
     private static let secretA = String(repeating: "11", count: 32)

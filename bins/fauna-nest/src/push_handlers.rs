@@ -76,6 +76,37 @@ fn vapid_key_handler() -> RpcHandler {
 
 // ── fauna.push.subscribe (≡ POST /api/v1/push/subscribe) ─────────────────────
 
+/// Refuse an over-long field before anything is stored or parsed: the
+/// destination check looks at where an endpoint points, never how long it is,
+/// so without this a caller parks megabytes per row (`apps/common.md`
+/// § Registration, the endpoint ruling).
+fn check_field_lengths(req: &SubscribeRequest) -> Result<(), String> {
+    use crate::db::push::{
+        MAX_PUSH_DEVICE_ID_BYTES, MAX_PUSH_ENDPOINT_BYTES, MAX_PUSH_KEY_AUTH_BYTES,
+        MAX_PUSH_KEY_P256DH_BYTES,
+    };
+    let fields: [(&str, usize, usize); 4] = [
+        ("device_id", req.device_id.len(), MAX_PUSH_DEVICE_ID_BYTES),
+        ("endpoint", req.endpoint.len(), MAX_PUSH_ENDPOINT_BYTES),
+        (
+            "key_p256dh",
+            req.key_p256dh.as_deref().map_or(0, str::len),
+            MAX_PUSH_KEY_P256DH_BYTES,
+        ),
+        (
+            "key_auth",
+            req.key_auth.as_deref().map_or(0, str::len),
+            MAX_PUSH_KEY_AUTH_BYTES,
+        ),
+    ];
+    for (name, len, cap) in fields {
+        if len > cap {
+            return Err(format!("{name} is longer than {cap} bytes"));
+        }
+    }
+    Ok(())
+}
+
 fn subscribe_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
@@ -88,6 +119,7 @@ fn subscribe_handler() -> RpcHandler {
             if req.endpoint.is_empty() {
                 return Err(invalid_request("endpoint is required"));
             }
+            check_field_lengths(&req).map_err(invalid_request)?;
             let transport = req.transport.as_deref().unwrap_or("web-push");
             match transport {
                 // Delivered over the device's own live connection: nothing is
@@ -203,5 +235,57 @@ pub fn register_push_handlers(b: &mut RpcRouterBuilder) {
                 handler,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::push::{
+        MAX_PUSH_DEVICE_ID_BYTES, MAX_PUSH_ENDPOINT_BYTES, MAX_PUSH_KEY_AUTH_BYTES,
+        MAX_PUSH_KEY_P256DH_BYTES,
+    };
+
+    fn req() -> SubscribeRequest {
+        SubscribeRequest {
+            device_id: "d".into(),
+            endpoint: "https://relay.example/x".into(),
+            key_p256dh: Some("k".into()),
+            key_auth: Some("a".into()),
+            ..Default::default()
+        }
+    }
+
+    /// One byte over `cap` is refused, exactly `cap` is accepted.
+    fn check(set: impl Fn(&mut SubscribeRequest, String), cap: usize) {
+        let mut over = req();
+        set(&mut over, "a".repeat(cap + 1));
+        assert!(
+            check_field_lengths(&over).is_err(),
+            "cap {cap}: +1 accepted"
+        );
+        let mut at = req();
+        set(&mut at, "a".repeat(cap));
+        assert!(check_field_lengths(&at).is_ok(), "cap {cap}: exact refused");
+    }
+
+    #[test]
+    fn endpoint_is_capped() {
+        check(|r, v| r.endpoint = v, MAX_PUSH_ENDPOINT_BYTES);
+    }
+
+    #[test]
+    fn device_id_is_capped() {
+        check(|r, v| r.device_id = v, MAX_PUSH_DEVICE_ID_BYTES);
+    }
+
+    #[test]
+    fn key_p256dh_is_capped() {
+        check(|r, v| r.key_p256dh = Some(v), MAX_PUSH_KEY_P256DH_BYTES);
+    }
+
+    #[test]
+    fn key_auth_is_capped() {
+        check(|r, v| r.key_auth = Some(v), MAX_PUSH_KEY_AUTH_BYTES);
     }
 }

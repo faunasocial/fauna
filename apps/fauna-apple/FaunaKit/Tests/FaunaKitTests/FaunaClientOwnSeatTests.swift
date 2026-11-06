@@ -50,3 +50,29 @@ private func inMemoryContext() -> ModelContext {
     #expect(client.api.boundActorIdHex == ownActor,
             "the startup auth re-pointed the seat at the active account's actor — a bound seat then signs as an account it does not serve")
 }
+
+// `start()` and `resume()` take the bearer mint through
+// `mintOwnSeatBearerOrLeaveItToTheSupervisor`, which must NOT throw: a first
+// mint that found no nest (an iOS launch whose optimistic shell started the
+// session before the launch machine installed the reach hint) used to throw out
+// of `start()` past every observer, so the connection indicator read
+// `connecting` for good while the session's supervisor sat connected over the
+// hint (`transport-connection.md` § Connection lifecycle, *A first mint that
+// finds no nest still starts the supervisor*). The residual HTTP bearer stays
+// unset, so `ensureAuthenticated` mints again on the next HTTP call.
+@MainActor
+@Test func aFailedStartupMintIsReportedNotThrown() async throws {
+    let own = String(repeating: "35", count: 32)
+    let keychain = KeychainStore(testBackend: FakeKeychainBackend())
+    let client = FaunaClient(
+        nodeUrl: URL(string: "http://127.0.0.1:1")!, secretHex: own,
+        deviceId: String(repeating: "00", count: 32), modelContext: inMemoryContext(),
+        keychain: keychain)
+
+    // Refused by the port: no nest answers.
+    let minted = await client.mintOwnSeatBearerOrLeaveItToTheSupervisor("start")
+
+    #expect(!minted, "a refused mint must report itself as failed")
+    #expect(client.api.currentToken == nil,
+            "a failed mint must leave no bearer, so the next HTTP call mints again")
+}

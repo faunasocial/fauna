@@ -64,6 +64,18 @@ fn rpc_router() -> RpcRouter {
 }
 
 async fn start_nest() -> Nest {
+    start_nest_with(true).await
+}
+
+/// `loopback: false` builds the production state's one difference that
+/// matters here: no `peer_fetch_loopback`, so the nest refuses a loopback peer.
+async fn start_nest_with(loopback: bool) -> Nest {
+    let base = AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()));
+    let peer_fetch_loopback = if loopback {
+        base.peer_fetch_loopback.clone()
+    } else {
+        None
+    };
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).unwrap();
     let signing_key = SigningKey::from_bytes(&secret);
@@ -80,7 +92,8 @@ async fn start_nest() -> Nest {
             b.build()
         }),
         rpc_router: Arc::new(rpc_router()),
-        ..AppState::for_test(Arc::new(CacheDb::open_in_memory().unwrap()))
+        peer_fetch_loopback,
+        ..base
     });
     let app = fauna_nest::build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -522,6 +535,52 @@ async fn a_conversation_takedown_reaches_the_foreign_members_home() {
     assert_eq!(on_a[0].0.as_deref(), Some(AUTHOR.as_slice()));
 }
 
+/// The same record sits in two channels: the earliest copy in a channel the
+/// foreign author is not a member of (no sender attested there), the author's
+/// own attested copy in a second channel. The delivery resolves the author's home from
+/// the SECOND channel's foreign-member row — the attested copy, not the
+/// earliest one.
+#[tokio::test]
+async fn a_conversation_takedown_finds_the_authors_home_through_the_attesting_copy() {
+    let (a, b) = pair().await;
+    let first = [0xf3u8; 32];
+    let second = [0xf4u8; 32];
+    let record_id = [0xf5u8; 32];
+    let content_id = hex::encode(record_id);
+    let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
+    a.state
+        .db
+        .segment_records_insert_conv(&first, 0, &record_cid, "b", 1_000, 1, &[], None)
+        .await
+        .unwrap();
+    a.state
+        .db
+        .segment_records_insert_conv(&second, 0, &record_cid, "b", 2_000, 1, &[], Some(&AUTHOR))
+        .await
+        .unwrap();
+    a.state
+        .db
+        .register_foreign_channel_member(
+            &second,
+            &AUTHOR,
+            &b.nest_id(),
+            Some(&b.url),
+            RebindPower::Standing,
+        )
+        .await
+        .unwrap();
+
+    take_down(&a, "conversation", &content_id).await;
+
+    let rows = queue(&b, AUTHOR).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "delivered via the second channel's member row"
+    );
+    assert_eq!(rows[0].content_id, content_id);
+}
+
 /// A takedown whose author the deciding nest hosts delivers nothing — the
 /// row is served where the author already reads it.
 #[tokio::test]
@@ -615,5 +674,261 @@ async fn a_delivery_lost_to_a_crash_after_the_commit_is_reconciled_at_boot() {
         fauna_nest::moderation_federation::reconcile_undelivered_obligations(&a.state).await,
         0,
         "a delivered row is never queued again"
+    );
+}
+
+/// Arm 1: the issuer a delivered row names is the host this nest
+/// PROVED the issuer's verified id answers at — a declared address it never
+/// dialled is not, so a peer cannot have the author's queue read "taken down at
+/// <a nest it chose>"; with no proven address the row names the id's hex.
+#[tokio::test]
+async fn a_delivered_rows_issuer_is_never_an_address_the_peer_only_declared() {
+    let (a, b) = pair().await;
+    let post_id = seed_foreign_post(&a, &b, 0xe8).await;
+    let c = start_nest().await;
+
+    let mut req = forged_delivery("spoof", &post_id);
+    req.issuer_nest_url = Some("https://court.example".into());
+    originate(&c, &b, DELIVER_KIND, value(&req))
+        .await
+        .expect("a hosted author's post is delivered");
+
+    let rows = queue(&b, AUTHOR).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].issuer_nest.as_deref(),
+        Some(hex::encode(c.nest_id()).as_str()),
+        "an unproven declared address never names the issuer"
+    );
+}
+
+/// The first-contact twin of the arm above: a home that never dialled the
+/// issuer receives a genuine delivery declaring the issuer's real address, and
+/// proves it itself — one handshake-only dial that must land on the verified
+/// origin — so the author's queue names the issuer's host with no appeal ever
+/// made (`takedown-and-block.md` § Legal takedown → *The author homed on
+/// another nest*).
+#[tokio::test]
+async fn a_first_contact_issuers_declared_address_is_proven_by_the_home_and_names_it() {
+    let a = start_nest().await;
+    let b = start_nest().await;
+    common::seed_user(&b.state.db, &AUTHOR).await;
+    let post_id = seed_foreign_post(&a, &b, 0xea).await;
+    assert!(
+        b.state
+            .db
+            .proven_foreign_nest_urls(&a.nest_id())
+            .await
+            .unwrap()
+            .is_empty(),
+        "the home has never dialled the issuer"
+    );
+
+    let mut req = forged_delivery("first-contact", &post_id);
+    req.issuer_nest_url = Some(a.url.clone());
+    originate(&a, &b, DELIVER_KIND, value(&req))
+        .await
+        .expect("a hosted author's post is delivered");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let rows = queue(&b, AUTHOR).await;
+        assert_eq!(rows.len(), 1);
+        if rows[0].issuer_nest.as_deref() == Some(a.host().as_str()) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the home proves the issuer's declared address and names its host, got {:?}",
+            rows[0].issuer_nest
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        audit_rows(&b, "moderation:appeal-relayed").await.is_empty(),
+        "named without any appeal"
+    );
+}
+
+/// Waits until some row on the author's queue names `want`, else fails with
+/// what the queue shows.
+async fn await_issuer_named(b: &Nest, want: &str, why: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let rows = queue(b, AUTHOR).await;
+        if rows.iter().any(|r| r.issuer_nest.as_deref() == Some(want)) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{why}, got {:?}",
+            rows.iter()
+                .map(|r| r.issuer_nest.clone())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// The declared issuer address is a stranger peer's text, dialled
+/// unattended — so only an origin-form declaration is dialled. A declaration
+/// carrying a path or user-info is never dialled: it spends no proof window
+/// (the origin's next, origin-form declaration is still proven) and never
+/// shapes the label the author reads.
+#[tokio::test]
+async fn a_declared_issuer_address_that_is_not_origin_form_is_never_dialled() {
+    let a = start_nest().await;
+    let b = start_nest().await;
+    common::seed_user(&b.state.db, &AUTHOR).await;
+    let post_id = seed_foreign_post(&a, &b, 0xeb).await;
+
+    for (n, declared) in [
+        format!("{}/api/v1/../x?y=1", a.url),
+        format!("http://evil@{}", a.host()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut req = forged_delivery(&format!("not-origin-{n}"), &post_id);
+        req.issuer_nest_url = Some(declared);
+        originate(&a, &b, DELIVER_KIND, value(&req))
+            .await
+            .expect("a hosted author's post is delivered");
+    }
+
+    let mut req = forged_delivery("origin-form", &post_id);
+    req.issuer_nest_url = Some(a.url.clone());
+    originate(&a, &b, DELIVER_KIND, value(&req))
+        .await
+        .expect("a hosted author's post is delivered");
+    await_issuer_named(
+        &b,
+        &a.host(),
+        "the origin-form declaration is proven, its window unspent by the others",
+    )
+    .await;
+    let proven = b
+        .state
+        .db
+        .proven_foreign_nest_urls(&a.nest_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        proven,
+        vec![a.url.clone()],
+        "only the origin was ever proven"
+    );
+}
+
+/// A production nest never dials a loopback issuer address a peer
+/// declared — the loopback carve-out is an authenticated caller's, and test
+/// state's, never an unattended stranger's.
+#[tokio::test]
+async fn a_production_home_never_dials_a_declared_loopback_issuer() {
+    let a = start_nest().await;
+    let b = start_nest_with(false).await;
+    common::seed_user(&b.state.db, &AUTHOR).await;
+    let post_id = seed_foreign_post(&a, &b, 0xec).await;
+
+    let mut req = forged_delivery("loopback", &post_id);
+    req.issuer_nest_url = Some(a.url.clone());
+    originate(&a, &b, DELIVER_KIND, value(&req))
+        .await
+        .expect("a hosted author's post is delivered");
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        b.state
+            .db
+            .proven_foreign_nest_urls(&a.nest_id())
+            .await
+            .unwrap()
+            .is_empty(),
+        "a declared loopback address is never dialled"
+    );
+    let rows = queue(&b, AUTHOR).await;
+    assert_eq!(
+        rows[0].issuer_nest.as_deref(),
+        Some(hex::encode(a.nest_id()).as_str())
+    );
+}
+
+/// Arm 2: the author's queue is newest-first, so a delivered row's
+/// time is never later than its arrival — a far-future row from one peer
+/// cannot sit above every other issuer's.
+#[tokio::test]
+async fn a_delivered_rows_time_is_never_later_than_its_arrival() {
+    let (a, b) = pair().await;
+    let post_id = seed_foreign_post(&a, &b, 0xe9).await;
+    let c = start_nest().await;
+
+    let mut req = forged_delivery("future", &post_id);
+    req.timestamp = 32_503_680_000_000_000; // the year 3000, in microseconds
+    originate(&c, &b, DELIVER_KIND, value(&req))
+        .await
+        .expect("delivered");
+    take_down(&a, "post", &post_id).await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    let rows = queue(&b, AUTHOR).await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.timestamp <= now), "{rows:?}");
+    assert_eq!(
+        rows[0].issuer_nest.as_deref(),
+        Some(a.host().as_str()),
+        "the later genuine row is the newest"
+    );
+}
+
+/// Arm 3: one origin may take only its own share of the nest-wide
+/// delivery budget, so a second issuer still lands while the first is refused.
+#[tokio::test]
+async fn one_origin_cannot_hold_the_nest_wide_delivery_budget() {
+    let (a, b) = pair().await;
+    let post_id = seed_foreign_post(&a, &b, 0xea).await;
+    let c = start_nest().await;
+    // Enough hosted authors that the per-author budget never binds first.
+    let authors: Vec<[u8; 32]> = (0..12u8).map(|i| [0x70 + i; 32]).collect();
+    for author in &authors {
+        common::seed_user(&b.state.db, author).await;
+    }
+
+    let mut accepted = 0u32;
+    let mut refused = false;
+    for n in 0..110u32 {
+        let author = authors[(n / 9) as usize];
+        let mut content = [0u8; 32];
+        content[..4].copy_from_slice(&n.to_be_bytes());
+        let req = ObligationDeliverRequest {
+            content_type: "conversation".into(),
+            content_id: hex::encode(content),
+            author: hex::encode(author),
+            ..forged_delivery(&format!("c{n}"), &post_id)
+        };
+        match originate(&c, &b, DELIVER_KIND, value(&req)).await {
+            Ok(_) => accepted += 1,
+            Err(e) => {
+                assert!(e.code.ends_with("rate_limited"), "{e:?}");
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "one origin meets its own bound");
+    assert_eq!(
+        accepted,
+        fauna_nest::bridge_rate_limit::OBLIGATION_DELIVER_ORIGIN_TARGET_MAX
+    );
+
+    take_down(&a, "post", &post_id).await;
+    assert!(
+        queue(&b, AUTHOR)
+            .await
+            .iter()
+            .any(|r| r.issuer_nest.as_deref() == Some(a.host().as_str())),
+        "another issuer's delivery still lands"
     );
 }

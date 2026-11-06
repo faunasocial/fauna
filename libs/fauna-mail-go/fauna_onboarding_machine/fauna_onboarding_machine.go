@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_client_policy"
 	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_core"
 	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_launch_machine"
 	"github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_provisioning"
@@ -785,7 +786,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_carddav_enable_requested()
 		})
-		if checksum != 5677 {
+		if checksum != 61064 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_carddav_enable_requested: UniFFI API checksum mismatch")
 		}
@@ -1188,6 +1189,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_joining_nest_rules()
+		})
+		if checksum != 20446 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_joining_nest_rules: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_local_nest_reachable()
 		})
 		if checksum != 43325 {
@@ -1244,7 +1254,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_pending_invite_slot()
 		})
-		if checksum != 45110 {
+		if checksum != 50650 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_pending_invite_slot: UniFFI API checksum mismatch")
 		}
@@ -1427,6 +1437,15 @@ func uniffiCheckChecksums() {
 		if checksum != 55615 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_recovery_selected_nest_id: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_redeem_error()
+		})
+		if checksum != 1261 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_redeem_error: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1973,7 +1992,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_description_key_for_row()
 		})
-		if checksum != 53241 {
+		if checksum != 31250 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_update_channel_description_key_for_row: UniFFI API checksum mismatch")
 		}
@@ -3883,9 +3902,9 @@ type OnboardingMachineInterface interface {
 	// locality AND NAT axis), no checkbox (`onboarding.md` § 3b).
 	//
 	// The per-app launch glue calls `MailAdminClient::set_carddav_enabled(true)`
-	// on it at `LoggedIn` and, when neither email nor CalDAV minted the shared
-	// MSEK, provisions the CardDAV-only mailbox
-	// (`enable_carddav_mailbox_with_generated_password`). Per
+	// on it at `LoggedIn` and, with email off, the shared serving-enablement
+	// plan's one DAV mailbox mint provisions the calendar-only credential
+	// (`enable_dav_mailbox_with_generated_password`). Per
 	// `docs/goal/behavior/carddav-server.md` § Independent enablement.
 	CarddavEnableRequested() bool
 	// The claim code a client wants the `ClaimCode` page input pre-filled with
@@ -4137,6 +4156,14 @@ type OnboardingMachineInterface interface {
 	InviteRequestSnapshot() InviteRequestSnapshot
 	IsBuyableViaProvider(domain string) bool
 	IsLoading() bool
+	// The nest's rules for the joining surface of the current step, in
+	// `lang`, or `None` when it shows none: on `invite_request`, and on
+	// `handle_entry` exactly while the terms notice shows
+	// (`terms_notice_visible`, `onboarding.md` § 2 — Continue signs in); never
+	// before the verified read has landed; and never for an applied empty
+	// document ([`fauna_client_policy::NestRulesSummary::is_shown`] — a
+	// document none of which applies here is shown, rules listed or not).
+	JoiningNestRules(lang string) *fauna_client_policy.NestRulesSummary
 	LocalNestReachable() bool
 	// Snapshot for the `nat_mode_choice` page. Pure read.
 	// Per `docs/goal/behavior/onboarding.md` § 3b-bis.
@@ -4186,7 +4213,9 @@ type OnboardingMachineInterface interface {
 	NavigateToInviteRequestForKnownNest(nestUrl string, handle string)
 	NestUrl() string
 	// The pending-invite resume slot for the current state, or `None` when
-	// there is nothing to resume.
+	// there is nothing to resume. A request is resumable while it is pending:
+	// in `PendingReview`, or in `Rechecking` — a recheck in flight answers with
+	// the `PendingReview` it is checking.
 	//
 	// **This replaced `submit_invite_request_continue()` (retired 2026-08-12).**
 	// That method existed to *exit* the wizard with
@@ -4332,6 +4361,13 @@ type OnboardingMachineInterface interface {
 	// The `nest_actor_id` (hex) of the selected box on `nest_recovery`, or
 	// `None` before a selection. Drives the `recover-box-item` selected state.
 	RecoverySelectedNestId() *string
+	// A failed redeem, on both of the page's channels: the invite snapshot
+	// (`invite-request-status`) and the shared `error_message` every app's
+	// `error-message` reads (e2e convention 2). The status line alone left
+	// `error-message` empty on a refused register. Both carry the one
+	// sentence [`crate::snapshots::invite_request::message_for`] resolves,
+	// through the generated string table — never a wire code.
+	RedeemError(transient bool, cause string) OnboardingStep
 	RedeemInvite() OnboardingStep
 	// Mint the single-use nonce the platform attestation binds
 	// (`fauna.account.age_nonce`, pre-identity, against the wizard's current
@@ -4791,7 +4827,7 @@ type OnboardingMachineInterface interface {
 	ToggleSameProviderForVps(on bool)
 	// The i18n key of `channel`'s row description: the no-build wording when
 	// the registry has no build on it, else the compat line's wording at the
-	// running product major (`UpdateChannel::description_key_for`). Apps look
+	// running product version (`UpdateChannel::description_key_for`). Apps look
 	// the string up by this key rather than choosing per row themselves.
 	UpdateChannelDescriptionKeyForRow(channel fauna_provisioning.UpdateChannel) string
 	VerifyDns() error
@@ -5434,9 +5470,9 @@ func (_self *OnboardingMachine) CapturedDnsCredential() *CapturedDnsCredential {
 // locality AND NAT axis), no checkbox (`onboarding.md` § 3b).
 //
 // The per-app launch glue calls `MailAdminClient::set_carddav_enabled(true)`
-// on it at `LoggedIn` and, when neither email nor CalDAV minted the shared
-// MSEK, provisions the CardDAV-only mailbox
-// (`enable_carddav_mailbox_with_generated_password`). Per
+// on it at `LoggedIn` and, with email off, the shared serving-enablement
+// plan's one DAV mailbox mint provisions the calendar-only credential
+// (`enable_dav_mailbox_with_generated_password`). Per
 // `docs/goal/behavior/carddav-server.md` § Independent enablement.
 func (_self *OnboardingMachine) CarddavEnableRequested() bool {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
@@ -6194,6 +6230,24 @@ func (_self *OnboardingMachine) IsLoading() bool {
 	}))
 }
 
+// The nest's rules for the joining surface of the current step, in
+// `lang`, or `None` when it shows none: on `invite_request`, and on
+// `handle_entry` exactly while the terms notice shows
+// (`terms_notice_visible`, `onboarding.md` § 2 — Continue signs in); never
+// before the verified read has landed; and never for an applied empty
+// document ([`fauna_client_policy::NestRulesSummary::is_shown`] — a
+// document none of which applies here is shown, rules listed or not).
+func (_self *OnboardingMachine) JoiningNestRules(lang string) *fauna_client_policy.NestRulesSummary {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalNestRulesSummaryINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_joining_nest_rules(
+				_pointer, FfiConverterStringINSTANCE.Lower(lang), _uniffiStatus),
+		}
+	}))
+}
+
 func (_self *OnboardingMachine) LocalNestReachable() bool {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -6298,7 +6352,9 @@ func (_self *OnboardingMachine) NestUrl() string {
 }
 
 // The pending-invite resume slot for the current state, or `None` when
-// there is nothing to resume.
+// there is nothing to resume. A request is resumable while it is pending:
+// in `PendingReview`, or in `Rechecking` — a recheck in flight answers with
+// the `PendingReview` it is checking.
 //
 // **This replaced `submit_invite_request_continue()` (retired 2026-08-12).**
 // That method existed to *exit* the wizard with
@@ -6706,6 +6762,23 @@ func (_self *OnboardingMachine) RecoverySelectedNestId() *string {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_recovery_selected_nest_id(
 				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// A failed redeem, on both of the page's channels: the invite snapshot
+// (`invite-request-status`) and the shared `error_message` every app's
+// `error-message` reads (e2e convention 2). The status line alone left
+// `error-message` empty on a refused register. Both carry the one
+// sentence [`crate::snapshots::invite_request::message_for`] resolves,
+// through the generated string table — never a wire code.
+func (_self *OnboardingMachine) RedeemError(transient bool, cause string) OnboardingStep {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOnboardingStepINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_redeem_error(
+				_pointer, FfiConverterBoolINSTANCE.Lower(transient), FfiConverterStringINSTANCE.Lower(cause), _uniffiStatus),
 		}
 	}))
 }
@@ -7934,7 +8007,7 @@ func (_self *OnboardingMachine) ToggleSameProviderForVps(on bool) {
 
 // The i18n key of `channel`'s row description: the no-build wording when
 // the registry has no build on it, else the compat line's wording at the
-// running product major (`UpdateChannel::description_key_for`). Apps look
+// running product version (`UpdateChannel::description_key_for`). Apps look
 // the string up by this key rather than choosing per row themselves.
 func (_self *OnboardingMachine) UpdateChannelDescriptionKeyForRow(channel fauna_provisioning.UpdateChannel) string {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
@@ -13194,6 +13267,47 @@ type FfiDestroyerOptionalString struct{}
 func (_ FfiDestroyerOptionalString) Destroy(value *string) {
 	if value != nil {
 		FfiDestroyerString{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalNestRulesSummary struct{}
+
+var FfiConverterOptionalNestRulesSummaryINSTANCE = FfiConverterOptionalNestRulesSummary{}
+
+func (c FfiConverterOptionalNestRulesSummary) Lift(rb RustBufferI) *fauna_client_policy.NestRulesSummary {
+	return LiftFromRustBuffer[*fauna_client_policy.NestRulesSummary](c, rb)
+}
+
+func (_ FfiConverterOptionalNestRulesSummary) Read(reader io.Reader) *fauna_client_policy.NestRulesSummary {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := fauna_client_policy.FfiConverterNestRulesSummaryINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalNestRulesSummary) Lower(value *fauna_client_policy.NestRulesSummary) C.RustBuffer {
+	return LowerIntoRustBuffer[*fauna_client_policy.NestRulesSummary](c, value)
+}
+
+func (c FfiConverterOptionalNestRulesSummary) LowerExternal(value *fauna_client_policy.NestRulesSummary) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*fauna_client_policy.NestRulesSummary](c, value))
+}
+
+func (_ FfiConverterOptionalNestRulesSummary) Write(writer io.Writer, value *fauna_client_policy.NestRulesSummary) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		fauna_client_policy.FfiConverterNestRulesSummaryINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalNestRulesSummary struct{}
+
+func (_ FfiDestroyerOptionalNestRulesSummary) Destroy(value *fauna_client_policy.NestRulesSummary) {
+	if value != nil {
+		fauna_client_policy.FfiDestroyerNestRulesSummary{}.Destroy(*value)
 	}
 }
 

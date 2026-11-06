@@ -146,8 +146,18 @@ def _cargo_cmd(repo: Path) -> list[str]:
     return ["cargo"]
 
 
-def _build_slot_cmd(repo: Path) -> list[str]:
-    """Prefix routing a heavy build through the machine-wide `build` slot pool.
+#: The declared writes (G) of the harness's own builds — the `--disk-gb` the
+#: grant reserves and is charged at while held (build-slot-pool.md § Build/e2e
+#: slot locks, the write-class bullet; figures: mac-disk-budget.md § Reserving
+#: disk by what a grant writes): a single-crate cargo build, the e2e app's
+#: `xcodebuild`.
+DISK_GB_CRATE = 5
+DISK_GB_XCODE = 3
+
+
+def _build_slot_cmd(repo: Path, disk_gb: float | None = None) -> list[str]:
+    """Prefix routing a heavy build through the machine-wide `build` slot pool,
+    declaring `disk_gb` (None: undeclared, the warm budget) as its write.
 
     `cargo build -p fauna-nest` compiles most of the workspace — exactly the
     "workspace-scale command outside `just`" the pool exists for. Before
@@ -165,7 +175,25 @@ def _build_slot_cmd(repo: Path) -> list[str]:
     wrapper = repo / "scripts" / "build-slot.py"
     if not wrapper.exists():
         return []
-    return [sys.executable, str(wrapper), "--pool", "build", "--"]
+    disk = ["--disk-gb", f"{disk_gb:g}"] if disk_gb is not None else []
+    return [sys.executable, str(wrapper), "--pool", "build", *disk, "--"]
+
+
+def _run_slot_build(cmd: list[str], *, run=None, **kwargs):
+    """`run_for_stamp` for a slot-wrapped build, returning `(result, instant)`
+    with stdout/stderr captured (the cargo JSON and the failure tails are read
+    from them) — and the wrapper's `[build-slot]` lines (HI sized or kept, the
+    answer wait, the bound hold, `granted … after Ns`) echoed as
+    `[prebuild] [build-slot] …` lines, success or failure, so the pytest log
+    keeps every grant decision beside the step's own line. `result.stderr` is
+    left whole: the `Access is denied` fallback and the failure tails read it."""
+    result, instant = _load_build_if_stale().run_for_stamp(
+        cmd, run=run or subprocess.run, capture_output=True, text=True, **kwargs
+    )
+    for line in (result.stderr or "").splitlines():
+        if line.startswith("[build-slot]"):
+            print(f"[prebuild] {line}", flush=True)
+    return result, instant
 
 
 def _cargo_target_dir(repo: Path) -> Path:
@@ -293,14 +321,14 @@ def build_node(release: bool = False, features: str = "test-hooks,nostr") -> str
     # queued was compiled by it — the warm pass's in-hold re-check must not
     # queue for `build` again over it.
     profile_args = ["--release"] if release else []
-    result, instant = _load_build_if_stale().run_for_stamp(
-        _build_slot_cmd(repo)
+    result, instant = _run_slot_build(
+        _build_slot_cmd(repo, DISK_GB_CRATE)
         + _cargo_cmd(repo)
         + ["build", "-p", "fauna-nest",
            "--features", features,
            *profile_args,
            "--message-format=json"],
-        run=subprocess.run, capture_output=True, text=True, cwd=repo,
+        cwd=repo,
     )
     if result.returncode != 0:
         # On Windows, cargo build fails if the exe is locked by another process
@@ -463,10 +491,15 @@ def build_sync_agent() -> str:
     `fauna-nest` build (measured: 0 of 66 workspace-local units shared,
     61 of 66 after dropping the flag).
 
-    On windows cargo's own exit code is never trusted — it lies on win-arm64 —
-    so success there is judged by the known exe path existing after the run.
-    Everywhere else a non-zero exit is a failure even with an older binary on
-    disk: committing the stamp over it would vouch for a stale agent.
+    A non-zero exit is a failure on every platform, even with an older binary
+    on disk: committing the stamp over it would vouch for a stale agent. That
+    held everywhere but windows until 2026-11-04, on the belief that cargo's
+    exit code lies there — but the lie was a false SUCCESS, and
+    `scripts/cargo-win.cmd` has propagated cargo's real code since 2026-07-16
+    (`build_node` beside this trusts it). Ignoring it stamped the preflight's
+    plan probe — whose build slot is refused on purpose (exit 75, nothing
+    built) — as a fresh build over a two-day-old agent, and the warm pass then
+    skipped the real one. The exe must still exist after the run.
     """
     repo = get_repo_root()
     binary, stamp = _sync_agent_build_paths(_cargo_target_dir(repo))
@@ -476,11 +509,11 @@ def build_sync_agent() -> str:
         return str(binary)
 
     # Stamp dated at the build-slot grant — see build_node's identical comment.
-    result, instant = _load_build_if_stale().run_for_stamp(
-        _build_slot_cmd(repo) + _cargo_cmd(repo) + ["build", "-p", "fauna-sync-agent"],
-        run=subprocess.run, cwd=repo, capture_output=True, text=True,
+    result, instant = _run_slot_build(
+        _build_slot_cmd(repo, DISK_GB_CRATE) + _cargo_cmd(repo) + ["build", "-p", "fauna-sync-agent"],
+        cwd=repo,
     )
-    if not binary.exists() or (sys.platform != "win32" and result.returncode != 0):
+    if not binary.exists() or result.returncode != 0:
         tail = result.stderr[-3000:] if result.stderr else result.stdout[-3000:]
         raise RuntimeError(
             f"building fauna-sync-agent failed (exit {result.returncode}; "
@@ -494,21 +527,10 @@ def build_sync_agent() -> str:
     return str(binary)
 
 
-def _example_build_paths(target_dir: Path, example: str) -> tuple[Path, Path]:
-    """(built exe, freshness stamp) for a test-only workspace `examples/`
-    binary — one debug shape, same single-shape reasoning as
-    `_sync_agent_build_paths`."""
-    examples_dir = target_dir / "debug" / "examples"
-    suffix = ".exe" if sys.platform == "win32" else ""
-    return (
-        examples_dir / f"{example}{suffix}",
-        target_dir / "debug" / f".{example.replace('_', '-')}-e2e.stamp",
-    )
-
-
 def _example_newest_source_mtime(repo: Path) -> float:
-    """Newest mtime across a test-only example's build inputs: each links
-    shared crates, so a bare comparison against its own source (the
+    """Newest mtime across a test-only helper binary's build inputs
+    (`tests/e2e-unified/helpers/helper_bins.py::build`): each links shared
+    crates, so a bare comparison against its own source (the
     pre-2026-09-29 rule) let a binary built against an older wire shape run
     against a newer nest — every path dep points into libs/."""
     bis = _load_build_if_stale()
@@ -516,65 +538,6 @@ def _example_newest_source_mtime(repo: Path) -> float:
         bis._source_newest(repo / rel, _NEST_SOURCE_EXCLUDES)
         for rel in ("libs", "Cargo.lock", "rust-toolchain.toml")
     )
-
-
-def _build_workspace_example(package: str, example: str) -> str:
-    """Build the test-only `example` of workspace crate `package` and return
-    its path — the shared builder behind `build_recovery_fixture` and
-    `build_render_cloud_init`.
-
-    Load + freshness discipline mirrors `build_sync_agent()`: the cargo
-    run holds a machine-wide `build` slot, goes through `_cargo_cmd` (bare
-    `cargo` fails on Windows, where Git Bash's `link.exe` shadows the MSVC linker),
-    and a warm tree — stamp newer than every workspace source — runs no cargo
-    and takes no slot. The stamp, not the binary, carries freshness: the
-    recovery helper signs profiles and statements with the SHARED crates'
-    encoders, so a binary older than any of them produced a body the nest's
-    strict decode refused (`fauna.profile.invalid_request … SchemaMismatch`,
-    measured 2026-09-29).
-
-    Never trusts cargo's own exit code (it lies on win-arm64) — success is the
-    known exe path existing after the run.
-    """
-    repo = get_repo_root()
-    binary, stamp = _example_build_paths(_cargo_target_dir(repo), example)
-    if _variant_build_is_fresh(
-        binary, stamp, lambda: _example_newest_source_mtime(repo)
-    ):
-        return str(binary)
-
-    # Stamp dated at the build-slot grant — see build_node's identical comment.
-    result, instant = _load_build_if_stale().run_for_stamp(
-        _build_slot_cmd(repo)
-        + _cargo_cmd(repo)
-        + ["build", "-p", package, "--example", example],
-        run=subprocess.run, cwd=repo, capture_output=True, text=True,
-    )
-    if not binary.exists():
-        tail = result.stderr[-3000:] if result.stderr else result.stdout[-3000:]
-        raise RuntimeError(
-            f"{example} not found at {binary}\nBuild output tail:\n{tail}"
-        )
-    _load_build_if_stale().commit_stamp(
-        stamp, instant,
-        f"{example} e2e freshness stamp; mtime = build start (slot grant)\n",
-    )
-    return str(binary)
-
-
-def build_recovery_fixture() -> str:
-    """Build the `recovery_fixture` example (`libs/fauna-client-recovery`) and
-    return its path — the builder behind
-    `tests/e2e-unified/helpers/succession.py::recovery_fixture_binary`."""
-    return _build_workspace_example("fauna-client-recovery", "recovery_fixture")
-
-
-def build_render_cloud_init() -> str:
-    """Build the `render_cloud_init` example (`libs/fauna-provisioning`) and
-    return its path: it prints the cloud-init user-data `build_cloud_init`
-    renders, so the host-maintenance witness runs the shipped coordinator
-    script rather than a copy lifted from source."""
-    return _build_workspace_example("fauna-provisioning", "render_cloud_init")
 
 
 def build_app() -> str:
@@ -1140,34 +1103,13 @@ def factory_reset_and_restart(nest, *, reclaim=True, timeout=120.0):
         f"factory_reset should echo the pinned claim code: {reply!r}"
     )
 
-    # 2) The handler exits ~750ms after replying (reply flush + DB flush).
-    proc = nest["proc"]
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        # It should self-exit; force it so the restart is deterministic.
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-
-    # 3) BE the supervisor: re-spawn the same binary with the same args + data
-    #    dir. At boot, `maybe_run_factory_reset` sees the marker and wipes
-    #    deployment state before opening the DB, then installs the staged code.
-    cli_args = _build_nest_cli_args(
-        nest["node_binary"], nest["port"], nest["config_path"], nest["blob_dir"],
-        handle_domain=nest["handle_domain_seed"],
-        bind_host=nest.get("bind_host", "127.0.0.1"),
-        cors_origins=nest.get("cors_origins"),
-        static_dir=nest.get("static_dir"),
-    )
-    # Re-apply `serve_tls`, else the post-wipe nest comes back on plain HTTP while
-    # `nest["url"]` still says https (and `_wait_nest_fresh` below polls that url).
-    nest["proc"] = _spawn_and_wait(cli_args, nest["port"], nest["log_path"],
-                                   serve_tls=nest.get("serve_tls", False),
-                                   extra_env=nest.get("extra_env"))
+    # 2-3) The handler exits ~750ms after replying, and a supervisor restarts it
+    #    into the boot-time wipe (`maybe_run_factory_reset`). Who supervises is
+    #    the mode's: the harness re-spawns a standalone binary, s6 restarts the
+    #    nest inside a docker container (`resume_after_self_exit`).
+    resume_after_self_exit(nest, timeout=30.0)
+    # The process every cached connection was opened to has exited.
+    _notify_stopped(nest["port"])
 
     # 4) Wait until the wiped nest is back AND fresh/unclaimed.
     _wait_nest_fresh(nest["url"], timeout=timeout)
@@ -1224,6 +1166,29 @@ def restart_nest(nest, *, graceful=True, timeout=30.0):
     return start_nest_in_place(nest)
 
 
+# Called with the port of every nest `stop_nest` takes down (and so every
+# `restart_nest` flip). A module that caches open connections to a nest
+# registers here to drop them: the process they were opened to is gone, and a
+# cached socket only learns it at its next send — a broken pipe on a request
+# already written, which the WS-RPC core refuses to replay. `tests/api/ws_api`
+# and `tests/api/conv_api` register their client caches.
+_STOP_LISTENERS: list = []
+
+
+def register_stop_listener(fn) -> None:
+    """Have ``fn(port)`` called whenever `stop_nest` takes down a nest."""
+    if fn not in _STOP_LISTENERS:
+        _STOP_LISTENERS.append(fn)
+
+
+def _notify_stopped(port) -> None:
+    for fn in list(_STOP_LISTENERS):
+        try:
+            fn(port)
+        except Exception as e:  # a listener's failure never blocks a stop
+            print(f"stop_nest: stop listener {fn!r} failed: {e!r}", flush=True)
+
+
 def stop_nest(nest, *, graceful=True, timeout=30.0):
     """Stop a locally-spawned binary nest and leave it DOWN (no respawn) — the
     first half of `restart_nest`, split out so a test can observe the client's
@@ -1274,6 +1239,7 @@ def stop_nest(nest, *, graceful=True, timeout=30.0):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+    _notify_stopped(nest["port"])
     return nest
 
 
@@ -1312,6 +1278,34 @@ def start_nest_in_place(nest):
                                    serve_tls=nest.get("serve_tls", False),
                                    extra_env=nest.get("extra_env"))
     return nest
+
+
+def copy_data_dir(nest, dest):
+    """Copy a STOPPED nest's data dir to ``dest`` (a path that does not exist
+    yet); returns a zero-argument cleanup the caller registers (a no-op where
+    the copy is the user's own).
+
+    Mode-agnostic by delegation, like `start_nest_in_place`: a docker nest's
+    `/data` holds entries owned by the image's service users, so its provider
+    answers a `copy_data_dir` key that copies through the image as root; a nest
+    without the key is standalone and its tree is the user's own.
+    """
+    copier = nest.get("copy_data_dir", None)
+    if copier is not None:
+        return copier(dest)
+    shutil.copytree(nest["tmp_dir"], dest)
+    return lambda: None
+
+
+def restore_data_dir(nest, src):
+    """Replace a STOPPED nest's data dir with the copy at ``src`` (taken by
+    `copy_data_dir`), keeping the owners a docker nest's services need."""
+    restorer = nest.get("restore_data_dir", None)
+    if restorer is not None:
+        restorer(src)
+        return
+    shutil.rmtree(nest["tmp_dir"])
+    shutil.copytree(src, nest["tmp_dir"])
 
 
 def resume_after_self_exit(nest, *, timeout=30.0):
@@ -1421,7 +1415,8 @@ def build_macos_app() -> str:
         raise RuntimeError(f"swift build failed:\n{result.stderr}")
 
     # Locate the built binary
-    exe = apple_dir / ".build" / "arm64-apple-macosx" / "debug" / "FaunaMacOS"
+    # SwiftPM's `.build/debug` symlink resolves under either build system.
+    exe = apple_dir / ".build" / "debug" / "FaunaMacOS"
     if not exe.exists():
         raise RuntimeError(f"FaunaMacOS binary not found at {exe}")
 

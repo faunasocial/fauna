@@ -136,6 +136,20 @@ public sealed class VideoThumbnailView : UserControl
         }
     }
 
+    /// <summary>The post a list card's slot belongs to, so its player's progress reaches
+    /// the engagement-cue capture (<see cref="Feed.CueViewportObserver.NotePlayed"/>):
+    /// a video played to its end derives the media <c>watch-complete</c>
+    /// (<c>engagement-cues.md</c> § Cue vocabulary &amp; derivation). Left <c>null</c> by
+    /// the post-detail dialog, whose player plays outside the list the capture
+    /// samples.</summary>
+    public string? PostId { get; set; }
+
+    /// <summary>The post's shared <c>post_blob_home</c> (<c>FfiPostBlobHome</c>, typed
+    /// <c>object</c> for the same reason as <see cref="Block"/>), handed unchanged to the
+    /// post-blob plane with a sealed video's hash, or a plain one's when the post is homed
+    /// on another nest; <c>null</c> = this nest.</summary>
+    public object? Home { get; set; }
+
     /// <summary><c>state;position;source</c>, packed — what the automation peer answers as
     /// HelpText. Read on the UI thread (UIA's provider calls are marshalled there).</summary>
     internal string AutomationAttributes()
@@ -148,13 +162,18 @@ public sealed class VideoThumbnailView : UserControl
         if (_block is not { } block || !_machine.Tap()) return;
         TearDownPlayer();
         var attempt = ++_attempt;
+        // The tap engages the player, loading included (engagement-cues.md, A play is
+        // attention): from here the post's media row is attended whatever its visible
+        // fraction, until a pause, the end, a failure or the teardown releases it.
+        NotePlaying(true);
         Paint();
 
         PlaybackMedia? media;
         try
         {
             media = await VideoPlaybackResolver.ResolveAsync(
-                App.CurrentNest, Core.FeedManagerHost.Current, block);
+                App.CurrentNest, Core.FeedManagerHost.Current, block,
+                hosts: Core.PostBlobHostsHost.Current, home: Home as uniffi.fauna_ffi.FfiPostBlobHome);
         }
         catch (Exception ex)
         {
@@ -172,6 +191,7 @@ public sealed class VideoThumbnailView : UserControl
         _machine.Resolved(media);
         if (_machine.Media is not { } resolved)
         {
+            NotePlaying(false);
             Paint();
             return;
         }
@@ -193,8 +213,9 @@ public sealed class VideoThumbnailView : UserControl
                 _streamed = streamed;
                 break;
             case PlaybackMedia.Opened opened:
-                // The plaintext of a sealed video plays from memory: it never touches
-                // disk, so no temp file outlives the session.
+                // Held bytes — a sealed video's plaintext, or a plain video fetched whole
+                // from the post's own home — play from memory: they never touch disk, so
+                // no temp file outlives the session.
                 source = MediaSource.CreateFromStream(await InMemoryAsync(opened.Bytes), opened.ContentType);
                 if (attempt != _attempt) return;
                 break;
@@ -203,12 +224,52 @@ public sealed class VideoThumbnailView : UserControl
         }
 
         var player = new MediaPlayer { AutoPlay = false, Source = source };
+        // Whether this player has reached Playing yet: a Paused or None reported while it
+        // opens, before the first play, is not the user pausing, so it keeps the tap's
+        // engagement (apple drops its initial `.paused` the same way). Touched only on the
+        // UI thread, inside the enqueued callbacks.
+        var hasPlayed = false;
         player.PlaybackSession.PlaybackStateChanged += (session, _) =>
         {
-            if (session.PlaybackState != MediaPlaybackState.Playing) return;
+            // Playing engages the cue capture's attention; a later pause or an idle player
+            // releases it. Opening and buffering change nothing.
+            var state = session.PlaybackState;
+            if (state is not (MediaPlaybackState.Playing or MediaPlaybackState.Paused or MediaPlaybackState.None)) return;
             DispatcherQueue.TryEnqueue(() =>
             {
-                if (ReferenceEquals(_player, player)) _machine.PlayerStartedPlaying();
+                if (!ReferenceEquals(_player, player)) return;
+                if (state == MediaPlaybackState.Playing)
+                {
+                    hasPlayed = true;
+                    _machine.PlayerStartedPlaying();
+                    NotePlaying(true);
+                }
+                else if (hasPlayed)
+                {
+                    NotePlaying(false);
+                }
+            });
+        };
+        // Every progress report, the end included (an ended player reads as played to
+        // its end), is noted for the cue capture — web's `notePlayed` on `timeupdate`
+        // and `ended`.
+        player.PlaybackSession.PositionChanged += (session, _) =>
+        {
+            var position = session.Position.TotalSeconds;
+            var duration = session.NaturalDuration.TotalSeconds;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (ReferenceEquals(_player, player)) NotePlayed(position, duration);
+            });
+        };
+        player.MediaEnded += (sender, _) =>
+        {
+            var duration = sender.PlaybackSession.NaturalDuration.TotalSeconds;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!ReferenceEquals(_player, player)) return;
+                NotePlayed(duration, duration);
+                NotePlaying(false);
             });
         };
         player.MediaFailed += (_, args) =>
@@ -217,7 +278,9 @@ public sealed class VideoThumbnailView : UserControl
                 $"VideoThumbnailView: player failed ({args.Error}): {args.ErrorMessage}");
             DispatcherQueue.TryEnqueue(() =>
             {
-                if (ReferenceEquals(_player, player)) _machine.PlayerFailed();
+                if (!ReferenceEquals(_player, player)) return;
+                _machine.PlayerFailed();
+                NotePlaying(false);
             });
         };
 
@@ -237,10 +300,28 @@ public sealed class VideoThumbnailView : UserControl
         player.Play();
     }
 
+    private void NotePlayed(double position, double duration)
+    {
+        if (PostId is { Length: > 0 } postId)
+            Feed.CueViewportObserver.NotePlayed(postId, position, duration);
+        else
+            Core.Logs.E2eTrace.Write($"[cue] note dropped: no PostId (position={position:0.###})");
+    }
+
+    /// <summary>Hand the player's engagement to the cue capture
+    /// (<see cref="Feed.CueViewportObserver.NotePlaying"/>). The post-detail dialog's player
+    /// has no <see cref="PostId"/>: it plays outside the list the capture samples.</summary>
+    private void NotePlaying(bool playing)
+    {
+        if (PostId is { Length: > 0 } postId)
+            Feed.CueViewportObserver.NotePlaying(postId, playing);
+    }
+
     /// <summary>Back to the idle glyph, releasing any player.</summary>
     private void Stop()
     {
         _attempt++;
+        NotePlaying(false);
         TearDownPlayer();
         _machine.Reset();
         Paint();

@@ -11,7 +11,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from .inprocess_agent import InProcessAgentDriver
+from .http_bridge import RESET_TIMEOUT_S
+from .inprocess_agent import AppArtifactMissing, InProcessAgentDriver
+from .local_launch import (
+    ThreadStateSampler,
+    crash_report_naming,
+    local_launch_timeout_report,
+    mark_pid_reported,
+    ps_cpu_reading,
+    read_gone_pid_before_close,
+)
 from .port_util import find_free_port
 
 BUNDLE_ID = "social.fauna.fauna"
@@ -373,7 +382,7 @@ class IosInProcessDriver(InProcessAgentDriver):
         """
         self._post("/app/lifecycle/background", {})
 
-    def reset(self, timeout: float = 10.0) -> None:
+    def reset(self, timeout: float = RESET_TIMEOUT_S) -> None:
         """Between-tests reset. Also DROPS any credential-dir pin — mirrors
         `MacosInProcessDriver.reset` exactly (this driver is session-scoped via
         conftest `_driver_cache` too, so a pin from one test must not leak into
@@ -381,7 +390,45 @@ class IosInProcessDriver(InProcessAgentDriver):
         self._preserved_cred_dir = None
         self._preserve_container = False
         self._grant_photos = False
+        # The reset sweeps the seat's keychain, so a `keep` has nothing left to keep.
+        config = getattr(self, "_launch_config", None)
+        if config and config.get("real_keychain") == "keep":
+            config["real_keychain"] = True
         super().reset(timeout=timeout)
+
+    def keep_real_keychain_at_next_launch(self) -> None:
+        """Make the next launch of this `real_keychain` run a `keep` one: the app
+        skips its launch sweep (`E2eEnv.keepRealKeychain`) and comes up on the seat
+        simulator's keychain as the last launch left it — the restored-device
+        relaunch (`apps/ios.md` § Credential Storage).
+
+        `recover()` re-launches the same config, so without this a plain relaunch
+        sweeps the rows the test is about. Valid only under a
+        `preserve_state_across_relaunch()` pin (`_require_keep_pin`)."""
+        self._launch_config["real_keychain"] = "keep"
+
+    def _require_keep_pin(self, config: dict) -> None:
+        """A `keep` launch without the pin would uninstall the container and pair
+        the kept keychain with an empty one, a state no device reaches."""
+        if config.get("real_keychain") == "keep" and not self._preserve_container:
+            raise RuntimeError(
+                "real_keychain='keep' needs a preserve_state_across_relaunch() pin "
+                "first: without it launch() uninstalls the app data container"
+            )
+
+    def recover(self) -> bool:
+        """The shared relaunch, with the `keep` pin checked first: the shared
+        `recover()` swallows a `launch()` failure into `False`, and a missing pin
+        is the test's own mistake, which must be named rather than read as an app
+        that did not come back."""
+        self._require_keep_pin(getattr(self, "_launch_config", None) or {})
+        return super().recover()
+
+    def app_data_container(self) -> str | None:
+        """This launch's app data container on the host — the root of what the app
+        keeps in files, resolved at launch by `_resolve_app_support`. ``None`` when
+        it could not be located."""
+        return str(Path(self._app_support).parents[1]) if self._app_support else None
 
     def supports_unclean_kill(self) -> bool:
         return self._app_pid is not None
@@ -398,6 +445,7 @@ class IosInProcessDriver(InProcessAgentDriver):
         if self._app_pid is None:
             super().kill_uncleanly()  # the NotImplementedError with the contract
             return
+        self._read_exit_before_close("kill_uncleanly()")
         try:
             os.kill(self._app_pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -780,6 +828,14 @@ class IosInProcessDriver(InProcessAgentDriver):
 
     def launch(self, config: dict) -> None:
         self._launch_config = config
+        # `config["keep_container"]`: the same device across separate driver
+        # instances, the iOS twin of macOS's `config["home"]` — a journey that
+        # builds one driver per launch has no earlier driver to carry the
+        # `preserve_state_across_relaunch()` pin, and pairs this with its own
+        # `config["credential_dir"]`.
+        if config.get("keep_container"):
+            self._preserve_container = True
+        self._require_keep_pin(config)
         udid = config.get("udid")
         app_path = config.get("app_path")
         if not udid or not app_path:
@@ -788,7 +844,8 @@ class IosInProcessDriver(InProcessAgentDriver):
                 "config (supplied by conftest._get_ios_setup)."
             )
         if not Path(app_path).exists():
-            raise RuntimeError(
+            raise AppArtifactMissing(
+                "ios",
                 f"iOS app bundle not found at {app_path}.\n"
                 f"Run 'just apple-ffi-test-sim' then rebuild via the iOS e2e setup."
             )
@@ -929,6 +986,17 @@ class IosInProcessDriver(InProcessAgentDriver):
         # iOS, unlike its siblings. `setdefault` before the override loop below so a
         # caller-supplied `environment["FAUNA_E2E_RESCAN_MS"]` still wins.
         env.setdefault("SIMCTL_CHILD_FAUNA_E2E_RESCAN_MS", "30000")
+        # `config["real_keychain"]`: this one launch runs `KeychainStore` on the seat
+        # simulator's own keychain instead of the in-memory e2e store
+        # (`KeychainStore.e2eRealKeychain`), so a test can read back the class of the
+        # item a real onboarding wrote. The app sweeps the service at launch; the
+        # caller's `reset()` sweeps it again before the seat is handed on. The value
+        # `"keep"` skips the launch sweep (`keep_real_keychain_at_next_launch`).
+        real_keychain = config.get("real_keychain")
+        if real_keychain:
+            env["SIMCTL_CHILD_FAUNA_E2E_REAL_KEYCHAIN"] = (
+                "keep" if real_keychain == "keep" else "1"
+            )
         for k, v in (config.get("environment") or {}).items():
             env[f"SIMCTL_CHILD_{k}"] = str(v)
 
@@ -940,6 +1008,8 @@ class IosInProcessDriver(InProcessAgentDriver):
         # forwards trailing tokens to the launched process the same way.
         launch_argv = shlex.split(config.get("app_args", "") or "")
 
+        posted_at = time.time()
+        self._app_launched_at = posted_at
         launch = _run_simctl(
             ["xcrun", "simctl", "launch", udid, self.BUNDLE_ID, *launch_argv],
             timeout=_SIMCTL_BOOT_S, what="launch", env=env,
@@ -959,23 +1029,93 @@ class IosInProcessDriver(InProcessAgentDriver):
         m = re.search(r":\s*(\d+)\s*$", launch.stdout.strip())
         if m:
             self._app_pid = int(m.group(1))
+        self._await_launched_app(udid, posted_at)
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if self._agent_health_ok():
-                self._bridge_dead = False
-                return
-            time.sleep(0.3)
-        raise RuntimeError(
-            f"iOS in-process agent never became healthy on {self._url}.\n"
-            f"For diagnostics, launch with the console attached:\n"
-            f"  xcrun simctl launch --console {udid} {self.BUNDLE_ID}"
+    def _await_launched_app(self, udid: str, posted_at: float | None = None) -> None:
+        """The simulator app's readiness gate, with the printed pid's thread states
+        sampled through it."""
+        posted_at = time.time() if posted_at is None else posted_at
+        deadline = time.monotonic() + self._LAUNCH_READY_BUDGET_S
+        with ThreadStateSampler(lambda: self._app_pid) as sampler:
+            while time.monotonic() < deadline:
+                if self._agent_health_ok():
+                    self._bridge_dead = False
+                    return
+                time.sleep(0.3)
+            # The launch-timeout verdict carries this launch's end, its log's FATAL
+            # lines included; the close after it is silent.
+            mark_pid_reported(self._PROC_NAME, self._app_pid)
+            raise TimeoutError(self._launch_timeout_report(posted_at, udid, sampler=sampler))
+
+    #: The launch gate's budget: the agent's `/health` answering after `simctl
+    #: launch`. 30 s, the figure the gate already carried; a deadline poll, so a
+    #: green run never pays it (convention 14). Never load-aware (convention 6's
+    #: launch-timeout rider, its part (3)).
+    _LAUNCH_READY_BUDGET_S = 30.0
+
+    def _launch_timeout_report(
+        self, posted_at: float, udid: str, *, sampler: ThreadStateSampler | None = None
+    ) -> str:
+        """Convention 6's launch-timeout report over this launch's witnesses: the
+        simulator's app pid `simctl launch` printed (a real host pid), its CPU from
+        `ps` and its wait from the gate's `sampler`, the app's own log from its
+        container (sliced at this launch's floor) and this machine's agent ledger.
+        The app's console is not captured
+        (`app_log_text`'s docstring: a live stream was rejected), which the report
+        states; the `--console` hint stays the LAST line, after the verdict."""
+        pid = getattr(self, "_app_pid", None)
+        return local_launch_timeout_report(
+            proc=None,
+            comm=self.BUNDLE_ID,
+            pid=pid,
+            pid_unread="" if pid is not None else "`simctl launch` printed no pid",
+            cpu_reader=ps_cpu_reading,
+            wait_sampler=sampler,
+            budget_s=self._LAUNCH_READY_BUDGET_S,
+            posted_at=posted_at,
+            stderr_paths=(),
+            log_text=self.app_log_text() or "",
+            apps=("ios",),
+            notes=(
+                "(b) the simulator's console is not captured; to see it, launch with "
+                f"the console attached: xcrun simctl launch --console {udid} {self.BUNDLE_ID}",
+            ),
+        )
+
+    #: The app's executable name: `ps`'s comm, and the prefix ReportCrash names a
+    #: simulator app's report with on the host (`FaunaiOS-<date>.ips`).
+    _PROC_NAME = "FaunaiOS"
+
+    def _read_exit_before_close(self, close: str) -> None:
+        """Convention 6's close rider (`docs/goal/architecture/e2e-self-diagnosing-
+        failures.md` § The convention) over the one witness the harness holds of a
+        simulator app: the host pid `simctl launch` printed. `simctl` owns the
+        process, so no exit code is readable; the pid gone before the close is a
+        crash only with a witness of one — a FATAL or panic line in the container's
+        log since this launch's floor, or the crash report ReportCrash wrote naming
+        the pid. A gone pid with neither prints UNKNOWN and fails nothing
+        (`drivers/local_launch.py::read_gone_pid_before_close`). Never raises."""
+        launched_at = getattr(self, "_app_launched_at", None)
+        read_gone_pid_before_close(
+            self._app_pid,
+            close=close,
+            comm=self._PROC_NAME,
+            unread="`simctl` owns the simulator app's process; the harness holds only the pid it printed",
+            launched_at=launched_at,
+            log_text=self.app_log_text,
+            crash_report=lambda pid: crash_report_naming(
+                pid, proc_name=self._PROC_NAME, since=launched_at
+            ),
         )
 
     def _stop_app(self) -> None:
         """Terminate the app in the Simulator (best-effort). A no-op `terminate`
         on an already-`kill_uncleanly()`-killed PID is harmless (best-effort,
-        `check=False`) — mirrors the Popen drivers tolerating a dead child."""
+        `check=False`) — mirrors the Popen drivers tolerating a dead child.
+
+        The exit is read first (`_read_exit_before_close`): `terminate` ends a
+        dead app as quietly as a live one."""
+        self._read_exit_before_close("teardown")
         config = getattr(self, "_launch_config", None)
         udid = (config or {}).get("udid")
         if udid:

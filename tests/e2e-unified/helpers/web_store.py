@@ -129,3 +129,68 @@ def account_store_names(driver) -> dict:
         " return { indexeddb: dbs.filter(ours).sort(), opfs: dirs.filter(ours).sort() };"
         "})()"
     )
+
+
+#: Walks every place this origin keeps bytes a copy of the browser profile
+#: carries — `localStorage`, `sessionStorage`, every IndexedDB database (each
+#: store's keys and values, typed arrays as their bytes, objects walked) and
+#: every OPFS file — and reports, per needle (hex of its bytes), the places
+#: whose bytes contain it. Matching is on byte boundaries (an even hex offset).
+_ORIGIN_HOLDINGS_JS = r"""
+(async (needles) => {
+  const enc = new TextEncoder();
+  const hex = (u8) => Array.from(u8, b => b.toString(16).padStart(2, '0')).join('');
+  const holds = (h, n) => {
+    for (let i = h.indexOf(n); i !== -1; i = h.indexOf(n, i + 1)) if (i % 2 === 0) return true;
+    return false;
+  };
+  const places = [];
+  const add = (where, u8) => places.push([where, hex(u8)]);
+  const walk = (where, v, depth) => {
+    if (v == null || depth > 8) return;
+    if (typeof v === 'string') return add(where, enc.encode(v));
+    if (v instanceof ArrayBuffer) return add(where, new Uint8Array(v));
+    if (ArrayBuffer.isView(v)) return add(where, new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+    if (Array.isArray(v)) return v.forEach((x, i) => walk(where + '[' + i + ']', x, depth + 1));
+    if (typeof v === 'object') for (const k of Object.keys(v)) walk(where + '.' + k, v[k], depth + 1);
+  };
+  for (const [name, st] of [['localStorage', localStorage], ['sessionStorage', sessionStorage]])
+    for (let i = 0; i < st.length; i++) { const k = st.key(i); add(name + ':' + k, enc.encode(k + '=' + st.getItem(k))); }
+  let idbRead = 0;
+  for (const d of await indexedDB.databases()) {
+    const db = await new Promise((ok, ko) => { const r = indexedDB.open(d.name); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
+    for (const s of Array.from(db.objectStoreNames)) {
+      const [keys, vals] = await new Promise((ok, ko) => {
+        const t = db.transaction(s, 'readonly').objectStore(s);
+        const rk = t.getAllKeys(); const rv = t.getAll();
+        rv.onsuccess = () => ok([rk.result, rv.result]); rv.onerror = () => ko(rv.error);
+      });
+      keys.forEach((k, i) => { walk('idb:' + d.name + '/' + s + '#' + i + ':key', k, 0); walk('idb:' + d.name + '/' + s + '#' + i, vals[i], 0); });
+      idbRead += vals.length;
+    }
+    db.close();
+  }
+  let opfsFiles = 0;
+  try {
+    const dir = async (h, path) => {
+      for await (const [name, e] of h.entries()) {
+        if (e.kind === 'directory') await dir(e, path + name + '/');
+        else { add('opfs:' + path + name, new Uint8Array(await (await e.getFile()).arrayBuffer())); opfsFiles++; }
+      }
+    };
+    await dir(await navigator.storage.getDirectory(), '');
+  } catch (e) { places.push(['opfs-unreadable: ' + e, '']); }
+  const found = {};
+  for (const n of needles) found[n] = places.filter(([, h]) => holds(h, n)).map(([w]) => w);
+  return { found, places: places.length, idb_values: idbRead, opfs_files: opfsFiles };
+})
+"""
+
+
+def origin_holdings(driver, needles: list[bytes]) -> dict:
+    """Where this origin's stored bytes contain each needle: ``{"found":
+    {needle_hex: [place, …]}, "places": n, "idb_values": n, "opfs_files": n}``.
+    The counts are the self-diagnosing half of an absence (convention 6): a
+    search that read nothing finds nothing."""
+    arg = json.dumps([n.hex() for n in needles])
+    return driver.eval_js(f"({_ORIGIN_HOLDINGS_JS.strip()})({arg})")

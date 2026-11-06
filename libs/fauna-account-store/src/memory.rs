@@ -432,6 +432,20 @@ impl StoreBackend for MemoryBackend {
         Ok(outcome)
     }
 
+    async fn group_state_cache_put(&self, entry: &StateEntry) -> Result<InsertOutcome> {
+        fits_i64(entry.entry_version, "entry_version")?;
+        let mut t = self.tx()?;
+        let cell = (entry.scope.clone(), entry.kind.clone(), entry.key.clone());
+        if entry_moved(
+            t.group.get(&cell).map(|e| e.entry_version),
+            entry.entry_version,
+        ) {
+            return Ok(InsertOutcome::EntryMoved);
+        }
+        t.group.insert(cell, entry.clone());
+        Ok(InsertOutcome::Inserted)
+    }
+
     async fn group_state_get(
         &self,
         scope: &str,

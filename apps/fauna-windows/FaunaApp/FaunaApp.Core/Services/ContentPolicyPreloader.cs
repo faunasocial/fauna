@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using FaunaApp.Core.Logs;
+using uniffi.fauna_ffi;
 
 namespace FaunaApp.Core.Services;
 
@@ -94,6 +95,37 @@ internal sealed class ContentPolicyPreloader
                 "ContentPolicyPreloader",
                 $"own thresholds skipped: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Save the viewer's own spam/phishing thresholds (<c>fauna.spam.set_preferences</c>)
+    /// and bind the pair the nest echoes into <see cref="ContentPolicyCache"/> AT ONCE,
+    /// so the next conversation or feed paint composes it strictest-wins with the
+    /// guardian's rules (family-client-enforcement.md § Content policy) — the
+    /// Settings → Privacy save's one path. The twin of tui's <c>SpamPrefsSaved</c>
+    /// fold, linux's privacy-page re-set and apple's
+    /// <c>saveSpamPreferences(rebinding:)</c>. Without the bind the render kept the
+    /// thresholds read at login until the next WS reconnect, so a ward who moved
+    /// stricter than the guardian saw nothing change.
+    ///
+    /// <para>Unlike the reads above this THROWS: a refused save is the page's to
+    /// paint, and it binds nothing — the cache keeps the pair the nest last
+    /// confirmed. A reply that lands after the signed-in identity changed is not
+    /// bound, for <see cref="RefreshOwnThresholdsAsync"/>'s reason.</para>
+    /// </summary>
+    internal async Task<FfiSpamPreferences> SaveOwnThresholdsAsync(ushort spam, ushort phishing)
+    {
+        using var scope = ActorScope.BeginBackgroundLoop();
+        var saved = await _rpc.SpamSetPreferencesAsync(spam, phishing).ConfigureAwait(false);
+        if (scope.Token.IsCancellationRequested)
+        {
+            ShellLog.Warn(
+                "ContentPolicyPreloader",
+                "saved own thresholds not bound: signed-in identity changed during the save");
+            return saved;
+        }
+        ContentPolicyCache.SetOwnThresholds((saved.spamThreshold, saved.phishingThreshold));
+        return saved;
     }
 
     /// <summary>

@@ -19,6 +19,7 @@ use std::path::Path;
 
 use crate::physical::normalize_actor_hex;
 use anyhow::{Context, Result};
+use fauna_core::blob_seal::SealStamp;
 use fauna_core::data::{ContentHash, Timestamp};
 use fauna_core::folder_keys::FolderRef;
 use rusqlite::{Connection, params};
@@ -59,6 +60,9 @@ const CREATE_TABLES_SQL: &str = "
         -- (cross-user shared folders). NULL for owner-only sets;
         -- the read path tries every keys_for(version) candidate and fails closed if absent.
         content_key_version INTEGER,
+        -- A group set's 32-byte content generation id, the stamp's other
+        -- family (`SealStamp`); at most one of it and content_key_version.
+        content_generation BLOB,
         -- Owner-only re-seal marker: 1 once this
         -- entry's recorded manifest is known sealed (stored_hashes present) —
         -- either verified as such, or re-sealed by the audience flip-back pass. Local
@@ -181,7 +185,23 @@ const CREATE_TABLES_SQL: &str = "
         path_sealed BLOB,
         -- When the candidate-free `conflicts.resolve` for `nest_id` landed;
         -- NULL on a cured (`resolved_at`) row with a `nest_id` = still owed.
-        nest_resolved_at INTEGER
+        nest_resolved_at INTEGER,
+        -- The six columns below serve a group set's retained loser only
+        -- (`p2p-shared-set-build.md` § Build design — the group set,
+        -- decision 9): the row its nest would hold, kept by the loser's
+        -- author. How the conflict auto-resolved (`latest_wins`); NULL on
+        -- every other row.
+        resolution  TEXT,
+        -- The plane's winning row: its author (hex actor), its device (hex),
+        -- its signed instant (epoch ms) and its manifest (hex; NULL = the
+        -- winner is a delete).
+        winner_author     TEXT,
+        winner_device     TEXT,
+        winner_created_at INTEGER,
+        winner_manifest   TEXT,
+        -- The one candidate: this replica's superseded edit, kept as a
+        -- retained version under this manifest hash (hex).
+        retained_manifest TEXT
     );
 
     CREATE TABLE IF NOT EXISTS meta (
@@ -339,6 +359,9 @@ const CREATE_TABLES_SQL: &str = "
         change_type     TEXT NOT NULL,
         created_at      INTEGER NOT NULL,
         content_key_version INTEGER,
+        -- A group set's 32-byte content generation id, the stamp's other
+        -- family (`SealStamp`); at most one of it and content_key_version.
+        content_generation BLOB,
         thumbnail_hash  TEXT,
         derived_through INTEGER,
         is_resolution   INTEGER,
@@ -352,7 +375,17 @@ const CREATE_TABLES_SQL: &str = "
         -- on the channel's proof alone until the flip.
         signature       BLOB,
         signer_key      BLOB,
-        signer_cert     BLOB
+        signer_cert     BLOB,
+        -- A group set's base (p2p-shared-set-build.md, decision 10): the hex
+        -- manifest the path's tracked head named when this edit was minted,
+        -- which the lift signs into the row. NULL on the folder family, on a
+        -- create over nothing or over a tracked delete, and on every row
+        -- minted before the column.
+        base_manifest   TEXT,
+        -- The depositor's hex writer key on the row the owner's device records
+        -- when it adopts a folder deposit (folder-deposit.md ruling 3) -- a
+        -- covered field of the row's statement. NULL on every other row.
+        deposited_by    TEXT
     );
 
     -- The share leg's RELAYED rows (the p2p relayed-row lift —
@@ -461,6 +494,9 @@ const CREATE_TABLES_SQL: &str = "
         bytes           BLOB NOT NULL,
         path            TEXT NOT NULL,
         content_key_version INTEGER,
+        -- A group set's 32-byte content generation id, the stamp's other
+        -- family (`SealStamp`); at most one of it and content_key_version.
+        content_generation BLOB,
         retained_at     INTEGER NOT NULL
     );
 
@@ -482,6 +518,9 @@ const CREATE_TABLES_SQL: &str = "
         len         INTEGER NOT NULL,
         plain_hash  BLOB NOT NULL,
         content_key_version INTEGER,
+        -- A group set's 32-byte content generation id, the stamp's other
+        -- family (`SealStamp`); at most one of it and content_key_version.
+        content_generation BLOB,
         PRIMARY KEY (store_key, path)
     );
     CREATE INDEX IF NOT EXISTS held_chunks_by_path ON held_chunks(path);
@@ -495,6 +534,24 @@ const CREATE_TABLES_SQL: &str = "
         peer_actor  TEXT PRIMARY KEY,
         cursor      INTEGER NOT NULL,
         updated_at  INTEGER NOT NULL
+    );
+
+    -- A restore an always-resident root still owes its disk
+    -- (`file-versions.md` § Restore, ordering 1): the restore verb writes the
+    -- row BEFORE the nest record, the resident loop drains it against the
+    -- nest's head, and the kept-copy replace drops it. Derived: a lost row
+    -- costs one restore the user re-issues, never data — the nest holds every
+    -- version. `signed_as` is the 32-byte identity the restore records as
+    -- (NULL = unknown); `content_key_version` is NULL for an owner-only set;
+    -- `owed_at` is Unix seconds on the device clock, which the drain's grace
+    -- reads and the replace stamps as `remote_mtime`.
+    CREATE TABLE IF NOT EXISTS owed_restores (
+        path                TEXT PRIMARY KEY,
+        manifest_hash       BLOB NOT NULL,
+        size_bytes          INTEGER NOT NULL,
+        content_key_version INTEGER,
+        signed_as           BLOB,
+        owed_at             INTEGER NOT NULL
     );
 ";
 
@@ -959,6 +1016,49 @@ fn winner_kinds_sql() -> String {
         .join(", ")
 }
 
+/// How a group set's concurrent edit auto-resolved: the plane's merge is
+/// `LatestWins` (`p2p-shared-set-build.md` § Build design — the group set,
+/// decision 9).
+pub const RETAINED_LOSER_RESOLUTION: &str = "latest_wins";
+
+/// How a group set's ordinary supersede of this replica's own lifted head
+/// is recorded (decision 10): the winner named that head as its base, so
+/// the bytes are retained but the row is the versions list's, never the
+/// review list's — and the cap's first eviction class.
+pub const SUPERSEDED_RESOLUTION: &str = "superseded";
+
+/// A group set's resolved concurrent edit as its loser's author records it
+/// ([`SyncDb::record_retained_loser`]): the plane's winning row and this
+/// replica's superseded edit, kept as a retained version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedLoser {
+    pub path: String,
+    /// The winning row's author, hex actor id.
+    pub winner_author: Option<String>,
+    /// The winning row's device, hex.
+    pub winner_device: Option<String>,
+    /// The winning row's signed instant, epoch ms.
+    pub winner_created_at: i64,
+    /// The winning row's manifest, hex; `None` = the winner is a delete.
+    pub winner_manifest: Option<String>,
+    /// The retained version's manifest, hex — the one candidate.
+    pub retained_manifest: String,
+    /// The winner named the retained head as its base (decision 10): an
+    /// ordinary supersede, recorded [`SUPERSEDED_RESOLUTION`] and never
+    /// listed; `false` is a concurrent loss, [`RETAINED_LOSER_RESOLUTION`].
+    pub superseded: bool,
+}
+
+impl RetainedLoser {
+    fn resolution(&self) -> &'static str {
+        if self.superseded {
+            SUPERSEDED_RESOLUTION
+        } else {
+            RETAINED_LOSER_RESOLUTION
+        }
+    }
+}
+
 /// One local [`CATCHUP_FAILED`] row, as the report and cure paths need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedChange {
@@ -1119,6 +1219,23 @@ impl ProofOrigin {
     }
 }
 
+/// A row from the `owed_restores` table: a restore an always-resident root still
+/// owes its disk (`file-versions.md` § Restore, ordering 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwedRestore {
+    /// Folder-relative path, forward-slash normalized.
+    pub path: String,
+    /// The restored head the record carries.
+    pub manifest_hash: ContentHash,
+    pub size_bytes: i64,
+    /// M2 content-key generation; `None` for an owner-only set.
+    pub content_key_version: Option<u64>,
+    /// The identity the restore records as, when known.
+    pub signed_as: Option<[u8; 32]>,
+    /// Unix seconds, the device clock.
+    pub owed_at: i64,
+}
+
 /// A row from the `sync_entries` table.
 #[derive(Debug, Clone)]
 pub struct SyncEntry {
@@ -1136,7 +1253,7 @@ pub struct SyncEntry {
     /// M2 content-key generation the chunks of this version were sealed under
     /// (cross-user shared folders); `None` for owner-only sets.
     /// The read path tries every `keys_for(version)` candidate and fails closed if absent.
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<SealStamp>,
     /// Owner-only re-seal marker: `true` once this
     /// entry's recorded manifest is known sealed (`stored_hashes` present).
     /// Local cache only — a lost marker merely re-checks.
@@ -1191,8 +1308,45 @@ const SYNC_ENTRY_SELECT: &str = "SELECT path, local_hash, remote_hash, manifest_
         local_mtime, remote_mtime, size_bytes, version_num,
         last_synced_at, pinned, content_key_version, owner_sealed,
         current_root_sealed, recorded_content_hash, thumbnail_hash, seen_on_disk,
-        head_signed_as, recorded_proof_origin
+        head_signed_as, recorded_proof_origin, content_generation
  FROM sync_entries";
+
+/// A stamp's `content_key_version` column — the folder family's arm.
+fn stamp_version_col(stamp: Option<SealStamp>) -> Option<i64> {
+    stamp.and_then(SealStamp::version).map(|v| v as i64)
+}
+
+/// A stamp's `content_generation` column — the group family's arm.
+fn stamp_generation_col(stamp: Option<SealStamp>) -> Option<Vec<u8>> {
+    stamp.and_then(SealStamp::generation).map(|g| g.to_vec())
+}
+
+/// Read a stamp back from its two columns. A generation that is not 32
+/// bytes, or both columns set, is a malformed row — an error, never a guess.
+fn stamp_from_cols(
+    row: &rusqlite::Row<'_>,
+    version_col: usize,
+    generation_col: usize,
+) -> rusqlite::Result<Option<SealStamp>> {
+    let version = row.get::<_, Option<i64>>(version_col)?.map(|v| v as u64);
+    let generation = match row.get::<_, Option<Vec<u8>>>(generation_col)? {
+        None => None,
+        Some(bytes) => Some(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                generation_col,
+                rusqlite::types::Type::Blob,
+                "content_generation is not 32 bytes".into(),
+            )
+        })?),
+    };
+    SealStamp::from_parts(version, generation).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            version_col,
+            rusqlite::types::Type::Integer,
+            e.into(),
+        )
+    })
+}
 
 /// Map one [`SYNC_ENTRY_SELECT`] row to a [`SyncEntry`].
 fn map_sync_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntry> {
@@ -1208,7 +1362,7 @@ fn map_sync_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntry> {
         version_num: row.get(8)?,
         last_synced_at: row.get(9)?,
         pinned: row.get::<_, i64>(10)? != 0,
-        content_key_version: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+        content_stamp: stamp_from_cols(row, 11, 19)?,
         owner_sealed: row.get::<_, i64>(12)? != 0,
         current_root_sealed: row.get::<_, i64>(13)? != 0,
         recorded_content_hash: opt_blob_to_hash(row.get(14)?),
@@ -1230,7 +1384,7 @@ fn map_sync_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncEntry> {
 pub struct RetainedManifest {
     pub bytes: Vec<u8>,
     pub path: String,
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<SealStamp>,
 }
 
 /// One chunk of a body this seat holds (`held_chunks`): its store key and
@@ -1251,7 +1405,7 @@ pub struct HeldChunkRow {
     pub chunk: HeldChunk,
     /// The M2 generation the chunk sealed under — `None` for an owner-sealed
     /// or public body.
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<SealStamp>,
 }
 
 /// One row of `segment_backup_state` (Plan 6 T5).
@@ -1543,15 +1697,15 @@ impl SyncDb {
         remote_mtime: i64,
         size_bytes: i64,
         version_num: i64,
-        content_key_version: Option<u64>,
+        content_stamp: Option<SealStamp>,
     ) -> Result<()> {
         self.conn
             .execute(
                 "INSERT INTO sync_entries
                     (path, local_hash, remote_hash, manifest_hash, state,
                      local_mtime, remote_mtime, size_bytes, version_num, last_synced_at,
-                     content_key_version)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     content_key_version, content_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(path) DO UPDATE SET
                     local_hash    = excluded.local_hash,
                     remote_hash   = excluded.remote_hash,
@@ -1564,7 +1718,8 @@ impl SyncDb {
                     size_bytes    = excluded.size_bytes,
                     version_num   = excluded.version_num,
                     last_synced_at = excluded.last_synced_at,
-                    content_key_version = excluded.content_key_version",
+                    content_key_version = excluded.content_key_version,
+                    content_generation = excluded.content_generation",
                 params![
                     path,
                     opt_hash_to_blob(&local_hash),
@@ -1576,7 +1731,8 @@ impl SyncDb {
                     size_bytes,
                     version_num,
                     now_epoch_secs(),
-                    content_key_version.map(|v| v as i64),
+                    stamp_version_col(content_stamp),
+                    stamp_generation_col(content_stamp),
                 ],
             )
             .context("upsert sync entry")?;
@@ -1727,19 +1883,21 @@ impl SyncDb {
         path: &str,
         manifest_hash: &ContentHash,
         size_bytes: i64,
-        content_key_version: Option<u64>,
+        content_stamp: Option<SealStamp>,
         signed_as: &[u8; 32],
     ) -> Result<()> {
         self.conn
             .execute(
                 "UPDATE sync_entries SET manifest_hash = ?1, size_bytes = ?2,
-                        content_key_version = ?3, head_signed_as = ?5 WHERE path = ?4",
+                        content_key_version = ?3, head_signed_as = ?5,
+                        content_generation = ?6 WHERE path = ?4",
                 params![
                     opt_hash_to_blob(&Some(*manifest_hash)),
                     size_bytes,
-                    content_key_version.map(|v| v as i64),
+                    stamp_version_col(content_stamp),
                     path,
                     &signed_as[..],
+                    stamp_generation_col(content_stamp),
                 ],
             )
             .context("update recorded head")?;
@@ -2497,6 +2655,154 @@ impl SyncDb {
             details: details.map(str::to_string),
             nest_id: None,
         }))
+    }
+
+    /// Record a group set's resolved concurrent edit, kept by the loser's
+    /// author (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 9): `concurrent_edit`, resolved `latest_wins`, the plane's
+    /// winner and the one candidate — this replica's retained version. A
+    /// base-matched winner (decision 10) records the same row resolved
+    /// `superseded`, which the review list never reads.
+    /// **Once per (path, winner, candidate)**: a fold that retained and
+    /// recorded but could not finish its write re-presents the row, and the
+    /// re-presentation must not list the same conflict twice. Returns the
+    /// row id, `None` when that conflict is already on record unresolved.
+    /// `nest_id` stays NULL — no nest holds this row, so it never arms the
+    /// verbatim-winner apply ([`CONFLICT_KINDS_WITH_PROPAGATED_WINNER`]).
+    pub fn record_retained_loser(&self, loser: &RetainedLoser) -> Result<Option<i64>> {
+        let on_record: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_conflicts
+                 WHERE path = ?1 AND resolution = ?2 AND resolved_at IS NULL
+                   AND retained_manifest = ?3 AND winner_manifest IS ?4
+                   AND winner_author = ?5 AND winner_created_at = ?6",
+                params![
+                    loser.path,
+                    loser.resolution(),
+                    loser.retained_manifest,
+                    loser.winner_manifest,
+                    loser.winner_author,
+                    loser.winner_created_at,
+                ],
+                |row| row.get(0),
+            )
+            .context("query retained loser on record")?;
+        if on_record > 0 {
+            return Ok(None);
+        }
+        let details = match (loser.superseded, &loser.winner_manifest) {
+            (true, Some(_)) => "superseded: a later write over this edit; this edit is retained",
+            (true, None) => "superseded: a later delete of this edit; this edit is retained",
+            (false, Some(_)) => {
+                "auto-resolved: the group set's later writer won; this edit is retained"
+            }
+            (false, None) => {
+                "auto-resolved: the group set's later delete won; this edit is retained"
+            }
+        };
+        self.conn
+            .execute(
+                "INSERT INTO sync_conflicts
+                     (path, conflict_type, details, created_at, resolution, winner_author,
+                      winner_device, winner_created_at, winner_manifest, retained_manifest)
+                 VALUES (?1, 'concurrent_edit', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    loser.path,
+                    details,
+                    now_epoch_secs(),
+                    loser.resolution(),
+                    loser.winner_author,
+                    loser.winner_device,
+                    loser.winner_created_at,
+                    loser.winner_manifest,
+                    loser.retained_manifest,
+                ],
+            )
+            .context("record retained loser")?;
+        Ok(Some(self.conn.last_insert_rowid()))
+    }
+
+    /// The unresolved retained-loser rows ([`Self::record_retained_loser`]),
+    /// oldest first — what a group set's review list reads: concurrent
+    /// losses only, never a `superseded` retention (decision 10).
+    pub fn retained_losers(&self) -> Result<Vec<(i64, RetainedLoser)>> {
+        self.retained_by_resolution(RETAINED_LOSER_RESOLUTION)
+    }
+
+    /// The review list's reading of [`Self::retained_losers`] — what the app
+    /// shows of each row, oldest first; `created_at` is when this replica
+    /// recorded the loss.
+    pub fn retained_conflicts(&self) -> Result<Vec<fauna_core::sync::RetainedConflict>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, details, created_at, winner_device, winner_manifest
+             FROM sync_conflicts
+             WHERE resolution = ?1 AND resolved_at IS NULL
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![RETAINED_LOSER_RESOLUTION], |row| {
+            Ok(fauna_core::sync::RetainedConflict {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                details: row.get(2)?,
+                created_at: row.get(3)?,
+                winner_device: row.get(4)?,
+                winner_manifest: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
+            .context("read retained conflicts")
+    }
+
+    /// Whether an unresolved row still names the retained version `manifest`
+    /// (hex) — a used review row's bytes go only when none does: a supersede
+    /// keeps its version under the same key.
+    pub fn retained_version_on_record(&self, manifest: &str) -> Result<bool> {
+        let rows: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_conflicts
+                 WHERE retained_manifest = ?1 AND resolved_at IS NULL",
+                params![manifest],
+                |row| row.get(0),
+            )
+            .context("query retained version on record")?;
+        Ok(rows > 0)
+    }
+
+    /// The `superseded` retentions — this replica's own lifted heads a
+    /// base-matched winner overwrote (decision 10), oldest first: the
+    /// versions list's rows (named, not designed) and the cap's first
+    /// eviction class. Never listed for review.
+    pub fn superseded_retentions(&self) -> Result<Vec<(i64, RetainedLoser)>> {
+        self.retained_by_resolution(SUPERSEDED_RESOLUTION)
+    }
+
+    fn retained_by_resolution(&self, resolution: &str) -> Result<Vec<(i64, RetainedLoser)>> {
+        let superseded = resolution == SUPERSEDED_RESOLUTION;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, winner_author, winner_device, winner_created_at,
+                    winner_manifest, retained_manifest
+             FROM sync_conflicts
+             WHERE resolution = ?1 AND resolved_at IS NULL
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![resolution], |row| {
+            Ok((
+                row.get(0)?,
+                RetainedLoser {
+                    path: row.get(1)?,
+                    winner_author: row.get(2)?,
+                    winner_device: row.get(3)?,
+                    winner_created_at: row.get(4)?,
+                    winner_manifest: row.get(5)?,
+                    retained_manifest: row.get(6)?,
+                    superseded,
+                },
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("list retained losers")
     }
 
     /// Stamp the nest's conflict id on a local row once its report landed.
@@ -3596,9 +3902,10 @@ impl SyncDb {
                 (seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
                  change_type, created_at, content_key_version, thumbnail_hash,
                  derived_through, is_resolution, author_actor_id, device_id,
-                 signature, signer_key, signer_cert)
+                 signature, signer_key, signer_cert, content_generation,
+                 base_manifest, deposited_by)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     ?15, ?16, ?17)
+                     ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(seq) DO NOTHING",
             params![
                 row.seq,
@@ -3609,7 +3916,7 @@ impl SyncDb {
                 row.size_bytes,
                 row.change_type,
                 row.created_at,
-                row.content_key_version.map(|v| v as i64),
+                stamp_version_col(row.content_stamp),
                 row.thumbnail_hash,
                 row.derived_through,
                 row.is_resolution,
@@ -3618,6 +3925,9 @@ impl SyncDb {
                 row.signature,
                 row.signer_key,
                 row.signer_cert,
+                stamp_generation_col(row.content_stamp),
+                row.base_manifest,
+                row.deposited_by,
             ],
         )
         .context("retain own change row")?;
@@ -3657,9 +3967,10 @@ impl SyncDb {
                 (seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
                  change_type, created_at, content_key_version, thumbnail_hash,
                  derived_through, is_resolution, author_actor_id, device_id,
-                 signature, signer_key, signer_cert)
+                 signature, signer_key, signer_cert, content_generation,
+                 base_manifest, deposited_by)
              VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16)",
+                     ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 row.path,
                 row.path_hash,
@@ -3668,7 +3979,7 @@ impl SyncDb {
                 row.size_bytes,
                 row.change_type,
                 row.created_at,
-                row.content_key_version.map(|v| v as i64),
+                stamp_version_col(row.content_stamp),
                 row.thumbnail_hash,
                 row.derived_through,
                 row.is_resolution,
@@ -3677,6 +3988,9 @@ impl SyncDb {
                 row.signature,
                 row.signer_key,
                 row.signer_cert,
+                stamp_generation_col(row.content_stamp),
+                row.base_manifest,
+                row.deposited_by,
             ],
         )
         .context("mint pending own-change row")?;
@@ -3692,7 +4006,8 @@ impl SyncDb {
             "SELECT seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
                     change_type, created_at, content_key_version, thumbnail_hash,
                     derived_through, is_resolution, author_actor_id, device_id,
-                    signature, signer_key, signer_cert
+                    signature, signer_key, signer_cert, content_generation, base_manifest,
+                    deposited_by
              FROM own_change_log
              WHERE seq IS NULL
              ORDER BY id
@@ -3704,6 +4019,41 @@ impl SyncDb {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// The path's own-PENDING row, if any (at most one per path —
+    /// [`Self::mint_pending_own_change`]).
+    pub fn own_pending_change(&self, path: &str) -> Result<Option<OwnChangeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
+                    change_type, created_at, content_key_version, thumbnail_hash,
+                    derived_through, is_resolution, author_actor_id, device_id,
+                    signature, signer_key, signer_cert, content_generation, base_manifest,
+                    deposited_by
+             FROM own_change_log
+             WHERE seq IS NULL AND path = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![path], map_own_change_row)?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    /// The path's newest own row, pending or sequenced — the last change this
+    /// replica authored there. A group set's fold reads it to tell its own
+    /// lifted head from one some other member authored (decision 9).
+    pub fn own_latest_change(&self, path: &str) -> Result<Option<OwnChangeRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
+                    change_type, created_at, content_key_version, thumbnail_hash,
+                    derived_through, is_resolution, author_actor_id, device_id,
+                    signature, signer_key, signer_cert, content_generation, base_manifest,
+                    deposited_by
+             FROM own_change_log
+             WHERE path = ?1
+             ORDER BY id DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![path], map_own_change_row)?;
+        rows.next().transpose().map_err(Into::into)
     }
 
     /// Withdraw every own-PENDING row sealed under a content-key generation
@@ -3733,7 +4083,8 @@ impl SyncDb {
             "SELECT seq, path, path_hash, path_sealed, manifest_hash, size_bytes,
                     change_type, created_at, content_key_version, thumbnail_hash,
                     derived_through, is_resolution, author_actor_id, device_id,
-                    signature, signer_key, signer_cert
+                    signature, signer_key, signer_cert, content_generation, base_manifest,
+                    deposited_by
              FROM own_change_log
              WHERE seq IS NOT NULL AND seq > ?1
              ORDER BY seq
@@ -3788,6 +4139,27 @@ impl SyncDb {
         )
         .context("retain relayed change row")?;
         tx.commit().context("commit relayed-change retention")
+    }
+
+    /// Retire a writer-device's pending relayed row for the path, with nothing
+    /// retained in its place: the nest's word on a same-account sibling's write,
+    /// which [`Self::retain_relayed_change`] never sees, since the nest pull
+    /// retains other writers' rows and this one is signed as this account.
+    pub fn retire_relayed_pending_change(
+        &self,
+        author_actor_id: &str,
+        path_hash: &str,
+        device_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM relayed_change_log
+                 WHERE author_actor_id = ?1 AND path_hash = ?2 AND device_id IS ?3
+                   AND seq IS NULL",
+                params![author_actor_id, path_hash, device_id],
+            )
+            .context("retire the sibling's pending relayed row for the path")?;
+        Ok(())
     }
 
     /// Relayed SEQUENCED rows with `seq` strictly greater than `since`, in seq
@@ -3854,19 +4226,21 @@ impl SyncDb {
         manifest_hash_hex: &str,
         bytes: &[u8],
         path: &str,
-        content_key_version: Option<u64>,
+        content_stamp: Option<SealStamp>,
     ) -> Result<()> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO own_manifests
-                    (manifest_hash, bytes, path, content_key_version, retained_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (manifest_hash, bytes, path, content_key_version, retained_at,
+                     content_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     manifest_hash_hex,
                     bytes,
                     path,
-                    content_key_version,
-                    now_epoch_secs()
+                    stamp_version_col(content_stamp),
+                    now_epoch_secs(),
+                    stamp_generation_col(content_stamp),
                 ],
             )
             .context("retain manifest bytes")?;
@@ -3879,14 +4253,14 @@ impl SyncDb {
         use rusqlite::OptionalExtension;
         self.conn
             .query_row(
-                "SELECT bytes, path, content_key_version FROM own_manifests
+                "SELECT bytes, path, content_key_version, content_generation FROM own_manifests
                  WHERE manifest_hash = ?1",
                 params![manifest_hash_hex],
                 |row| {
                     Ok(RetainedManifest {
                         bytes: row.get(0)?,
                         path: row.get(1)?,
-                        content_key_version: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                        content_stamp: stamp_from_cols(row, 2, 3)?,
                     })
                 },
             )
@@ -3902,7 +4276,7 @@ impl SyncDb {
     pub fn index_held_body(
         &self,
         path: &str,
-        content_key_version: Option<u64>,
+        content_stamp: Option<SealStamp>,
         chunks: &[HeldChunk],
     ) -> Result<()> {
         let tx = self
@@ -3914,8 +4288,9 @@ impl SyncDb {
         {
             let mut insert = tx.prepare(
                 "INSERT OR REPLACE INTO held_chunks
-                    (store_key, path, offset, len, plain_hash, content_key_version)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (store_key, path, offset, len, plain_hash, content_key_version,
+                     content_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for c in chunks {
                 insert
@@ -3925,7 +4300,8 @@ impl SyncDb {
                         c.offset as i64,
                         c.len as i64,
                         c.plain_hash.digest().as_slice(),
-                        content_key_version.map(|v| v as i64),
+                        stamp_version_col(content_stamp),
+                        stamp_generation_col(content_stamp),
                     ])
                     .context("index held chunk")?;
             }
@@ -3937,7 +4313,8 @@ impl SyncDb {
     /// content at several paths yields one row each.
     pub fn held_chunks(&self, store_key: &[u8; 32]) -> Result<Vec<HeldChunkRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, offset, len, plain_hash, content_key_version FROM held_chunks
+            "SELECT path, offset, len, plain_hash, content_key_version, content_generation
+             FROM held_chunks
              WHERE store_key = ?1",
         )?;
         let rows = stmt.query_map(params![store_key.as_slice()], |row| {
@@ -3947,7 +4324,7 @@ impl SyncDb {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 plain,
-                row.get::<_, Option<i64>>(4)?,
+                stamp_from_cols(row, 4, 5)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -3966,7 +4343,7 @@ impl SyncDb {
                     len: len as u64,
                     plain_hash: ContentHash::from_digest_raw(plain),
                 },
-                content_key_version: ckv.map(|v| v as u64),
+                content_stamp: ckv,
             });
         }
         Ok(out)
@@ -4105,6 +4482,102 @@ impl SyncDb {
         Ok(())
     }
 
+    /// Owe `owed`'s restore. A second restore of the same path before the first
+    /// drained replaces it: the newer head is the one the nest will hold.
+    pub fn put_owed_restore(&self, owed: &OwedRestore) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO owed_restores
+                    (path, manifest_hash, size_bytes, content_key_version, signed_as, owed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(path) DO UPDATE SET
+                    manifest_hash = excluded.manifest_hash,
+                    size_bytes = excluded.size_bytes,
+                    content_key_version = excluded.content_key_version,
+                    signed_as = excluded.signed_as,
+                    owed_at = excluded.owed_at",
+                params![
+                    owed.path,
+                    hash_to_blob(&owed.manifest_hash),
+                    owed.size_bytes,
+                    owed.content_key_version.map(|v| v as i64),
+                    owed.signed_as.as_ref().map(|s| &s[..]),
+                    owed.owed_at,
+                ],
+            )
+            .context("put owed restore")?;
+        Ok(())
+    }
+
+    /// Every restore this root still owes, in path order.
+    pub fn owed_restores(&self) -> Result<Vec<OwedRestore>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path, manifest_hash, size_bytes, content_key_version, signed_as, owed_at
+                 FROM owed_restores ORDER BY path",
+            )
+            .context("prepare owed restores")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .context("query owed restores")?;
+        let mut owed = Vec::new();
+        for row in rows {
+            let (path, manifest, size_bytes, key_version, signed_as, owed_at) =
+                row.context("read owed restore")?;
+            let manifest_hash = blob_to_hash(manifest)
+                .with_context(|| format!("owed restore of {path}: a malformed manifest"))?;
+            owed.push(OwedRestore {
+                path,
+                manifest_hash,
+                size_bytes,
+                content_key_version: key_version.map(|v| v as u64),
+                signed_as: signed_as.and_then(|s| s.try_into().ok()),
+                owed_at,
+            });
+        }
+        Ok(owed)
+    }
+
+    /// Is the restore of `path` to exactly `manifest` still owed? A later intent
+    /// on the path is a different restore, and answers `false`.
+    pub fn owes_restore(&self, path: &str, manifest: &ContentHash) -> Result<bool> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM owed_restores WHERE path = ?1 AND manifest_hash = ?2",
+                params![path, hash_to_blob(manifest)],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("read owed restore")?
+            .is_some())
+    }
+
+    /// Drop the intent to restore `path` to `manifest`, reporting whether one
+    /// was. Keyed by the manifest, so settling an older intent never drops a
+    /// newer one on the same path.
+    pub fn drop_owed_restore(&self, path: &str, manifest: &ContentHash) -> Result<bool> {
+        let dropped = self
+            .conn
+            .execute(
+                "DELETE FROM owed_restores WHERE path = ?1 AND manifest_hash = ?2",
+                params![path, hash_to_blob(manifest)],
+            )
+            .context("drop owed restore")?;
+        Ok(dropped > 0)
+    }
+
     /// The ingest consult: is `actor_hex` a cached WRITER for this set?
     /// Fail-closed — an absent row (unknown actor, or no roster ever cached)
     /// answers `false`, exactly the `peer_is_cached_writer` bool the share
@@ -4202,6 +4675,15 @@ impl SyncDb {
     /// incoming seq lower. Everything else replaces — within one serve
     /// session rows arrive in seq order, and an un-sequenced row has no
     /// cross-replica seq to compare.
+    ///
+    /// **The same version re-served keeps its landed body.** When the row
+    /// names the version the overlay already holds (same change type, same
+    /// manifest), `materialized` and `content_hash` stay as they are: a
+    /// pending row is served again on every pass, and the landed hash is
+    /// what the upload door reads to tell a peer's provisional body from this
+    /// replica's edit, and what the nest's confirm compares against
+    /// (`p2p.md` § Same-account nest-down folder transfer — a provisional row
+    /// never enters the nest-sequenced log). A new version starts unlanded.
     pub fn upsert_share_overlay(&self, row: &ShareOverlayRow) -> Result<bool> {
         use rusqlite::OptionalExtension;
         let existing: Option<(bool, i64)> = self
@@ -4222,11 +4704,28 @@ impl SyncDb {
         }
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO share_overlay
+                "INSERT INTO share_overlay
                     (path, seq, sequenced, change_type, manifest_hash, size_bytes,
                      content_key_version, proven_author, materialized, content_hash,
                      ingested_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(path) DO UPDATE SET
+                    materialized = CASE
+                        WHEN share_overlay.change_type = excluded.change_type
+                         AND share_overlay.manifest_hash IS excluded.manifest_hash
+                        THEN share_overlay.materialized ELSE excluded.materialized END,
+                    content_hash = CASE
+                        WHEN share_overlay.change_type = excluded.change_type
+                         AND share_overlay.manifest_hash IS excluded.manifest_hash
+                        THEN share_overlay.content_hash ELSE excluded.content_hash END,
+                    seq = excluded.seq,
+                    sequenced = excluded.sequenced,
+                    change_type = excluded.change_type,
+                    manifest_hash = excluded.manifest_hash,
+                    size_bytes = excluded.size_bytes,
+                    content_key_version = excluded.content_key_version,
+                    proven_author = excluded.proven_author,
+                    ingested_at = excluded.ingested_at",
                 params![
                     row.path,
                     row.seq,
@@ -4279,7 +4778,9 @@ impl SyncDb {
     /// Stamp a path's overlay row materialized, with the written content's
     /// hash (hex) when bytes were written — what a later confirm uses to
     /// stamp the withheld dehydration proof without re-reading disk. `None`
-    /// for the already-current arms that fetched nothing.
+    /// for the already-current arms that fetched nothing, which keep any hash
+    /// an earlier pass landed for this version ([`Self::upsert_share_overlay`]
+    /// keeps it across a re-served row; a new version arrives with none).
     pub fn mark_share_overlay_materialized(
         &self,
         path: &str,
@@ -4287,7 +4788,8 @@ impl SyncDb {
     ) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE share_overlay SET materialized = 1, content_hash = ?2
+                "UPDATE share_overlay SET materialized = 1,
+                     content_hash = COALESCE(?2, content_hash)
                  WHERE path = ?1",
                 params![path, content_hash],
             )
@@ -4371,7 +4873,7 @@ pub struct OwnChangeRow {
     /// Local epoch-millis stamp at retention. Informational — the nest's own
     /// `created_at` is the authoritative one; receivers order by `seq`.
     pub created_at: i64,
-    pub content_key_version: Option<u64>,
+    pub content_stamp: Option<SealStamp>,
     pub thumbnail_hash: Option<String>,
     pub derived_through: Option<i64>,
     pub is_resolution: Option<bool>,
@@ -4388,6 +4890,15 @@ pub struct OwnChangeRow {
     /// The delegated signer's cert, canonical embed-as-bytes (`None` for a
     /// direct signer).
     pub signer_cert: Option<Vec<u8>>,
+    /// A group set's base (decision 10): the hex manifest the path's tracked
+    /// head named when the edit was minted — the lift signs it into the
+    /// `fauna.group.file` core. `None` on the folder family and on a create
+    /// over nothing or over a tracked delete.
+    pub base_manifest: Option<String>,
+    /// The depositor's hex writer key on an adopted folder deposit's row
+    /// (`SyncChange::deposited_by`, `folder-deposit.md` ruling 3) — covered by
+    /// the row's signature, so the served copy carries it. `None` otherwise.
+    pub deposited_by: Option<String>,
 }
 
 /// One retained relayed row (`relayed_change_log` — the share leg's relay
@@ -4414,7 +4925,7 @@ pub struct RelayedChangeRow {
 }
 
 /// Row mapper for the `own_change_log` SELECTs (`own_changes_since` /
-/// `own_pending_changes` — both select the same 17 columns in this order).
+/// `own_pending_changes` — all select the same 20 columns in this order).
 fn map_own_change_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnChangeRow> {
     Ok(OwnChangeRow {
         seq: row.get(0)?,
@@ -4425,7 +4936,7 @@ fn map_own_change_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnChangeRow>
         size_bytes: row.get(5)?,
         change_type: row.get(6)?,
         created_at: row.get(7)?,
-        content_key_version: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+        content_stamp: stamp_from_cols(row, 8, 17)?,
         thumbnail_hash: row.get(9)?,
         derived_through: row.get(10)?,
         is_resolution: row.get(11)?,
@@ -4434,6 +4945,8 @@ fn map_own_change_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OwnChangeRow>
         signature: row.get(14)?,
         signer_key: row.get(15)?,
         signer_cert: row.get(16)?,
+        base_manifest: row.get(18)?,
+        deposited_by: row.get(19)?,
     })
 }
 
@@ -4461,6 +4974,59 @@ mod tests {
         }
     }
 
+    fn owed(path: &str, manifest: u8) -> OwedRestore {
+        OwedRestore {
+            path: path.to_string(),
+            manifest_hash: test_hash(manifest),
+            size_bytes: 4096,
+            content_key_version: Some(3),
+            signed_as: Some([0x5A; 32]),
+            owed_at: 1_700_000_000,
+        }
+    }
+
+    /// Every column survives the round trip, the listing is in path order, and a
+    /// second restore of a path replaces the first whole — the NULL arms included.
+    #[test]
+    fn an_owed_restore_round_trips_and_a_second_restore_of_the_path_replaces_it() {
+        let db = SyncDb::open_in_memory().unwrap();
+        db.put_owed_restore(&owed("b.txt", 1)).unwrap();
+        db.put_owed_restore(&owed("a.txt", 2)).unwrap();
+        assert_eq!(
+            db.owed_restores().unwrap(),
+            vec![owed("a.txt", 2), owed("b.txt", 1)]
+        );
+
+        let newer = OwedRestore {
+            content_key_version: None,
+            signed_as: None,
+            owed_at: 1_700_000_100,
+            ..owed("b.txt", 9)
+        };
+        db.put_owed_restore(&newer).unwrap();
+        assert_eq!(
+            db.owed_restores().unwrap(),
+            vec![owed("a.txt", 2), newer],
+            "the newer head is the one the nest will hold"
+        );
+    }
+
+    /// A drop is keyed by the manifest: settling an older intent leaves the
+    /// newer one on the path owed.
+    #[test]
+    fn dropping_an_owed_restore_is_keyed_by_its_manifest() {
+        let db = SyncDb::open_in_memory().unwrap();
+        db.put_owed_restore(&owed("a.txt", 2)).unwrap();
+        assert!(db.owes_restore("a.txt", &test_hash(2)).unwrap());
+        assert!(!db.owes_restore("a.txt", &test_hash(1)).unwrap());
+
+        assert!(!db.drop_owed_restore("a.txt", &test_hash(1)).unwrap());
+        assert_eq!(db.owed_restores().unwrap(), vec![owed("a.txt", 2)]);
+
+        assert!(db.drop_owed_restore("a.txt", &test_hash(2)).unwrap());
+        assert!(db.owed_restores().unwrap().is_empty());
+    }
+
     /// Re-indexing a path replaces its rows whole — the previous body's keys
     /// stop resolving there — while another path holding the same key keeps
     /// its own row.
@@ -4469,7 +5035,12 @@ mod tests {
         let db = SyncDb::open_in_memory().unwrap();
         db.index_held_body("a", None, &[held(1, 0), held(2, 10)])
             .unwrap();
-        db.index_held_body("b", Some(3), &[held(2, 0)]).unwrap();
+        db.index_held_body(
+            "b",
+            Some(fauna_core::blob_seal::SealStamp::Version(3)),
+            &[held(2, 0)],
+        )
+        .unwrap();
 
         let shared = db.held_chunks(&[2; 32]).unwrap();
         assert_eq!(shared.len(), 2, "both paths hold key 2");
@@ -4480,7 +5051,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, "b");
         assert_eq!(rows[0].chunk, held(2, 0));
-        assert_eq!(rows[0].content_key_version, Some(3));
+        assert_eq!(
+            rows[0].content_stamp,
+            Some(fauna_core::blob_seal::SealStamp::Version(3))
+        );
         assert_eq!(db.held_chunks(&[4; 32]).unwrap()[0].chunk, held(4, 0));
     }
 
@@ -5454,7 +6028,7 @@ mod tests {
             2000,
             4096,
             1,
-            Some(3),
+            Some(fauna_core::blob_seal::SealStamp::Version(3)),
         )
         .unwrap();
 
@@ -5469,7 +6043,10 @@ mod tests {
         assert_eq!(entry.remote_mtime, 2000);
         assert_eq!(entry.size_bytes, 4096);
         assert_eq!(entry.version_num, 1);
-        assert_eq!(entry.content_key_version, Some(3));
+        assert_eq!(
+            entry.content_stamp,
+            Some(fauna_core::blob_seal::SealStamp::Version(3))
+        );
 
         // Update state
         db.update_state("photos/cat.jpg", SyncState::LocallyModified)
@@ -6282,7 +6859,7 @@ mod tests {
             size_bytes: 1234,
             change_type: "create".to_string(),
             created_at: 1_700_000_000_000,
-            content_key_version: Some(3),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(3)),
             thumbnail_hash: Some("ef".repeat(32)),
             derived_through: Some(41),
             is_resolution: Some(false),
@@ -6291,6 +6868,8 @@ mod tests {
             signature: Some(vec![0x51; 64]),
             signer_key: Some(vec![0x4B; 32]),
             signer_cert: Some(vec![0xCE; 12]),
+            base_manifest: Some("ba".repeat(32)),
+            deposited_by: None,
         }
     }
 
@@ -6311,7 +6890,7 @@ mod tests {
         let del = OwnChangeRow {
             manifest_hash: None,
             change_type: "delete".to_string(),
-            content_key_version: None,
+            content_stamp: None,
             thumbnail_hash: None,
             ..own_row(8, "photos/holiday.mp4")
         };
@@ -6410,6 +6989,54 @@ mod tests {
         db.remove_share_overlay("b.txt").unwrap();
         assert!(db.get_share_overlay("b.txt").unwrap().is_none());
         assert!(db.list_share_overlay().unwrap().is_empty());
+    }
+
+    /// A pending row is served again on every pass (it carries no coordinate
+    /// to advance a cursor past), so the same version re-ingested must keep
+    /// what the overlay knows of its landed body — the content hash is what
+    /// tells a peer's provisional body from this replica's edit at the upload
+    /// door, and what the nest's confirm compares against. Wiping it on the
+    /// second pass let a windows seat record a sibling's file as its own
+    /// (`p2p.md` § Same-account nest-down folder transfer). A NEW version
+    /// still starts unlanded.
+    #[test]
+    fn a_re_served_row_of_the_same_version_keeps_its_landed_body() {
+        let db = SyncDb::open_in_memory().unwrap();
+        let landed = "ef".repeat(32);
+        db.upsert_share_overlay(&overlay_row("c.bin", 0, false))
+            .unwrap();
+        db.mark_share_overlay_materialized("c.bin", Some(&landed))
+            .unwrap();
+
+        // The same version again: still landed, same hash.
+        assert!(
+            db.upsert_share_overlay(&overlay_row("c.bin", 0, false))
+                .unwrap()
+        );
+        let row = db.get_share_overlay("c.bin").unwrap().unwrap();
+        assert!(row.materialized, "a re-served row forgot its landed body");
+        assert_eq!(row.content_hash.as_deref(), Some(&*landed));
+
+        // The judge's already-current stamp fetched nothing — it erases nothing.
+        db.mark_share_overlay_materialized("c.bin", None).unwrap();
+        let row = db.get_share_overlay("c.bin").unwrap().unwrap();
+        assert!(row.materialized);
+        assert_eq!(row.content_hash.as_deref(), Some(&*landed));
+
+        // A new version of the path has landed nothing yet.
+        let newer = ShareOverlayRow {
+            manifest_hash: Some("ab".repeat(32)),
+            ..overlay_row("c.bin", 0, false)
+        };
+        assert!(db.upsert_share_overlay(&newer).unwrap());
+        let row = db.get_share_overlay("c.bin").unwrap().unwrap();
+        assert!(!row.materialized);
+        assert_eq!(row.content_hash, None);
+        db.mark_share_overlay_materialized("c.bin", None).unwrap();
+        assert_eq!(
+            db.get_share_overlay("c.bin").unwrap().unwrap().content_hash,
+            None
+        );
     }
 
     /// Retention is idempotent on seq: the nest assigns each seq once and a
@@ -6579,7 +7206,7 @@ mod tests {
     fn a_floor_read_withdraws_only_pending_rows_sealed_below_it() {
         let db = SyncDb::open_in_memory().unwrap();
         let stamped = |path: &str, version: Option<u64>| OwnChangeRow {
-            content_key_version: version,
+            content_stamp: version.map(SealStamp::Version),
             ..pending_row(path, "aa")
         };
         db.mint_pending_own_change(&stamped("behind.txt", Some(1)))
@@ -6589,7 +7216,7 @@ mod tests {
         db.mint_pending_own_change(&stamped("owner-only.txt", None))
             .unwrap();
         db.retain_own_change(&OwnChangeRow {
-            content_key_version: Some(1),
+            content_stamp: Some(fauna_core::blob_seal::SealStamp::Version(1)),
             ..own_row(4, "landed.txt")
         })
         .unwrap();
@@ -6619,5 +7246,65 @@ mod tests {
             db.mint_pending_own_change(&own_row(3, "a.txt")).is_err(),
             "mint is the seq-less door"
         );
+    }
+
+    /// A group set's 32-byte generation id rests in its own column on every
+    /// stamped table and reads back as the same stamp — no `u64` stands in for
+    /// it (`p2p-shared-set-build.md` § Build design — the group set,
+    /// decision 4) — and the content-key floor never withdraws a
+    /// generation-stamped pending row, which has no version to compare.
+    #[test]
+    fn a_group_generation_stamp_rests_in_its_own_column_on_every_table() {
+        let db = SyncDb::open_in_memory().unwrap();
+        let g = [0x3cu8; 32];
+        let stamp = Some(SealStamp::Generation(g));
+        let hash = ContentHash::of_raw(b"group body");
+
+        db.upsert_entry(
+            "g.txt",
+            None,
+            Some(hash),
+            Some(hash),
+            SyncState::Synced,
+            0,
+            0,
+            10,
+            1,
+            stamp,
+        )
+        .unwrap();
+        assert_eq!(db.get_entry("g.txt").unwrap().unwrap().content_stamp, stamp);
+        db.update_recorded_head("g.txt", &hash, 10, Some(SealStamp::Version(2)), &[1u8; 32])
+            .unwrap();
+        assert_eq!(
+            db.get_entry("g.txt").unwrap().unwrap().content_stamp,
+            Some(SealStamp::Version(2)),
+            "a re-stamp replaces the other family's column, never leaves both"
+        );
+
+        db.mint_pending_own_change(&OwnChangeRow {
+            content_stamp: stamp,
+            ..pending_row("g.txt", "aa")
+        })
+        .unwrap();
+        assert_eq!(db.retire_own_pending_below(u64::MAX).unwrap(), 0);
+        assert_eq!(db.own_pending_changes(10).unwrap()[0].content_stamp, stamp);
+
+        db.retain_manifest("ab", b"manifest", "g.txt", stamp)
+            .unwrap();
+        assert_eq!(
+            db.retained_manifest("ab").unwrap().unwrap().content_stamp,
+            stamp
+        );
+
+        let chunk = HeldChunk {
+            store_key: [9u8; 32],
+            offset: 0,
+            len: 10,
+            plain_hash: hash,
+        };
+        db.index_held_body("g.txt", stamp, std::slice::from_ref(&chunk))
+            .unwrap();
+        assert_eq!(db.held_chunks(&[9u8; 32]).unwrap()[0].content_stamp, stamp);
     }
 }

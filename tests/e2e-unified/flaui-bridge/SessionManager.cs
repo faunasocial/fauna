@@ -149,13 +149,46 @@ class SessionManager : IDisposable
     public UIA3Automation Automation => _automation
         ?? throw new InvalidOperationException("No automation instance");
 
+    /// <summary>When this bridge started the app, UTC — where the wall time its CPU
+    /// time is read against begins. Surfaced on <c>/session/status</c> (convention 6's
+    /// launch-timeout rider).</summary>
+    public DateTime? LaunchedAt { get; private set; }
+
+    /// <summary>How often the launch's CPU wait is sampled, and the most samples one
+    /// launch takes: a launch gate's budget is 90 s, so a launch nobody is waiting on
+    /// any more stops costing a process snapshot a second after ten minutes.</summary>
+    private static readonly TimeSpan WaitSamplePeriod = TimeSpan.FromSeconds(1);
+    private const int MaxWaitSamples = 600;
+    private Timer? _waitTimer;
+    private Process? _waitProcess;
+    private int _waitSamples;
+    private int _waitReadySamples;
+
+    /// <summary>The environment the driver launched the app with, kept so a
+    /// per-session bridge setting rides the one dictionary every launch flag already
+    /// does (the stall watcher's helper path and faked readings, <see cref="StallWatch"/>).
+    /// Replaced whole at each launch, never mutated, so any thread may read it.</summary>
+    private IReadOnlyDictionary<string, string> _launchEnv = new Dictionary<string, string>();
+
+    /// <summary>One value of the launch environment, or null.</summary>
+    public string? LaunchEnv(string key) =>
+        Volatile.Read(ref _launchEnv).TryGetValue(key, out var value) ? value : null;
+
     public void Launch(string appPath, string args, Dictionary<string, string>? environment = null,
-                       string? packageFamilyName = null, string? packageAppId = null)
+                       string? packageFamilyName = null, string? packageAppId = null,
+                       long? cpuAffinityMask = null, string? aumid = null)
     {
         _automation = new UIA3Automation();
         _appPath = appPath;
+        Volatile.Write(ref _launchEnv,
+            environment is null ? new Dictionary<string, string>() : new Dictionary<string, string>(environment));
         environment?.TryGetValue("FAUNA_E2E_DATA_DIR", out _dataDir);
-        if (packageFamilyName is not null)
+        LaunchedAt = DateTime.UtcNow;
+        if (aumid is not null)
+        {
+            _appProcess = ActivateApplication(aumid, args);
+        }
+        else if (packageFamilyName is not null)
         {
             _appProcess = StartInPackageContext(
                 appPath, args, environment ?? new(), packageFamilyName, packageAppId ?? "App");
@@ -176,6 +209,14 @@ class SessionManager : IDisposable
                 ?? throw new InvalidOperationException($"Failed to start {appPath}");
         }
         AppPid = _appProcess.Id;
+        // A launch held to chosen CPUs (the forced-starvation half of convention 6's
+        // launch-timeout rider). Set here, a moment after the start, because a
+        // process's threads take its mask as they run; a mask that is not a lowest-n
+        // one and sits inside the core fence is a deliberate pin the fence's sweep
+        // leaves alone.
+        if (cpuAffinityMask is long mask)
+            _appProcess.ProcessorAffinity = new IntPtr(mask);
+        StartWaitSampling();
         // Which pid belongs to which session epoch, on the record. An untracked
         // survivor is identified by its epoch (Quit's scan reports one per process),
         // and that only names a culprit if the epochs this bridge itself started are
@@ -313,6 +354,65 @@ class SessionManager : IDisposable
             try { Directory.Delete(handoff, recursive: true); } catch { }
         }
     }
+
+    /// <summary>
+    /// Start an installed package's application by its AUMID
+    /// (<c>&lt;PackageFamilyName&gt;!&lt;ApplicationId&gt;</c>) through the shell's
+    /// activation manager — what its Start-menu entry, and
+    /// <c>shell:AppsFolder\&lt;AUMID&gt;</c>, do. The Store install's launch shape
+    /// (<c>feature-catalog.md</c> § Implementation status today, how the Windows
+    /// Store install is driven): the OS starts the manifest's <c>Executable</c> under
+    /// the package's identity, so the process carries it, and nothing of this
+    /// bridge's environment reaches the app — a Store build reads none (convention
+    /// 15), and the activation could not carry it if it did.
+    ///
+    /// <para>The activation manager answers with the pid it started, so the app is
+    /// tracked by that pid rather than found by its exe path as a package-context
+    /// launch must be.</para>
+    /// </summary>
+    private static Process ActivateApplication(string aumid, string args)
+    {
+        var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+        try
+        {
+            manager.ActivateApplication(aumid, string.IsNullOrWhiteSpace(args) ? null : args,
+                                        ActivateOptions.None, out var pid);
+            var process = Process.GetProcessById((int)pid);
+            Console.Error.WriteLine(
+                $"[bridge] activation launch {aumid} pid={pid} package={PackageFullNameOf(process) ?? "(none)"}");
+            return process;
+        }
+        catch (System.Runtime.InteropServices.COMException ex)
+        {
+            throw new InvalidOperationException(
+                $"activating {aumid} failed with HRESULT 0x{ex.HResult:X8}: {ex.Message} "
+                + "(is the package installed for this user? `Get-AppxPackage` names it)", ex);
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.ReleaseComObject(manager);
+        }
+    }
+
+    private enum ActivateOptions { None = 0 }
+
+    /// <summary>The shell's <c>IApplicationActivationManager</c>; only its first
+    /// method is declared, which keeps the vtable slot it is called through.</summary>
+    [System.Runtime.InteropServices.ComImport]
+    [System.Runtime.InteropServices.Guid("2e941141-7f97-4756-ba1d-9decde894a3d")]
+    [System.Runtime.InteropServices.InterfaceType(System.Runtime.InteropServices.ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IApplicationActivationManager
+    {
+        void ActivateApplication(
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string appUserModelId,
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string? arguments,
+            ActivateOptions options,
+            out uint processId);
+    }
+
+    [System.Runtime.InteropServices.ComImport]
+    [System.Runtime.InteropServices.Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+    private class ApplicationActivationManager { }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int GetPackageFullName(IntPtr hProcess, ref uint length, System.Text.StringBuilder? name);
@@ -491,6 +591,157 @@ class SessionManager : IDisposable
         }
     }
 
+    /// <summary>When the tracked app exited, UTC, or null while it runs or with no
+    /// handle that answers — so a driver that finds it dead at its close can say how
+    /// long before the close it died (convention 6's close rider). Like the exit
+    /// code, it is gone once <see cref="Quit"/> drops the handle, which is why the
+    /// driver reads it before its <c>DELETE /session</c>.</summary>
+    public DateTime? AppExitedAt()
+    {
+        if (_appProcess is null) return null;
+        try
+        {
+            _appProcess.Refresh();
+            return _appProcess.HasExited ? _appProcess.ExitTime.ToUniversalTime() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The app's own user+kernel CPU time so far, in ms, or null with no
+    /// handle that answers — what the app actually got, where a lane's figure says
+    /// only what was asked (convention 6's launch-timeout rider). Refreshed, because a
+    /// <see cref="Process"/> caches; and still answering after the exit, for as long
+    /// as the handle is open, so a launch that died says what it ran first.</summary>
+    public long? AppCpuMs()
+    {
+        if (_appProcess is null) return null;
+        try
+        {
+            _appProcess.Refresh();
+            return (long)_appProcess.TotalProcessorTime.TotalMilliseconds;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The app's CPU cycles so far, exact, or null with no handle that
+    /// answers — the stall verdict's "did the app run" reading
+    /// (<see cref="StallReadings.CyclesStart"/> says why not the ms figure).</summary>
+    public long? AppCycles()
+    {
+        if (_appProcess is null) return null;
+        try
+        {
+            return StallWatch.CyclesOf(_appProcess.Handle);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>How many of the app's threads are waiting for a CPU right now —
+    /// runnable and not running (Ready, Standby, or the kernel's DeferredReady, which
+    /// .NET's enum spells Unknown) — and how many it has; null with no handle that
+    /// answers. Read from the system's process snapshot, so it needs no handle to the
+    /// app and works across the bridge's x64 / the app's ARM64 boundary.</summary>
+    public (int ready, int total)? AppThreadsReady()
+        => _appProcess is null ? null : ThreadsReady(_appProcess);
+
+    private static (int ready, int total)? ThreadsReady(Process process)
+    {
+        try
+        {
+            process.Refresh();
+            int ready = 0, total = 0;
+            foreach (ProcessThread thread in process.Threads)
+            {
+                total++;
+                var state = (int)thread.ThreadState;
+                if (state == (int)System.Diagnostics.ThreadState.Ready
+                    || state == (int)System.Diagnostics.ThreadState.Standby
+                    || state == 7 /* KTHREAD_STATE DeferredReady */)
+                {
+                    ready++;
+                }
+            }
+            return (ready, total);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The launch's CPU wait, sampled: how many one-a-second reads of the
+    /// app's thread table this launch has had, and at how many of them a thread was
+    /// waiting for a CPU. Windows keeps no run-queue wait an unprivileged reader can
+    /// take, so the bridge samples <see cref="ThreadsReady"/> from the launch until
+    /// the app's agent first pushes its state (<see cref="AgentUp"/>), on its own
+    /// timer and its own handle — never from the driver's gate loop, whose one
+    /// iteration can spend 30 s in a UIA main-window resolve, and never behind the
+    /// UIA gate. The share of reads with a Ready thread is the app's CPU wait
+    /// (convention 6's launch-timeout rider): a starved launch reads Ready at nearly
+    /// every sample, a launch that blocks at none. The counts outlive the app, so a
+    /// launch that died still says what it waited for.</summary>
+    public (int samples, int ready) WaitSamples()
+        => (Volatile.Read(ref _waitSamples), Volatile.Read(ref _waitReadySamples));
+
+    private void StartWaitSampling()
+    {
+        StopWaitSampling();
+        _waitSamples = 0;
+        _waitReadySamples = 0;
+        try { _waitProcess = Process.GetProcessById(AppPid); }
+        catch { _waitProcess = null; return; }
+        _waitTimer = new Timer(_ => SampleWait(), null, TimeSpan.Zero, WaitSamplePeriod);
+    }
+
+    private void SampleWait()
+    {
+        var process = _waitProcess;
+        if (process is null) return;
+        var reading = ThreadsReady(process);
+        if (reading is null) return;
+        var n = Interlocked.Increment(ref _waitSamples);
+        if (reading.Value.ready > 0) Interlocked.Increment(ref _waitReadySamples);
+        if (n >= MaxWaitSamples) StopWaitSampling();
+    }
+
+    /// <summary>The app's agent has pushed its first state: the launch is up, and
+    /// its CPU wait is no longer sampled.</summary>
+    public void AgentUp() => StopWaitSampling();
+
+    private void StopWaitSampling()
+    {
+        try { _waitTimer?.Dispose(); } catch { }
+        _waitTimer = null;
+        try { _waitProcess?.Dispose(); } catch { }
+        _waitProcess = null;
+    }
+
+    /// <summary>The app's CPU mask, or null with no handle that answers. A launch that
+    /// asked for a pin reads it back here: inside a job carrying an affinity limit the
+    /// set succeeds and changes nothing.</summary>
+    public long? AppAffinityMask()
+    {
+        if (_appProcess is null) return null;
+        try
+        {
+            _appProcess.Refresh();
+            return _appProcess.ProcessorAffinity.ToInt64();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>How long a killed app gets to actually leave the process table.</summary>
     private const int ExitBudgetMs = 10_000;
 
@@ -586,6 +837,7 @@ class SessionManager : IDisposable
             }
             trackedPid = AppPid;
         }
+        StopWaitSampling();
         try { _appProcess?.Dispose(); } catch { }
         try { _automation?.Dispose(); } catch { }
         _appProcess = null;

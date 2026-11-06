@@ -1087,6 +1087,15 @@ pub(crate) fn log_displayed_notice(text: &str) {
     tracing::info!(target: "fauna_tui::notice", "{text}");
 }
 
+/// Record an error line the UI is showing in the log ring at `error` — the
+/// error half of [`log_displayed_notice`] (category 1 again). Called by the
+/// producers that put an `error-message` up — [`crate::app::PageErrors::insert`]
+/// and the test agent's injected error — never by the paint, so a redraw logs
+/// nothing.
+pub(crate) fn log_displayed_error(text: &str) {
+    tracing::error!(target: "fauna_tui::notice", "{text}");
+}
+
 /// Fire-and-forget an action from the keyboard path. The observer tick redraws
 /// when the machine lands, so a multi-second probe leaves the TUI responsive.
 /// Resolve a [`RecoveryEntryOutcome`] into what the user sees.
@@ -1427,7 +1436,7 @@ pub fn handle_wizard_done(app: &mut crate::app::App, tx: &UnboundedSender<UiMess
             // domain is still propagating (`onboarding.md` § Reach hint). `None`
             // on every path that did not provision a box.
             let reach_ipv4 = app.wizard.machine.provision_reach_ipv4();
-            if let Err(e) = crate::session::adopt(
+            let adopted = crate::session::adopt(
                 app,
                 tx,
                 &nest_url,
@@ -1436,7 +1445,20 @@ pub fn handle_wizard_done(app: &mut crate::app::App, tx: &UnboundedSender<UiMess
                 handle,
                 reach_ipv4.as_deref(),
                 &restored_predecessors,
-            ) {
+            );
+            // Consume the terminal: a wizard left at `Done` re-fires this handler
+            // the moment the session next drops (`showing_launch_surface()` turns
+            // true again), and a second `adopt` is a second claim terminal — it
+            // signs the account back in and spends whatever pending-factory-reset
+            // slot the drop was protecting. Measured on the admin reset right
+            // after a wizard claim: the reset's sign-out re-adopted, the slot was
+            // gone, and the box sat unclaimed under a code no client held
+            // (`nest/common.md` § Client-state recoverability, CR-1). Everything
+            // the success arm below needs was captured off the machine above.
+            if adopted.is_ok() {
+                app.wizard.reset();
+            }
+            if let Err(e) = adopted {
                 tracing::error!("wizard LoggedIn: {e}");
                 app.wizard.error = Some(e);
             } else if let Some(session) = app.session.as_ref() {

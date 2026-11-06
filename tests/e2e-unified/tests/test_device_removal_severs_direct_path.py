@@ -31,8 +31,10 @@ found it did not, for minutes: the removed seat kept pulling bodies directly.
    residency folder, so the nest holds its bytes), and ``b``'s count of chunks
    a sibling served it does not move.
 
-Two tui seats on one machine, no operator (convention 16); the removal is the
-user's gesture on ``a``'s Devices page (convention 8). Every wait is a deadline
+Two seats on one machine, no operator (convention 16) — tui's pair, and the
+platform's own GUI app (``native``) on linux, windows and macos, the pairs
+``test_device_to_device_file_transfer.py`` runs; the removal is the user's
+gesture on ``a``'s Devices page (convention 8). Every wait is a deadline
 poll on state (convention 14).
 """
 
@@ -48,7 +50,7 @@ import pytest
 from common import user_create_folder
 from helpers import sync_seats
 from helpers.waiting import await_device_removal_ready, wait_until
-from tests.test_device_direct_transfer_switch import _card_scope
+from tests.test_device_direct_transfer_switch import _card_scope, _own_name
 from tests.test_device_to_device_file_transfer import (
     BODY_BYTES,
     SIBLING_WINDOW,
@@ -59,30 +61,38 @@ from tests.test_device_to_device_file_transfer import (
     _await_siblings,
     _reading,
     _seat_factory,
+    seat_pairs,
 )
 
 pytestmark = [
     pytest.mark.tier_3,
+    # tui led; linux, windows and macos run their native pairs through the
+    # same seat seam. android and iOS run no seat pair (their absence of this
+    # outcome is declared on the catalog page).
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.windows,
+    pytest.mark.macos,
 ]
 
-# The tui pair only: the journey drives the Devices page through the seat's
-# own action layer, and tui is the lead app.
+# The device-to-device journey's pairs, its owed legs included: the journey
+# drives the Devices page through each seat's own action layer, which every
+# seat mode carries.
 _SEAT_PAIRS = [
     pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
-    for pair in sync_seats.seat_sets_for_platform(sys.platform, (("tui", "tui"),))
+    for pair in seat_pairs(sys.platform)
 ]
 
 #: The gesture's own re-snapshot repaints the roster.
 _ROSTER_WINDOW = 60.0
 
 
-def _sibling_card(seat) -> str | None:
-    """The scope of the other seat's card on ``seat``'s Devices page, or None
-    once it has left the roster."""
+def _sibling_card(seat, sibling: str) -> str | None:
+    """The scope of the card named ``sibling`` (the other seat's own device
+    name) on ``seat``'s Devices page, or None once it has left the roster."""
     seat.app.backups.navigate_devices()
     try:
-        return _card_scope(seat.app.driver, own=False)
+        return _card_scope(seat.app.driver, sibling=sibling)
     except AssertionError:
         return None
 
@@ -133,13 +143,14 @@ def test_a_removed_device_fetches_nothing_directly_from_your_other_devices(
 
             # The user's gesture: seat a removes seat b's card.
             driver = a.app.driver
+            b_name = _own_name(b)
             a.app.backups.navigate_devices()
             await_device_removal_ready(driver)
-            scope = _card_scope(driver, own=False)
+            scope = _card_scope(driver, sibling=b_name)
             index = int(scope.rsplit("[", 1)[1].rstrip("]"))
             driver.click("device-remove-button", index=index)
             wait_until(
-                lambda: _sibling_card(a) is None,
+                lambda: _sibling_card(a, b_name) is None,
                 _ROSTER_WINDOW, interval=1.0,
                 diagnose=lambda: (
                     f"seat b's card never left seat a's Devices page after the "

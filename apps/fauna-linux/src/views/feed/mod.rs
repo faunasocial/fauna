@@ -8,7 +8,7 @@ pub use post_list::PostListHandles;
 // (`profile.md` § The Posts tab → *What a row is*).
 pub(crate) use post_list::paint_post_cards;
 // The cue probe (`feed::viewport`) reads the inline player's progress.
-pub(crate) use video_thumbnail::{played_position_us, take_played_pm};
+pub(crate) use video_thumbnail::{is_engaged, played_position_us};
 // Shared by the document walker's quoted-post embed (`views::document`) as well
 // as the feed post list/detail — the muted "unverified source" badge builder.
 pub use post_list::{build_delegated_origin_badge, build_unverified_badge};
@@ -70,6 +70,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
     split.set_content(Some(&detail_page));
 
     let trending_list = feed_list_handles.trending_list.clone();
+    let local_list = feed_list_handles.local_list.clone();
     let feeds_list = feed_list_handles.feeds_list.clone();
     let bridge_list = feed_list_handles.bridge_list.clone();
     let subscribe_btn = feed_list_handles.subscribe_btn.clone();
@@ -94,6 +95,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
         let m = Arc::clone(&manager);
         let rt = rt.clone();
         let feeds_list = feeds_list.clone();
+        let local_list = local_list.clone();
         let suppress = Rc::clone(&suppress);
         trending_list.connect_row_selected(move |_, row| {
             if suppress.get() || row.is_none() {
@@ -101,11 +103,38 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
             }
             suppress.set(true);
             feeds_list.unselect_all();
+            local_list.unselect_all();
             suppress.set(false);
             let m = Arc::clone(&m);
             rt.spawn(async move { m.select_trending_feed().await });
         });
         trending_list.connect_row_activated(|list, row| {
+            if !row.is_selected() {
+                list.select_row(Some(row));
+            }
+        });
+    }
+
+    // Local (`feed-local-item`) → the nest's local feed via the shared
+    // `select_feed(None)`; clears the other lists' highlights.
+    {
+        let m = Arc::clone(&manager);
+        let rt = rt.clone();
+        let feeds_list = feeds_list.clone();
+        let trending_list = trending_list.clone();
+        let suppress = Rc::clone(&suppress);
+        local_list.connect_row_selected(move |_, row| {
+            if suppress.get() || row.is_none() {
+                return; // programmatic clear
+            }
+            suppress.set(true);
+            feeds_list.unselect_all();
+            trending_list.unselect_all();
+            suppress.set(false);
+            let m = Arc::clone(&m);
+            rt.spawn(async move { m.select_feed(None).await });
+        });
+        local_list.connect_row_activated(|list, row| {
             if !row.is_selected() {
                 list.select_row(Some(row));
             }
@@ -122,6 +151,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
         let m = Arc::clone(&manager);
         let rt = rt.clone();
         let trending_list = trending_list.clone();
+        let local_list = local_list.clone();
         let suppress = Rc::clone(&suppress);
         feeds_list.connect_row_selected(move |_, row| {
             if suppress.get() {
@@ -141,6 +171,7 @@ pub fn build_feed_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView, F
             if row.is_some() {
                 suppress.set(true);
                 trending_list.unselect_all();
+                local_list.unselect_all();
                 suppress.set(false);
             }
             let m = Arc::clone(&m);

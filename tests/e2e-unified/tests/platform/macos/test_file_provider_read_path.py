@@ -111,7 +111,6 @@ _BACKUP_KEY_CONTEXT = "fauna backup encryption key 2026-03-12"
 _CONVERGENT_CHUNK_CONTEXT = "fauna.backup.chunk.v1"
 
 _APPLE_DIR = Path(__file__).resolve().parents[5] / "apps" / "fauna-apple"
-_XCODEPROJ = _APPLE_DIR / "Fauna.xcodeproj"
 _XCFRAMEWORK = _APPLE_DIR / "FaunaFFI.xcframework"
 _APPEX_ENTITLEMENTS = _APPLE_DIR / "Fauna-FileProvider" / "Fauna-FileProvider.entitlements"
 # The real app's entitlements (carry the macOS app group — Team-ID-prefixed
@@ -182,50 +181,27 @@ def _wait_for(predicate, timeout: float, msg: str, interval: float = 1.0):
 
 @pytest.fixture(scope="session")
 def fauna_fp_host_app():
-    """Build + ad-hoc-sign + install the Fauna FP host app (embeds the appex),
-    once per session. Requires ``just apple-ffi-host`` to have built the host
-    xcframework first — this fixture NEVER triggers the lazy FFI rebuild (which
-    races concurrent `just apple-ffi` on the shared xcframework and blows the
-    per-test timeout; memory `apple-ffi-e2e-build-race-and-timeout`)."""
+    """Ad-hoc-sign + install the Fauna FP host app (embeds the appex) at
+    ~/Applications/Fauna.app, once per session, from the build
+    `conftest._ensure_fp_host_app_built` ran at collection time, and unregister +
+    delete it at session end. This fixture is the one writer of that bundle. Requires ``just apple-ffi-host`` to have built the host xcframework
+    first — this fixture NEVER triggers the lazy FFI rebuild (which races
+    concurrent `just apple-ffi` on the shared xcframework and blows the per-test
+    timeout; memory `apple-ffi-e2e-build-race-and-timeout`)."""
+    from conftest import _ensure_fp_host_app_built
+
     if not _XCFRAMEWORK.exists():
         pytest.skip(
             f"{_XCFRAMEWORK} missing — run `just apple-ffi-host` before this tier_3 test "
             "(it links the FFI xcframework into the appex)."
         )
-    # The SAME derived-data tree `just mac-app` builds into: one xcodebuild cache
-    # per checkout rather than two (configurations namespace themselves under
-    # Build/Products/<Config>, so a Debug test build and a Release shipping build
-    # coexist in it).
-    derived = _APPLE_DIR / ".xcode-build"
-    build = subprocess.run(
-        [
-            "xcodebuild",
-            "-project",
-            str(_XCODEPROJ),
-            "-scheme",
-            "Fauna",
-            "-configuration",
-            "Debug",
-            "-derivedDataPath",
-            str(derived),
-            "ENABLE_DEBUG_DYLIB=NO",
-            "CODE_SIGNING_ALLOWED=NO",
-            "CODE_SIGNING_REQUIRED=NO",
-            "build",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=1200,
-    )
-    if build.returncode != 0:
-        raise AssertionError(f"xcodebuild failed:\n{build.stdout[-3000:]}\n{build.stderr[-2000:]}")
-
-    built_app = derived / "Build" / "Products" / "Debug" / "Fauna.app"
+    built_app = _ensure_fp_host_app_built()
+    assert built_app, "no Fauna app: this box has no xcodebuild"
     app_dst = Path.home() / "Applications" / "Fauna.app"
     app_dst.parent.mkdir(parents=True, exist_ok=True)
     if app_dst.exists():
         shutil.rmtree(app_dst)
-    subprocess.run(["cp", "-R", str(built_app), str(app_dst)], check=True, timeout=120)
+    subprocess.run(["cp", "-R", built_app, str(app_dst)], check=True, timeout=120)
 
     # Ad-hoc sign appex (inner) then app (outer) with their entitlements — the
     # app-group + sandbox capabilities are restricted, so xcodebuild is told not
@@ -259,7 +235,21 @@ def fauna_fp_host_app():
             subprocess.run([_LSREGISTER, "-u", twin], timeout=60)
     subprocess.run([_LSREGISTER, "-f", str(app_dst)], check=True, timeout=60)
     subprocess.run(["pluginkit", "-a", str(appex)], timeout=60)
-    return str(app_dst / "Contents" / "MacOS" / "Fauna")
+    try:
+        yield str(app_dst / "Contents" / "MacOS" / "Fauna")
+    finally:
+        # Leave nothing registered behind the session. An ad-hoc-signed copy left
+        # in ~/Applications keeps its File Provider extension registered with
+        # pluginkit, and when the system later launches that extension outside
+        # any test, Gatekeeper puts an "unidentified developer … differs from
+        # previously opened versions" dialog on an unwatched console, where
+        # nobody clicks it. The
+        # tests remove their own domains; the bundle and its registrations go
+        # here. Best-effort, never failing the session: the next setup's
+        # rmtree + re-register covers a teardown that did not finish.
+        subprocess.run(["pluginkit", "-r", str(appex)], timeout=60)
+        subprocess.run([_LSREGISTER, "-u", str(app_dst)], timeout=60)
+        shutil.rmtree(app_dst, ignore_errors=True)
 
 
 @pytest.mark.timeout(1200)

@@ -3,8 +3,11 @@
 Regression gate for the unconditional ``CFFIXED_USER_HOME`` flip
 (`drivers/macos.py::launch`): every launch — not just one with a pinned
 ``home``/``seed_app_support`` — must relocate the whole CoreFoundation home
-(Application Support with the MLS db and the SwiftData store, UserDefaults,
-Caches) into the per-launch throwaway home.
+(Application Support with the MLS db and the SwiftData store, Caches) into the
+per-launch throwaway home. The app's own preferences are NOT moved by it —
+`cfprefsd` keeps `.standard` in the real profile — and ride FaunaKit's
+`AppDefaults.store` suite instead; `test_autostart_choice.py`'s never-chosen
+precondition is that half's witness.
 
 Why this is load-bearing: ``HOME`` alone moves nothing CF-resolved, so a
 default-path launch that skips ``CFFIXED_USER_HOME`` puts every run's state in

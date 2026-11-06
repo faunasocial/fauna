@@ -27,7 +27,7 @@ COMMIT=$(tr -d '[:space:]' < "$COMMIT_FILE")
 if [[ -n "${DAGCBOR_FIXTURES_DIR:-}" ]]; then
     DEST="$DAGCBOR_FIXTURES_DIR"
 elif [[ -d /work ]]; then
-    DEST=/work/tmp/codec-fixtures
+    DEST="/work/tmp/fauna/$(basename -- "$(git rev-parse --show-toplevel)")/codec-fixtures"
 else
     DEST="${TMPDIR:-/tmp}/fauna-codec-fixtures"
 fi

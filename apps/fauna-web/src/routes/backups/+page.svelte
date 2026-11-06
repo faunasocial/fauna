@@ -14,6 +14,7 @@
     backupAuditRunPass,
     backupRecoverFromDestination,
     backupPullBackFromDestination,
+    backupPullBackPreflight,
     type DestinationAuditRow,
     type ReseedResult,
     type MessageKindSnapshot,
@@ -130,8 +131,26 @@
   let restoreSnapshots: MessageKindSnapshot[] = $state([]);
   let selectedRestoreId = $state(''); // stringified snapshot id of the picked row
   let restoreConfirm = $state(''); // friction-bar re-typed id
-  let restoreKindMail = $state(true);
-  let restoreKindCalendar = $state(true);
+  // The five restore kinds in `KIND_ENTRIES` order: wire token + the
+  // checkbox label a snapshot of that kind is named by (never the raw token).
+  const RESTORE_KINDS = [
+    { token: 'mail', label: t.backups.restore_kinds_mail },
+    { token: 'calendar', label: t.backups.restore_kinds_calendar },
+    { token: 'card', label: t.backups.restore_kinds_contacts },
+    { token: 'post', label: t.backups.restore_kinds_posts },
+    { token: 'conv', label: t.backups.restore_kinds_conversations },
+  ];
+  let restoreKindTicked = $state(RESTORE_KINDS.map(() => true));
+  function restoreKindLabel(token: string | null | undefined): string | null {
+    return RESTORE_KINDS.find((k) => k.token === token)?.label ?? token ?? null;
+  }
+  /** Whether the picked snapshot's kind box is ticked; a kind with no box is
+   *  not the checkboxes' to refuse. */
+  function selectedKindTicked(): boolean {
+    const snap = restoreSnapshots.find((s) => String(s.id) === selectedRestoreId);
+    const i = RESTORE_KINDS.findIndex((k) => k.token === snap?.message_kind);
+    return i < 0 || restoreKindTicked[i];
+  }
   // Explicit `string`: the progress line cycles through several i18n strings
   // (idle/running/done/no-snapshots); without the annotation TS narrows it to
   // the initial literal's type and rejects the other assignments.
@@ -187,7 +206,14 @@
   // hosts only the nest-held pull-back (it is never a custodian).
   type ReseedView =
     | { kind: 'closed' }
-    | { kind: 'confirming'; destinationId: string; name: string }
+    | { kind: 'preflighting'; destinationId: string }
+    | {
+        kind: 'confirming';
+        destinationId: string;
+        name: string;
+        lines: string[];
+        acceptance: string;
+      }
     | { kind: 'running' }
     | { kind: 'done'; text: string };
   let reseedView: ReseedView = $state({ kind: 'closed' });
@@ -195,7 +221,10 @@
   // The restore button arms only when the typed id exactly matches the
   // selected snapshot's id (same friction bar as the immediate-delete modal).
   let restoreButtonEnabled = $derived(
-    !restoring && restoreConfirm !== '' && restoreConfirm === selectedRestoreId,
+    !restoring &&
+      restoreConfirm !== '' &&
+      restoreConfirm === selectedRestoreId &&
+      selectedKindTicked(),
   );
 
   // --- Immediate-delete modal (docs/goal/ui/backups.md § Element IDs + the
@@ -913,10 +942,35 @@
     destinationsHydrated ? backupReseedRows($state.snapshot(destinations)) : [],
   );
 
-  function openReseedConfirm(d: BackupDestination) {
-    if (reseedView.kind === 'running') return;
+  // The press runs the shared preflight; the confirm opens on its answer,
+  // carrying the lines it accepts (no id of its own — the modal's body).
+  async function openReseedConfirm(d: BackupDestination) {
+    const id = $identity;
+    if (!id) return;
+    if (reseedView.kind === 'running' || reseedView.kind === 'preflighting') return;
     if (!backupReseedRunsPullBack($state.snapshot(destinations), d.destination_id)) return;
-    reseedView = { kind: 'confirming', destinationId: d.destination_id, name: destLabel(d) };
+    const destinationId = d.destination_id;
+    reseedView = { kind: 'preflighting', destinationId };
+    let preflight;
+    try {
+      preflight = await backupPullBackPreflight(id.secretHex, destinationId);
+    } catch (e: any) {
+      preflight = { stopped: e?.message ?? String(e), lines: [], acceptance: '' };
+    }
+    // Only the press still waiting opens: a cancel in between owns the view.
+    if (reseedView.kind !== 'preflighting' || reseedView.destinationId !== destinationId) return;
+    if (preflight.stopped !== null) {
+      reseedView = { kind: 'closed' };
+      showPageError(t.backups.backup_reseed_failed({ reason: preflight.stopped }));
+      return;
+    }
+    reseedView = {
+      kind: 'confirming',
+      destinationId,
+      name: destLabel(d),
+      lines: preflight.lines.map((line) => resolveLocalizedNested(line)),
+      acceptance: preflight.acceptance,
+    };
   }
 
   function cancelReseed() {
@@ -926,12 +980,13 @@
   async function confirmReseed() {
     const id = $identity;
     if (!id || reseedView.kind !== 'confirming') return;
-    const { destinationId, name } = reseedView;
+    const { destinationId, name, acceptance } = reseedView;
     reseedView = { kind: 'running' };
     error = '';
     let result: ReseedResult;
     try {
-      result = await backupPullBackFromDestination(id.secretHex, destinationId);
+      // The run carries exactly the preflight the confirm showed.
+      result = await backupPullBackFromDestination(id.secretHex, destinationId, acceptance);
     } catch (e: any) {
       result = { stopped: e?.message ?? String(e), resultLines: [], isWhole: false, reenrollError: null };
     }
@@ -1413,23 +1468,21 @@
       disabled={restoreSnapshots.length === 0}
     >
       {#each restoreSnapshots as snap}
-        <option value={String(snap.id)}>{snapshotRestoreOptionLabel(snap.message_kind, snap.id)}</option>
+        <option value={String(snap.id)}>{snapshotRestoreOptionLabel(restoreKindLabel(snap.message_kind), snap.id)}</option>
       {/each}
     </select>
 
     <div class="kinds" data-testid={IDS.RESTORE_KINDS_CHECKBOXES}>
-      <label>
-        <input type="checkbox" data-testid={IDS.RESTORE_KIND_CHECKBOX} bind:checked={restoreKindMail} />
-        {t.backups.restore_kinds_mail}
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          data-testid={IDS.RESTORE_KIND_CHECKBOX}
-          bind:checked={restoreKindCalendar}
-        />
-        {t.backups.restore_kinds_calendar}
-      </label>
+      {#each RESTORE_KINDS as kind, i}
+        <label>
+          <input
+            type="checkbox"
+            data-testid={IDS.RESTORE_KIND_CHECKBOX}
+            bind:checked={restoreKindTicked[i]}
+          />
+          {kind.label}
+        </label>
+      {/each}
     </div>
 
     <input
@@ -1683,6 +1736,9 @@
       <div data-testid={IDS.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL} class="dest-remove-confirm">
         <p><strong>{t.backups.backup_reseed_pull_back_confirm_title({ name: reseedView.name })}</strong></p>
         <p>{t.backups.backup_reseed_pull_back_confirm_body({ name: reseedView.name })}</p>
+        {#each reseedView.lines as line}
+          <p>{line}</p>
+        {/each}
         <div class="dest-form-actions">
           <button
             data-testid={IDS.BACKUP_DESTINATION_RESEED_CANCEL_BUTTON}

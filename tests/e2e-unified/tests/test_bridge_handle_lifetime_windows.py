@@ -69,3 +69,18 @@ def test_bridge_app_handle_survives_a_find_and_kills_through_it() -> None:
         f"bridge handle-lifetime self-test reported {proc.returncode} failure(s).\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
+
+
+def test_bridge_status_reports_the_apps_cpu_time_launch_instant_and_pin() -> None:
+    """What a launch's timeout report reads off `/session/status`
+    (`e2e-self-diagnosing-failures.md` § The convention, the launch-timeout rider):
+    the app's CPU time from the handle above, with `cmd` and `ping` standing in."""
+    _ensure_bridge_built()
+    proc = subprocess.run(
+        [str(_BRIDGE_EXE), "--self-test-launch-status"],
+        capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, (
+        f"bridge launch-status self-test reported {proc.returncode} failure(s).\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )

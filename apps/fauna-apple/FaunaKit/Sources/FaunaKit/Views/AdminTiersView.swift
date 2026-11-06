@@ -50,7 +50,9 @@ public struct AdminTiersView: View {
                     }
                     ForEach(Array(vm.tiers.enumerated()), id: \.element.name) { offset, tier in
                         TierDefinitionRow(tier: tier, reloadToken: vm.snapshotVersion,
-                                          isBusy: vm.isBusy) { await vm.saveTier($0) }
+                                          isBusy: vm.isBusy,
+                                          onSave: { await vm.saveTier($0) },
+                                          onDelete: { await vm.deleteTier(name: $0) })
                             .accessibilityElement(children: .contain)
                             .accessibilityIdentifier(Ids.adminSettingsTierItem)
                             // Per-row read anchor (indexed registry entry per
@@ -138,6 +140,7 @@ private struct TierDefinitionRow: View {
     let reloadToken: Int
     let isBusy: Bool
     let onSave: (FfiAdminTier) async -> Void
+    let onDelete: (_ name: String) async -> Void
 
     @State private var inbox = ""
     @State private var storage = ""
@@ -171,6 +174,19 @@ private struct TierDefinitionRow: View {
                 save()
             }
             .faunaGate("fauna.admin.tiers.update")
+
+            // Delete (admin.md § 3 → *Removing a tier*): on every row, `free`'s
+            // included — which tier is removable is the nest's call. No confirm.
+            Button(L.admin.settingsPage.deleteTier, role: .destructive) {
+                delete()
+            }
+            .disabled(isBusy)
+            .accessibilityIdentifier(Ids.adminSettingsTierDeleteButton)
+            .automationActivate(Ids.adminSettingsTierDeleteButton,
+                                isEnabled: { !isBusy }) {
+                delete()
+            }
+            .faunaGate("fauna.admin.tiers.delete")
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -181,6 +197,11 @@ private struct TierDefinitionRow: View {
     /// two can never diverge.
     private func save() {
         Task { await onSave(gather()) }
+    }
+
+    /// The Delete action — shared by the `Button` and `automationActivate`.
+    private func delete() {
+        Task { await onDelete(tier.name) }
     }
 
     private func seed() {

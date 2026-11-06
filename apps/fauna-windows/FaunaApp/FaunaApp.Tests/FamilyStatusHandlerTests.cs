@@ -49,7 +49,7 @@ public class FamilyStatusHandlerTests : IDisposable
 
     /// <summary>
     /// The defect this row fixes: a successful status whose raw <c>policy</c>
-    /// names a floor, Notify and a lock-worthy window, but with no guardian
+    /// names a content rule, Notify and a lock-worthy window, but with no guardian
     /// and so no fold, must bind NONE of the three — proving the handler
     /// reads <c>supervision</c>, not <c>policy</c>.
     /// </summary>
@@ -63,7 +63,7 @@ public class FamilyStatusHandlerTests : IDisposable
                 unknownSenderMail: "allow",
                 federationContact: false,
                 feedSources: "allow",
-                contentPolicy: FfiContentPolicyFixture.Make(nsfw: "block"),
+                contentPolicy: FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block),
                 screenTime: FfiScreenTimePolicyFixture.Make(dailyMinutes: 0),
                 contentNotify: true,
                 unknownPeerDm: null),
@@ -84,12 +84,12 @@ public class FamilyStatusHandlerTests : IDisposable
     /// fields rather than the raw policy.
     /// </summary>
     [Fact]
-    public void ApplySupervision_FoldPresent_BindsFloorNotifyAndLockFromTheFold()
+    public void ApplySupervision_FoldPresent_BindsRulesNotifyAndLockFromTheFold()
     {
         var guardian = new FfiFamilyGuardianInfo(actorId: new byte[] { 1 }, handle: "guardian-1");
         var supervision = new FfiSupervisionSnapshot(
             supervisedBy: guardian,
-            contentPolicy: FfiContentPolicyFixture.Make(nsfw: "block"),
+            contentPolicy: FfiContentPolicyFixture.Make(nsfw: uniffi.fauna_client_policy.RuleVerdict.Block),
             contentNotify: true,
             screenTime: FfiScreenTimePolicyFixture.Make(dailyMinutes: 0));
         var status = FfiFamilyStatusFixture.Make(

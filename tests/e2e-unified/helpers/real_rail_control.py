@@ -126,6 +126,12 @@ REAL_RAIL_LAUNCH_MARKER = "mls-sync:"
 GATE_OPEN = "real-conversations gate OPEN"
 GATE_CLOSED = "real-conversations gate CLOSED"
 
+#: What the apple shells stamp when the app signs ITSELF in from its own store
+#: (the production launch a pinned-store relaunch takes), which reaches no gate
+#: and builds the real session unconditionally — an open rail by construction.
+#: Wording owned by `AutomationRegistry.swift::productionLaunchRailVerdict`.
+PRODUCTION_LAUNCH = "real-conversations rail: production launch"
+
 #: Per stage. The launch step runs off the LOGIN path (both apple shells stamp
 #: the verdict and build the session inside the post-auth block), so the lines
 #: may not be written at the instant login returns — they landed ~0.8 s after it
@@ -162,15 +168,14 @@ def witness_real_rail(driver, *, context: str, budget_s: float = STAGE_BUDGET_S)
     Raises `AssertionError` on a finding; `pytest.skip`s — with its class
     declared (convention 7) — where the app's log cannot answer at all.
     """
+    app_surface.require_surface(driver, "app-log-reader")
     if not app_log_section.has_reader(driver):
-        app_surface.skip_unbuilt(
-            driver,
-            surface="an app-log reader on the e2e driver",
-            detail=f"{context} can witness the real FaunaMls rail only through the "
-                   "app's own account of its launch, and this driver answers "
-                   "neither app_log_text nor app_stderr_text — so the absence of "
-                   "the marker here would be no evidence at all",
-            tracked="docs/goal/architecture/e2e-self-diagnosing-failures.md § The convention",
+        raise AssertionError(
+            f"{context} can witness the real FaunaMls rail only through the app's "
+            "own account of its launch, and this driver answers neither "
+            "app_log_text nor app_stderr_text, though surfaces.toml declares its "
+            "app's `app-log-reader` built — the absence of the marker here would "
+            "be no evidence at all"
         )
     if driver.is_web():
         # Not debt: no reader of ANY size could make web pass this control. The
@@ -189,11 +194,13 @@ def witness_real_rail(driver, *, context: str, budget_s: float = STAGE_BUDGET_S)
 
     # Stage 1 — the shell's own verdict on the gate. Apple stamps it on BOTH
     # arms, so reaching it at all proves the login path got here, and its
-    # wording says which way the branch went. No other shell stamps it.
+    # wording says which way the branch went. No other shell stamps it. A launch
+    # the app made itself (a pinned-store relaunch) reaches no gate and stamps
+    # PRODUCTION_LAUNCH instead: the real session, unconditionally.
     if driver.is_macos() or driver.is_ios():
         verdict = waiting.wait_until(
             lambda: next(
-                (m for m in (GATE_OPEN, GATE_CLOSED)
+                (m for m in (GATE_OPEN, GATE_CLOSED, PRODUCTION_LAUNCH)
                  if m in app_log_section.app_text(driver)),
                 None,
             ),
@@ -205,7 +212,7 @@ def witness_real_rail(driver, *, context: str, budget_s: float = STAGE_BUDGET_S)
                 f"which is itself the finding. {_diagnose(driver)}"
             ),
         )
-        assert verdict == GATE_OPEN, (
+        assert verdict in (GATE_OPEN, PRODUCTION_LAUNCH), (
             f"{context}: the app's own log says the real-conversations gate was "
             "CLOSED, so this session ran the deterministic MOCK conversation "
             "backends — every green built on it proves nothing about the real "

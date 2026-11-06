@@ -55,7 +55,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 import fauna_ffi
 from helpers import nostr_relay
-from helpers.app_surface import skip_unbuilt
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bridge/consent_spa_url are pytest fixtures adopted by import
     HANDLE_DOMAIN,
@@ -65,7 +64,8 @@ from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bri
     consent_spa_url,
 )
 from helpers.budgets import RECEIVE_CYCLE_S, RPC_ROUNDTRIP_S
-from helpers.family_wire import DEFAULT_WARD_POLICY, admit_adult_directly, admit_ward
+from helpers.admin_wire import admit_adult
+from helpers.family_wire import DEFAULT_WARD_POLICY, admit_ward
 from helpers.client_metadata_server import (
     DOCUMENT_PATH,
     ClientMetadataServer,
@@ -138,24 +138,11 @@ def consent_nest_env(metadata_server):
     return metadata_server.nest_env()
 
 
-def _bridged_built(driver) -> bool:
-    """Whether this app registers the bridged rail and paints it — the apps
-    the lift (``conversations.md`` § Implementation status today) has reached."""
-    return driver.is_tui() or driver.is_web() or driver.is_linux() or driver.is_windows() or driver.is_macos() or driver.is_ios()
-
-
 @pytest.fixture
 def bridged_app(request, app, consent_nest, consent_bridge):
     """`app`, logged in as alice on the consent nest, with mail enabled through
     the app's own UI — which is what gives the account the recipient key a
     bridge seals to and the app opens under."""
-    if not _bridged_built(app.driver):
-        skip_unbuilt(
-            app.driver,
-            surface="bridged rooms on the unified Conversations page",
-            detail="no BridgedBackend is registered on this app yet",
-            tracked="docs/goal/ui/conversations.md § Implementation status today",
-        )
     from conftest import _login_app_as
 
     _login_app_as(
@@ -265,6 +252,7 @@ def _await_text(app, body):
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge(
     bridged_app, consent_nest, metadata_server
 ):
@@ -363,6 +351,10 @@ def test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge(
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.windows
 def test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too(
     bridged_app, consent_nest, metadata_server
 ):
@@ -480,14 +472,16 @@ def test_a_revoked_bridges_room_says_so_and_its_undelivered_reply_too(
     assert any(INBOUND_BODY in (t or "") for t in texts), texts
 
     # ── Readable, never writable: the reply bar is withheld. ──
-    if not app.driver.is_tui():
-        skip_unbuilt(
-            app.driver,
-            surface="a read-only dm-compose-bar on a disconnected bridged room",
-            detail="dm-text-field / dm-send-button do not yet gate on can_send",
-            tracked="docs/goal/behavior/bridged-adapter.md § Implementation status today",
-        )
-    for control in ("dm-text-field", "dm-send-button"):
+    # android has no inline compose bar: its per-bubble Reply is the compose
+    # entry, gated on the same shared `ThreadCapabilities.canSend`.
+    if app.driver.is_android():
+        controls = ("dm-reply-button",)
+    elif app.driver.is_windows():
+        # windows has the inline bar AND gates each bubble's Reply on the same flag.
+        controls = ("dm-text-field", "dm-send-button", "dm-reply-button")
+    else:
+        controls = ("dm-text-field", "dm-send-button")
+    for control in controls:
         assert app.driver.get_attr(control, "disabled") == "true", (
             f"{control} must be withheld on a room no bridge serves"
         )
@@ -510,7 +504,7 @@ def held_ward(consent_nest):
     completes as an identity."""
     nest = consent_nest
     tail = os.urandom(3).hex()
-    guardian = admit_adult_directly(nest, f"guardian-{tail}")
+    guardian = admit_adult(nest, f"guardian-{tail}")
     handle = f"ward-{tail}"
     ward = admit_ward(nest, guardian, handle)
     ward["actor_id_bytes"] = bytes.fromhex(ward["actor_id_hex"])
@@ -546,16 +540,10 @@ def held_ward(consent_nest):
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_cold_peers_bridged_room_is_marked_held_for_a_ward_and_stays_readable(
     request, app, consent_nest, consent_bridge, metadata_server, held_ward
 ):
-    if not _bridged_built(app.driver):
-        skip_unbuilt(
-            app.driver,
-            surface="bridged rooms on the unified Conversations page",
-            detail="no BridgedBackend is registered on this app yet",
-            tracked="docs/goal/ui/conversations.md § Implementation status today",
-        )
     from conftest import _login_app_as
 
     nest = _as_user(consent_nest, held_ward)
@@ -636,6 +624,7 @@ LATER_BODY = "see you there on saturday"
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_guardian_lets_a_held_bridged_conversation_through_and_later_messages_arrive(
     request, app, consent_nest, consent_bridge, metadata_server, held_ward
 ):
@@ -652,13 +641,6 @@ def test_a_guardian_lets_a_held_bridged_conversation_through_and_later_messages_
     released after the Approve — so a marker the app still paints names the
     app, not the gate.
     """
-    if not _bridged_built(app.driver):
-        skip_unbuilt(
-            app.driver,
-            surface="bridged rooms on the unified Conversations page",
-            detail="no BridgedBackend is registered on this app yet",
-            tracked="docs/goal/ui/conversations.md § Implementation status today",
-        )
     from conftest import _login_app_as
 
     ward_nest = _as_user(consent_nest, held_ward)
@@ -779,6 +761,7 @@ def _post_to_relay(nest, event: dict) -> None:
 @pytest.mark.windows
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 def test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room(bridged_app, consent_nest):
     app = bridged_app
     nest = consent_nest

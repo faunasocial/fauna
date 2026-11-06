@@ -147,6 +147,9 @@ pub(crate) fn strip_for_public(mut change: SyncChange, grant: FolderReadGrant) -
     change.content_key_version = None;
     change.signature = None;
     change.signer_key = None;
+    // The depositor names one of the owner's connected apps — identity, like
+    // the recorder (`folder-deposit.md` ruling 3).
+    change.deposited_by = None;
     // The label projection follows the GRANT, uniformly with every other folder
     // read surface, rather than open-coding the rule here — the one predicate
     // means a future grant class cannot be given labels at one surface and
@@ -177,17 +180,15 @@ pub(crate) async fn public_changes_page(
 ) -> Result<Vec<SyncChange>, RpcError> {
     let floor = since.max(folder.public_floor_seq);
     let limit = crate::segments::effective_fetch_limit(limit);
-    let mut rows = state
+    // The clamped `limit` bounds the load itself, under the one DB lock.
+    let rows = state
         .db
-        .get_sync_changes_for_folder(folder.id, floor, None)
+        .get_sync_changes_for_folder_page(folder.id, floor, None, limit)
         .await
         .map_err(|e| crate::rpc_errors::internal_ns(NS, e))?;
-    rows.truncate(limit as usize);
     // Frame-budget exactly like the member `folder.changes.fetch` page — close
     // early, never skip, so the follower's cursor stays contiguous.
-    let (rows, rest) = crate::segments::take_page_within_budget(rows, |c| {
-        c.wire_len() + crate::segments::RECORD_WIRE_OVERHEAD
-    });
+    let (rows, rest) = crate::sync_handlers::take_change_page(rows);
     if rows.is_empty()
         && let Some(head) = rest.first()
     {
@@ -220,12 +221,14 @@ mod tests {
             path: Some("notes/a.md".to_string()),
             device_id: Some("cc".repeat(32)),
             content_key_version: Some(4),
+            content_generation: None,
             thumbnail_hash: Some("dd".repeat(32)),
             author_actor_id: Some("ee".repeat(32)),
             path_sealed: Some(fauna_protocol::ByteBuf::from(vec![1, 2, 3])),
             derived_through: Some(5),
             is_resolution: Some(false),
             is_retention: Some(false),
+            deposited_by: Some("ff".repeat(32)),
             item_class: None,
             origin_writer: None,
             origin_seq: None,
@@ -248,6 +251,7 @@ mod tests {
         assert_eq!(stripped.content_key_version, None, "the M2 generation");
         assert_eq!(stripped.signature, None, "the writer signature");
         assert_eq!(stripped.signer_key, None, "the writer's device key");
+        assert_eq!(stripped.deposited_by, None, "the depositing app");
 
         let kept = wire_change_with_everything();
         assert_eq!(stripped.seq, kept.seq);

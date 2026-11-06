@@ -49,7 +49,11 @@ from `completeAuthenticatedLaunch`, latch-gated on `pendingFirstSetupMail`); tui
 wires the ported `mail_glue::provision_mail_at_first_setup` from
 `wizard::handle_wizard_done`'s `WizardOutcome::LoggedIn` arm. All three drive the
 believable first-setup wizard end-to-end — on macOS via the in-process driver (no
-XCUITest). The remaining clients' lift is tracked elsewhere.
+XCUITest). Web runs the same shared step through the wasm
+`applyPostClaimServingEnablement` on the onboarding page's `LoggedIn` handoff; a
+browser tab cannot pin a self-signed loopback nest, so its leg rides a plain-HTTP
+nest behind the `"nest"` override and a domain-shaped handle (the fixture says
+how). The remaining clients' lift is tracked elsewhere.
 """
 
 from __future__ import annotations
@@ -71,13 +75,13 @@ _e2e_dir = str(Path(__file__).resolve().parent.parent)  # tests/e2e-unified/
 if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
-from common.auth import register_handled_actor  # noqa: E402
+from helpers.admin_wire import admit_adult  # noqa: E402
 from conftest import (  # noqa: E402
     MAIL_PRIMARY_DOMAIN,
     _spawn_mda_bridge,
     get_available_apps,
 )
-from helpers.app_surface import skip_unbuilt  # noqa: E402
+from helpers.app_surface import require_surface  # noqa: E402
 from helpers.authenticated_shell import SHELL_MARKERS  # noqa: E402
 from helpers.mail_wire import (  # noqa: E402
     _imap_auth_plain,
@@ -86,13 +90,18 @@ from helpers.mail_wire import (  # noqa: E402
 )
 
 _avail_clients = get_available_apps()
-if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui")):
+if not any(c in _avail_clients for c in ("linux", "macos", "ios", "tui", "android", "web")):
     pytest.skip(
-        "drives the linux/macOS/iOS/tui client first-setup onboarding UI",
+        "drives the linux/macOS/iOS/tui/android/web client first-setup onboarding UI",
         allow_module_level=True,
     )
 
-pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
+# The module guard above, spelled where the feature ledger can read it.
+pytestmark = [
+    pytest.mark.tier1, pytest.mark.tier_3,
+    pytest.mark.linux, pytest.mark.macos, pytest.mark.ios, pytest.mark.tui,
+    pytest.mark.android, pytest.mark.web,
+]
 
 
 # The authed app shell has mounted once any main-view landmark is visible: this
@@ -109,17 +118,29 @@ _LOGGED_IN_MARKERS = SHELL_MARKERS
 # AUTH — that is the integration under test.
 
 
-@pytest.fixture(scope="module")
-def autoenable_nest(request, nest_mode, tmp_path_factory):
+@pytest.fixture
+def autoenable_nest(request, app, nest_mode, tmp_path_factory):
     """A nest with ``handle_domain == primary mail domain == MAIL_PRIMARY_DOMAIN``,
     open self-service registration, committed plaintext storage, and the mail
     subsystem **enabled** — so a fresh handled actor's canonical
     ``<handle>@MAIL_PRIMARY_DOMAIN`` is the routable mailbox and the client's
     first-setup auto-mint gates pass (``email_enabled`` true; the
     ``auto_enable_mail_for_new_users`` policy defaults ON).
+
+    Function-scoped because its shape follows the app: a browser tab cannot pin
+    a self-signed loopback nest, so on web the nest serves plain HTTP, allows
+    the run's SPA origin, and is reached through the ``provider_base_urls["nest"]``
+    override behind a domain-shaped typed handle — the real-domain shape
+    ``test_mail_enable_at_admin_claim.py``'s web leg rides. The override is
+    cleared on teardown so it never points a later test at a dead nest.
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from conftest import _start_dedicated_nest
+    from conftest import _start_dedicated_nest, browser_origins_to_allow
+
+    on_web = app.driver.is_web()
+    if on_web:
+        require_surface(app.driver, "post-logged-in-dial-seam")
+    cors = {"cors_origins": browser_origins_to_allow(request)} if on_web else {}
 
     # Serves REAL self-signed HTTPS (`serve_tls=True`): after Pillar C (uniform
     # https) the loopback `…@127.0.0.1:{port}` first-setup handle resolves to
@@ -141,7 +162,7 @@ def autoenable_nest(request, nest_mode, tmp_path_factory):
         # same `apply_primary_identity`, so `serve_tls=True` arms no issuance
         # the later call was not already arming (`testing.md` § Default app and
         # nest mode, ruling (3)).
-        claim_domain=MAIL_PRIMARY_DOMAIN, serve_tls=True,
+        claim_domain=MAIL_PRIMARY_DOMAIN, serve_tls=not on_web, **cors,
     )
     from common.auth import open_registration
     open_registration(nest)
@@ -163,10 +184,16 @@ def autoenable_nest(request, nest_mode, tmp_path_factory):
     try:
         yield nest
     finally:
+        if on_web:
+            # The test installs the `"nest"` override; an empty map clears it.
+            try:
+                app.driver.set_provider_base_urls({})
+            except Exception:
+                pass
         cleanup()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def autoenable_mda(autoenable_nest, mail_bridge_binary, tmp_path_factory):
     """An MDA-role `fauna-mail-bridge` serving IMAPS for ``MAIL_PRIMARY_DOMAIN``
     against ``autoenable_nest``. No recipient is pre-provisioned — the believable
@@ -271,6 +298,15 @@ def _wait_for_auto_minted_credential(app, timeout: float = 60.0) -> bool:
     onboarding can race ahead of the mint. A real user opening mail-settings to
     read their generated password does so well after the mint; this mirrors that
     by re-showing the page (away → back) until the credential appears.
+
+    The credential row alone is NOT the end of the mint: first-enable puts the
+    row (with its secret) on the page BEFORE it publishes and provisions the
+    nest blob set (recipient pubkey → canonical alias, wrapped MSEK, submission
+    token, the per-actor mail flag), under the resume sentinel, so a stop reads
+    pending (`mail-credentials.md` § Partial-state-during-minting). An AUTH
+    fired on the row alone races that tail and answers NO. The status
+    indicator reads "All up to date" only once finalize has cleared the
+    sentinel, after every one of those steps — so that is the barrier.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -281,7 +317,9 @@ def _wait_for_auto_minted_credential(app, timeout: float = 60.0) -> bool:
             "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "account"}]},
         })
         app.mail_settings.navigate()
-        if app.mail_settings.wait_for_credential_count_at_least(1, timeout=6.0):
+        if app.mail_settings.wait_for_credential_count_at_least(
+            1, timeout=6.0
+        ) and app.mail_settings.wait_for_enabled_status(timeout=6.0):
             return True
     return False
 
@@ -295,23 +333,7 @@ def test_non_admin_first_setup_auto_mints_and_imap_logs_in(
 ):
     """Fresh non-admin user → first client setup → auto-mint → IMAP-login, with
     no admin call and no manual mail-settings enable (the goal's "Done =")."""
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="first-setup mail auto-mint",
-            detail="linux wires FaunaClient::provision_mail_at_first_setup; "
-            "macOS + iOS wire the same first-setup auto-mint via the shared "
-            "FaunaKit MailEnableGlue (iOS confirmed in-process 2026-06-17); "
-            "tui wires the ported mail_glue::provision_mail_at_first_setup "
-            "(2026-07-19); web/windows/android are the remaining cross-app "
-            "follow-on",
-            tracked="mail-settings.md",
-        )
+    require_surface(app.driver, "first-setup-mail-auto-mint")
 
     nest = autoenable_nest
 
@@ -321,15 +343,18 @@ def test_non_admin_first_setup_auto_mints_and_imap_logs_in(
     from conftest import _relaunch_trusting_nest
 
     _relaunch_trusting_nest(app.driver, nest)
+    on_web = app.driver.is_web()
+    if on_web:
+        # Every nest call — the handle-check probe AND the authed session whose
+        # launch glue runs the auto-mint — rides this one override; nothing else
+        # reaches `MAIL_PRIMARY_DOMAIN` (the fixture explains why web needs it).
+        app.driver.set_provider_base_urls({"nest": nest["url"]})
 
     # 1) A fresh NON-ADMIN user self-registers over open registration. No admin
     #    call — the user provisions their own handle (the works-out-of-box
     #    invariant, extended to every user).
     localpart = "newuser" + secrets.token_hex(3)
-    actor = register_handled_actor(
-        nest["port"], handle=localpart, domain=MAIL_PRIMARY_DOMAIN,
-        base_url=nest["url"],  # serve_tls nest → dial the https base for registration
-    )
+    actor = admit_adult(nest, localpart, domain=MAIL_PRIMARY_DOMAIN, token=True)
     secret_hex = actor["signing_key"].encode().hex()
     address = f"{localpart}@{MAIL_PRIMARY_DOMAIN}"
 
@@ -337,7 +362,7 @@ def test_non_admin_first_setup_auto_mints_and_imap_logs_in(
     #    handle drives nest discovery; the already-registered secret yields
     #    AlreadyOnNest → LoggedIn → launch_main_app_after_signin →
     #    provision_mail_at_first_setup (non-admin branch) → auto-mint.
-    typed_handle = f"{localpart}@127.0.0.1:{nest['port']}"
+    typed_handle = address if on_web else f"{localpart}@127.0.0.1:{nest['port']}"
     _drive_first_setup_to_logged_in(app, secret_hex, typed_handle)
 
     # 3) The auto-mint fired: a `default` mail credential is present in

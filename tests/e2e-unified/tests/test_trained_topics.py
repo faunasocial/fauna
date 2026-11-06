@@ -315,6 +315,9 @@ def _post_index(app, needle: str, timeout: float = 15.0) -> int:
 @pytest.mark.linux
 @pytest.mark.android
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("trained-topics")
 def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
     logged_in_app, nest_instance, test_user
@@ -495,7 +498,10 @@ def test_trained_factor_publishes_as_a_pruned_list_labeler(
     assert "saw" in note or "seen" in note or "loaded" in note, (
         f"limitation copy must state the corpus limit; got {note!r}"
     )
-    assert "anonym" in note or "no author" in note or "not linked" in note, (
+    assert (
+        "anonym" in note or "no author" in note or "not linked" in note
+        or "without your name" in note
+    ), (
         f"limitation copy must state that publishing is anonymous; got {note!r}"
     )
 
@@ -1069,7 +1075,9 @@ def test_trained_factor_publishes_as_a_scrubbed_text_model(
         f"copy must disclose the DISLIKE half — the direction column exists "
         f"because it is part of what crosses; got {note!r}"
     )
-    assert "anonym" in note, f"copy must state pseudonymity; got {note!r}"
+    assert "anonym" in note or "without your name" in note, (
+        f"copy must state pseudonymity; got {note!r}"
+    )
     assert str(len(MODEL_CORPUS)) in note, (
         f"the corpus-size line must state how many public examples the "
         f"vocabulary was built from; got {note!r}"
@@ -1401,6 +1409,10 @@ def _open_actions_for(app, needle: str) -> None:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("trained-topics")
 def test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working(
     logged_in_app, nest_instance, test_user
@@ -1531,6 +1543,10 @@ def _in_order(positions: dict, order: list) -> bool:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("trained-topics")
 def test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back(
     logged_in_app, nest_instance, test_user
@@ -1622,6 +1638,9 @@ def test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_a
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("trained-topics")
 def test_creating_a_topic_is_refused_by_name_when_blank_and_at_the_limit(logged_in_app):
     """Outcomes 13 and 12 (`topic-factors.md` § Implementation status today —
@@ -1673,6 +1692,10 @@ def test_creating_a_topic_is_refused_by_name_when_blank_and_at_the_limit(logged_
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("trained-topics")
 def test_publish_name_starts_blank_every_open_and_a_thin_model_is_refused(
     logged_in_app, nest_instance, test_user
@@ -1808,6 +1831,12 @@ def _error_starting_with(app, prefix: str) -> str:
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
 @pytest.mark.feature("trained-topics")
 def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_reset(
     logged_in_app, nest_instance, test_user
@@ -1863,15 +1892,18 @@ def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_res
         # ── Never reset: a train on top of it is refused, nothing is put ───
         _open_actions_for(app, post_text)
         app.feed.click_train_verb("more")
-        # The refusal replaces the feed's notice with the train's own error, so
-        # once it paints the train has finished (failed) and the row read after
-        # it is not racing a put still in flight.
+        # The refusal replaces the feed's notice with the train's own error (the
+        # manager's `feed.error_train`, on every app's error line), so once it
+        # paints the train has finished (failed) and the row read after it is
+        # not racing a put still in flight.
         refused = wait_until(
-            lambda: _error_starting_with(app, "sealed model failed to decrypt"),
+            lambda: _error_starting_with(app, S.feed.error_train(message="")),
             budgets.RPC_ROUNDTRIP_S,
             diagnose=lambda: f"error line reads {app.error_text()!r}",
         )
-        assert refused
+        assert "sealed model failed to decrypt" in refused, (
+            f"the train's report must carry why the learning would not open: {refused!r}"
+        )
         row = ws_api.personalization_model_fetch(port, test_user, factor_key)
         assert bytes(row.get("sealed_blob") or b"") == UNOPENABLE_MODEL and row[
             "sample_count"
@@ -1891,6 +1923,11 @@ def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_res
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("trained-topics")
 def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
     request, logged_in_app, nest_instance, test_user
@@ -1939,8 +1976,12 @@ def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
     assert trained["sample_count"] == 1 and trained.get("sealed_blob"), trained
 
     try:
-        # The other device, launched now: whatever it shows, it fetched.
-        seat_b, _driver_b = request.getfixturevalue("alice_second_device")
+        # The other device, launched now: whatever it shows, it fetched. web's
+        # is a twin page in its own BrowserContext (fresh storage, same
+        # identity); the native ones a fresh-state-root launch.
+        seat_b, _driver_b = request.getfixturevalue(
+            "alice_second_web_device" if app.driver.is_web() else "alice_second_device"
+        )
 
         row = seat_b.personalization.wait_for_topic_reopening(topic_name)
         assert seat_b.personalization.topic_factor_key(row) == factor_key, (

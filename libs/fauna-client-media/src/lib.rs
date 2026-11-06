@@ -366,6 +366,15 @@ pub struct MediaSnapshot {
     /// only pages `fauna.media.list` leaves it empty and degrades to the
     /// item-derived options (exactly the pre-fix behavior, never worse).
     pub known_folders: Vec<MediaFolder>,
+    /// How many rows and own sets this read **held back for want of
+    /// custody** — media rows the shared row judge could not judge yet
+    /// (`ProjectionTally::held`) plus own sets whose sealed name no custody
+    /// opened yet. Non-zero means the read is not a complete answer: right
+    /// after sign-in, before the account runtime has assembled, every signed
+    /// row is held, and painting that read as "no media" / "no folder" is the
+    /// false empty `ui/README.md` § List pages: loading is not empty, rule 2
+    /// forbids. The page machine owns what it does with it.
+    pub held: usize,
 }
 
 /// One `media-folder-filter` option: the set's value and label plus its
@@ -493,8 +502,9 @@ impl MediaSnapshot {
     fn in_scope(&self, filter: &FolderFilter, it: &MediaItem) -> bool {
         match filter {
             FolderFilter::Ref(FolderRef::Local(id)) => it.folder_id == Some(*id),
-            // A foreign set's items are never in this nest's aggregate.
-            FolderFilter::Ref(FolderRef::Foreign(_)) => false,
+            // A foreign set's items — and a group set's, which has no nest
+            // row at all — are never in this nest's aggregate.
+            FolderFilter::Ref(FolderRef::Foreign(_) | FolderRef::Group(_)) => false,
             FolderFilter::Name(name) => match self.own_row(name) {
                 Some(own) => {
                     it.folder_id == Some(own.id) || (it.folder_id.is_none() && it.folder == *name)
@@ -521,7 +531,7 @@ impl MediaSnapshot {
             FolderFilter::Ref(FolderRef::Local(id)) => {
                 self.known_folders.iter().find(|f| f.id == *id)
             }
-            FolderFilter::Ref(FolderRef::Foreign(_)) => None,
+            FolderFilter::Ref(FolderRef::Foreign(_) | FolderRef::Group(_)) => None,
             FolderFilter::Name(name) => self.own_row(name),
         }
     }
@@ -540,7 +550,7 @@ impl MediaSnapshot {
             FolderFilter::Ref(r) => {
                 let id = match r {
                     FolderRef::Local(id) => Some(id),
-                    FolderRef::Foreign(_) => None,
+                    FolderRef::Foreign(_) | FolderRef::Group(_) => None,
                 };
                 self.items
                     .iter()
@@ -962,6 +972,7 @@ mod tests {
                 hashed("docs", "docs/y.pdf", [0x22; 32]),
             ],
             known_folders: vec![known_with_id(7, "photos"), known_with_id(9, "docs")],
+            ..Default::default()
         };
         let hex11 = fauna_core::hex32::encode(&[0x11; 32]);
 
@@ -996,6 +1007,7 @@ mod tests {
                 item("docs", "a/x.jpg", 20, 200),
             ],
             known_folders: vec![known_with_id(7, "photos"), known_with_id(9, "docs")],
+            ..Default::default()
         };
         assert_eq!(
             snap.locate_path(7, "a/x.jpg").map(|i| i.size_bytes),
@@ -1018,10 +1030,12 @@ mod tests {
         let before = MediaSnapshot {
             items: vec![hashed("photos", "photos/x.jpg", [0x11; 32])],
             known_folders: vec![known_with_id(7, "photos")],
+            ..Default::default()
         };
         let after = MediaSnapshot {
             items: vec![hashed("family-photos", "photos/x.jpg", [0x11; 32])],
             known_folders: vec![known_with_id(7, "family-photos")],
+            ..Default::default()
         };
         let hex11 = fauna_core::hex32::encode(&[0x11; 32]);
         assert!(before.locate_file(7, &hex11).is_some());
@@ -1042,6 +1056,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![item("photos", "photos/x.jpg", 10, 100)],
             known_folders: vec![known_with_id(7, "photos")],
+            ..Default::default()
         };
         assert!(
             snap.locate_file(7, &fauna_core::hex32::encode(&[0x11; 32]))
@@ -1056,6 +1071,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![hashed("photos", "photos/x.jpg", [0x11; 32])],
             known_folders: vec![known_with_id(7, "photos")],
+            ..Default::default()
         };
         assert!(snap.locate_file(7, "not-hex").is_none());
         assert!(
@@ -1112,6 +1128,7 @@ mod tests {
                 known_with_id(7, "photos"),
                 shared_with_id(9, "photos", "alice", true),
             ],
+            ..Default::default()
         }
     }
 
@@ -1177,6 +1194,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![item_in("knock", Some(42), "knock/a.jpg")],
             known_folders: vec![known_with_id(7, "photos")],
+            ..Default::default()
         };
         let options = snap.folder_options();
         assert_eq!(options.len(), 2);
@@ -1197,6 +1215,7 @@ mod tests {
                 shared_with_id(10, "read-only", "bob", false),
                 known_with_id(7, "mine"),
             ],
+            ..Default::default()
         };
         assert_eq!(snap.default_upload_target().as_deref(), Some("mine"));
         assert_eq!(
@@ -1209,6 +1228,7 @@ mod tests {
         let shared_only = MediaSnapshot {
             items: vec![],
             known_folders: vec![shared_with_id(9, "theirs", "alice", true)],
+            ..Default::default()
         };
         assert_eq!(shared_only.default_upload_target(), None);
     }
@@ -1254,6 +1274,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![item("photos", "photos/x.jpg", 10, 100)],
             known_folders: vec![known("photos"), known("fresh")],
+            ..Default::default()
         };
         assert!(
             snap.folders().contains(&"fresh".to_string()),
@@ -1278,6 +1299,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![],
             known_folders: vec![known("site"), known("__config"), known("photos")],
+            ..Default::default()
         };
         assert_eq!(
             snap.folders(),
@@ -1297,6 +1319,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![],
             known_folders: vec![known("photo-library"), known("docs")],
+            ..Default::default()
         };
         assert_eq!(
             snap.folders(),
@@ -1313,6 +1336,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![item("shared-with-me", "s/1.jpg", 1, 1)],
             known_folders: vec![known("mine")],
+            ..Default::default()
         };
         assert_eq!(
             snap.folders(),
@@ -1328,6 +1352,7 @@ mod tests {
         let snap = MediaSnapshot {
             items: vec![item("a", "a/1", 1, 1), item("b", "b/1", 1, 1)],
             known_folders: vec![],
+            ..Default::default()
         };
         assert_eq!(snap.folders(), vec!["a".to_string(), "b".to_string()]);
         assert_eq!(

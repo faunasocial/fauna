@@ -1069,17 +1069,20 @@ class AdminNestVM @Inject constructor(
             return "${resolve(row.reason)} · $kind $id · $whenText"
         }
 
-        fun reportLine(row: com.fauna.ffi.FfiReportQueueRow, resolve: (LocalizedText) -> String): String {
+        fun reportLine(
+            row: com.fauna.ffi.FfiReportQueueRow,
+            relativeTime: (Long) -> String,
+            resolve: (LocalizedText) -> String,
+        ): String {
             val (kind, id) = when (val s = row.subject) {
                 is com.fauna.ffi.FfiReportSubject.Post -> "post" to s.cid
                 is com.fauna.ffi.FfiReportSubject.Message -> "message" to s.recordCid
                 is com.fauna.ffi.FfiReportSubject.Actor -> "actor" to s.actorId
                 is com.fauna.ffi.FfiReportSubject.Unknown -> "unknown" to ""
             }
-            // `created_at` is microseconds since the epoch.
-            val whenText = java.text.DateFormat
-                .getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
-                .format(java.util.Date(row.createdAt / 1_000))
+            // `created_at` is microseconds since the epoch; [relativeTime] takes millis
+            // and is the shared relative-time fold (`ValueFormat.relativeTime`).
+            val whenText = relativeTime(row.createdAt / 1_000)
             val text = StringBuilder("${resolve(row.reason)} · $kind $id · ${resolve(row.origin)} · $whenText")
             row.note?.takeIf { it.isNotEmpty() }?.let { text.append(" — ").append(it) }
             row.excerpt?.takeIf { it.isNotEmpty() }?.let { text.append(" — “").append(it).append("”") }

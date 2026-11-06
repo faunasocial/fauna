@@ -32,7 +32,7 @@
   <Package
     Name="Fauna"
     Manufacturer="Fauna Social"
-    Version="0.1.5"
+    Version="0.1.6"
     UpgradeCode="4a7b8c00-f1e2-4d3a-b5c6-000000000001"
     Scope="perMachine"
     InstallerVersion="500">
@@ -462,7 +462,7 @@
     <!-- public-text: windows-installer-descriptions -->
     <Feature Id="TerminalApp"
              Title="Fauna Terminal App"
-             Description="The terminal (text-mode) Fauna app, usable over SSH; adds it to PATH."
+             Description="The terminal (text-mode) Fauna app, usable over SSH, and fauna-cli, the program an AI assistant runs to work in Fauna; adds both to PATH."
              Level="1"
              AllowAbsent="yes">
     <!-- public-text-end: windows-installer-descriptions -->

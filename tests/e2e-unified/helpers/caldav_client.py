@@ -627,3 +627,29 @@ def insecure_ssl_context() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def sign_in_round_trip(base_url: str, username: str, password: str, *, timeout: float = 120.0) -> str:
+    """Prove ``username``/``password`` sign a stock calendar app in, the way one
+    does it: wait for the listener, discover the lazy Personal calendar, PUT an
+    event and read it back. Returns the event's SUMMARY.
+
+    A PROPFIND alone proves only that AUTH passed; the PUT + REPORT also prove
+    the credential's wrapped MSEK unwrapped at the MDA, since the event is sealed
+    under it on the way in and opened on the way out (caldav-server.md
+    § Authentication). Raises ``CalDAVError`` (with the server's reply) on any
+    refusal — a 401 here is the credential being wrong, not the listener cold.
+    """
+    client = CalDAVClient(base_url, username, password, verify=False)
+    client.wait_until_serving(timeout=timeout)
+    cal = client.personal_calendar()
+    nonce = hashlib.sha256(f"{username}{time.time()}".encode()).hexdigest()[:12]
+    uid = f"sign-in-{nonce}@e2e"
+    summary = f"Sign-in proof {nonce}"
+    client.put_event(cal, uid, build_vevent(uid, summary, "20300101T100000Z", "20300101T110000Z"))
+    summaries = client.summaries(cal)
+    if summary not in summaries:
+        raise CalDAVError(
+            f"the event PUT as {username} did not read back from {cal}: got {summaries!r}"
+        )
+    return summary

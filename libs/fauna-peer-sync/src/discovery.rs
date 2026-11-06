@@ -277,16 +277,37 @@ async fn custodian_rows<B: StoreBackend>(
 /// `own_relay_url` is the relay the dialing seat was bound with: a target's
 /// relay is attached only when the member advertises that same one
 /// ([`share_relay_attaches`]).
+///
+/// `is_member` is the set's roster consult over the member's ACTOR key —
+/// `fauna_peer_share::admission::SetMembership::is_member` for this set in
+/// production. **A row is a dial target only while the roster lists its
+/// actor** (`p2p.md` § Cross-user shared-set transfer → *A departed member's
+/// cached endpoint*, ruling 1): nothing in the sink forgets a cached row, so
+/// a member who left or was removed would otherwise be dialed for ever. The
+/// shape is [`sibling_dial_targets`]' `verified_member`, for its reason —
+/// admission would refuse that peer after the dial; this refuses it before.
 pub async fn share_dial_targets<B: StoreBackend>(
     store: &AccountStore<B>,
     channel_id: &[u8; 32],
     our_lan_ips: &[std::net::Ipv4Addr],
     own_relay_url: Option<&str>,
-) -> Result<Vec<PeerDialTarget>> {
+    is_member: impl Fn(&[u8; 32]) -> bool,
+) -> Result<ShareDialRead> {
     let rows = store
         .states_of_kind(fauna_protocol::merge_policy::KIND_SHARE_ENDPOINTS)
         .await?;
-    share_dial_targets_from_rows(&rows, channel_id, our_lan_ips, own_relay_url)
+    share_dial_targets_from_rows(&rows, channel_id, our_lan_ips, own_relay_url, is_member)
+}
+
+/// One set's dial-target read: the targets to dial, and the well-formed rows
+/// the roster consult did NOT vouch for, by member actor — the rows a pass
+/// may tombstone on a positive reading (`p2p.md` § *A departed member's
+/// cached endpoint*, ruling 2; the reading itself is the caller's, because a
+/// deletion needs a tri-state answer the boolean consult cannot give).
+#[derive(Debug, Clone, Default)]
+pub struct ShareDialRead {
+    pub targets: Vec<PeerDialTarget>,
+    pub unvouched: Vec<[u8; 32]>,
 }
 
 /// Whether a share dial attaches a relay: only toward a member advertising
@@ -309,9 +330,10 @@ pub fn share_dial_targets_from_rows(
     channel_id: &[u8; 32],
     our_lan_ips: &[std::net::Ipv4Addr],
     own_relay_url: Option<&str>,
-) -> Result<Vec<PeerDialTarget>> {
+    is_member: impl Fn(&[u8; 32]) -> bool,
+) -> Result<ShareDialRead> {
     let prefix = format!("{}:", fauna_core::hex32::encode(channel_id));
-    let mut targets = Vec::new();
+    let mut read = ShareDialRead::default();
     for entry in rows {
         let Some(actor_hex) = entry.key.strip_prefix(&prefix) else {
             continue; // another set's row
@@ -338,12 +360,24 @@ pub fn share_dial_targets_from_rows(
             continue;
         }
 
+        // The roster gate (ruling 1), after the cross-check: a row that
+        // failed the cross-check names nobody this set could vouch for, so it
+        // is neither a target nor a candidate for the tombstone sweep.
+        let member = value.endpoints.node_id;
+        if !is_member(&member) {
+            tracing::debug!(
+                key = %entry.key,
+                "share-endpoints entry of an actor the set's roster does not list — not dialed"
+            );
+            read.unvouched.push(member);
+            continue;
+        }
         let mut target = dial_target_from(value.endpoints, our_lan_ips);
         target.candidates.relay_available =
             share_relay_attaches(target.relay_url.as_deref(), own_relay_url);
-        targets.push(target);
+        read.targets.push(target);
     }
-    Ok(targets)
+    Ok(read)
 }
 
 #[cfg(test)]
@@ -550,9 +584,13 @@ mod tests {
         let store = store_with_share_rows(&[share_row(SET, MEMBER, MEMBER)]).await;
         let ours = ["192.168.1.7".parse().unwrap()];
 
-        let targets = share_dial_targets(&store, &SET, &ours, Some("https://relay.example/"))
+        let targets =
+            share_dial_targets(&store, &SET, &ours, Some("https://relay.example/"), |_| {
+                true
+            })
             .await
-            .unwrap();
+            .unwrap()
+            .targets;
 
         assert_eq!(targets.len(), 1);
         let t = &targets[0];
@@ -585,7 +623,10 @@ mod tests {
             (Some("https://relay.other.example/"), false),
             (None, false),
         ] {
-            let targets = share_dial_targets(&store, &SET, &ours, own).await.unwrap();
+            let targets = share_dial_targets(&store, &SET, &ours, own, |_| true)
+                .await
+                .unwrap()
+                .targets;
             let t = &targets[0];
             assert_eq!(
                 t.candidates.relay_available, attaches,
@@ -601,9 +642,16 @@ mod tests {
         let (key, mut value) = share_row(SET, MEMBER, MEMBER);
         value.endpoints.relay_url = None;
         let relayless = store_with_share_rows(&[(key, value)]).await;
-        let targets = share_dial_targets(&relayless, &SET, &ours, Some("https://relay.example/"))
-            .await
-            .unwrap();
+        let targets = share_dial_targets(
+            &relayless,
+            &SET,
+            &ours,
+            Some("https://relay.example/"),
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .targets;
         assert!(
             !targets[0].candidates.relay_available,
             "a member advertising no relay is dialed direct-only"
@@ -631,7 +679,10 @@ mod tests {
         ])
         .await;
 
-        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None, |_| true)
+            .await
+            .unwrap()
+            .targets;
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].node_id, MEMBER);
     }
@@ -643,7 +694,10 @@ mod tests {
     #[tokio::test]
     async fn a_row_naming_a_third_node_is_skipped() {
         let store = store_with_share_rows(&[share_row(SET, MEMBER, [0x99; 32])]).await;
-        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None, |_| true)
+            .await
+            .unwrap()
+            .targets;
         assert!(targets.is_empty());
     }
 
@@ -654,7 +708,10 @@ mod tests {
         let (key, mut value) = share_row(SET, MEMBER, MEMBER);
         value.channel_id = OTHER_SET.to_vec();
         let store = store_with_share_rows(&[(key, value)]).await;
-        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None, |_| true)
+            .await
+            .unwrap()
+            .targets;
         assert!(targets.is_empty());
     }
 
@@ -758,9 +815,32 @@ mod tests {
             fauna_core::share_endpoints::share_entry_key(&SET, &[0x4D; 32]),
         )
         .await;
-        let targets = share_dial_targets(&store, &SET, &[], None).await.unwrap();
+        let targets = share_dial_targets(&store, &SET, &[], None, |_| true)
+            .await
+            .unwrap()
+            .targets;
         let dialed: Vec<[u8; 32]> = targets.iter().map(|t| t.node_id).collect();
         assert_eq!(dialed, vec![MEMBER, LATER_MEMBER]);
+    }
+
+    /// The roster gate (`p2p.md` § *A departed member's cached endpoint*,
+    /// ruling 1): a cached row whose actor the set's roster does not list is
+    /// not dialed — and is reported as unvouched, the sweep's candidate —
+    /// while a listed member's row becomes a target exactly as before.
+    #[tokio::test]
+    async fn a_row_the_roster_does_not_list_is_not_dialed() {
+        const DEPARTED: [u8; 32] = [0x7A; 32];
+        let store = store_with_share_rows(&[
+            share_row(SET, MEMBER, MEMBER),
+            share_row(SET, DEPARTED, DEPARTED),
+        ])
+        .await;
+        let read = share_dial_targets(&store, &SET, &[], None, |actor| *actor == MEMBER)
+            .await
+            .unwrap();
+        let dialed: Vec<[u8; 32]> = read.targets.iter().map(|t| t.node_id).collect();
+        assert_eq!(dialed, vec![MEMBER]);
+        assert_eq!(read.unvouched, vec![DEPARTED]);
     }
 
     /// The rule-7 gate reads the capability list exactly as every other

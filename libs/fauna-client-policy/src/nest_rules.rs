@@ -26,7 +26,7 @@ use fauna_core::content_policy::{
     reason_text, verify_nest_policy,
 };
 use fauna_core::localized::LocalizedText;
-use fauna_core::obligation::{NestRuleSet, rules_from_nest_policy};
+use fauna_core::obligation::{ComposedVerdict, NestRuleSet, RenderVerdict, rules_from_nest_policy};
 use fauna_core::scoring::LabelerPostInput;
 use serde::{Deserialize, Serialize};
 
@@ -353,18 +353,33 @@ pub struct NestRulesSummary {
     pub domain: String,
     pub sequence: u64,
     pub issued_at: i64,
-    /// Empty for a nest with no rules — the joining surface then renders
-    /// nothing.
+    /// Empty for a nest with no rules, and for a document this build cannot
+    /// decode; whether a surface paints is [`Self::is_shown`].
     pub rules: Vec<NestRuleLine>,
     /// Why none of the document applies on this device; `None` when it
     /// applies.
     pub not_applied: Option<NestRulesNotApplied>,
+    /// [`NestRulesNotApplied::sentence`] of `not_applied`, carried as data so
+    /// an app across the UniFFI or wasm boundary only paints it.
+    #[serde(default)]
+    pub not_applied_sentence: Option<LocalizedText>,
 }
 
-/// Why none of a nest's document applies on this device. The member-facing
-/// sentence for each is owed with the surfaces' strings (a string shown at
-/// joining is shown before sign-in, so it is a public text —
-/// `docs/goal/architecture/public-texts.md` § The boundary).
+impl NestRulesSummary {
+    /// Whether the rules surfaces paint anything: a rule listed, or a
+    /// document none of which applies here. A newer grammar's document decodes
+    /// to no rules on this build, and joining still accepts it, so the heading
+    /// and the not-applied sentence paint with no rule listed; only an applied
+    /// empty document paints nothing (`nest-rules.md` § Acceptance at joining).
+    pub fn is_shown(&self) -> bool {
+        !self.rules.is_empty() || self.not_applied.is_some()
+    }
+}
+
+/// Why none of a nest's document applies on this device. The sentence for each
+/// ([`Self::sentence`]) is painted under the heading on the joining surface and
+/// on the settings rules surface; shown before sign-in, it is a public text
+/// (`docs/goal/architecture/public-texts.md` § The boundary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -375,6 +390,16 @@ pub enum NestRulesNotApplied {
     /// Structurally wrong — the nest validates before storing, so this is a
     /// defence, not an expected state.
     Malformed,
+}
+
+impl NestRulesNotApplied {
+    /// The member-facing sentence.
+    pub fn sentence(self) -> LocalizedText {
+        LocalizedText::key(match self {
+            Self::NewerVersion => "nest_rules.not_applied_newer_version",
+            Self::Malformed => "nest_rules.not_applied_malformed",
+        })
+    }
 }
 
 /// One rule of a [`NestRulesSummary`].
@@ -431,7 +456,38 @@ pub fn summary(
         issued_at,
         rules,
         not_applied,
+        not_applied_sentence: not_applied.map(NestRulesNotApplied::sentence),
     }
+}
+
+/// The nest placeholder a composed verdict paints in place of an item, when a
+/// nest rule drove it — the one shape every app paints (the frame naming the
+/// nest comes from `fauna_core::obligation::nest_rule_notice`, resolved
+/// through the app's own string table).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestPlaceholder {
+    pub verdict: RenderVerdict,
+    pub domain: String,
+    /// The admin's reason, verbatim, in the app's language where written.
+    pub reason: String,
+}
+
+impl NestPlaceholder {
+    /// A `block` has no reveal — a member never loosens a nest's rule.
+    pub fn is_block(&self) -> bool {
+        self.verdict == RenderVerdict::Block
+    }
+}
+
+/// The placeholder a composed verdict paints, when the nest drove it; the
+/// admin's reason is picked in `lang`.
+pub fn nest_placeholder(verdict: &ComposedVerdict, lang: &str) -> Option<NestPlaceholder> {
+    let source = verdict.nest()?;
+    Some(NestPlaceholder {
+        verdict: verdict.verdict,
+        domain: source.domain.clone(),
+        reason: reason_text(&source.reason, lang).to_string(),
+    })
 }
 
 #[cfg(test)]

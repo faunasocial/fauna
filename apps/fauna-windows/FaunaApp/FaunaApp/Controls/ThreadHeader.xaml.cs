@@ -14,6 +14,10 @@ public sealed partial class ThreadHeader : UserControl
     /// policy editor (the <c>room_settings</c> sub-page).</summary>
     public event EventHandler? RoomSettingsRequested;
 
+    /// <summary><c>room-search-button</c> was pressed — open the community room's search
+    /// strip, or close it when it is open (<c>room-search.md</c> § The surface).</summary>
+    public event EventHandler? RoomSearchToggled;
+
     /// <summary>A member chip's <c>thread-member-keep-button</c> was pressed —
     /// the pressed person's raw id as lowercase hex (the chip's own
     /// <c>PersonHex</c>, never re-derived).
@@ -121,6 +125,14 @@ public sealed partial class ThreadHeader : UserControl
     }
 
     /// <summary>
+    /// <c>room-search-button</c>: painted AND LIVE iff the shared
+    /// <c>capabilities.can_search_room</c> (a community-class room whose floor seats this
+    /// account) — Collapsed, hence absent, otherwise.
+    /// </summary>
+    public void SetCanSearchRoom(bool canSearchRoom) =>
+        RoomSearchButton.Visibility = canSearchRoom ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
     /// <c>thread-room-notice</c>: the room's standing notice, painted only while one
     /// holds. Both arguments come from shared Rust — <c>RoomNoticeLabel</c> and
     /// <c>RoomNoticeAttrToken</c> over the notice <c>RoomNoticeFor</c> derived from
@@ -148,6 +160,11 @@ public sealed partial class ThreadHeader : UserControl
     private void OnAddParticipantClicked(object sender, RoutedEventArgs e)
     {
         AddParticipantRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnRoomSearchClicked(object sender, RoutedEventArgs e)
+    {
+        RoomSearchToggled?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnRoomSettingsClicked(object sender, RoutedEventArgs e)

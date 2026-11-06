@@ -19,349 +19,32 @@
 //! conformance test (`peer_leg_convergence.rs`). The stores are
 //! what row 66 built; the cfgs stay in memory here.
 
-use ed25519_dalek::SigningKey;
-use fauna_account_store::sqlite::SqliteBackend;
-use fauna_account_store::store::AccountStore;
-use fauna_account_store::types::WriterId;
-use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
-use fauna_core::data::{Capability, DeviceAuthorization, Timestamp};
-use fauna_core::encoding::{EmbedAsBytes, canonical_decode, canonical_encode, sign_envelope};
-use fauna_core::group_ceremony::GroupShareConfig;
+mod group_seats;
+use group_seats::*;
+
+use fauna_core::encoding::{EmbedAsBytes, canonical_decode, canonical_encode};
 use fauna_core::group_ceremony::{GroupShareDeliver, verify_group_share_deliver};
 use fauna_core::group_generation::{
     GroupHeldRootRecord, GroupReceptionKeyRecord, group_generation_key_commitment,
     resolve_admissible_group_tip,
 };
 use fauna_core::group_scope::{GroupAuthority, GroupBirthRecord, RosterView};
-use fauna_core::identity::ActorKeypair;
 use fauna_mls::wrapped_blob::group_generation_wraps::open_group_admission_bundle;
 use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ItemClass};
 use fauna_protocol::group_state::{
-    GROUP_BIRTH_KEY, KIND_GROUP_BIRTH, KIND_GROUP_GENERATION_MINT, KIND_GROUP_ROSTER,
+    GROUP_BIRTH_KEY, GROUP_NAME_KEY, KIND_GROUP_BIRTH, KIND_GROUP_GENERATION_MINT, KIND_GROUP_NAME,
+    KIND_GROUP_ROSTER,
 };
+use fauna_protocol::merge_policy::LwwStamp;
 use fauna_protocol::merge_policy::{
-    KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_GENERATION_MINT, KIND_GROUP_MACHINERY_ROOT,
-    KIND_GROUP_RECEPTION_KEY,
+    KIND_DEVICE_SET, KIND_GROUP_MACHINERY_ROOT, KIND_GROUP_RECEPTION_KEY,
 };
 use fauna_protocol::scope::GroupScope;
 use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
 use fauna_protocol::{decode_strict, encode_canonical};
 use fauna_sync_engine::account_state_plane::{AccountStatePlane, ItemId};
-use fauna_sync_engine::generation_tip::GenerationTrust;
-use fauna_sync_engine::group_state_plane::{
-    GroupStatePlane, NoFeed, write_held_root_row, write_reception_key_row,
-};
-
-use fauna_client_capabilities::group_ceremony::{
-    admit_group_share, begin_group_share, build_group_accept, build_group_deliver,
-    ingest_group_frame, mark_group_accept_posted, mark_group_delivered, mark_group_offer_posted,
-};
-
-const ESCROW_SEED: [u8; 32] = [0x55u8; 32];
-
-fn holder_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x66u8; 32])
-}
-
-fn now() -> Timestamp {
-    Timestamp(1_700_000_000)
-}
-
-fn now_ms() -> i64 {
-    1_700_000_000_000
-}
-
-/// One member seat: an account (its own actor + `BackupKey`) with one device
-/// replica (the store's writer = the device signing key).
-struct Seat {
-    actor: ActorKeypair,
-    device_seed: u8,
-    schedule: AccountStateKeySchedule,
-    store: AccountStore<SqliteBackend>,
-    dir: tempfile::TempDir,
-}
-
-impl Seat {
-    async fn open(actor_seed: u8, device_seed: u8, key_seed: u8) -> Seat {
-        let dir = tempfile::tempdir().expect("seat dir");
-        Seat {
-            actor: ActorKeypair::from_secret([actor_seed; 32]),
-            device_seed,
-            schedule: AccountStateKeySchedule::derive(&BackupKey::derive(&[key_seed; 32])),
-            store: Self::open_store(&dir, actor_seed, device_seed).await,
-            dir,
-        }
-    }
-
-    async fn open_store(
-        dir: &tempfile::TempDir,
-        actor_seed: u8,
-        device_seed: u8,
-    ) -> AccountStore<SqliteBackend> {
-        let actor_hex = hex::encode(ActorKeypair::from_secret([actor_seed; 32]).actor_id().0);
-        AccountStore::open(
-            SqliteBackend::open(dir.path()).unwrap(),
-            &actor_hex,
-            WriterId(
-                SigningKey::from_bytes(&[device_seed; 32])
-                    .verifying_key()
-                    .to_bytes(),
-            ),
-        )
-        .await
-        .unwrap()
-    }
-
-    /// The restart: a fresh store handle over the same on-disk replica.
-    async fn restart(&mut self) {
-        let actor_hex = hex::encode(self.actor.actor_id().0);
-        self.store = AccountStore::open(
-            SqliteBackend::open(self.dir.path()).unwrap(),
-            &actor_hex,
-            WriterId(self.device().verifying_key().to_bytes()),
-        )
-        .await
-        .unwrap();
-    }
-
-    fn device(&self) -> SigningKey {
-        SigningKey::from_bytes(&[self.device_seed; 32])
-    }
-
-    fn trust(&self) -> GenerationTrust {
-        GenerationTrust {
-            root: self.actor.actor_id(),
-            prior: Vec::new(),
-            trusted_holders: vec![holder_key().verifying_key().to_bytes()].into(),
-        }
-    }
-
-    /// The device's actor-signed `DeviceAuthorization` in the `EmbedAsBytes`
-    /// carriage roster entries, mints, and enrollments embed.
-    fn device_cert(&self) -> Vec<u8> {
-        let cert = DeviceAuthorization {
-            actor_id: self.actor.actor_id(),
-            device_key: self.device().verifying_key().to_bytes(),
-            capabilities: vec![Capability::RenewBearer],
-            created_at: Timestamp(1_000),
-            expires_at: None,
-        };
-        let (bytes, env) = sign_envelope(&self.actor, &cert).expect("sign cert");
-        canonical_encode(&EmbedAsBytes::from_signed(bytes, env))
-            .expect("encode carriage")
-            .to_vec()
-    }
-
-    /// A fleet-scope class-2 write through the pull-only account plane —
-    /// journal + entry + relay row, no publish (no nest in this file).
-    async fn fleet_put(&self, item: &ItemId, value: Vec<u8>) {
-        let requester = NoFeed;
-        let sk = self.device();
-        let trust = self.trust();
-        let plane = AccountStatePlane::new_pull_only(
-            &self.store,
-            &requester,
-            &self.schedule,
-            &sk,
-            &trust,
-            ACCOUNT_STATE_FLEET_SCOPE,
-        )
-        .unwrap();
-        plane.put(item, value, None).await.expect("fleet put");
-    }
-
-    /// Stand up this account's R14 (account-data-plane.md § The ratified decisions) machinery — enroll the device, mint the
-    /// first fleet generation, land the trusted holder's escrow receipt — so
-    /// the tip-sealed group custody kinds can seal (the same fixture shape as
-    /// the peer-leg convergence file's top-up test).
-    async fn establish_fleet_tip(&self) {
-        let writer_hex = fauna_core::hex32::encode(&self.device().verifying_key().to_bytes());
-        let authorization = self.device_cert();
-        let enrollment = canonical_encode(&fauna_core::generation::sign_device_enrollment(
-            &self.device(),
-            authorization,
-            5_000,
-        ))
-        .unwrap()
-        .to_vec();
-        self.fleet_put(
-            &ItemId {
-                kind: KIND_DEVICE_SET.into(),
-                key: writer_hex.clone(),
-            },
-            enrollment,
-        )
-        .await;
-
-        let escrow = fauna_core::generation::EscrowTargetRecord {
-            xwing_escrow_pubkey: fauna_core::generation::derive_escrow_xwing_keypair(&ESCROW_SEED)
-                .public
-                .to_bytes()
-                .to_vec(),
-        };
-        let member = fauna_core::generation::FleetMember {
-            device_id: self.device().verifying_key().to_bytes(),
-            xwing_pubkey: fauna_core::generation::derive_device_xwing_keypair(
-                &[self.device_seed; 32],
-            )
-            .public
-            .to_bytes()
-            .to_vec(),
-            enrolled_at_ms: 5_000,
-        };
-        let built = fauna_mls::wrapped_blob::generation_wraps::build_mint(
-            &[member],
-            &escrow,
-            &fauna_core::generation::escrow_target_identity_key(&self.actor.actor_id()),
-            Vec::new(),
-            &self.device(),
-            7_000,
-        )
-        .expect("fleet mint");
-        self.fleet_put(
-            &ItemId {
-                kind: KIND_GENERATION_MINT.into(),
-                key: fauna_core::hex32::encode(&built.generation_id),
-            },
-            canonical_encode(&built.record).unwrap().to_vec(),
-        )
-        .await;
-        let receipt = fauna_core::generation::sign_escrow_receipt(
-            &holder_key(),
-            built.generation_id,
-            blake3::hash(&built.escrow_wrap).into(),
-            &fauna_core::generation::escrow_target_identity_key(&self.actor.actor_id()),
-            7_100,
-        );
-        self.fleet_put(
-            &ItemId {
-                kind: KIND_ESCROW_RECEIPT.into(),
-                key: format!(
-                    "{}/{}",
-                    fauna_core::hex32::encode(&built.generation_id),
-                    fauna_core::hex32::encode(&receipt.holder_id)
-                ),
-            },
-            canonical_encode(&receipt).unwrap().to_vec(),
-        )
-        .await;
-    }
-
-    /// Write the two group custody kinds through the fleet plane — the
-    /// ceremony driver's account-plane seam under test.
-    async fn write_custody_rows(
-        &self,
-        held_root: &GroupHeldRootRecord,
-        reception: &GroupReceptionKeyRecord,
-    ) {
-        let requester = NoFeed;
-        let sk = self.device();
-        let trust = self.trust();
-        let plane = AccountStatePlane::new_pull_only(
-            &self.store,
-            &requester,
-            &self.schedule,
-            &sk,
-            &trust,
-            ACCOUNT_STATE_FLEET_SCOPE,
-        )
-        .unwrap();
-        write_reception_key_row(&plane, reception)
-            .await
-            .expect("reception key row");
-        write_held_root_row(&plane, held_root)
-            .await
-            .expect("held root row");
-    }
-}
-
-/// The whole two-seat ceremony, driven in memory; hands back everything the
-/// drivers wrote and the values the assertions compare against.
-struct CeremonyRun {
-    scope_id: [u8; 32],
-    generation_id: [u8; 32],
-    alice_reception: GroupReceptionKeyRecord,
-    bob_reception: GroupReceptionKeyRecord,
-    alice_root_row: GroupHeldRootRecord,
-    bob_root_row: GroupHeldRootRecord,
-    plane_rows: Vec<fauna_core::group_ceremony::GroupPlaneRow>,
-    bob_rows: Vec<fauna_core::group_ceremony::GroupPlaneRow>,
-    bob_entry_id: [u8; 32],
-    bob_cfg: GroupShareConfig,
-}
-
-fn run_ceremony(alice: &Seat, bob: &Seat) -> CeremonyRun {
-    let mut alice_cfg = GroupShareConfig::default();
-    let mut bob_cfg = GroupShareConfig::default();
-
-    let begun = begin_group_share(&mut alice_cfg, &alice.actor, bob.actor.actor_id(), now())
-        .expect("begin");
-    let scope_id = begun.scope_id;
-    mark_group_offer_posted(&mut alice_cfg, &scope_id, &bob.actor.actor_id());
-
-    ingest_group_frame(
-        &mut bob_cfg,
-        &bob.actor.actor_id(),
-        &alice.actor.actor_id(),
-        &begun.frame,
-        now(),
-    )
-    .expect("bob ingests offer");
-
-    let bob_reception = GroupReceptionKeyRecord::mint(now_ms());
-    let accept_frame =
-        build_group_accept(&mut bob_cfg, &bob.actor, &scope_id, &bob_reception, now())
-            .expect("accept");
-    mark_group_accept_posted(&mut bob_cfg, &scope_id);
-
-    ingest_group_frame(
-        &mut alice_cfg,
-        &alice.actor.actor_id(),
-        &bob.actor.actor_id(),
-        &accept_frame,
-        now(),
-    )
-    .expect("alice ingests accept");
-
-    let alice_reception = GroupReceptionKeyRecord::mint(now_ms());
-    let delivered = build_group_deliver(
-        &mut alice_cfg,
-        &alice.actor,
-        &alice.device(),
-        alice.device_cert(),
-        &alice_reception,
-        &scope_id,
-        &bob.actor.actor_id(),
-        now(),
-    )
-    .expect("deliver");
-    mark_group_delivered(&mut alice_cfg, &scope_id, &bob.actor.actor_id());
-
-    ingest_group_frame(
-        &mut bob_cfg,
-        &bob.actor.actor_id(),
-        &alice.actor.actor_id(),
-        &delivered.frame,
-        now(),
-    )
-    .expect("bob ingests deliver");
-
-    let admitted =
-        admit_group_share(&bob_cfg, &bob.actor, &bob_reception, &scope_id, now()).expect("admit");
-
-    CeremonyRun {
-        scope_id,
-        generation_id: delivered.generation_id,
-        alice_reception,
-        bob_reception,
-        alice_root_row: begun.held_root_row,
-        bob_root_row: admitted.held_root_row,
-        plane_rows: delivered.plane_rows,
-        bob_rows: admitted.rows,
-        bob_entry_id: admitted.entry_id,
-        bob_cfg,
-    }
-}
+use fauna_sync_engine::group_set::{fold_group_files, fold_group_name, group_set_keys};
+use fauna_sync_engine::group_state_plane::{GroupStatePlane, NoFeed};
 
 /// Resolve the scope's roster + tip from a store's PERSISTED group rows alone
 /// (plus the retained keys the reloaded admission bundle yields) — the
@@ -869,4 +552,896 @@ async fn sealed_rows_walk_member_to_member_and_stay_dark_without_the_root() {
             .is_empty(),
         "nothing lands without the root"
     );
+}
+
+// ── The group set's content plane (`p2p-shared-set-build.md` § Build design
+// — the group set, decisions 2–5) ─────────────────────────────────────────
+
+/// Decisions 2–5 end to end on two real replicas of two accounts, no nest:
+/// a member's file row and the authority's file row and set name seal under
+/// the ceremony's generation tip (the v2 envelope naming it), walk to the
+/// other replica, open there with the key its own wrap yields, and fold under
+/// the writer check; a row a member seals for a stranger who holds no wrap at
+/// that generation opens but is refused and counted, never folded; both
+/// replicas derive the same content key ring; and all of it holds after a
+/// restart, from disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_set_rows_seal_under_the_tip_walk_and_fold_across_a_restart() {
+    let (mut alice, mut bob, run) = admitted_pair().await;
+    let scope_str = GroupScope::new(run.scope_id).to_string();
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+    let carol = Seat::open(0x51, 0xD4, 0x0A).await;
+
+    // Bob writes his own file and — sealing it himself, under the tip he
+    // holds — a file authored by Carol, who is no member.
+    {
+        let sk = bob.device();
+        let plane =
+            GroupStatePlane::new(&bob.store, &NoFeed, &bob_root, &sk, &run.scope_id).unwrap();
+        let (item, value, stamp) = file_row(
+            &run,
+            &bob,
+            Some(entry_core_of(&run, &bob)),
+            0x11,
+            1_700_000_100_000,
+        );
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("bob's file");
+        let stranger = fauna_core::group_scope::RosterEntryCore {
+            scope_id: run.scope_id,
+            member_actor: carol.actor.actor_id(),
+            admission_salt: [0x5C; 32],
+        };
+        let (item, value, stamp) = file_row(&run, &carol, Some(stranger), 0x33, 1_700_000_100_001);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("the stranger's row seals");
+    }
+    // Alice — the authority — names the set and writes a file of her own.
+    {
+        let sk = alice.device();
+        let plane =
+            GroupStatePlane::new(&alice.store, &NoFeed, &alice_root, &sk, &run.scope_id).unwrap();
+        let (item, value, stamp) = name_row(&run, &alice, "Holiday photos", 1_700_000_100_002);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("the name");
+        let (item, value, stamp) = file_row(&run, &alice, None, 0x22, 1_700_000_100_003);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("alice's file");
+    }
+
+    // The content rows rest in the v2 envelope naming the ceremony's tip.
+    let bob_feed = feed_of(&bob, &scope_str).await;
+    let generation_sealed = bob_feed
+        .rows
+        .iter()
+        .filter(|r| {
+            r.entry
+                .as_deref()
+                .and_then(|e| fauna_core::account_entry_crypto::peek_generation_id(e))
+                == Some(run.generation_id)
+        })
+        .count();
+    assert_eq!(
+        generation_sealed, 2,
+        "both of bob's file rows are tip-sealed"
+    );
+
+    // Alice walks Bob's rows: the machinery is already hers, his file
+    // lands, the stranger's is refused and counted.
+    {
+        let sk = alice.device();
+        let plane =
+            GroupStatePlane::new(&alice.store, &bob_feed, &alice_root, &sk, &run.scope_id).unwrap();
+        let report = plane.walk().await.expect("alice walks bob");
+        assert_eq!(
+            (
+                report.rows,
+                report.kept,
+                report.applied,
+                report.refused,
+                report.unopened
+            ),
+            (6, 4, 1, 1, 0),
+            "{report:?}"
+        );
+    }
+    // Bob walks Alice's: the name and her file open and land.
+    {
+        let alice_feed = feed_of(&alice, &scope_str).await;
+        let sk = bob.device();
+        let plane =
+            GroupStatePlane::new(&bob.store, &alice_feed, &bob_root, &sk, &run.scope_id).unwrap();
+        let report = plane.walk().await.expect("bob walks alice");
+        assert_eq!(
+            (report.applied, report.refused, report.unopened),
+            (2, 0, 0),
+            "{report:?}"
+        );
+    }
+
+    alice.restart().await;
+    bob.restart().await;
+
+    // From disk, both seats: the same two honoured files and the same name.
+    // Bob's own store still holds the stranger's row he sealed himself — the
+    // walk never saw it — so his fold, the second line, refuses it there.
+    let mut rings = Vec::new();
+    for (name, seat, stored_refusals) in [("alice", &alice, 0), ("bob", &bob, 1)] {
+        let rows = seat.store.group_scope_states(&scope_str).await.unwrap();
+        let fold = fold_group_files(&run.scope_id, &rows).expect("the scope reads");
+        let mut authors: Vec<_> = fold.files.values().map(|f| f.member).collect();
+        authors.sort_by_key(|a| a.0);
+        let mut want = vec![alice.actor.actor_id(), bob.actor.actor_id()];
+        want.sort_by_key(|a| a.0);
+        assert_eq!(authors, want, "{name}: the honoured files' authors");
+        assert_eq!(fold.refused, stored_refusals, "{name}: the fold's refusals");
+        assert!(
+            !fold
+                .files
+                .contains_key(&fauna_core::group_file::group_file_logical_key(&[0x33; 32])),
+            "{name}: the stranger's row never folds"
+        );
+        let named = fold_group_name(&run.scope_id, &rows).expect("the scope reads");
+        assert_eq!(
+            (named.name.as_ref().map(|n| n.name()), named.refused),
+            (Some("Holiday photos"), 0),
+            "{name}: the authority's name folds"
+        );
+
+        let ring = group_set_keys(&seat.store, &run.scope_id).await.unwrap();
+        let (tip, key) = ring.tip().expect("a keyable tip");
+        assert_eq!(tip, run.generation_id, "{name}: the ring's tip");
+        rings.push(*key);
+    }
+    assert_eq!(
+        rings[0], rings[1],
+        "both members derive the one content key"
+    );
+}
+
+/// Decision 2's "written by the authority", end to end on two replicas: a
+/// member holding the tip key seals a later-stamped rename, signed by his
+/// own device under his own cert. The authority's replica refuses it at the
+/// walk, before the merge, and keeps the authority's name. The member's own
+/// replica stored the rename itself, so his fold — the second line — refuses
+/// it there. Then the authority revokes the device that signed the name,
+/// and the authority's fold retires the name with that device's other
+/// signatures.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_current_authority_device_names_the_set() {
+    let (alice, bob, run) = admitted_pair().await;
+    let scope_str = GroupScope::new(run.scope_id).to_string();
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+
+    // Alice — the authority — names the set; Bob renames it later.
+    {
+        let sk = alice.device();
+        let plane =
+            GroupStatePlane::new(&alice.store, &NoFeed, &alice_root, &sk, &run.scope_id).unwrap();
+        let (item, value, stamp) = name_row(&run, &alice, "Holiday photos", 1_700_000_100_000);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("alice's name");
+    }
+    {
+        let sk = bob.device();
+        let plane =
+            GroupStatePlane::new(&bob.store, &NoFeed, &bob_root, &sk, &run.scope_id).unwrap();
+        let (item, value, stamp) = name_row(&run, &bob, "Bob's now", 1_700_000_200_000);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("a member's rename seals under the tip");
+    }
+
+    // The walk: Alice refuses Bob's rename before the merge.
+    {
+        let bob_feed = feed_of(&bob, &scope_str).await;
+        let sk = alice.device();
+        let plane =
+            GroupStatePlane::new(&alice.store, &bob_feed, &alice_root, &sk, &run.scope_id).unwrap();
+        let report = plane.walk().await.expect("alice walks bob");
+        assert_eq!(
+            (report.applied, report.refused, report.unopened),
+            (0, 1, 0),
+            "the member's rename is refused at the walk: {report:?}"
+        );
+    }
+    let alice_rows = alice.store.group_scope_states(&scope_str).await.unwrap();
+    let alice_name = fold_group_name(&run.scope_id, &alice_rows).expect("the scope reads");
+    assert_eq!(
+        (
+            alice_name.name.as_ref().map(|n| n.name()),
+            alice_name.refused
+        ),
+        (Some("Holiday photos"), 0),
+        "the authority's name stands at the authority's replica"
+    );
+    assert_eq!(
+        alice_name.name.as_ref().map(|n| n.device),
+        Some(alice.device().verifying_key().to_bytes()),
+        "honoured as the authority device's"
+    );
+
+    // The fold: Bob's own replica holds the rename he sealed; it never folds.
+    let bob_rows = bob.store.group_scope_states(&scope_str).await.unwrap();
+    let bob_name = fold_group_name(&run.scope_id, &bob_rows).expect("the scope reads");
+    assert_eq!(
+        (bob_name.name.as_ref().map(|n| n.name()), bob_name.refused),
+        (None, 1),
+        "the member's stored rename is refused in the fold"
+    );
+
+    // The revocation: Alice's actor revokes the device that signed the name.
+    {
+        let (key, record) = fauna_core::group_scope::sign_authority_revocation(
+            alice.actor.signing_key(),
+            Vec::new(),
+            run.scope_id,
+            alice.device().verifying_key().to_bytes(),
+            1_700_000_300_000,
+        );
+        let sk = alice.device();
+        let plane =
+            GroupStatePlane::new(&alice.store, &NoFeed, &alice_root, &sk, &run.scope_id).unwrap();
+        plane
+            .put(
+                &ItemId {
+                    kind: fauna_protocol::group_state::KIND_GROUP_AUTHORITY_REVOCATION.into(),
+                    key,
+                },
+                canonical_encode(&record).unwrap().to_vec(),
+                None,
+            )
+            .await
+            .expect("the revocation");
+    }
+    // The revocation is a row the writer check reads, so the plane re-folds
+    // the name's cell over its writers' latest rows (`group-set.md`
+    // decision 5, rule (ii)): neither the revoked device's name nor Bob's
+    // rename is honoured, and the cell folds as no row — nothing left for
+    // the fold's second line to refuse.
+    let alice_rows = alice.store.group_scope_states(&scope_str).await.unwrap();
+    let retired = fold_group_name(&run.scope_id, &alice_rows).expect("the scope reads");
+    assert_eq!(
+        (retired.name.as_ref().map(|n| n.name()), retired.refused),
+        (None, 0),
+        "a name signed by a since-revoked authority device is retired"
+    );
+}
+
+/// A revoked authority device's far-future-stamped name never holds the cell
+/// against a current authority device's rename. The
+/// authority's second, stolen device names the set stamped `i64::MAX / 2`
+/// and Bob lands it; the authority revokes that device and renames from its
+/// own device at an ordinary instant. Bob's fold shows the rename, where
+/// latest-wins alone would keep the revoked row and fold no name at all.
+/// Both rows reach Bob under one relay writer (Alice's replica), so the
+/// re-fold's one-row-per-writer pick already supersedes the stolen row here;
+/// the writer check in the re-fold is pinned by the cross-writer form below.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_authority_devices_future_stamped_name_never_holds_the_cell() {
+    let (alice, bob, run) = admitted_pair().await;
+    let scope_str = GroupScope::new(run.scope_id).to_string();
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+    // A second authority device of Alice's, later stolen.
+    let stolen = ed25519_dalek::SigningKey::from_bytes(&[0x7A; 32]);
+    let alice_plane_write = |item: ItemId, value: Vec<u8>, stamp: Option<Vec<u8>>| {
+        let (alice, run, alice_root) = (&alice, &run, &alice_root);
+        async move {
+            let sk = alice.device();
+            GroupStatePlane::new(&alice.store, &NoFeed, alice_root, &sk, &run.scope_id)
+                .unwrap()
+                .put(&item, value, stamp)
+                .await
+                .expect("alice's write");
+        }
+    };
+    let bob_walks_alice = || {
+        let (alice, bob, run, scope_str, bob_root) = (&alice, &bob, &run, &scope_str, &bob_root);
+        async move {
+            let feed = feed_of(alice, scope_str).await;
+            let sk = bob.device();
+            GroupStatePlane::new(&bob.store, &feed, bob_root, &sk, &run.scope_id)
+                .unwrap()
+                .walk()
+                .await
+                .expect("bob walks alice")
+        }
+    };
+
+    // The compromised second device names the set far in the future.
+    let (item, value, stamp) = name_row_by(&run, &alice, &stolen, "Hijacked", i64::MAX / 2);
+    alice_plane_write(item, value, Some(stamp)).await;
+    let report = bob_walks_alice().await;
+    assert_eq!(report.applied, 1, "bob lands the name: {report:?}");
+
+    // The authority renames from its own device at an ordinary instant, and
+    // revokes the stolen one. The revocation reaches Bob first — carried by
+    // another replica; it verifies under the authority actor's signature
+    // whoever carries it, so it is planted here as Bob's own write.
+    let (item, value, stamp) = name_row(&run, &alice, "Holiday photos", 1_700_000_400_000);
+    alice_plane_write(item, value, Some(stamp)).await;
+    let (key, record) = fauna_core::group_scope::sign_authority_revocation(
+        alice.actor.signing_key(),
+        Vec::new(),
+        run.scope_id,
+        stolen.verifying_key().to_bytes(),
+        1_700_000_300_000,
+    );
+    {
+        let sk = bob.device();
+        GroupStatePlane::new(&bob.store, &NoFeed, &bob_root, &sk, &run.scope_id)
+            .unwrap()
+            .put(
+                &ItemId {
+                    kind: fauna_protocol::group_state::KIND_GROUP_AUTHORITY_REVOCATION.into(),
+                    key,
+                },
+                canonical_encode(&record).unwrap().to_vec(),
+                None,
+            )
+            .await
+            .expect("the revocation lands at bob");
+    }
+    let report = bob_walks_alice().await;
+    assert_eq!(report.unopened, 0, "the rename opens at bob: {report:?}");
+    assert_eq!(
+        report.refused, 0,
+        "the rename passes the writer check: {report:?}"
+    );
+
+    let bob_rows = bob.store.group_scope_states(&scope_str).await.unwrap();
+    let named = fold_group_name(&run.scope_id, &bob_rows).expect("the scope reads");
+    assert_eq!(
+        (named.name.as_ref().map(|n| n.name()), named.refused),
+        (Some("Holiday photos"), 0),
+        "the current authority device's rename takes the cell from the revoked one's"
+    );
+    assert_eq!(
+        named.name.as_ref().map(|n| n.device),
+        Some(alice.device().verifying_key().to_bytes()),
+        "honoured as the current authority device's"
+    );
+}
+
+/// The same theft with the stolen device's row carried by a replica of its
+/// own: Bob's replica relays the stolen
+/// device's `i64::MAX / 2` name under Bob's writer while the authority's
+/// rename arrives under Alice's, so the re-fold holds one live row per writer
+/// and only its writer check keeps the revoked device's row from winning on
+/// stamp. Dropping that check folds the cell to the stolen row, which the
+/// display fold then refuses — no name at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_authority_devices_name_from_another_replica_never_holds_the_cell() {
+    let (alice, bob, run) = admitted_pair().await;
+    let scope_str = GroupScope::new(run.scope_id).to_string();
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+    let stolen = ed25519_dalek::SigningKey::from_bytes(&[0x7A; 32]);
+    let bob_puts = |item: ItemId, value: Vec<u8>, stamp: Option<Vec<u8>>| {
+        let (bob, run, bob_root) = (&bob, &run, &bob_root);
+        async move {
+            let sk = bob.device();
+            GroupStatePlane::new(&bob.store, &NoFeed, bob_root, &sk, &run.scope_id)
+                .unwrap()
+                .put(&item, value, stamp)
+                .await
+                .expect("bob carries the row");
+        }
+    };
+
+    // The stolen authority device names the set far in the future; the row
+    // reaches Bob through a replica other than Alice's — here, his own.
+    let (item, value, stamp) = name_row_by(&run, &alice, &stolen, "Hijacked", i64::MAX / 2);
+    bob_puts(item, value, Some(stamp)).await;
+    let bob_rows = bob.store.group_scope_states(&scope_str).await.unwrap();
+    let named = fold_group_name(&run.scope_id, &bob_rows).expect("the scope reads");
+    assert_eq!(
+        named.name.as_ref().map(|n| n.name()),
+        Some("Hijacked"),
+        "before the revocation the second authority device's name stands"
+    );
+
+    // The authority renames from its own device and revokes the stolen one.
+    {
+        let sk = alice.device();
+        let (item, value, stamp) = name_row(&run, &alice, "Holiday photos", 1_700_000_400_000);
+        GroupStatePlane::new(&alice.store, &NoFeed, &alice_root, &sk, &run.scope_id)
+            .unwrap()
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("alice's rename");
+    }
+    let (key, record) = fauna_core::group_scope::sign_authority_revocation(
+        alice.actor.signing_key(),
+        Vec::new(),
+        run.scope_id,
+        stolen.verifying_key().to_bytes(),
+        1_700_000_300_000,
+    );
+    bob_puts(
+        ItemId {
+            kind: fauna_protocol::group_state::KIND_GROUP_AUTHORITY_REVOCATION.into(),
+            key,
+        },
+        canonical_encode(&record).unwrap().to_vec(),
+        None,
+    )
+    .await;
+    let report = {
+        let feed = feed_of(&alice, &scope_str).await;
+        let sk = bob.device();
+        GroupStatePlane::new(&bob.store, &feed, &bob_root, &sk, &run.scope_id)
+            .unwrap()
+            .walk()
+            .await
+            .expect("bob walks alice")
+    };
+    assert_eq!(
+        (report.unopened, report.refused),
+        (0, 0),
+        "the rename opens and passes the writer check: {report:?}"
+    );
+
+    let bob_rows = bob.store.group_scope_states(&scope_str).await.unwrap();
+    let named = fold_group_name(&run.scope_id, &bob_rows).expect("the scope reads");
+    assert_eq!(
+        (named.name.as_ref().map(|n| n.name()), named.refused),
+        (Some("Holiday photos"), 0),
+        "the current authority device's rename takes the cell from the revoked device's row \
+         relayed under another writer"
+    );
+}
+
+/// The fail-safe gap at a replica that holds the scope's machinery root but
+/// no generation key (a custodian's posture): it walks a member's feed and
+/// lands the machinery, but every content row stays unopened, and its own
+/// content write refuses and lands nothing — never a machinery-root fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_holder_without_a_generation_key_neither_opens_nor_writes_content() {
+    let (alice, _bob, run) = admitted_pair().await;
+    let scope_str = GroupScope::new(run.scope_id).to_string();
+    let root = run.alice_root_row.machinery_root().unwrap();
+    {
+        let sk = alice.device();
+        let plane = GroupStatePlane::new(&alice.store, &NoFeed, &root, &sk, &run.scope_id).unwrap();
+        let (item, value, stamp) = file_row(&run, &alice, None, 0x22, 1_700_000_100_003);
+        plane
+            .put(&item, value, Some(stamp))
+            .await
+            .expect("alice's file");
+    }
+
+    let custodian = Seat::open(0x61, 0xE5, 0x0B).await;
+    let feed = feed_of(&alice, &scope_str).await;
+    let sk = custodian.device();
+    let plane = GroupStatePlane::new(&custodian.store, &feed, &root, &sk, &run.scope_id).unwrap();
+    let report = plane.walk().await.expect("the custodian walks");
+    assert_eq!(
+        (report.applied, report.unopened),
+        (4, 1),
+        "machinery lands, the content row stays dark: {report:?}"
+    );
+    let err = plane
+        .put(
+            &ItemId {
+                kind: KIND_GROUP_NAME.into(),
+                key: GROUP_NAME_KEY.into(),
+            },
+            b"mine now".to_vec(),
+            Some(
+                LwwStamp {
+                    at_ms: 1,
+                    writer: sk.verifying_key().to_bytes(),
+                }
+                .encode()
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no admissible"), "{err}");
+    assert!(
+        custodian
+            .store
+            .group_state(&scope_str, KIND_GROUP_NAME, GROUP_NAME_KEY)
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused write landed nothing"
+    );
+}
+
+/// A removed member's post-removal rows, merged by one stale replica, never
+/// hold a cell anywhere the removal has merged — `group-set.md` decision 5, the
+/// 2026-11-02 ruling: rule (i), a removed member is honoured as of its
+/// removal; rule (ii), a writer-checked cell folds over each writer's latest
+/// relay row, honoured rows only.
+///
+/// Alice is the authority and Bob a member. Carol is a second replica that
+/// holds the generation Bob still holds and goes stale: it has walked the
+/// files but not the removal. (The two-seat ceremony admits one member, so
+/// the stale co-member is a sibling replica of the authority's actor — the
+/// reader's mechanism is the same whoever's replica is stale — and no
+/// severance mint follows the removal: the bound reads the roster's signed
+/// removal instant, never a mint.)
+///
+/// Bob writes two honest files and Alice one. Alice removes Bob. Bob, still
+/// holding the generation, signs three rows naming it, stamped a year after
+/// the removal: a put on Alice's path, a put on a fresh path, and a put on
+/// his own second path. Carol walks Bob and merges all three (stale, by
+/// design), then walks Alice and learns the removal; Alice walks Carol. At
+/// both: Alice's path folds as Alice's row, the fresh path as no row, Bob's
+/// second path as no row (his refused row superseded his own earlier one —
+/// the ruling's residual (3)), and his first path keeps his pre-removal row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_members_post_removal_rows_never_hold_a_cell_through_a_stale_peer() {
+    const REMOVED_AT: i64 = 1_700_000_200_000;
+    const PLANTED_AT: i64 = REMOVED_AT + 365 * 24 * 3_600_000;
+    const BOB_PATH: u8 = 0x11;
+    const BOB_SECOND_PATH: u8 = 0x13;
+    const ALICE_PATH: u8 = 0x22;
+    const FRESH_PATH: u8 = 0x44;
+
+    let (alice, bob, run) = admitted_pair().await;
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+    // Carol: a sibling replica of the authority's actor, admitted from the
+    // same snapshot and custody rows.
+    let carol = Seat::open(0x21, 0xA3, 0x0C).await;
+    carol.establish_fleet_tip().await;
+    carol
+        .write_custody_rows(&run.alice_root_row, &run.alice_reception)
+        .await;
+    {
+        let sk = carol.device();
+        let plane =
+            GroupStatePlane::new(&carol.store, &NoFeed, &alice_root, &sk, &run.scope_id).unwrap();
+        let report = plane.adopt_rows(&run.plane_rows).await.expect("adopt");
+        assert_eq!(report.refused, 0, "{report:?}");
+    }
+    let bob_entry = || Some(entry_core_of(&run, &bob));
+    let cell = |path: u8| fauna_core::group_file::group_file_logical_key(&[path; 32]);
+
+    // Honest writes, everywhere.
+    put_as(
+        &bob,
+        &bob_root,
+        &run.scope_id,
+        file_row(&run, &bob, bob_entry(), BOB_PATH, 1_700_000_100_000),
+    )
+    .await;
+    put_as(
+        &bob,
+        &bob_root,
+        &run.scope_id,
+        file_row(&run, &bob, bob_entry(), BOB_SECOND_PATH, 1_700_000_100_001),
+    )
+    .await;
+    put_as(
+        &alice,
+        &alice_root,
+        &run.scope_id,
+        file_row(&run, &alice, None, ALICE_PATH, 1_700_000_100_002),
+    )
+    .await;
+    walk_as(&alice, &alice_root, &run.scope_id, &bob).await;
+    walk_as(&carol, &alice_root, &run.scope_id, &bob).await;
+    walk_as(&carol, &alice_root, &run.scope_id, &alice).await;
+
+    // Alice removes Bob. Carol does not see it yet.
+    let (removal_cell, removal) = fauna_core::group_scope::sign_roster_removal(
+        &alice.device(),
+        run.bob_entry_id,
+        alice.device_cert(),
+        REMOVED_AT,
+    );
+    {
+        let sk = alice.device();
+        GroupStatePlane::new(&alice.store, &NoFeed, &alice_root, &sk, &run.scope_id)
+            .unwrap()
+            .put(
+                &ItemId {
+                    kind: KIND_GROUP_ROSTER.into(),
+                    key: removal_cell,
+                },
+                canonical_encode(&removal).unwrap().to_vec(),
+                None,
+            )
+            .await
+            .expect("the removal");
+    }
+
+    // Bob, removed but still holding the generation, plants a year ahead.
+    for path in [ALICE_PATH, FRESH_PATH, BOB_SECOND_PATH] {
+        put_as(
+            &bob,
+            &bob_root,
+            &run.scope_id,
+            file_row(&run, &bob, bob_entry(), path, PLANTED_AT),
+        )
+        .await;
+    }
+    walk_as(&carol, &alice_root, &run.scope_id, &bob).await;
+    assert_eq!(
+        honoured_files(&carol, &run.scope_id)
+            .await
+            .get(&cell(ALICE_PATH)),
+        Some(&(bob.actor.actor_id(), PLANTED_AT)),
+        "the stale replica merges the planted row, by design"
+    );
+
+    // Carol learns the removal; Alice walks Carol.
+    walk_as(&carol, &alice_root, &run.scope_id, &alice).await;
+    let report = walk_as(&alice, &alice_root, &run.scope_id, &carol).await;
+    assert_eq!(
+        report.refused, 3,
+        "every planted row is refused at the authority: {report:?}"
+    );
+
+    let want: std::collections::BTreeMap<_, _> = [
+        (cell(BOB_PATH), (bob.actor.actor_id(), 1_700_000_100_000)),
+        (
+            cell(ALICE_PATH),
+            (alice.actor.actor_id(), 1_700_000_100_002),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    for (name, seat) in [("alice", &alice), ("carol", &carol)] {
+        assert_eq!(
+            honoured_files(seat, &run.scope_id).await,
+            want,
+            "{name}: Alice's path is Alice's, Bob's pre-removal file stands, the fresh path \
+             and Bob's superseded path fold as no row"
+        );
+    }
+}
+
+/// Rule (i) holds, and rule (ii)'s fold reads ACROSS generations, when a
+/// severance mint follows the removal (`group-set.md` decision 5, the
+/// 2026-11-02 ruling). After Alice
+/// removes Bob she mints G1 wrapped to herself alone and writes under it, so
+/// one path's rows sit at two item keys: her own under G0 and G1, Bob's
+/// plant under G0. Bob, who has seen neither the removal nor the mint, plants
+/// a year ahead under G0 on Alice's re-written path, on a path only G1 holds,
+/// and on a fresh path; Carol (stale) merges them, then learns the removal
+/// and the mint; Alice walks Carol. At both: each of Alice's paths folds as
+/// her G1 row, the fresh path as no row, Bob's pre-removal file stands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_members_g0_rows_never_outrank_a_g1_write_through_a_stale_peer() {
+    const REMOVED_AT: i64 = 1_700_000_200_000;
+    const MINTED_AT: i64 = REMOVED_AT + 1;
+    const PLANTED_AT: i64 = REMOVED_AT + 365 * 24 * 3_600_000;
+    const BOB_PATH: u8 = 0x11;
+    const ALICE_PATH: u8 = 0x22;
+    const ALICE_G1_PATH: u8 = 0x33;
+    const FRESH_PATH: u8 = 0x44;
+    const ALICE_G0_PATH: u8 = 0x55;
+
+    let (alice, bob, run) = admitted_pair().await;
+    let alice_root = run.alice_root_row.machinery_root().unwrap();
+    let bob_root = run.bob_root_row.machinery_root().unwrap();
+    let carol = Seat::open(0x21, 0xA3, 0x0C).await;
+    carol.establish_fleet_tip().await;
+    carol
+        .write_custody_rows(&run.alice_root_row, &run.alice_reception)
+        .await;
+    {
+        let sk = carol.device();
+        let plane =
+            GroupStatePlane::new(&carol.store, &NoFeed, &alice_root, &sk, &run.scope_id).unwrap();
+        let report = plane.adopt_rows(&run.plane_rows).await.expect("adopt");
+        assert_eq!(report.refused, 0, "{report:?}");
+    }
+    let bob_entry = || Some(entry_core_of(&run, &bob));
+    let cell = |path: u8| fauna_core::group_file::group_file_logical_key(&[path; 32]);
+    let alice_plane_put = |item: ItemId, value: Vec<u8>| {
+        let alice = &alice;
+        let alice_root = &alice_root;
+        let scope_id = run.scope_id;
+        async move {
+            let sk = alice.device();
+            GroupStatePlane::new(&alice.store, &NoFeed, alice_root, &sk, &scope_id)
+                .unwrap()
+                .put(&item, value, None)
+                .await
+                .expect("the authority's write");
+        }
+    };
+
+    // Honest G0 writes, everywhere.
+    put_as(
+        &bob,
+        &bob_root,
+        &run.scope_id,
+        file_row(&run, &bob, bob_entry(), BOB_PATH, 1_700_000_100_000),
+    )
+    .await;
+    put_as(
+        &alice,
+        &alice_root,
+        &run.scope_id,
+        file_row(&run, &alice, None, ALICE_PATH, 1_700_000_100_002),
+    )
+    .await;
+    put_as(
+        &alice,
+        &alice_root,
+        &run.scope_id,
+        file_row(&run, &alice, None, ALICE_G0_PATH, 1_700_000_100_003),
+    )
+    .await;
+    walk_as(&alice, &alice_root, &run.scope_id, &bob).await;
+    walk_as(&carol, &alice_root, &run.scope_id, &bob).await;
+    walk_as(&carol, &alice_root, &run.scope_id, &alice).await;
+
+    // Alice removes Bob, then mints G1 to herself alone.
+    let (removal_cell, removal) = fauna_core::group_scope::sign_roster_removal(
+        &alice.device(),
+        run.bob_entry_id,
+        alice.device_cert(),
+        REMOVED_AT,
+    );
+    alice_plane_put(
+        ItemId {
+            kind: KIND_GROUP_ROSTER.into(),
+            key: removal_cell,
+        },
+        canonical_encode(&removal).unwrap().to_vec(),
+    )
+    .await;
+    let alice_core = entry_core_of(&run, &alice);
+    let g1 = fauna_mls::wrapped_blob::group_generation_wraps::build_group_mint(
+        &[fauna_core::group_scope::RosterMember {
+            entry_id: fauna_core::group_scope::roster_entry_id(&alice_core).unwrap(),
+            member_actor: alice.actor.actor_id(),
+            reception_pubkey: run.alice_reception.reception_pubkey().unwrap(),
+            enrolled_at_ms: now_ms(),
+        }],
+        vec![run.generation_id],
+        Vec::new(),
+        &alice.device(),
+        alice.device_cert(),
+        MINTED_AT,
+    )
+    .expect("the severance mint");
+    alice_plane_put(
+        ItemId {
+            kind: KIND_GROUP_GENERATION_MINT.into(),
+            key: fauna_core::hex32::encode(&g1.generation_id),
+        },
+        canonical_encode(&g1.record).unwrap().to_vec(),
+    )
+    .await;
+    for (path, at) in [
+        (ALICE_PATH, MINTED_AT + 10),
+        (ALICE_G1_PATH, MINTED_AT + 11),
+    ] {
+        put_as(
+            &alice,
+            &alice_root,
+            &run.scope_id,
+            file_row_in(g1.generation_id, &run, &alice, None, path, at),
+        )
+        .await;
+    }
+    let want: std::collections::BTreeMap<_, _> = [
+        (cell(BOB_PATH), (bob.actor.actor_id(), 1_700_000_100_000)),
+        (cell(ALICE_PATH), (alice.actor.actor_id(), MINTED_AT + 10)),
+        (
+            cell(ALICE_G1_PATH),
+            (alice.actor.actor_id(), MINTED_AT + 11),
+        ),
+        (
+            cell(ALICE_G0_PATH),
+            (alice.actor.actor_id(), 1_700_000_100_003),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        honoured_files(&alice, &run.scope_id).await,
+        want,
+        "the authority's G1 writes hold before any plant"
+    );
+
+    // Bob, who saw neither the removal nor the mint, plants a year ahead
+    // under G0 — his tip.
+    for path in [ALICE_PATH, ALICE_G1_PATH, FRESH_PATH, ALICE_G0_PATH] {
+        put_as(
+            &bob,
+            &bob_root,
+            &run.scope_id,
+            file_row(&run, &bob, bob_entry(), path, PLANTED_AT),
+        )
+        .await;
+    }
+    walk_as(&carol, &alice_root, &run.scope_id, &bob).await;
+    assert_eq!(
+        honoured_files(&carol, &run.scope_id)
+            .await
+            .get(&cell(ALICE_PATH)),
+        Some(&(bob.actor.actor_id(), PLANTED_AT)),
+        "the stale replica merges the planted row, by design"
+    );
+
+    // Carol learns the removal, the mint and the G1 rows; Alice walks Carol.
+    walk_as(&carol, &alice_root, &run.scope_id, &alice).await;
+    let report = walk_as(&alice, &alice_root, &run.scope_id, &carol).await;
+    assert_eq!(
+        report.refused, 4,
+        "every planted row is refused at the authority: {report:?}"
+    );
+    for (name, seat) in [("alice", &alice), ("carol", &carol)] {
+        assert_eq!(
+            honoured_files(seat, &run.scope_id).await,
+            want,
+            "{name}: Alice's re-written paths fold as her G1 rows, the path she wrote only \
+             under G0 as that row (gathered at G0's item key once the tip is G1), the fresh \
+             path as no row, Bob's pre-removal file stands"
+        );
+    }
+}
+
+/// One own write on `seat`'s plane.
+async fn put_as(
+    seat: &Seat,
+    root: &fauna_core::crypto::GroupMachineryRoot,
+    scope_id: &[u8; 32],
+    (item, value, stamp): (ItemId, Vec<u8>, Vec<u8>),
+) {
+    let sk = seat.device();
+    GroupStatePlane::new(&seat.store, &NoFeed, root, &sk, scope_id)
+        .unwrap()
+        .put(&item, value, Some(stamp))
+        .await
+        .expect("the write");
+}
+
+/// `reader` walks `served`'s relay rows.
+async fn walk_as(
+    reader: &Seat,
+    root: &fauna_core::crypto::GroupMachineryRoot,
+    scope_id: &[u8; 32],
+    served: &Seat,
+) -> fauna_sync_engine::account_state_plane::WalkReport {
+    let feed = feed_of(served, &GroupScope::new(*scope_id).to_string()).await;
+    let sk = reader.device();
+    GroupStatePlane::new(&reader.store, &feed, root, &sk, scope_id)
+        .unwrap()
+        .walk()
+        .await
+        .expect("the walk")
+}
+
+/// A seat's honoured files: cell key → (author, stamp).
+async fn honoured_files(
+    seat: &Seat,
+    scope_id: &[u8; 32],
+) -> std::collections::BTreeMap<String, (fauna_core::identity::ActorId, i64)> {
+    let rows = seat
+        .store
+        .group_scope_states(&GroupScope::new(*scope_id).to_string())
+        .await
+        .unwrap();
+    fold_group_files(scope_id, &rows)
+        .expect("the scope reads")
+        .files
+        .into_iter()
+        .map(|(key, f)| (key, (f.member, f.record.core.stamped_at_ms)))
+        .collect()
 }

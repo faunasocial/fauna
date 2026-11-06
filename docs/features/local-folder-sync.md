@@ -55,7 +55,7 @@ Stamped 2026-10-01 at dfa27a899f.
 11. [app] A device set to keep an archive keeps the files your other devices delete — `docs/goal/behavior/file-sync.md` § Technical Flow
    - `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_backup_seat_keeps_a_file_the_source_deleted`
 12. [nest] Files matched by a folder's own ignore list are never uploaded, neither as they change nor by a later rescan — `docs/goal/behavior/sync-engine-deployments.md` § Control Plane Principle
-   - (none)
+   - `tests/e2e-unified/tests/api/test_folder_ignore_list.py::test_ignored_files_are_never_uploaded_on_a_change_or_a_rescan`
 13. [app] One change a device cannot apply never holds up the rest: the others keep arriving, and the stuck one is listed for you to review — `docs/goal/behavior/file-sync.md` § Technical Flow
    - `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest`
 14. [nest] Only one of your devices at a time can hold a folder for exclusive editing; a second device asking while it is held is refused — `docs/goal/behavior/file-sync.md` § Folders
@@ -85,47 +85,47 @@ Stamped 2026-10-01 at dfa27a899f.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ⚠ partial | |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
+| linux | ⚠ partial | 0.1.5-dev+381efcf2 standalone |
+| windows | ⚠ partial | 0.1.5-dev+381efcf2 standalone |
+| macos | ⚠ partial | 0.1.5-dev+381efcf2 standalone |
 | ios | — absent | |
 | android | — absent | |
-| tui | ⚠ partial | |
+| tui | ⚠ partial | 0.1.5-dev+381efcf2 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_agent_uploads_bound_folder_file` | linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_agent_uploads_bound_folder_file` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_windows_agent_uploads_bound_folder_file` | windows (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_folder_agent_content_sync.py::test_macos_agent_uploads_bound_folder_file` | macos (macos): passed |
 | 2 | app | `tests/e2e-unified/tests/test_filesync_multiseat_live.py::test_three_seat_live_sync` | tui (linux): failed |
-| 3 | app | `tests/e2e-unified/tests/test_sync_agent_status.py::test_sync_agent_status_reads_running_after_login` | linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sync_agent_status.py::test_sync_agent_status_reads_running_after_login` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sync_agent_status.py::test_sync_agent_status_reads_running_after_login_windows_real` | windows (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_sync_agent_status.py::test_sync_agent_status_reads_running_after_login_macos_real` | macos (macos): passed |
-| 4 | app | `tests/e2e-unified/tests/test_sync_live_apply.py::test_sync_location_map_edits_apply_live` | linux (linux): error, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_filesync_mass_delete_floor.py::test_a_vanished_folder_is_held_surfaced_and_propagated_only_on_confirm` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_sync_live_apply.py::test_sync_location_map_edits_apply_live` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 5 | app | `tests/e2e-unified/tests/test_filesync_mass_delete_floor.py::test_a_vanished_folder_is_held_surfaced_and_propagated_only_on_confirm` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_filesync_mass_delete_floor.py::test_an_on_demand_root_holds_only_its_hydrated_rows` | windows (windows): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_filesync_delete_declined_debounce.py::test_declined_delete_of_a_mid_debounce_edit_keeps_the_file` | linux (linux): passed, tui (linux): failed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_filesync_delete_declined_debounce.py::test_declined_delete_of_a_mid_debounce_edit_keeps_the_file` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_filesync_delete_declined_debounce.py::test_windows_declined_delete_of_a_mid_debounce_edit_keeps_the_file` | windows (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/test_filesync_delete_declined_debounce.py::test_macos_declined_delete_of_a_mid_debounce_edit_keeps_the_file` | macos (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_filesync_bind_history.py::test_fresh_bind_onto_tombstoned_history_preserves_local_file` | linux (linux): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_filesync_bind_history.py::test_fresh_bind_onto_a_same_named_never_deleted_file_keeps_syncing` | linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_restarted_seat_receives_what_it_missed` | — |
-| 8 | app | `tests/e2e-unified/tests/test_filesync_metadata_only_relay.py::test_a_second_device_receives_a_metadata_only_folders_file_from_the_first` | tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_filesync_bind_history.py::test_fresh_bind_onto_tombstoned_history_preserves_local_file` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 6 | app | `tests/e2e-unified/tests/test_filesync_bind_history.py::test_fresh_bind_onto_a_same_named_never_deleted_file_keeps_syncing` | linux (linux): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 7 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_restarted_seat_receives_what_it_missed` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_filesync_metadata_only_relay.py::test_a_second_device_receives_a_metadata_only_folders_file_from_the_first` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 | 9 | nest | (maintainer-only) | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_folder_selective_sync_live.py::test_an_excluded_path_stops_syncing_until_the_exclusion_is_cleared` | tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_backup_seat_keeps_a_file_the_source_deleted` | — |
-| 12 | nest | (none) | — |
-| 13 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest` | tui (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_folder_exclusive_lease.py::test_only_one_device_at_a_time_holds_a_folders_exclusive_lease` | nest (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_folder_place_accepts_hold.py::test_a_device_told_not_to_take_changes_resumes_exactly_where_it_stopped` | tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_filesync_mass_delete_floor.py::test_an_unreadable_subtree_is_surfaced_and_nothing_is_deleted` | linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_bind_location_nested_under_folder` | linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_folder_selective_sync_live.py::test_an_excluded_path_stops_syncing_until_the_exclusion_is_cleared` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 11 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_backup_seat_keeps_a_file_the_source_deleted` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_folder_ignore_list.py::test_ignored_files_are_never_uploaded_on_a_change_or_a_rescan` | nest (linux): passed, nest (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_filesync_seat_catchup.py::test_a_permanently_unappliable_change_is_recorded_and_never_blocks_the_rest` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_folder_exclusive_lease.py::test_only_one_device_at_a_time_holds_a_folders_exclusive_lease` | nest (linux): passed, nest (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_folder_place_accepts_hold.py::test_a_device_told_not_to_take_changes_resumes_exactly_where_it_stopped` — requires `folder-place-accepts-hold` (not built: web, windows, ios, android) | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 16 | app | `tests/e2e-unified/tests/test_filesync_mass_delete_floor.py::test_an_unreadable_subtree_is_surfaced_and_nothing_is_deleted` — requires `folder-location-unreadable` (not built: web, ios, android) | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_bind_location_nested_under_folder` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 17 | app | `tests/e2e-unified/tests/test_folders.py::test_bind_location_nested_under_folder_windows` | windows (windows): passed |
-| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_bind_location_nested_under_folder_macos` | — |
-| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_save_paths_does_not_drop_pending_location_path` | linux (linux): passed, tui (linux): passed |
-| 18 | app | `tests/e2e-unified/tests/test_folders.py::test_writer_member_binds_location` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seats_converge` | linux (linux): passed, tui (linux): passed |
-| 19 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seat_scenarios` | linux (linux): failed, windows (windows): failed, macos (macos): failed, tui (linux): failed, tui (macos): passed |
-| 20 | app | `tests/e2e-unified/tests/test_sync_helper_holds_no_identity_key.py::test_the_sync_helper_never_holds_the_identity_key` | tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seat_ignore` | linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_bind_location_nested_under_folder_macos` | macos (macos): passed |
+| 17 | app | `tests/e2e-unified/tests/test_folders.py::test_folder_save_paths_does_not_drop_pending_location_path` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
+| 18 | app | `tests/e2e-unified/tests/test_folders.py::test_writer_member_binds_location` | linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seats_converge` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 19 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seat_scenarios` | linux (linux): passed, windows (windows): failed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 20 | app | `tests/e2e-unified/tests/test_sync_helper_holds_no_identity_key.py::test_the_sync_helper_never_holds_the_identity_key` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_filesync_seats.py::test_seat_ignore` | linux (linux): passed, macos (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

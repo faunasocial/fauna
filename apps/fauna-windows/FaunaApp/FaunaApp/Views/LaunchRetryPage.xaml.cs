@@ -44,6 +44,7 @@ public sealed partial class LaunchRetryPage : Page
         RetryButton.Content = S.Get("common/retry");
         FallthroughButton.Content = S.Get("onboarding/launch/use_different_nest");
         RecoverButton.Content = S.Get("onboarding/launch/recover_lost_box");
+        RetireButton.Content = S.Get("onboarding/launch/retire_server");
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -95,18 +96,28 @@ public sealed partial class LaunchRetryPage : Page
     {
         _context?.Recover(_recoverableBoxes);
     }
+
+    /// <summary>nest-retirement.md § Layout &amp; flow: open nest_retire over this
+    /// surface (<see cref="LaunchRetryContext.Retire"/>).</summary>
+    private void OnRetireClick(object sender, RoutedEventArgs e)
+    {
+        _context?.Retire();
+    }
 }
 
 /// <summary>
 /// Navigation parameter for <see cref="LaunchRetryPage"/>. The launch
-/// flow constructs all three callbacks: <see cref="Retry"/> re-runs the
+/// flow constructs all four callbacks: <see cref="Retry"/> re-runs the
 /// silent challenge, <see cref="Fallthrough"/> drops to the wizard
 /// with the identity pre-seeded, <see cref="Recover"/> drops to the
 /// wizard seeded for box recovery (box-recovery.md § Recovery UI step 4,
 /// surviving-device entry) — only reachable once
-/// <see cref="LaunchRetryPage.ShowRecoverButton"/> has revealed the button.
+/// <see cref="LaunchRetryPage.ShowRecoverButton"/> has revealed the button —
+/// and <see cref="Retire"/> opens nest_retire over this surface, which puts the
+/// surface back when it is left (nest-retirement.md § Layout &amp; flow).
 /// </summary>
 public sealed record LaunchRetryContext(
     Func<Task> Retry,
     Action Fallthrough,
-    Action<string[]> Recover);
+    Action<string[]> Recover,
+    Action Retire);

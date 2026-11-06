@@ -90,6 +90,7 @@ from helpers.photo_backup import (
     enable_photo_backup,
     granted,
     png_chunks,
+    photo_library_set,
     prepare_photos_access,
 )
 from helpers.waiting import wait_until
@@ -100,18 +101,9 @@ pytestmark = [
 ]
 
 
-def _photo_set(port: int, secret_key: str) -> str:
-    """The set the ingress resolved to, asked of the NEST.
-
-    Not read off a folder row: that row's text is a rendered label (name plus mode
-    plus size), not the identifier `changes.list` takes. The shared resolver
-    names it `"Photo Library"` (`folders.md` § Photo backup → *Target set model*).
-    """
-    folders = user_folders_list(port, secret_key=secret_key).get("folders", [])
-    return next(
-        (f["name"] for f in folders if f.get("name") == "Photo Library"),
-        "",
-    )
+#: Above any copy of the one-pixel fixtures and below every stock photo the
+#: simulator's library ships (megabytes) — see the selection in the test.
+FIXTURE_CEILING_B = 64 * 1024
 
 
 def _creates_above(port: int, secret_key: str, folder: str, seq: int) -> list[dict]:
@@ -177,7 +169,7 @@ def test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone(
     granted(app)
 
     folder = wait_until(
-        lambda: _photo_set(port, secret_key) or None,
+        lambda: photo_library_set(port, secret_key) or None,
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
             "the nest holds no photo-library set after enabling backup, so the "
@@ -188,22 +180,28 @@ def test_the_stored_copy_is_the_phones_pixels_with_only_the_metadata_gone(
 
     # ⚠ The high-water mark is read AFTER the pass, not before: `enable_photo_backup`
     # starts a pass itself, so there is no quiet moment before the uploads to
-    # measure from. Instead both photos are identified by being the newest TWO
-    # creates in the set — which is sound because the assertion below is about the
-    # relationship BETWEEN them, and `await_photo_in_media` has already proved both
-    # arrived.
+    # measure from. Nor are this test's photos the newest creates: the pass backs
+    # up the WHOLE library, and the simulator's own stock photos may go up after
+    # them. They are picked out by size instead — both fixtures are a single
+    # pixel (under 200 B), the stock photos are megabytes, and any copy the
+    # ingress could make of a one-pixel PNG, re-encoded or not, stays far under
+    # `FIXTURE_CEILING_B`. Which create is which does not matter: the assertion
+    # below is about the relationship BETWEEN them, and `await_photo_in_media`
+    # has already proved both arrived.
     await_photo_in_media(app, plain_tag, what="enabling backup (the plain photo)")
     await_photo_in_media(app, rich_tag, what="enabling backup (the rich photo)")
     app.backups.navigate_folders()
     await_quiet(driver)
 
+    def fixture_creates() -> list[dict]:
+        return [c for c in _creates_above(port, secret_key, folder, 0)
+                if (c.get("size_bytes") or 0) < FIXTURE_CEILING_B]
+
     ours = wait_until(
-        lambda: (lambda cs: cs if len(cs) >= 2 else None)(
-            _creates_above(port, secret_key, folder, 0)
-        ),
+        lambda: (lambda cs: cs if len(cs) >= 2 else None)(fixture_creates()),
         budgets.RPC_ROUNDTRIP_S,
         diagnose=lambda: (
-            "the nest recorded fewer than two creates in "
+            "the nest recorded fewer than two fixture-sized creates in "
             f"{folder!r} even though both photos list in Media: "
             f"{_creates_above(port, secret_key, folder, 0)!r}"
         ),

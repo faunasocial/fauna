@@ -80,10 +80,9 @@ struct Inner {
     /// local read can never move a thread backwards.
     read_positions: HashMap<String, u64>,
     /// Whether the positions above are **known** — the seam has delivered them
-    /// at least once this run. Until then a native message is judged by the
-    /// launch floor like every other ([`Inner::is_news`]): an app between
-    /// launch and its account-store-ready edge, and web for its whole run,
-    /// cannot tell history from news any other way.
+    /// at least once this run. Until then no native message is unread — an app
+    /// between launch and its account-store-ready edge cannot tell history from
+    /// news, and the first delivery recomputes the whole set ([`Inner::is_news`]).
     positions_known: bool,
     /// Per held `INBOX` mail message, its UID on the nest — the identity the
     /// mail rail's read marker, IMAP `\Seen`, is written and delivered under
@@ -94,25 +93,22 @@ struct Inner {
     inbox_uid: HashMap<MessageId, u32>,
     by_inbox_uid: HashMap<u32, MessageId>,
     /// The **launch floor** — where this run's news starts ([`ThreadStore::new`];
-    /// `conversations.md` § State & data shape → *When a thread is read*). The
-    /// store is refilled from the nest at every launch, and nothing yet tells a
-    /// replayed message the user read last week from one that arrived while the
-    /// app was closed — so a message stamped before the floor is history: it
-    /// never enters [`Self::unread`], and the new-message banner decision reads
-    /// the same floor off the snapshot (`ConversationsSnapshot::launch_floor_ms`,
-    /// `notification.rs`) so a thread a slower rail delivers after the seed never
-    /// banners for old mail. Under-reports by design until read state syncs: a
-    /// missing badge is a gap, a false one on every old mail after every restart
-    /// is a lie. Since synced read state landed it is the unread rule's
-    /// **position-unknown arm** only ([`Inner::is_news`]) — a native message
-    /// before the positions arrive (mail never reads it: its `\Seen` flag is
-    /// its marker, [`Inner::append`]); that read goes when the last
-    /// host without an account runtime gains one (`conversation-read-state.md`
-    /// § web). The banner's read stays — a banner is for what arrives while the
-    /// app runs, and that question has a run-start answer whatever read state
-    /// knows.
+    /// `conversations.md` § State & data shape → *When a thread is read*). It no
+    /// longer decides any unread state: since every host registers the
+    /// read-position seam, a native message is unread by its nest-assigned
+    /// `seq` against the channel's position alone ([`Inner::is_news`]) and mail
+    /// by its `\Seen` flag. What remains is the new-message banner decision's
+    /// run-start stamp, published on every snapshot
+    /// (`ConversationsSnapshot::launch_floor_ms`, `notification.rs`): a banner
+    /// is for what arrives while the app runs, and that question has a
+    /// run-start answer whatever read state knows.
     launch_floor_ms: i64,
     next_id: u64,
+    /// Message ids an e2e inject seam announced as news before ingesting them
+    /// ([`ThreadStore::announce_injected_news_for_test`]) — consumed by the
+    /// append, so the arrival is unread in the one snapshot that shows it.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    injected_news: HashSet<MessageId>,
 }
 
 impl Inner {
@@ -120,13 +116,14 @@ impl Inner {
     /// (`conversation-read-state.md` § How the carriers meet the in-memory
     /// set). A native message whose channel position is known is unread iff
     /// its nest-assigned `seq` is above the position — no clock anywhere.
-    /// Everything else falls back to the launch floor: a message stamped
-    /// before this run began is history. Mail never asks — its `\Seen` flag
-    /// decides ([`Self::append`]).
+    /// Until the positions arrive nothing native is unread: the delivery
+    /// recomputes every native thread's set whole
+    /// ([`ThreadStore::apply_read_positions`]). Mail never asks — its `\Seen`
+    /// flag decides ([`Self::append`]).
     fn is_news(&self, msg: &MessageSnapshot) -> bool {
         match msg.message_id.channel_position() {
             Some((channel_hex, seq)) if self.positions_known => seq > self.position_of(channel_hex),
-            _ => msg.timestamp_ms >= self.launch_floor_ms,
+            _ => false,
         }
     }
 
@@ -143,7 +140,9 @@ impl Inner {
     /// what the inbound mail record said beyond the snapshot, when one did.
     fn append(&mut self, id: &ThreadId, msg: MessageSnapshot, mail: Option<MailArrival>) -> bool {
         self.by_message.insert(msg.message_id.clone(), id.clone());
-        let position_or_floor_news = self.is_news(&msg);
+        let position_news = self.is_news(&msg);
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        let position_news = self.injected_news.remove(&msg.message_id) || position_news;
         let Some(detail) = self.threads.get_mut(id) else {
             return false;
         };
@@ -186,7 +185,7 @@ impl Inner {
             && if detail.rail == Rail::Smtp {
                 !mail.is_some_and(|m| m.has_seen_flag)
             } else {
-                position_or_floor_news
+                position_news
             };
         if news {
             self.unread
@@ -304,6 +303,61 @@ impl ThreadStore {
             })
             .collect();
         out.sort_by_key(|s| -s.last_activity_ms);
+        out
+    }
+
+    /// Thread `id`'s list snippet past every message `deleted` holds — the
+    /// preview of the newest message neither stored deleted nor held by it,
+    /// `""` when none stands. `None` when that is what the stored summary
+    /// already says (the newest message is not one `deleted` holds) or the
+    /// thread is unknown, so the common case allocates nothing. The manager
+    /// passes its read-time delete fold, which the store does not see.
+    pub fn snippet_past(
+        &self,
+        id: &ThreadId,
+        deleted: impl Fn(&MessageSnapshot) -> bool,
+    ) -> Option<String> {
+        let inner = self.inner.read().unwrap();
+        let mut standing = inner
+            .threads
+            .get(id)?
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| !m.deleted);
+        if !deleted(standing.clone().next()?) {
+            return None;
+        }
+        Some(
+            standing
+                .find(|m| !deleted(m))
+                .map(|m| snippet_preview(&m.body))
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The summaries the thread list shows and counts — [`Self::list_summaries`]
+    /// minus every thread [`is_unlisted`] holds back. The page snapshot, the
+    /// unread total and the secure-channel count read this; a walk over every
+    /// thread the store holds (a roster sweep, an eviction) reads
+    /// [`Self::list_summaries`].
+    pub fn list_rail_summaries(&self) -> Vec<ThreadSummary> {
+        let unlisted: HashSet<ThreadId> = {
+            let inner = self.inner.read().unwrap();
+            inner
+                .by_key
+                .iter()
+                .filter(|(key, id)| {
+                    inner
+                        .threads
+                        .get(*id)
+                        .is_some_and(|detail| is_unlisted(key, detail))
+                })
+                .map(|(_, id)| id.clone())
+                .collect()
+        };
+        let mut out = self.list_summaries();
+        out.retain(|s| !unlisted.contains(&s.thread_id));
         out
     }
 
@@ -595,18 +649,14 @@ impl ThreadStore {
             ThreadKey::Participants { rail, .. } => *rail,
             ThreadKey::SubjectKeyed { rail, .. } => *rail,
             ThreadKey::Channel { rail, .. } => *rail,
-            ThreadKey::ByMessageReference(_) => participants
+            ThreadKey::ByMessageReference(_) | ThreadKey::Unknown { .. } => participants
                 .first()
                 .and_then(|p| p.rail())
                 .unwrap_or(crate::address::Rail::FaunaMls),
         };
         let label = label_override.unwrap_or_else(|| match &key {
             ThreadKey::SubjectKeyed { subject, .. } => subject.clone(),
-            _ => participants
-                .iter()
-                .map(|p| p.display())
-                .collect::<Vec<_>>()
-                .join(", "),
+            _ => join_displays(&participants, TypedAddress::display),
         });
         let detail = ThreadDetail {
             thread_id: id.clone(),
@@ -837,6 +887,9 @@ impl ThreadStore {
             marks.insert(new, handle);
         }
         if let Some(detail) = inner.threads.get_mut(id) {
+            // Read before the rows move: a label joined from them names the
+            // retired key otherwise, and no later read could tell it is derived.
+            let derived_label = label_is_derived(&detail.label, &detail.participants);
             for i in 0..detail.participants.len() {
                 let repointed = match &mut detail.participants[i] {
                     TypedAddress::Fauna { actor_id, .. } if actor_id == old => {
@@ -851,6 +904,9 @@ impl ThreadStore {
                         *d = display;
                     }
                 }
+            }
+            if derived_label {
+                detail.label = join_displays(&detail.participants, TypedAddress::display);
             }
         }
     }
@@ -1080,6 +1136,23 @@ impl ThreadStore {
             .collect()
     }
 
+    /// Every thread's routing key, by local id, in one read — a thread carries
+    /// exactly one (`find_or_create` inserts it, [`Self::rekey_to_channel`]
+    /// replaces it). The at-rest key of its draft (`store::drafts`).
+    pub fn routing_keys(&self) -> HashMap<ThreadId, ThreadKey> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .by_key
+            .iter()
+            .map(|(k, id)| (id.clone(), k.clone()))
+            .collect()
+    }
+
+    /// The thread this device holds under `key`, if it holds one.
+    pub fn id_for_key(&self, key: &ThreadKey) -> Option<ThreadId> {
+        self.inner.read().unwrap().by_key.get(key).cloned()
+    }
+
     pub fn channel_hex(&self, id: &ThreadId) -> Option<String> {
         let inner = self.inner.read().unwrap();
         inner.by_key.iter().find_map(|(k, v)| match k {
@@ -1249,6 +1322,36 @@ impl ThreadStore {
         }
     }
 
+    /// Announce that the message `msg_id` names, about to be ingested, is news
+    /// — test-only, backing the e2e inject seams
+    /// ([`crate::ConversationsManager::inject_inbound_for_test`]). An injected
+    /// message carries no carrier marker: on the native rail no channel
+    /// position, so [`Inner::is_news`] never counts it, and a journey watching
+    /// unread rise (the new-message banner's) would watch nothing. The seam
+    /// states the arrival is news instead — mail's injects already are, for
+    /// lacking `\Seen` — so no clock enters read state. Announced BEFORE the
+    /// ingest, not marked after it, so no observer ever sees the arrival read
+    /// first and unread a notify later (a banner tracker seeding on that first
+    /// snapshot would banner its own seed). Own messages still never count
+    /// ([`Inner::append`]).
+    ///
+    /// Gated for the same reason as [`Self::set_message_is_own_for_test`] above.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn announce_injected_news_for_test(&self, msg_id: &crate::message::MessageId) {
+        self.inner
+            .write()
+            .unwrap()
+            .injected_news
+            .insert(msg_id.clone());
+    }
+
+    /// Withdraw an announcement the ingest did not consume (a duplicate id, a
+    /// failed ingest), so it can never apply to a later arrival.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn withdraw_injected_news_for_test(&self, msg_id: &crate::message::MessageId) {
+        self.inner.write().unwrap().injected_news.remove(msg_id);
+    }
+
     /// Force a loaded message's content [`labels`](crate::message::MessageSnapshot::labels)
     /// — test-only, backing [`crate::ConversationsManager::inject_inbound_with_labels_for_test`].
     /// The generic inject path (`ingest_inbound`) does not classify (only the real
@@ -1294,7 +1397,11 @@ impl ThreadStore {
         // The next identity's run starts now: what its catch-up replays is its
         // history, not news.
         inner.launch_floor_ms = launch_floor_ms();
-        inner.next_id = 0;
+        // `next_id` is deliberately NOT reset: a thread id is unique for the
+        // life of the process. Per-session maps keyed by thread id (the
+        // FaunaMls `thread → channel` binding the `history/<ch>` save reads)
+        // outlive the wipe with their session, and a reissued id would alias
+        // the next account's thread onto the last account's channel.
     }
 }
 
@@ -1307,6 +1414,33 @@ pub(crate) const SNIPPET_PARSE_MAX_BYTES: usize = 4096;
 /// The most bytes the thread-list snippet itself carries — into every
 /// `ThreadSummary`, the e2e state row, and a desktop notification body.
 pub(crate) const SNIPPET_MAX_BYTES: usize = 512;
+
+/// The participants' names joined the way a thread's derived label is.
+pub(crate) fn join_displays(
+    participants: &[TypedAddress],
+    name: impl Fn(&TypedAddress) -> String,
+) -> String {
+    participants.iter().map(name).collect::<Vec<_>>().join(", ")
+}
+
+/// Whether `label` is a join of `participants` rather than a subject, a room
+/// name or a rename — either as they display now, or as they did before a
+/// handle reached them ([`ThreadStore::find_or_create`] joins once, at creation).
+pub(crate) fn label_is_derived(label: &str, participants: &[TypedAddress]) -> bool {
+    if participants.is_empty() {
+        return false;
+    }
+    let nameless = |p: &TypedAddress| match p {
+        TypedAddress::Fauna { actor_id, .. } => TypedAddress::Fauna {
+            handle: String::new(),
+            actor_id: *actor_id,
+        }
+        .display(),
+        other => other.display(),
+    };
+    label == join_displays(participants, nameless)
+        || label == join_displays(participants, TypedAddress::display)
+}
 
 /// Whether `detail` seats `actor` under exactly `handle` — the liveness test
 /// every `Inner::anchor_grade` read applies before honouring a mark.
@@ -1342,6 +1476,27 @@ fn bounded_activity_ms(stamp_ms: i64, now_ms: i64, launch_floor_ms: i64) -> i64 
     }
 }
 
+/// Whether a thread is held off every rail: a **direct** FaunaMls thread born
+/// from its channel — a Welcome's, or the bootstrap that carries an
+/// archive-link signal — that has carried no renderable message yet
+/// (`archive-import.md` § Linking and merging (phase two), ruling 1). The
+/// first `Text` or `Attachments` body appends a message and lists it like any
+/// other; an archive body appends nothing, so a thread carrying only signals
+/// stays unlisted and counts nothing. A thread the owner started from the
+/// composer is keyed by its participants, not its channel, and stays listed
+/// even before its first send lands — a failed first send keeps it on the rail
+/// with its draft, for the retry.
+fn is_unlisted(key: &ThreadKey, detail: &ThreadDetail) -> bool {
+    matches!(
+        key,
+        ThreadKey::Channel {
+            rail: Rail::FaunaMls,
+            ..
+        }
+    ) && detail.flavor == ThreadFlavor::OneToOne
+        && detail.messages.is_empty()
+}
+
 fn summarize(
     detail: &ThreadDetail,
     unread: Option<&HashSet<MessageId>>,
@@ -1366,7 +1521,16 @@ fn summarize(
         glyph: detail.rail.glyph(),
         flavor: detail.flavor.clone(),
         label: detail.label.clone(),
-        snippet: last.map(|m| snippet_preview(&m.body)).unwrap_or_default(),
+        // The newest message still standing: a deleted body never reaches the
+        // list (the manager re-applies the same rule for the deletes it folds
+        // at read time — `ThreadStore::snippet_past`).
+        snippet: detail
+            .messages
+            .iter()
+            .rev()
+            .find(|m| !m.deleted)
+            .map(|m| snippet_preview(&m.body))
+            .unwrap_or_default(),
         last_activity_ms: last
             .map(|m| bounded_activity_ms(m.timestamp_ms, now_ms, launch_floor_ms))
             .unwrap_or(0),
@@ -1472,6 +1636,57 @@ mod tests {
             ThreadFlavor::MlsGroup,
             None,
         )
+    }
+
+    /// The unlisted rule's scope (`archive-import.md` § Linking and merging
+    /// (phase two), ruling 1): only a channel-born 1:1 with no message is held
+    /// off the rail. A group born from its channel, and a 1:1 the owner
+    /// started from the composer (keyed by participants — a failed first send
+    /// keeps it there for the retry), stay listed while empty; the first
+    /// message lists the held one.
+    #[test]
+    fn only_an_empty_channel_born_one_to_one_is_unlisted() {
+        let store = ThreadStore::new();
+        let held = store.find_or_create(
+            ThreadKey::Channel {
+                rail: Rail::FaunaMls,
+                channel_id_hex: "a0".into(),
+            },
+            vec![fauna("", 1)],
+            ThreadFlavor::OneToOne,
+            None,
+        );
+        let group = channel_thread(&store, "a1", vec![fauna("", 2), fauna("", 3)]);
+        let composed = store.find_or_create(
+            ThreadKey::Participants {
+                rail: Rail::FaunaMls,
+                participants: vec![fauna("", 4)],
+            },
+            vec![fauna("", 4)],
+            ThreadFlavor::OneToOne,
+            None,
+        );
+        let listed = |store: &ThreadStore| -> Vec<ThreadId> {
+            store
+                .list_rail_summaries()
+                .into_iter()
+                .map(|s| s.thread_id)
+                .collect()
+        };
+        let rail = listed(&store);
+        assert!(!rail.contains(&held), "{rail:?}");
+        assert!(
+            rail.contains(&group) && rail.contains(&composed),
+            "{rail:?}"
+        );
+        assert_eq!(
+            store.list_summaries().len(),
+            3,
+            "every thread is still held"
+        );
+
+        store.append_message(&held, msg("m1", "hello"));
+        assert!(listed(&store).contains(&held), "the first message lists it");
     }
 
     /// A correspondent's future-dated stamp is bounded in the list: the summary
@@ -1663,6 +1878,60 @@ mod tests {
         store.append_message(&id, msg("m2", "see [docs](https://example.com)"));
 
         assert_eq!(store.list_summaries()[0].snippet, "see docs");
+    }
+
+    /// A wipe never reissues a thread id. Every per-session map keyed by thread
+    /// id (the FaunaMls backend's `thread → channel` binding, which the
+    /// `history/<ch>` save reads) outlives an identity change with the session
+    /// that holds it; restarting the counter made the incoming account's `t-1`
+    /// alias the outgoing session's `t-1`, so a stale save wrote one
+    /// conversation into another channel's slice (the 2026-10-29 store
+    /// reviewer walk: a restored thread carried another reviewer's label and
+    /// messages).
+    #[test]
+    fn a_wipe_never_reissues_a_thread_id() {
+        let store = ThreadStore::new();
+        let key = |who: &str| ThreadKey::Participants {
+            rail: Rail::Smtp,
+            participants: vec![email(who)],
+        };
+        let before = store.find_or_create(
+            key("alice@example.com"),
+            vec![email("alice@example.com")],
+            ThreadFlavor::OneToOne,
+            None,
+        );
+        store.clear();
+        let after = store.find_or_create(
+            key("bob@example.com"),
+            vec![email("bob@example.com")],
+            ThreadFlavor::OneToOne,
+            None,
+        );
+        assert_ne!(before, after, "the wipe reissued {before:?}");
+    }
+
+    /// A message stored deleted (a restored slice's tombstone) is skipped:
+    /// the snippet previews the newest message still standing.
+    #[test]
+    fn snippet_skips_a_deleted_latest_message() {
+        let store = ThreadStore::new();
+        let parts = vec![email("alice@example.com")];
+        let id = store.find_or_create(
+            ThreadKey::Participants {
+                rail: Rail::Smtp,
+                participants: parts.clone(),
+            },
+            parts,
+            ThreadFlavor::OneToOne,
+            None,
+        );
+        store.append_message(&id, msg("m1", "still here"));
+        let mut gone = msg("m2", "taken back");
+        gone.deleted = true;
+        store.append_message(&id, gone);
+
+        assert_eq!(store.list_summaries()[0].snippet, "still here");
     }
 
     /// A huge latest message must not make every summary carry — and every

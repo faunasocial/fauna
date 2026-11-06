@@ -19,7 +19,6 @@ surface excision → *The price-and-route class*); the e2e harness builds every
 app's default flavor, which carries the plane, so no flavor gate applies.
 """
 
-import time
 import uuid
 
 import pytest
@@ -104,23 +103,6 @@ def _can_read_tier(api: ApiActor, author_id: bytes, tier: str) -> bool:
         return False
 
 
-def _approve_until(app, done, timeout: float = AUTHOR_GRANT_BUDGET_S) -> bool:
-    """Drive the author's §2 until ``done()``, approving whatever is pending
-    when observed (the connect-time drain may win rows first)."""
-    subs = app.subscriptions
-    subs.navigate()
-    subs.open_tiers_tab()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if done():
-            return True
-        subs.refresh()
-        if subs.pending_request_count() >= 1:
-            subs.approve_first_request()
-        time.sleep(1)  # sleep-ok: poll interval of a deadline loop
-    return bool(done())
-
-
 def _sell(app, preview: str, *, subscribers_get_it_free: bool = True) -> str:
     """Sell a post through the composer; return its auto-minted tier name."""
     feed = app.feed
@@ -154,7 +136,6 @@ def _card_for(app, preview: str) -> int:
 def test_a_non_subscriber_sees_only_the_teaser_and_the_tier_badge(app, request, offers_nest):
     """Outcome: someone not subscribed to a post's tier sees only its teaser and
     a badge naming the tier, never the post itself."""
-    app.subscriptions.require_sell_post_authoring_supported()
     author = _register(offers_nest)
     stranger = _register(offers_nest)
     _login_as(app, request, offers_nest, author, handle=_unique("e2e-gater"))
@@ -198,7 +179,7 @@ def test_a_post_sold_to_everyone_leaves_existing_subscribers_out(app, request, o
     _create_tier(app, gold, 2)
     sub_api = _api(offers_nest, subscriber)
     assert sub_api.subscribe(seller_id, gold).get("outcome") == "queued"
-    assert _approve_until(app, lambda: _can_read_tier(sub_api, seller_id, gold)), (
+    assert app.subscriptions.approve_until(lambda: _can_read_tier(sub_api, seller_id, gold)), (
         f"precondition: the gold subscriber is granted; error={app.subscriptions.error_text()!r}"
     )
 
@@ -246,7 +227,9 @@ def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offer
 
     follow_api = _api(offers_nest, follower)
     follow_api.subscribe(seller_id, FOLLOWERS_TIER)
-    assert _approve_until(app, lambda: _can_read_tier(follow_api, seller_id, FOLLOWERS_TIER)), (
+    assert app.subscriptions.approve_until(
+        lambda: _can_read_tier(follow_api, seller_id, FOLLOWERS_TIER),
+    ), (
         "precondition: a third actor's follow provisions the followers tier"
     )
     preview = _unique("subscribers-free")
@@ -271,8 +254,7 @@ def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offer
 
     # ── The seller's client grants it; the buyer becomes a follower too. ─────
     _login_as(app, request, offers_nest, seller, handle=seller_handle)
-    assert _approve_until(
-        app,
+    assert app.subscriptions.approve_until(
         lambda: _can_read_tier(buyer_api, seller_id, unlock)
         and _can_read_tier(buyer_api, seller_id, FOLLOWERS_TIER),
     ), (
@@ -303,8 +285,6 @@ def test_a_bought_post_is_not_offered_again_while_the_approval_is_on_its_way(
     same card. The seller never approves, so the grant stays on its way. A
     restart is out of scope — the in-memory guard deliberately does not survive
     one (§ Per-post pay-to-unlock)."""
-    app.subscriptions.require_sell_post_authoring_supported()
-    app.feed.require_purchase_pending_supported()
     seller = _register(offers_nest)
     buyer = _register(offers_nest)
     _login_as(app, request, offers_nest, seller, handle=_unique("e2e-seller"))
@@ -351,7 +331,6 @@ def test_a_sold_post_is_never_offered_as_a_tier_or_an_audience(app, request, off
     an agent REFUSES a select value its frame did not paint
     (`SelectOptionNotOffered`, convention 11), so selecting the sold tier is
     the read."""
-    app.subscriptions.require_sell_post_authoring_supported()
     app.subscriptions.require_sell_post_seller_fanout_leg_supported()
     app.profile.require_other_profile_offers_browse_supported()
     seller = _register(offers_nest)
@@ -395,7 +374,6 @@ def test_you_are_never_offered_your_own_sold_post(app, request, offers_nest):
     resolves in the same render pass that would resolve the author's own — so
     once the foreign card shows its price, the own card's resolve has run, and
     its having painted no price is settled."""
-    app.subscriptions.require_teaser_buy_supported()
     other = _register(offers_nest)
     me = _register(offers_nest)
     _login_as(app, request, offers_nest, other, handle=_unique("e2e-other-seller"))

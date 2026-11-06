@@ -231,6 +231,7 @@ async fn engine_control_plane_round_trips_via_adapter() {
             Some(seal.clone()),
             None, // derived_through
             None, // is_resolution
+            None,
             None, // row
         )
         .await
@@ -295,6 +296,7 @@ async fn reseal_supersede_round_trips_via_adapter() {
                 ckv, // the re-seal stamps the current generation
                 None,
                 Some(owner_seal("prebind.bin")), // S9: sealed like the engine
+                None,
                 None,
                 None,
                 None,

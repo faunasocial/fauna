@@ -18,6 +18,7 @@ public class AdminNavigationTests
     [InlineData("admin-nest", "admin-nest")]
     [InlineData("admin-aliases", "admin-aliases")]
     [InlineData("admin-mail", "admin-mail")]
+    [InlineData("admin-mail-reports", "admin-mail-reports")]
     [InlineData("admin-calendar", "admin-calendar")]
     [InlineData("admin-contacts", "admin-contacts")]
     [InlineData("admin-files", "admin-files")]
@@ -63,7 +64,8 @@ public class AdminNavigationTests
         // contextual detail pages (admin-web apex designation / admin-dns /
         // admin-bridges-pending / admin-custody-hosting / admin-logs) the shell
         // switches between.
-        Assert.Equal(14, AdminNavigation.SubPages.Count);
+        Assert.Equal(15, AdminNavigation.SubPages.Count);
+        Assert.Contains(AdminNavigation.MailReports, AdminNavigation.SubPages);
         Assert.Contains("admin-logs", AdminNavigation.SubPages);
         Assert.Contains(AdminNavigation.Users, AdminNavigation.SubPages);
         Assert.Contains(AdminNavigation.Settings, AdminNavigation.SubPages);

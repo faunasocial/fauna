@@ -10,7 +10,7 @@ namespace FaunaApp.Tests;
 /// verified); this is the pure decision the mechanism consults — keyed on the
 /// E2E gate (FAUNA_E2E_BRIDGE present) and whether another instance already
 /// holds the single-instance mutex. The Windows twin of linux's
-/// NON_UNIQUE-in-e2e gate (apps/fauna-linux/src/main.rs:54-67).
+/// NON_UNIQUE-in-e2e gate (apps/fauna-linux/src/lib.rs:54-67).
 /// </summary>
 public class SingleInstanceGateTests
 {

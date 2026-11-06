@@ -1,8 +1,8 @@
 # Who can see what — the ways your data reaches the outside world
 
-Fauna stores your content encrypted on your nest, apart from what you publish to everyone, which is public by design. Nobody who connects to your nest — not another Fauna user, not a stranger on the internet, not the person who runs the server — can read your private posts, messages, files, or contact details unless you deliberately shared them. That is the default, and it does not change.
+Fauna stores your content encrypted on your nest, apart from your profile and what you publish to everyone, which are public by design. Nobody who connects to your nest — not another Fauna user, not a stranger on the internet, not the person who runs the server — can read your private posts, messages, files, or contact details unless you deliberately shared them. That is the default, and it does not change.
 
-Some things sit beside that. Your nest sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send. And beyond what you publish to everyone and the mail and messages your nest passes to and from email and other networks, what any machine may read is a permission you granted and can revoke in the app. A group may also choose to be a community room, which its home nest can read. And a link standing on a line of its own in a post or a message is fetched for its preview by the nest of each person who reads it, so that nest learns the link's address. And someone who can open one of your messages, or a post only some people can open, can attach its text to a report, which the admins it goes to can then read. The sections below say where each of these applies.
+Some things sit beside that. Your nest sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send. And beyond your profile, what you publish to everyone and the mail and messages your nest passes to and from email and other networks, what any machine may read is a permission you granted and can revoke in the app. A group may also choose to be a community room, which its home nest can read. And a link standing on a line of its own in a post or a message is fetched for its preview by the nest of each person who reads it, so that nest learns the link's address. And someone who can open one of your messages, or a post only some people can open, can attach its text to a report, which the admins it goes to can then read. The sections below say where each of these applies.
 
 But a nest is also a *server*. The moment it opens a port to the world — to send
 your mail, to show your public posts, to reach the wider social web — it starts
@@ -28,10 +28,7 @@ made. Where that applies, this guide says so.
 
 - **Your private content stays private.** Posts only some people can open, the content of your direct messages on Fauna and Nostr, your files, your contacts, your follower and following lists on your nest, and how many users your nest has — none of these are visible to outsiders. See
   [What always stays private](#what-always-stays-private).
-- **What you publish is public — everywhere it travels.** A public post, your
-  profile, and the free preview of a paid post are meant to be seen. If you also
-  connect to Bluesky, Nostr, or the Fediverse, "public" means public on those
-  networks too, and often permanently.
+- **What you publish is public — everywhere it travels.** A public post and the free preview of a paid post are meant to be seen, and so is your profile: by everyone on your nest, by people on other nests once you turn on **People on other nests can see your profile**, and, whatever that switch says, on the Fediverse once you enable it and on Bluesky when your nest hosts your Bluesky identity. If you also connect to Bluesky, Nostr, or the Fediverse, a public post, unless you imported it from another service, is public on those networks too, and often permanently.
 - **Running a public service announces the service.** Mail, a public web page for
   your posts, and the bridges each leave a public footprint — a mail server's
   greeting, DNS records, a security certificate. These identify the service and
@@ -46,11 +43,9 @@ made. Where that applies, this guide says so.
 
 ## Public posts and your profile
 
-When you make a post public, it is public. Anyone can read it. People on your nest can also find it through search, it appears on your web page if you publish it there (**Publish to web**, on the post's menu), and it travels to any network you have bridged it to. Your profile
-(display name, bio, picture, banner, and your account's public identifier) is
-public in the same way once you have a public presence.
+When you make a post public, it is public. Anyone can read it. People on your nest can also find it through search, it appears on your web page if you publish it there (**Publish to web**, on the post's menu), and, unless you imported it from another service, it travels to any network you have bridged it to. Your profile (display name, bio, links, picture, banner, and your **Actor ID**) is public by design, as the top of this guide says: whatever the switch below says, everyone on your nest can see it. People on other nests who open your profile in Fauna see only the start of your Actor ID where your name would be, until you turn on **People on other nests can see your profile** in your profile's edit form; then their app receives your whole profile, which also carries the address of your home nest.
 
-- **Who sees it:** anyone.
+- **Who sees it:** anyone, for a public post; for your profile, everyone on your nest, people on other nests once you turn that switch on, and, whatever the switch says, the Fediverse once you enable it and Bluesky when your nest hosts your Bluesky identity (below).
 - **Reaches other networks?** Only if you turn on a bridge (below). A plain public post on a nest with no bridges is readable by people using Fauna, and on your web page if you published it there.
 - **Turning it off:** you can delete a post, but if it already travelled to
   another network, copies there may remain.
@@ -74,13 +69,11 @@ it. On the folder's row in **Settings → Folders**, open it and set who can see
 to *Public*. Your app asks you to confirm, because a public folder is different
 in kind from the other two:
 
-- **The files are no longer encrypted.** Anyone on the web can read them.
+- **The files are no longer encrypted.** Anyone on the web can read what the folder holds when you make it public and what you add while it is public. If you shared the folder with people, what they add while it is public stays encrypted.
 - **The names are public too.** File and folder names become part of each file's
   web address, so a folder called `tax-2025` announces itself even before anyone
   opens a file.
-- **Going back to private protects only what comes after.** Files that were
-  public can have been copied, indexed, or archived by anyone in the meantime.
-  Treat anything you published as public for good.
+- **Going back can't take back what was public.** Your devices encrypt the files again, but anything that was public can have been copied, indexed, or archived by anyone in the meantime. Treat anything you published as public for good.
 
 That is why nothing becomes public by accident: it takes the setting *and* the
 confirmation, and a folder shared with specific people has to stop being shared
@@ -166,7 +159,7 @@ world can see what you send it. Background on each:
 
 ### Bluesky
 
-When you link your Bluesky account and turn on cross-posting, your public posts are copied to the Bluesky network. Bluesky's feed is world-readable, and its history is copied by many independent servers and apps: deleting your Fauna post also deletes the Bluesky copy, but anyone who already copied it may keep it.
+When you link your Bluesky account and turn on cross-posting, your public posts, apart from posts you imported from another service, are copied to the Bluesky network. Bluesky's feed is world-readable, and its history is copied by many independent servers and apps: deleting your Fauna post also deletes the Bluesky copy, but anyone who already copied it may keep it.
 
 - **What's published:** the post text (up to a length limit), its links and tags,
   the time you posted, and your own Bluesky handle. **Photos and video are not
@@ -175,11 +168,11 @@ When you link your Bluesky account and turn on cross-posting, your public posts 
 - **Who sees it:** anyone on Bluesky.
 - **Turning it off:** on the AT Protocol page, set **Cross-post to Bluesky** to **Disabled** (or to **Manual**, which sends only the public posts you tag `crosspost`). That stops future cross-posts; it does not recall past ones. A reply to, or quote of, a Bluesky post still goes to Bluesky whatever this setting says, since that is where it answers.
 
-**Hosting your Bluesky identity on your nest.** Instead of linking an account you already have, you can choose **Hosted here — visible** on the AT Protocol page, once your nest has its own domain name (until then the option is greyed out, with the reason). Your nest then holds your Bluesky identity itself, with a handle at your nest's domain, and publishes your public posts to the Bluesky network — photos, videos, your profile picture and banner included. Your earlier public posts go too only if you tick **Also publish my *N* existing public posts** (the box shows how many there are). Paid posts, posts you imported from another service, posts for a room and messages are never published. The app shows what a change will do before anything happens. Stepping back down stops publishing and takes your account offline on Bluesky, keeping the identity for if you return; **Delete my Bluesky presence** removes what your nest published. Neither can recall copies the network already made.
+**Hosting your Bluesky identity on your nest.** Instead of linking an account you already have, you can choose **Hosted here — visible** on the AT Protocol page, once your nest has its own domain name (until then the option is greyed out, with the reason). Your nest then holds your Bluesky identity itself, with a handle at your nest's domain, and publishes your profile — display name, bio, picture and banner — and your public posts to the Bluesky network, photos and videos included. Your earlier public posts go too only if you tick **Also publish my *N* existing public posts** (the box shows how many there are). Paid posts, posts you imported from another service, posts for a room and messages are never published. The app shows what a change will do before anything happens. Stepping back down stops publishing and takes your account offline on Bluesky, keeping the identity for if you return; **Delete my Bluesky presence** removes what your nest published. Neither can recall copies the network already made.
 
 ### Nostr
 
-Nostr is a public relay network. When you turn on **Expose content** on the Nostr page, your public posts become readable by anyone who connects to your nest's relay — no account needed. Because Nostr is built for open reach, a few things follow:
+Nostr is a public relay network. When you turn on **Expose content** on the Nostr page, your public posts, apart from posts you imported from another service, become readable by anyone who connects to your nest's relay — no account needed. Because Nostr is built for open reach, a few things follow:
 
 - **Anyone can read** all your exposed public posts, and can **search** them by
   keyword and **count** them (how many posts you've made, how many replies
@@ -191,12 +184,12 @@ Nostr is a public relay network. When you turn on **Expose content** on the Nost
 ### The Fediverse (ActivityPub / Mastodon-compatible)
 
 Enabling Fediverse federation publishes your handle to the wider Fediverse and
-lets Mastodon-style servers follow you and receive your public posts.
+lets Mastodon-style servers follow you and receive your public posts, apart from posts you imported from another service.
 
 - **Enabling it publishes your handle permanently.** Your Fauna handle becomes
   your Fediverse address, and it is remembered by every server that sees it.
   There is no rename afterwards, so choose before you enable.
-- **What's shared:** your profile and your public, non-paid posts. Your follower and following **counts** are visible, but your nest does not publish **the lists themselves**. When you follow someone on the Fediverse, or someone there follows you, their server sees it. Paid-post full text is never federated.
+- **What's shared:** your profile and your public, non-paid posts, apart from posts you imported from another service. Your follower and following **counts** are visible, but your nest does not publish **the lists themselves**. When you follow someone on the Fediverse, or someone there follows you, their server sees it. Paid-post full text is never federated.
 - **Who sees it:** any Fediverse server and its users, once you enable it for your
   account.
 - **Turning it off:** stops future federation; servers that already cached your
@@ -223,10 +216,9 @@ public protocol. When mail is on, a nest on the internet becomes a mail server t
   will, by default, tell a sender whether a given address is a real mailbox
   (by accepting or refusing the message). Someone can use that to guess which
   addresses exist. **This can be closed:** your nest's admin can choose a **catch-all** address for a domain (on the admin **DNS** page, on the domain's row) so every address is accepted and none can be singled out.
-- **Your stored mail stays private.** Your nest encrypts each message as soon as it arrives. After that, your Fauna apps open it on your own devices; a mail app you connect reaches it through your nest, which opens it with that app's password and only for that signed-in session; and beyond those, only a machine you have given permission to read your mail can open it. Email itself is an open protocol, though: your nest, and the sender's and recipient's mail servers, handle a message in readable form while delivering it. Outgoing mail is scrubbed of your device's address and internal details before it leaves.
-- **Who sees the footprint:** anyone (the greeting, the DNS records). **Who reads your mail:** you; your nest, while it delivers a message and while it serves a mail app you connected; any machine you have given permission to read it; and — as with all email — the other mail servers that carry it between you and the other person.
-- **Turning it off:** turning mail off closes the mail ports completely — a
-  scanner finds nothing. The public DNS records stay until your nest's admin removes them.
+- **Your stored mail stays private.** Your nest encrypts each message as soon as it arrives. After that, your Fauna apps open it on your own devices; a mail app you connect reaches it through your nest, which opens it with the password of a mail, calendar, contacts or file app you connect, and only for that app's signed-in session; and beyond those, only a machine you have given permission to read your mail can open it. Email itself is an open protocol, though: your nest, and the sender's and recipient's mail servers, handle a message in readable form while delivering it. Outgoing mail is scrubbed of your device's address and internal details before it leaves.
+- **Who sees the footprint:** anyone (the greeting, the DNS records). **Who reads your mail:** you; your nest, while it delivers a message and while a mail, calendar, contacts or file app you connected is signed in; any machine you have given permission to read it; and — as with all email — the other mail servers that carry it between you and the other person.
+- **Turning it off:** when your nest's admin turns mail off for the nest, the mail ports close completely — a scanner finds nothing. The public DNS records stay until your nest's admin removes them.
 
 **A note for guardians:** a mailbox you set up for a child with an approved-senders
 list refuses mail from unapproved senders with the same generic "no such address"
@@ -248,9 +240,7 @@ A monetized post has two parts: a short **free preview** you write, and the
   show them, your subscription tiers, their prices, and payment links are readable
   by anyone. This is the storefront, meant to be seen.
 
-**What a visitor without a Fauna account sees.** A paid post on your website
-shows the free preview, your price and payment link, and a box to enter an
-access code. A visitor who pays through your payment link comes back to a page on your site that shows their access code, once you have set your payment provider's "after payment" redirect to your site's return address (the provider form shows it, with a button to copy it, once your web address is switched on). One you gave a code to by hand enters it directly. Entering the code opens the full post for a few minutes.
+**What a visitor without a Fauna account sees.** A paid post on your website shows the free preview, your price and payment link, and a box to enter a claim code. A visitor who pays through your payment link comes back to a page on your site that shows their claim code, once you have set your payment provider's "after payment" redirect to your site's return address (the provider form shows it, with a button to copy it, once your web address is switched on). One you gave a code to by hand enters it directly. Entering the code opens the full post for a few minutes.
 The code itself keeps working: when the link expires, the visitor enters the
 code again on the paywall page (most browsers remember it), so they should keep
 it somewhere safe. The same code can still be added to a Fauna account later.
@@ -358,8 +348,8 @@ full picture.
 
 None of the following is visible to an outsider — anonymous, another user, or a bridged network — except where a bullet below names the exception:
 
-- **Posts only some people can open, and the bodies of your messages on Fauna** — stored encrypted, readable only by the intended people (and, in a community room, by its home nest; for a paid post on your website, by your nest, which opens it for each visitor with a valid code; someone who can open a message or a post only some people can open can also attach its text to a report, which the admins it goes to can then read; email is the exception while it travels; see [Mail](#mail)).
-- **Direct messages** — their content, and on Nostr who sent them. A conversation with someone on Bluesky or the Fediverse is the exception: the network that carries it can read what is said.
+- **Posts only some people can open, and the bodies of your messages on Fauna** — stored encrypted, readable only by the intended people (and, in a community room, by its home nest; for a paid post on your website, by your nest, which opens it for each visitor with a valid code; someone who can open a message or a post only some people can open can also attach its text to a report, which the admins it goes to can then read; an app you allowed in **Connected apps** to read your conversations, such as an AI assistant, reads them through a Fauna app open and signed in on the same computer, and so does the company whose servers the assistant runs on, if any — see [Connect an AI assistant](connect-an-ai-assistant.md#what-the-assistants-provider-sees); email is the exception while it travels; see [Mail](#mail)).
+- **Direct messages** — their content, and on Nostr who sent them. A conversation with someone on Bluesky or the Fediverse is the exception: the network that carries it can read what is said. An app you allowed to read your conversations reads them too, as above.
 - **Your files and photos** — synced and backed up encrypted. The exceptions are a folder *you* deliberately make public, which you confirm first (see [Folders you make public](#folders-you-make-public)); a file you share as a link, which anyone holding the link can open; and a file in a folder you sell on your website, which your nest opens for each visitor with a valid code.
 - **Your follower and following lists on your nest** — bridges publish *counts* at most, never the lists. When you follow someone on another nest or another network, or someone there follows you, their nest or that network sees it.
 - **How many users your nest has** — user and post totals are visible only to the
@@ -377,7 +367,7 @@ None of the following is visible to an outsider — anonymous, another user, or 
 | **Mail** | the mail server and all its ports (a scanner finds nothing) | public DNS records (until your nest's admin removes them) |
 | **Expose content** (Nostr) | your relay serving your posts, apart from new ones your nest still publishes for you (see [Nostr](#nostr)) | copies already fetched, and posts already sent to other relays |
 | **A public web page or custom domain** | the page and future visits | the certificate already in the public logs |
-| **A public folder** (back to private) | outside access to it, and files added afterwards are encrypted again | anything already downloaded, indexed, or archived while it was public |
+| **A public folder** (back to private) | outside access to it, and its files are encrypted again | anything already downloaded, indexed, or archived while it was public |
 
 The rule of thumb: **the switches let you reduce what goes out from now on, but
 what has already reached a public network or a public log is out.** When in

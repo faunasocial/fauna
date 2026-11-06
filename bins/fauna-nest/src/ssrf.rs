@@ -150,6 +150,54 @@ pub async fn ssrf_safe_https_streaming_client(
     Ok((client, url))
 }
 
+/// Whether `host` names this machine: a loopback IP literal, or `localhost`
+/// (any case, a trailing root dot allowed). The one test every unattended,
+/// peer-triggered dial applies before it reaches the loopback carve-out of
+/// `federation_channel::validate_peer_url`.
+pub(crate) fn is_loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+        url::Host::Domain(d) => d.trim_end_matches('.').eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// The origin a **peer-declared** nest address is recorded and dialled at, or
+/// `None` when the declaration is anything but an origin-form
+/// `https://host[:port]` — all an honest nest declares (it sends
+/// `https://<its handle domain>`). The one test for every address a stranger
+/// peer names for itself or another nest and this nest later dials unattended:
+/// the home URL a relayed delivery declares
+/// (`federation_handlers::resolve_origin_home_url`, before the directory
+/// write), an obligation issuer's address (`moderation_federation`), a
+/// discovery referral's `nest_url` (`peer_query`) and a relayed room
+/// invitation's invitee node.
+///
+/// User-info, a path, a query and a fragment are refused (each would ride into
+/// the dialled URL or a label a user reads), and so is a loopback host — the
+/// in-process fixture `federation_channel::validate_peer_url` admits for an
+/// authenticated caller — unless `loopback` says this is test state (the
+/// state's `peer_fetch_loopback`, `None` on every production nest), where the
+/// conformance suites' nests share one host over `http`.
+pub(crate) fn peer_declared_origin(declared: &str, loopback: bool) -> Option<String> {
+    let url = url::Url::parse(declared).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return None;
+    }
+    let is_loopback = is_loopback_host(&url.host()?);
+    match (url.scheme(), is_loopback) {
+        ("https", false) => {}
+        ("http" | "https", true) if loopback => {}
+        _ => return None,
+    }
+    Some(url.origin().ascii_serialization())
+}
+
 /// The dial a nest makes to **another nest** for bytes by content address — a
 /// video segment's cache-on-fetch (`video_routes::download_segment`) and a
 /// follow-delivered room post's sealed body (`room_post_view`). The peer's base
@@ -434,6 +482,58 @@ pub(crate) mod test_server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_origin_form_https_declaration_is_dialled_at_its_origin() {
+        assert_eq!(
+            peer_declared_origin("https://court.example", false).as_deref(),
+            Some("https://court.example")
+        );
+        assert_eq!(
+            peer_declared_origin("https://court.example:8443/", false).as_deref(),
+            Some("https://court.example:8443")
+        );
+    }
+
+    /// A stranger peer's declaration never carries its own path, query,
+    /// fragment or user-info into the dial, nor reaches loopback or a
+    /// plaintext host on a production nest.
+    #[test]
+    fn any_other_declaration_is_never_dialled() {
+        for declared in [
+            "https://court.example/x",
+            "https://court.example/?q",
+            "https://court.example/#f",
+            "https://evil@court.example",
+            "https://u:p@court.example",
+            "http://court.example",
+            "ftp://court.example",
+            "https://127.0.0.1:8444",
+            "http://127.0.0.1:8444",
+            "https://127.1:8444",
+            "https://localhost:8444",
+            "https://LOCALHOST.:8444",
+            "http://[::1]:8444",
+            "court.example",
+            "",
+        ] {
+            assert_eq!(peer_declared_origin(declared, false), None, "{declared}");
+        }
+    }
+
+    #[test]
+    fn loopback_is_admitted_only_on_test_state() {
+        assert_eq!(
+            peer_declared_origin("http://127.0.0.1:9000", true).as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        assert_eq!(
+            peer_declared_origin("https://127.0.0.1:9000/", true).as_deref(),
+            Some("https://127.0.0.1:9000")
+        );
+        assert_eq!(peer_declared_origin("http://127.0.0.1:9000/x", true), None);
+        assert_eq!(peer_declared_origin("http://court.example", true), None);
+    }
 
     fn v4(s: &str) -> IpAddr {
         IpAddr::V4(s.parse().unwrap())

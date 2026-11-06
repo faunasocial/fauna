@@ -42,7 +42,7 @@ use fauna_core::crypto::{AccountStateKeySchedule, BackupKey};
 use fauna_core::custody_grant::{
     CUSTODY_GRANT_ID_LEN, CustodyGrant, CustodyScopeSet, sign_custody_grant,
 };
-use fauna_core::data::{ModerationConfig, Timestamp};
+use fauna_core::data::{SyncPrefsConfig, Timestamp};
 use fauna_core::identity::ActorKeypair;
 use fauna_credential_store::CredentialStore;
 use fauna_mls::wrapped_blob::GrantWindow;
@@ -53,7 +53,7 @@ use fauna_nest::routes::{AppState, RegistrationConfig};
 use fauna_nest::state::AuthState;
 use fauna_nest::token_store::TokenStore;
 use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
-use fauna_protocol::merge_policy::{KIND_MODERATION, MODERATION_KEY};
+use fauna_protocol::merge_policy::{KIND_SYNC_PREFS, PREFERENCE_KEY};
 use fauna_sync_engine::account_runtime::{
     AccountRuntimeParams, AccountStoreRuntime, CRED_NAMESPACE, RuntimePrincipal, StoreRoot,
 };
@@ -294,17 +294,16 @@ async fn a_credentialless_custodian_pulls_the_owners_planes_and_revoke_severs_li
         ACCOUNT_STATE_SCOPE,
     )
     .unwrap();
-    let sealed_value = fauna_core::encoding::canonical_encode(&ModerationConfig {
-        muted_keywords: vec!["through-the-nest-door".into()],
-        ..Default::default()
+    let sealed_value = fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+        default_conflict_policy: Some("through-the-nest-door".into()),
     })
     .unwrap()
     .to_vec();
     plane
         .put(
             &ItemId {
-                kind: KIND_MODERATION.into(),
-                key: MODERATION_KEY.into(),
+                kind: KIND_SYNC_PREFS.into(),
+                key: PREFERENCE_KEY.into(),
             },
             sealed_value,
             Some(
@@ -947,12 +946,11 @@ async fn the_pump_pulls_a_custodied_owner_from_the_owners_nest_with_no_peer_leg(
     .unwrap()
     .put(
         &ItemId {
-            kind: KIND_MODERATION.into(),
-            key: MODERATION_KEY.into(),
+            kind: KIND_SYNC_PREFS.into(),
+            key: PREFERENCE_KEY.into(),
         },
-        fauna_core::encoding::canonical_encode(&ModerationConfig {
-            muted_keywords: vec!["pulled-by-the-pump".into()],
-            ..Default::default()
+        fauna_core::encoding::canonical_encode(&SyncPrefsConfig {
+            default_conflict_policy: Some("pulled-by-the-pump".into()),
         })
         .unwrap()
         .to_vec(),
@@ -1061,6 +1059,7 @@ async fn the_pump_pulls_a_custodied_owner_from_the_owners_nest_with_no_peer_leg(
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1390,6 +1389,7 @@ async fn the_pump_pulls_the_owners_record_bytes_from_the_owners_nest_with_no_pee
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1600,6 +1600,7 @@ async fn the_pump_adopts_the_owners_mail_segments_end_to_end() {
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -1808,6 +1809,7 @@ async fn a_cap_below_one_pair_leaves_the_owners_mail_segments_unadopted() {
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -2017,6 +2019,7 @@ async fn the_pump_adopts_the_owners_calendar_and_card_segments_end_to_end() {
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");
@@ -2350,6 +2353,7 @@ async fn the_pump_adopts_a_channels_conv_segments_under_the_member_mint_rule() {
         peer_transport: None, // ⚠ no peer leg on this machine at all
         // The machine's named row (the RULED 2026-09-28 block, decision 3).
         enrollment_target_device_id: "cd".repeat(32),
+        enrollment_device_label: None,
     })
     .await
     .expect("the custodian's runtime assembles");

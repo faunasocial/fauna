@@ -429,9 +429,6 @@ def test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unsca
 
 
 # ── The in-flight DATA byte budget (smtp-server.md § Connection-time limits) ──
-#
-# Unmarked for the feature catalog until the public-texts round adds its outcome
-# line to `docs/features/mail-abuse-refused.md`.
 
 # Bytes each holder streams: under any size cap the fixture runs with (the
 # 50 MB default), so no holder is refused for size; twelve of them are well past
@@ -440,6 +437,7 @@ _HOLDER_BYTES = 40_000_000
 _HOLDERS = 12
 
 
+@pytest.mark.feature("mail-abuse-refused")
 def test_messages_past_the_servers_memory_budget_are_put_off_not_accepted(mail_bridge_mta):
     """While other connections hold unfinished messages that fill the server's
     in-flight memory budget, the next message is put off with `451 4.3.1` — the

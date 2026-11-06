@@ -115,6 +115,7 @@ async fn transcode_in_job_dir(
         .with_context(|| format!("resolve output dir {}", output_dir.display()))?;
 
     let job_dir = output_dir.join(format!(".transcode-{}", uuid::Uuid::new_v4()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);

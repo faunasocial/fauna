@@ -53,6 +53,15 @@ struct EventFormView: View {
                 // The form's one commit; every field above it is the buffer.
                 .faunaGate("fauna.bridges.put_event_ciphertext")
                 .frame(maxWidth: .infinity)
+
+                Button(L.events.discardEvent) {
+                    vm.discardCompose()
+                }
+                .accessibilityIdentifier(Ids.eventFormDiscard)
+                .automationActivate(Ids.eventFormDiscard) {
+                    vm.discardCompose()
+                }
+                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle(L.events.newEvent)

@@ -46,14 +46,15 @@
 
 import { get, writable, type Writable } from 'svelte/store';
 import type { LocalizedText } from './i18n/localized';
-import { identity, onSignedInActorChange, reconnectTick } from './store';
+import { identity, onSignedInActorChange, reconnectTick, signedInIdentity } from './store';
 import { guardSingletonBuild } from './singleton-build';
 import { registerActorScopedReset, sameActorSince } from './actorScope';
 import { accountsList, accountsTabSessionMaterial } from './accounts';
 import { ReceivePump, RECEIVE_PASS_CEILING_MS } from './receive-pump';
+import { beginReceiveLoopForTest, markReceiveStoppedForTest } from './receive-rail-doors';
 import {
   actorsServedByAnotherTab,
-  autosaveDebounceMs,
+  draftSaveDebounceMs,
   contactOverlaysWithoutRuntime,
   ensureWasm,
   isConversationsEngineRoleRefusal,
@@ -76,6 +77,7 @@ import {
   getSpamScoringPolicy,
   mailSettingsMachine,
   onPushEvent,
+  registerArchiveThreads,
   type InboxFetchReply,
 } from './rpc';
 import type {
@@ -93,10 +95,12 @@ import { getDeviceId } from './device-id';
 import {
   accountRuntimeSettled,
   accountRuntimeStarted,
+  setAccountRuntimeStartExpected,
   startAccountRuntimeFor,
   stopAccountRuntime,
 } from './account-runtime';
 import { runAtLaterEdge } from './launch-pass';
+import { wireArchiveLinks } from './archive-links';
 
 /** A row mirroring the manager snapshot's `ThreadSummary`, in the shape the e2e
  *  `data.conversation_threads` state reads. `message_count` / `channel_id_hex`
@@ -253,6 +257,20 @@ export function conversationsManagerIfReady(): WasmConversationsManager | null {
   return manager;
 }
 
+/** Re-read the `Archive` rail on the built manager — the conversations page
+ *  calls it on every visit, so an import finished since login lists without a
+ *  reload (`archive-import.md` § What each category becomes; tui's
+ *  `App::set_page`). No manager yet, or no source registered yet, is a no-op;
+ *  a failed read keeps what the last read listed. */
+export function refreshArchiveThreadsIfReady(): void {
+  const m = manager;
+  if (!m) return;
+  m.refreshArchiveThreads().then(
+    () => refreshConversations(),
+    (e: unknown) => logMessage('warn', 'fauna_web::conversations', `archive threads: ${e}`),
+  );
+}
+
 /** Moves whenever the names a surface keyed on a person may have changed —
  *  the private contact overlay's projection moved, or the tab's manager was
  *  built or reset (`docs/goal/ui/contacts.md` § The private overlay). No
@@ -305,6 +323,18 @@ function noteContactsRevision(): void {
 function ensureAccountRuntime(): void {
   getConversationsManager().catch(() => {});
 }
+
+// A page mounts before `startReceivePoll` first runs, so a port call can be
+// ahead of the build that asks for the runtime. Until a manager exists the
+// signed-in account's runtime is still to come; a built manager has asked
+// already (`#lib/account-runtime` tracks that start), and a tab refused the
+// role hosts none.
+setAccountRuntimeStartExpected(
+  (actorIdHex) =>
+    manager === null &&
+    !get(engineRoleDenied) &&
+    get(identity)?.actorId?.toLowerCase() === actorIdHex,
+);
 
 export function getConversationsManager(): Promise<WasmConversationsManager> {
   if (managerPromise) return managerPromise;
@@ -418,17 +448,18 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     // Draft-persistence v2 (file-sync.md § Drafts Sync): restore the owner's
     // persisted conversations drafts once, before any save can run — so the
     // composer's in-progress drafts survive an app restart and appear on the
-    // user's other devices. A transient/seal failure is logged + swallowed (the
-    // page must still open); the wasm side's shared `DraftsSync` keeps its save
-    // gate closed until a restore *succeeds*, so a later save can't clobber an
-    // unread (incl. undecryptable) blob — the next launch retries the load.
-    try {
-      await built.restoreDrafts();
-      refreshConversations();
-    } catch (e) {
-      logMessage('warn', 'fauna_web::conversations', `restore drafts failed: ${e}`);
-    }
-    if (!stillOurs()) throw superseded();
+    // user's other devices. NOT awaited: the shared `DraftsSync` retries a
+    // launch read lost to the transport for minutes (`conversation-drafts.md`
+    // § Persistence, *A launch load lost to the transport is retried*), and a
+    // build held that long would trip its settle deadline. Landing late is safe
+    // on this rail because its restore FILLS — it never overwrites what the user
+    // typed meanwhile — and a reply for a departed actor is dropped by the
+    // manager's identity epoch. The save gate stays closed until a restore
+    // *succeeds*, so no save can clobber an unread (incl. undecryptable) blob.
+    built.restoreDrafts().then(
+      () => refreshConversations(),
+      (e: unknown) => logMessage('warn', 'fauna_web::conversations', `restore drafts failed: ${e}`),
+    );
     // Cross-device MLS group-state sync (devices.md § Cross-device MLS group-state
     // sync): restore the openMLS `provider` + per-channel `history/<ch>` replicas and
     // wire the device-owned-epoch gate/cursor BEFORE the first `pollConversations`
@@ -502,6 +533,38 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
         logMessage('warn', 'fauna_web::conversations', `folders: launch pass skipped — ${why}`),
     });
     if (!stillOurs()) throw superseded();
+    // The `Archive` rail (`archive-import.md` § What each category becomes):
+    // the imported archives' threads, read from the archive folders whose keys
+    // rest in the account runtime — so registered and first read at the later
+    // of the two edges, like the folder pass above. The conversations page
+    // re-reads on every visit (`refreshArchiveThreadsIfReady`). Not awaited: a
+    // read failing must never hold the page back.
+    void runAtLaterEdge({
+      started: accountRuntimeStarted,
+      settled: accountRuntimeSettled,
+      stillWanted: stillOurs,
+      pass: async () => {
+        try {
+          await registerArchiveThreads(id.secretHex, built, getDeviceId(id.actorId));
+          await built.refreshArchiveThreads();
+          refreshConversations();
+        } catch (e) {
+          logMessage('warn', 'fauna_web::conversations', `archive threads: ${e}`);
+        }
+        // Phase two's links (`archive-import.md` § Linking and merging): the
+        // backend's archive-signal sink over the same seam, driven once and
+        // then on `#lib/archive-links`' tick. Its own try: a failed link
+        // wiring must not cost the rail, nor the rail the links.
+        if (!stillOurs()) return;
+        try {
+          await wireArchiveLinks(id.secretHex, built, getDeviceId(id.actorId));
+        } catch (e) {
+          logMessage('warn', 'fauna_web::conversations', `archive links: ${e}`);
+        }
+      },
+      skipped: (why) =>
+        logMessage('warn', 'fauna_web::conversations', `archive threads skipped — ${why}`),
+    });
     // Login-time key-package replenish (the one-time pool + the mandatory
     // last-resort KP), so peers can add us after the pool drains — the SAME
     // manager surface linux (`conv_backend.rs` login task) and windows
@@ -704,19 +767,7 @@ export function setConvPollSecs(secs: number | null): void {
 // logged, never surfaced on the page (a not-yet-synced draft is not a user-facing
 // error). The restore-on-launch half lives in `getConversationsManager` above.
 
-// Under the Playwright e2e agent, debounce far shorter so a restart round-trip
-// test (`test_conversations_draft_persistence`) needn't wait the production
-// window — mirrors `pollIntervalMs()`'s `__faunaTestAgent` test cadence.
-const DRAFT_SAVE_DEBOUNCE_E2E_MS = 150;
 let draftSaveTimer: ReturnType<typeof setTimeout> | null = null;
-
-function draftSaveDebounceMs(): number {
-  const hasAgent =
-    __FAUNA_E2E_AUTOMATION__ &&
-    typeof window !== 'undefined' &&
-    (window as unknown as { __faunaTestAgent?: unknown }).__faunaTestAgent != null;
-  return hasAgent ? DRAFT_SAVE_DEBOUNCE_E2E_MS : autosaveDebounceMs();
-}
 
 /** Debounced persist of the conversations drafts after a compose change
  *  (reserved-folders.md § Drafts Sync). Coalesces a burst of edits into one
@@ -739,13 +790,13 @@ export function scheduleDraftSave(): void {
  *  grants no reliable async work after either event) — `saveDrafts()` is
  *  fire-and-forget here exactly as the debounced call above is; there is
  *  nothing to block on that the browser would honor. */
-export function flushDraftsNow(): void {
+export function flushDraftsNow(): Promise<void> {
   if (draftSaveTimer) {
     clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
   }
-  if (!manager) return;
-  void manager.saveDrafts().catch((e) => {
+  if (!manager) return Promise.resolve();
+  return manager.saveDrafts().catch((e) => {
     logMessage('debug', 'fauna_web::conversations', `leave-flush drafts failed: ${e}`);
   });
 }
@@ -780,7 +831,8 @@ let mlsSaveTimer: ReturnType<typeof setTimeout> | null = null;
 /** Debounced persist of the cross-device MLS state replica after an engine/store
  *  mutation (send, inbound-fold, membership). Coalesces a burst into one
  *  `fauna.mls.put` pair; fire-and-forget (errors logged, never surfaced). Shares
- *  the draft-save debounce cadence (`draftSaveDebounceMs`). */
+ *  the draft-save debounce cadence (`draftSaveDebounceMs`), never the drafts'
+ *  window seam. */
 export function scheduleMlsSave(): void {
   if (mlsSaveTimer) clearTimeout(mlsSaveTimer);
   mlsSaveTimer = setTimeout(() => {
@@ -789,7 +841,7 @@ export function scheduleMlsSave(): void {
     void manager.saveMlsState().catch((e) => {
       logMessage('debug', 'fauna_web::conversations', `save mls state failed (transient): ${e}`);
     });
-  }, draftSaveDebounceMs());
+  }, draftSaveDebounceMs({ windowSeam: false }));
 }
 
 /** Re-read the manager snapshot into both reactive stores. Called after every
@@ -825,6 +877,16 @@ export function moderationLocalDetections(): LocalDetection[] {
 export function mlsFoldedCommits(): Record<string, number> {
   if (!manager) return {};
   return manager.mlsFoldedCommits() as Record<string, number>;
+}
+
+/** Every chat channel this tab has bound a thread to, as sorted channel hex ids —
+ *  the web leg of the bound-channels restore witness
+ *  (`fauna_e2e_agent::MLS_BOUND_CHANNELS_KEY` owns the cross-app contract). `[]`
+ *  when no manager has been built yet, without building one, for
+ *  `mlsFoldedCommits`'s reason. */
+export function mlsBoundChannels(): string[] {
+  if (!manager) return [];
+  return manager.mlsBoundChannels() as string[];
 }
 
 /** Drop the local-detection row for `contentId` once the user trains a correction on
@@ -1606,7 +1668,7 @@ export async function startReceivePoll(): Promise<void> {
   // a home nest, because the build dials it.
   onSignedInActorChange(() => ensureAccountRuntime());
   for (;;) {
-    const id = get(identity);
+    const id = get(signedInIdentity);
     if (id?.secretHex) {
       try {
         // Built lazily here on the first tick with an actor secret (not at
@@ -1659,7 +1721,7 @@ export async function startReceivePoll(): Promise<void> {
 // ── e2e command hook ────────────────────────────────────────────────────────
 //
 // The browser twin of linux's `conversations_*` bridge commands
-// (`apps/fauna-linux/src/main.rs`). The Playwright driver calls
+// (`apps/fauna-linux/src/lib.rs`). The Playwright driver calls
 // `window.__fauna_callCommand(action, payloadJson)` (see
 // `tests/e2e-unified/drivers/web.py::call_command`); we route both the snapshot
 // test-helper commands (`inject_inbound` / `create_mls_group` / `accept_recipient`,
@@ -1708,6 +1770,7 @@ interface FeedTestSeams {
   injectPostsForTest(specs: unknown): void;
   injectErrorForTest(key: string, message: string): void;
   setCueRollupForTest(contentIds: string[]): Promise<void>;
+  cueVerdictForTest(contentId: string): string;
   holdNextReloadForTest(): void;
   releaseHeldReloadForTest(): void;
 }
@@ -1932,6 +1995,8 @@ const CONVERSATIONS_COMMANDS = [
   'conversations_create_mls_group',
   'conversations_inject_send_failure',
   'conversations_inject_page_error',
+  'conversations_mark_receive_stopped',
+  'conversations_begin_receive_loop',
   'conversations_accept_recipient',
   'conversations_enable_real_faunamls',
   'conversations_disable_real_faunamls',
@@ -1943,6 +2008,7 @@ const CONVERSATIONS_COMMANDS = [
   'feed_inject_posts',
   'feed_inject_error',
   'feed_seed_cue_rollup_for_test',
+  'feed_cue_verdict_for_test',
   'feed_hold_next_reload',
   'feed_release_held_reload',
   // WebDAV served-set fixture — here because it runs over this module's
@@ -2054,6 +2120,21 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
         refreshConversations();
         return null;
       }
+      case 'conversations_mark_receive_stopped': {
+        // Stand up the dead receive rail: set the same `receiveRailStalled`
+        // store the pump's `onStalledChange` sets when a pass outruns its
+        // ceiling, so the page's `receive_stopped` notice renders exactly as
+        // for a real stall (conversations.md § Errors & edge cases). Web twin
+        // of `ConversationsManager::mark_receive_stopped_for_test`.
+        markReceiveStoppedForTest(receiveRailStalled);
+        return null;
+      }
+      case 'conversations_begin_receive_loop': {
+        // What a fresh pump pass does on recovery (`setStalled(false)`):
+        // retire the stall notice. Web twin of `begin_receive_loop`.
+        beginReceiveLoopForTest(receiveRailStalled);
+        return null;
+      }
       case 'conversations_accept_recipient': {
         // Commit the typed recipient chip on the REAL manager. This is a genuine
         // UI action — the bridge's keyboard-Enter substitute (Windows SendInput
@@ -2146,6 +2227,11 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
         // `Fauna` chip, then `sendNewThread` bootstraps the group (fetch key
         // package → create MLS group → deliver Welcome → post Application envelope).
         const m = await getConversationsManager();
+        // A NEW conversation with exactly this recipient: discard any stashed
+        // new-thread draft first — `startNewConversation` keeps one by design, so
+        // an earlier test's seeded chip would otherwise ride into this send (tui's
+        // `e2e_resolve_send_new` has the full reason).
+        m.cancelNewConversation();
         m.startNewConversation();
         m.setNewThreadRecipientInput(p.recipient);
         await m.resolveRecipient();
@@ -2288,6 +2374,19 @@ async function handleConversationsCommand(action: string, p: any): Promise<unkno
         await m.setCueRollupForTest((p.content_ids as string[] | undefined) ?? []);
         refreshFeed();
         return null;
+      }
+      case 'feed_cue_verdict_for_test': {
+        // Read the live engagement-cue engine's verdict for one item and
+        // whether it has hydrated from the nest yet — how a second seat
+        // witnesses that it starts from the rollup the first collected.
+        // Returns `{hydrated, verdict}` as a JSON string. Browser twin of
+        // tui/linux's same-named arm.
+        const m = testSeams<WasmFeedManager, FeedTestSeams>(
+          await getFeedManager(),
+          'cueVerdictForTest',
+          'WasmFeedManager',
+        );
+        return m.cueVerdictForTest((p.content_id as string | undefined) ?? '');
       }
       case 'conv_receive_now': {
         // Convention 14's `run_now` for the receive rail — the web twin of

@@ -12,7 +12,9 @@ install**. The install-level proof is throwaway-VM-gated (`test_installer.py`,
 (temp data dirs + ephemeral loopback ports, no SCM / HKLM / %ProgramData%
 writes), so it runs on the shared Windows VM in the inner loop and is reused by
 the install-level test. The serving engine lives in
-``helpers/windows_caldav_nest.py`` so the install-gated variant reuses it.
+``helpers/windows_caldav_nest.py`` so the install-gated variant reuses it; that
+variant's nest leg — TLS to the TLS-only service, the floor pinned by SPKI — is
+rehearsed here by ``test_windows_nest_provisions_over_its_pinned_tls_floor``.
 
 Authority:
   - Track D design (tracked internally)
@@ -116,6 +118,68 @@ def test_windows_nest_claims_enables_caldav_and_mints_credential(tmp_path):
         assert n == 1, f"expected the minted wrapped-MSEK credential row, found {n}"
     finally:
         prov.cleanup()
+
+
+def test_windows_nest_provisions_over_its_pinned_tls_floor(tmp_path):
+    """The installed-service test's NEST LEG, rehearsed without an install
+    (`test_installer.py::TestCalDAVImapServingAfterInstall` needs an elevated,
+    disruptive MSI run; this runs on the shared box).
+
+    The installed ``FaunaNest`` service is TLS-only, and same-box callers reach
+    it on its fixed loopback over its self-signed floor, trusted by SPKI pin
+    per authority (`nest/common.md` § Same-box reach). Here the spawned
+    nest-svc serves that same floor over TLS (``serve_tls`` drops the harness's
+    plain-HTTP escape for it), and the claim, the WS-RPC admin calls and the
+    seal-helper credential mint all ride ``https``/``wss`` pinned to the SPKI
+    the nest's own ``acme/fullchain.pem`` names — the engine path the installed
+    test takes. A disagreeing pin is refused before the upgrade, so the pin is
+    load-bearing, not decoration; and the pin goes with the nest.
+    """
+    import sqlite3
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from clients.ws_rpc_anon_client import WsRpcAnonClient
+    from common.auth import SpkiPinMismatch, pin_nest_spki, pinned_spki
+    from helpers.tls_spki import served_leaf_spki_sha256_hex
+
+    prov = eng.provision_windows_caldav_nest(tmp_path / "nest", serve_tls=True)
+    try:
+        assert prov.nest_url == f"https://127.0.0.1:{prov.port}", prov.nest_url
+        assert prov.floor_spki and pinned_spki(prov.locator) == prov.floor_spki
+        # The pin read off disk is the key the listener serves (a second,
+        # independent read of the leaf — the pin is not circular).
+        assert served_leaf_spki_sha256_hex("127.0.0.1", prov.port, "127.0.0.1") \
+            == prov.floor_spki
+
+        ws = WsRpcAdminClient(
+            prov.nest_url, actor_id=prov.actor_id, signing_key=bytes(prov.admin["signing_key"]),
+        )
+        with ws:
+            cfg = ws.call("fauna.bridges.get_mail_config", {})
+            assert cfg.get("caldav_enabled") is True, f"caldav not enabled: {cfg!r}"
+            assert cfg.get("mail_enabled") is True, f"mail not enabled: {cfg!r}"
+
+        conn = sqlite3.connect(prov.db_path, timeout=10.0)
+        try:
+            n = conn.execute(
+                "SELECT count(*) FROM bridge_wrapped_mls_blobs WHERE actor_id=? AND credential_id=?",
+                (prov.actor_id, eng.CREDENTIAL_ID),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 1, f"expected the minted wrapped-MSEK credential row, found {n}"
+
+        # Negative control: the same nest under a pin that names another key.
+        pin_nest_spki(prov.locator, "00" * 32)
+        try:
+            with pytest.raises(SpkiPinMismatch):
+                with WsRpcAnonClient(prov.nest_url):
+                    pass
+        finally:
+            pin_nest_spki(prov.locator, prov.floor_spki)
+    finally:
+        prov.cleanup()
+    assert pinned_spki(prov.locator) is None, "the pin outlived its nest"
 
 
 @pytest.mark.feature("calendar-in-standard-apps")

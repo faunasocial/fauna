@@ -85,14 +85,15 @@ def test_signing_out_and_back_in_keeps_one_roster(app, request, nest_instance, t
     row's grant and keeps the row, and each sign-in re-adopts that row under a
     fresh writer key — a new principal each time, as production does, and never
     a second row."""
-    from conftest import _E2E_LOGIN_DEVICE_ID, _make_user
+    from conftest import _make_user
+    from helpers.e2e_session import e2e_login_device_id
 
     nest_url = nest_instance["url"]
     user = _make_user(nest_instance)
     # The session patch seeds the app's own device id, and every app adopts it
     # as its real sync identity (`test_device_cards.py`'s marks-this-device
     # premise) — so this is the machine's NAMED row throughout.
-    named_row = _E2E_LOGIN_DEVICE_ID
+    named_row = e2e_login_device_id(app)
 
     enrollment.sign_in(app, request, nest_instance, user)
     writer, latched_row, _ = enrollment.await_enrollment(app, nest_url, user)
@@ -155,11 +156,12 @@ def test_a_sign_out_landing_mid_assembly_still_retires_its_enrollment(
     ``fauna-client-account-runtime``; this case is the end-to-end witness that
     it is wired to a real retirement.
     """
-    from conftest import _E2E_LOGIN_DEVICE_ID, _login_app_as, _make_user
+    from conftest import _login_app_as, _make_user
+    from helpers.e2e_session import e2e_login_device_id
 
     nest_url = nest_instance["url"]
     user = _make_user(nest_instance)
-    named_row = _E2E_LOGIN_DEVICE_ID
+    named_row = e2e_login_device_id(app)
 
     # One settled sign-in first: the switch onto the dedicated actor is
     # verified once, and every later login is the same actor after a reset.
@@ -207,7 +209,7 @@ def test_a_sign_in_minting_its_own_device_id_comes_back_to_its_named_row(
     """The PRODUCTION get-or-create: no forced device id, N sign-out → sign-in
     cycles, one named row.
 
-    Both cases above force ``_E2E_LOGIN_DEVICE_ID`` through the session patch, so
+    Both cases above force the app's ``e2e_login_device_id`` through the session patch, so
     the machine's named row is the same one every cycle *by construction* — and
     that blinded them to the defect measured 2026-09-20: a sign-out's scope sweep
     takes the account-scoped ``device.db`` (ratified — ``account-scoping.md``

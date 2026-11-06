@@ -39,6 +39,22 @@ so linux's promise — a loud error — through the same shared
 ``refuse_secret_writes_for_test``, the one way to make a keychain refuse on
 demand (the test's own docstring says why that stands for "cannot be
 reached").
+
+**web's column** (the fifth test). A browser offers a page no protected
+store at all, so web's answer is tui's: the sealed arm, said on the shared
+``unlock`` page's create surface before anything is stored, and an identity
+found nowhere in the origin's storage but sealed.
+
+**android's column** (the fourth test). The Keystore-sealed store has no file
+arm either, so the promise and the body are apple's — one shared body
+(``_a_refused_confirm_is_loud_and_the_wizard_stays_put``), the same shared
+fault, reached through the android agent's registry arm, and the shared
+``identity_commit_failed`` reached through ``ConfirmCommit.kt``.
+
+**windows' column** (the sixth test). Credential Manager is one more store with
+no file arm in a shipped build, so the same body again, through
+``TestAgent.cs``'s registry arm; it runs in the ordinary suite, on the launch's
+file store, because the fault needs no real row.
 """
 
 from __future__ import annotations
@@ -67,6 +83,7 @@ pytestmark = [
 
 PASSPHRASE = "correct-horse-battery"
 NAMESPACE = "fauna-tui-unreachable-store-e2e"
+LOCKED_NOTICE = "unlock-keyring-locked-notice"
 
 _ANSI = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
 
@@ -146,6 +163,9 @@ def _launch(tui_app_path, nest, xdg_base, bus, request):
 
 
 @pytest.mark.tui
+# A private session bus is a linux box's (convention 7, the fourth skip kind); the
+# environment skip in `empty_bus` stays for a linux box with no dbus daemon.
+@pytest.mark.host_platform("linux")
 def test_no_protected_store_is_said_and_the_key_rests_only_sealed(
     launch_client, tui_app_path, nest_instance, empty_bus, tmp_path, request
 ):
@@ -173,6 +193,10 @@ def test_no_protected_store_is_said_and_the_key_rests_only_sealed(
                 )
             time.sleep(0.5)
         assert not sealed.exists(), "a sealed file existed before the person chose a passphrase"
+        assert driver.is_absent(LOCKED_NOTICE), (
+            "no store answered at all (cause KeyringAbsent), yet the page says a "
+            "keyring is there but locked — the notice is the locked cause's alone"
+        )
 
         # ── 2. Choose the passphrase, then import an identity through the
         # wizard: the confirm is the durable write. ─────────────────────────
@@ -216,6 +240,62 @@ def test_no_protected_store_is_said_and_the_key_rests_only_sealed(
             "unlocked, but the identity was not found — it was never in the sealed store"
         )
         assert driver.is_visible("handle-input")
+    finally:
+        with contextlib.suppress(Exception):
+            driver.teardown()
+
+
+@pytest.mark.tui
+@pytest.mark.host_platform("linux")
+def test_a_locked_keyring_is_said_on_the_create_surface_and_tui_still_starts(
+    launch_client, tui_app_path, nest_instance, tmp_path, request
+):
+    """The other half of outcome 2 on tui: a protected store that ANSWERED but
+    is locked (cause ``KeyringLocked``, the driver's ``locked_keyring`` launch —
+    the store's own probe runs and answers locked) is reported on the create
+    surface by ``unlock-keyring-locked-notice`` with the reviewed copy, and the
+    app still starts: the passphrase is chosen and launch routing runs
+    (``tui.md`` § Credential storage, ruled 2026-10-16 — a notice, never a
+    refusal). Once the passphrase is chosen the notice is gone with the page."""
+    from conftest import _seeded_environment
+
+    xdg_base = tmp_path / "xdg"
+    driver = create_driver("tui")
+    driver.launch({
+        "app_path": tui_app_path,
+        "url": nest_instance["url"],
+        "locked_keyring": True,
+        "xdg_base": str(xdg_base),
+        "keyring_app": NAMESPACE + "-locked",
+        "environment": _seeded_environment(request, nest_instance),
+    })
+    try:
+        driver.wait_for(CONFIRM_INPUT, timeout=30)
+        assert driver.is_visible(LOCKED_NOTICE), (
+            "the keyring answered locked, yet the create surface says nothing of it: "
+            f"{driver.diagnose(LOCKED_NOTICE)}"
+        )
+        painted = " ".join(driver.get_text(LOCKED_NOTICE).split())
+        assert painted == " ".join(S.unlock.keyring_locked_notice.split()), (
+            f"the notice must carry the reviewed copy; painted {painted!r}"
+        )
+
+        submit_passphrase(driver, PASSPHRASE, confirm=PASSPHRASE)
+        deadline = time.monotonic() + 30
+        while driver.is_visible(CONFIRM_INPUT):
+            if time.monotonic() > deadline:
+                pytest.fail(
+                    "a locked keyring must not stop the start: the passphrase was "
+                    "chosen but the create surface stayed up; "
+                    f"error={driver.get_text('error-message') if driver.is_visible('error-message') else ''!r}"
+                )
+            time.sleep(0.5)
+        assert driver.is_absent(LOCKED_NOTICE), (
+            "the notice outlived the unlock page it belongs to"
+        )
+        assert (xdg_base / "config" / "fauna-tui" / f"{NAMESPACE}-locked.sealed").is_file(), (
+            "the passphrase was chosen, yet no sealed store was created"
+        )
     finally:
         with contextlib.suppress(Exception):
             driver.teardown()
@@ -314,6 +394,90 @@ def apple_client(request):
     return request.param
 
 
+def _stored_copies(driver, secret: bytes) -> list[str]:
+    """Where the app's e2e credential store holds ``secret`` in any encoding:
+    the harness's credential dir on apple, the on-device credential file
+    (``credential_map``, read over the bridge) on android."""
+    needles = _encodings(secret)
+    if hasattr(driver, "credential_map"):
+        return sorted(
+            key for key, value in driver.credential_map().items()
+            if any(n in str(value).encode() for n in needles)
+        )
+    cred_dir = getattr(driver, "_cred_dir", None)
+    return _files_holding(Path(cred_dir), needles) if cred_dir else []
+
+
+def _a_refused_confirm_is_loud_and_the_wizard_stays_put(app_name, nest_instance, request):
+    """The body both registry-fault columns run: arm the shared registry
+    bridge's ``refuse_secret_writes_for_test`` (the store takes the write and
+    keeps nothing; the shared ``persist_confirmed_identity`` read-back
+    refuses), create an identity, confirm it with a real tap, and require the
+    shared ``identity_commit_failed`` outcome — the error painted, the wizard
+    still on the key's own screen with the same key, nothing past it, and no
+    copy of the key in the app's e2e credential store."""
+    from conftest import _seeded_environment
+    from helpers.app_launch import app_launch_config
+    from helpers.waiting import wait_until
+
+    driver = create_driver(app_name)
+    driver.launch({
+        "url": nest_instance["url"],
+        "environment": _seeded_environment(request, nest_instance),
+        **app_launch_config(app_name, request),
+    })
+    try:
+        driver.wait_for("create-identity-button", timeout=60)
+        driver.call_machine_method("refuse_secret_writes_for_test", '{"refuse": true}')
+        driver.click("create-identity-button")
+        driver.wait_for("secret-key-display", timeout=15)
+        shown = driver.get_text("secret-key-display").strip()
+        assert re.fullmatch(r"[0-9a-f]{64}", shown), "no 64-hex key on screen"
+        driver.click("identity-continue-button")
+
+        # ── 1. Loud: the error is painted — waited on as state. ─────────────
+        def _error():
+            if driver.is_visible("error-message"):
+                return driver.get_text("error-message").strip()
+            return ""
+
+        error = wait_until(
+            _error, 30,
+            diagnose=lambda: (
+                "confirming an identity the store kept nothing of painted no "
+                "error — the person was not told the key is stored nowhere; "
+                f"handle-input visible={driver.is_visible('handle-input')}"
+            ),
+        ).replace(shown, "<key>")
+
+        # ── 2. The wizard did not advance as if the key were saved. ─────────
+        assert driver.is_visible("secret-key-display"), (
+            f"the wizard left the key's screen after a failed save; error={error!r}"
+        )
+        assert driver.get_text("secret-key-display").strip() == shown, (
+            "the key on screen changed after the failed save — the one the "
+            "person was told to write down would be worthless"
+        )
+        for advanced in ("handle-input", "recovery-kit-confirm-button"):
+            assert driver.is_absent(advanced), (
+                f"{advanced} is up: the wizard advanced past a confirm whose key "
+                f"was saved nowhere; error={error!r}"
+            )
+
+        # ── 3. Nowhere less protected: the app's e2e credential store holds
+        # no copy of the key. ────────────────────────────────────────────────
+        hits = _stored_copies(driver, bytes.fromhex(shown))
+        assert not hits, (
+            f"the identity secret rests in the credential store, in: {hits} "
+            "— the refused write kept a copy after all"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            driver.call_machine_method("refuse_secret_writes_for_test", '{"refuse": false}')
+        with contextlib.suppress(Exception):
+            driver.teardown()
+
+
 @pytest.mark.macos
 @pytest.mark.ios
 def test_a_keychain_that_keeps_nothing_is_a_loud_error_and_the_wizard_stays_put(
@@ -338,65 +502,155 @@ def test_a_keychain_that_keeps_nothing_is_a_loud_error_and_the_wizard_stays_put(
     and let the wizard advance to handle entry holding a key stored nowhere —
     every assertion below was red against that code.
     """
-    from conftest import _seeded_environment
-    from helpers.app_launch import app_launch_config
-    from helpers.waiting import wait_until
+    _a_refused_confirm_is_loud_and_the_wizard_stays_put(apple_client, nest_instance, request)
 
-    driver = create_driver(apple_client)
-    driver.launch({
-        "url": nest_instance["url"],
-        "environment": _seeded_environment(request, nest_instance),
-        **app_launch_config(apple_client, request),
-    })
+
+@pytest.fixture(params=["android"])
+def android_client(request):
+    """android-only, the client id in the test name for conftest's ``--app``
+    filter."""
+    if request.param not in get_available_apps():
+        pytest.skip("android is not in this run's app set")
+    return request.param
+
+
+@pytest.mark.android
+def test_a_keystore_that_keeps_nothing_is_a_loud_error_and_the_wizard_stays_put(
+    android_client, nest_instance, request
+):
+    """android: the Keystore-sealed store's write of a confirmed identity
+    fails → the wizard says so and stays on the key's own screen.
+
+    android's store is ``EncryptedSharedPreferences`` under a Keystore master
+    key, with no fallback arm, so its promise is apple's (the test above): a
+    loud error. "The Keystore cannot be reached" makes that encrypted write
+    throw or keep nothing (an invalidated master key, an unavailable keystore
+    daemon), and nothing a user does on an emulator produces it on demand —
+    an e2e launch also rests its slots in the ``FAUNA_E2E_CREDENTIAL_FILE``
+    backend (convention 10), not the Keystore file. So the fault is the same
+    shared registry-bridge fault apple's arm uses, reached through the
+    agent's ``call_machine_method`` registry arm (``TestAgent.kt``): the store
+    keeps nothing and the shared read-back refuses, the same ``Err`` a failed
+    Keystore-backed write reaches. Everything from there is the app's own:
+    the confirm is a real tap, and ``ConfirmCommit.kt``'s
+    ``commitConfirmedIdentity`` calling the shared ``identity_commit_failed``
+    is what must put the error on screen.
+    """
+    _a_refused_confirm_is_loud_and_the_wizard_stays_put(android_client, nest_instance, request)
+
+
+@pytest.fixture(params=["windows"])
+def windows_client(request):
+    """windows-only, the client id in the test name for conftest's ``--app``
+    filter."""
+    if request.param not in get_available_apps():
+        pytest.skip("windows is not in this run's app set")
+    return request.param
+
+
+@pytest.mark.windows
+def test_a_credential_manager_that_keeps_nothing_is_a_loud_error_and_the_wizard_stays_put(
+    windows_client, nest_instance, request
+):
+    """windows: the Credential Manager write of a confirmed identity is lost →
+    the wizard says so and stays on the key's own screen.
+
+    Credential Manager is the app's only store, with no file arm in a shipped
+    build, so its promise is apple's (the test above the android one): a loud
+    error. It is a per-user OS service nothing here may stop, and what it does
+    when it cannot take a write is lose it: ``CredWriteW`` refuses a full set,
+    the arm's write is best-effort and log-only (`apps/windows.md` § Key
+    storage → *The whole set has a budget too*), and the read-back in the
+    shared ``persist_confirmed_identity`` is what turns that into an ``Err``.
+    So the fault is the shared registry-bridge fault again, reached through
+    ``TestAgent.cs``'s registry arm, on the launch's own file store, and it
+    reaches the same ``Err`` a lost write does: the store keeps nothing and the
+    read-back refuses. Everything from there is the app's own: the confirm is
+    a real tap, and ``OnboardingViewModel``'s shared ``identity_commit_failed``
+    is what must put the error on screen.
+    """
+    _a_refused_confirm_is_loud_and_the_wizard_stays_put(windows_client, nest_instance, request)
+
+
+@pytest.mark.web
+def test_a_browser_has_no_protected_store_and_says_so_and_the_key_rests_only_sealed(
+    nest_instance, spa_url
+):
+    """web's column. A browser offers a page no protected store at all, so
+    web's answer is tui's sealed arm (`common.md` § Credential storage → *The
+    web app's posture*): the create surface says there is no secure key store
+    here before anything is stored, the person chooses a passphrase, and an
+    identity imported through the wizard rests nowhere less protected — no
+    place in the origin (``localStorage``, ``sessionStorage``, IndexedDB,
+    OPFS) holds the secret in any encoding — and the next launch asks for the
+    passphrase before it can read the identity back.
+
+    The test build keeps the plain arm unless the origin opts in
+    (`web.md` § Identity store at rest → *Test builds*): a shipped build has
+    no plain arm, so the opt-in on a fresh origin is the shipped launch."""
+    from actions import ActionLayer
+    from helpers.web_store import origin_holdings
+    from tests.test_web_sealed_identity_store import (
+        CONFIRM_INPUT as WEB_CONFIRM, OPT_IN_KEY, PASSPHRASE_INPUT as WEB_PASSPHRASE,
+        _submit,
+    )
+
+    secret = bytes(SigningKey.generate())
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/"})
     try:
-        driver.wait_for("create-identity-button", timeout=60)
-        driver.call_machine_method("refuse_secret_writes_for_test", '{"refuse": true}')
-        driver.click("create-identity-button")
-        driver.wait_for("secret-key-display", timeout=15)
-        shown = driver.get_text("secret-key-display").strip()
-        assert re.fullmatch(r"[0-9a-f]{64}", shown), "no 64-hex key on screen"
-        driver.click("identity-continue-button")
+        driver.wait_for("import-identity-button", timeout=90)
+        driver.eval_js(f"localStorage.setItem({OPT_IN_KEY!r}, '1')")
+        driver.hard_reload()
 
-        # ── 1. Loud: the error is painted — waited on as state. ─────────────
-        def _error():
-            if driver.is_visible("error-message"):
-                return driver.get_text("error-message").strip()
-            return ""
-
-        error = wait_until(
-            _error, 30,
-            diagnose=lambda: (
-                "confirming an identity the keychain kept nothing of painted no "
-                "error — the person was not told the key is stored nowhere; "
-                f"handle-input visible={driver.is_visible('handle-input')}"
-            ),
-        ).replace(shown, "<key>")
-
-        # ── 2. The wizard did not advance as if the key were saved. ─────────
-        assert driver.is_visible("secret-key-display"), (
-            f"the wizard left the key's screen after a failed save; error={error!r}"
+        # ── 1. The app SAYS so before anything is stored. ────────────────────
+        driver.wait_for(WEB_CONFIRM, timeout=30)
+        assert driver.is_visible(WEB_PASSPHRASE)
+        assert S.unlock.create_prompt in driver.eval_js("document.body.innerText"), (
+            "the create surface is up but its prompt — the words that tell the "
+            "person no secure key store is here — is not on the page"
         )
-        assert driver.get_text("secret-key-display").strip() == shown, (
-            "the key on screen changed after the failed save — the one the "
-            "person was told to write down would be worthless"
+        assert driver.eval_js("localStorage.getItem('fauna/seal')") is None, (
+            "a seal header existed before the person chose a passphrase"
         )
-        for advanced in ("handle-input", "recovery-kit-confirm-button"):
-            assert driver.is_absent(advanced), (
-                f"{advanced} is up: the wizard advanced past a confirm whose key "
-                f"was saved nowhere; error={error!r}"
-            )
 
-        # ── 3. Nowhere less protected: the e2e keychain's durable backing
-        # (the harness's credential dir) holds no copy of the key. ──────────
-        cred_dir = getattr(driver, "_cred_dir", None)
-        if cred_dir:
-            hits = _files_holding(Path(cred_dir), _encodings(bytes.fromhex(shown)))
-            assert not hits, (
-                f"the identity secret rests in the credential store, in: {hits} "
-                "— the refused write kept a copy after all"
-            )
+        # ── 2. Choose the passphrase, then import through the wizard. ────────
+        _submit(driver, PASSPHRASE, confirm=PASSPHRASE)
+        app = ActionLayer(driver)
+        driver.wait_for("import-identity-button", timeout=60)
+        app.onboarding.import_key(secret.hex())
+        driver.wait_for("handle-input", timeout=30)
+
+        # ── 3. Nowhere less protected. ───────────────────────────────────────
+        assert driver.eval_js("localStorage.getItem('fauna/seal') !== null"), (
+            f"no seal header after the identity was confirmed; error={app.error_text()!r}"
+        )
+        held = origin_holdings(driver, _encodings(secret))
+        hits = sorted({w for places in held["found"].values() for w in places})
+        assert not hits, (
+            "the identity secret rests readable outside the sealed rows, in: "
+            f"{hits} (the 'somewhere less protected' outcome 2 forbids; searched "
+            f"{held['places']} places)"
+        )
+
+        # ── 4. The next launch asks before it can read the identity. ─────────
+        driver.hard_reload()
+        driver.wait_for(WEB_PASSPHRASE, timeout=30)
+        assert driver.is_absent(WEB_CONFIRM), (
+            "the relaunch offered to CREATE a store — the identity was not kept sealed"
+        )
+        _submit(driver, PASSPHRASE)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if driver.is_visible("handle-input") or driver.is_visible("create-identity-button"):
+                break
+            time.sleep(0.5)
+        assert driver.is_absent("create-identity-button"), (
+            "unlocked, but the identity was not found — it was never in the sealed store"
+        )
+        assert driver.is_visible("handle-input"), (
+            f"unlocked, but the wizard did not resume at handle entry; error={app.error_text()!r}"
+        )
     finally:
-        with contextlib.suppress(Exception):
-            driver.call_machine_method("refuse_secret_writes_for_test", '{"refuse": false}')
         with contextlib.suppress(Exception):
             driver.teardown()

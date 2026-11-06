@@ -1078,7 +1078,7 @@ where
             if listed.active.is_empty() {
                 // public-text: cli-answer-strings-public
                 return Err(ToolError::new(
-                    "this server has no active domain yet, and the first domain added becomes its permanent main domain: the admin adds that one in their own Fauna app",
+                    "this server has no active domain yet, and the first domain added becomes its primary domain, which can never be removed, only renamed onto a different domain: the admin adds that one in their own Fauna app",
                 ));
                 // public-text-end: cli-answer-strings-public
             }
@@ -1510,14 +1510,11 @@ where
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    (s.len().is_multiple_of(2) && !s.is_empty())
-        .then(|| {
-            (0..s.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
-                .collect()
-        })
-        .flatten()
+    // Non-empty on top of the shared decoder: an empty id is never valid here.
+    if s.is_empty() {
+        return None;
+    }
+    fauna_core::format::hex_decode(s)
 }
 
 /// The forwarder list with each 16-byte id as the hex `admin_forwarders_delete`

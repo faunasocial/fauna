@@ -26,6 +26,9 @@ from helpers import nest_test_image
 pytestmark = pytest.mark.tier_1
 
 TAG = "fauna-nest-test:src-0123456789abcdef"
+#: What the docker daemon says on stderr for an absent image — the only answer
+#: `helpers._image_created` reads as "absent" (any other failure is asked again).
+_NO_SUCH_IMAGE = f"Error: No such image: {TAG}"
 
 
 @pytest.fixture()
@@ -47,7 +50,7 @@ def _spy(monkeypatch, module, *, image_present: bool):
         calls.append(list(argv))
         if "inspect" in argv:
             return subprocess.CompletedProcess(
-                argv, 0 if image_present else 1, "", "")
+                argv, 0 if image_present else 1, "", "" if image_present else _NO_SUCH_IMAGE)
         raise AssertionError(
             "docker_build ran a real subprocess in a unit test: " + " ".join(argv))
 
@@ -88,7 +91,9 @@ def test_the_opt_in_builds_the_keyed_tag(helpers, monkeypatch, tmp_path):
         calls.append(list(argv))
         # image ABSENT, so the opt-in is what decides — otherwise the early
         # "already present" return would make this test pass for the wrong reason
-        return subprocess.CompletedProcess(argv, 1 if "inspect" in argv else 0, "", "")
+        if "inspect" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", _NO_SUCH_IMAGE)
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(helpers.subprocess, "run", fake_run)
     assert helpers.docker_build(tmp_path) == TAG

@@ -109,10 +109,12 @@ impl RoomSearchState {
 /// The name a room search's post row gives its author: the bridged face the
 /// nest served, else the name this room already shows them by — a
 /// participant, or the sender of a message this device holds — else the
-/// account display label of the bare actor id.
+/// account display label of the actor id, over the contact roster's handle
+/// for them when it holds one.
 fn room_post_author_display(
     d: &ThreadDetail,
     envelope: &crate::backend::RoomSearchPostEnvelope,
+    contacts: &ContactsCache,
 ) -> String {
     if let Some(face) = envelope.author_display.as_deref().map(str::trim)
         && !face.is_empty()
@@ -133,7 +135,12 @@ fn room_post_author_display(
     if let Some(p) = d.participants.iter().find(|p| is_author(p)) {
         return p.display();
     }
-    fauna_core::format::account_display_label(None, &envelope.author_actor_hex)
+    fauna_core::format::account_display_label(
+        contacts
+            .roster_handle(&envelope.author_actor_hex)
+            .as_deref(),
+        &envelope.author_actor_hex,
+    )
 }
 
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
@@ -277,6 +284,20 @@ pub struct ConversationsManager {
     /// the thread), so it is never cleared. **In-memory only** (no-persistence posture
     /// unchanged).
     resolved_previews: RwLock<HashMap<String, PreviewState>>,
+    /// The read-only threads of the account's imported archives — the
+    /// [`Rail::Archive`] projection (`behavior/archive-import.md` § What each
+    /// category becomes), built by [`Self::set_archive_threads`] from what the
+    /// [`crate::backend::ArchiveThreadSource`] read. Held beside the thread
+    /// store, never in it: nothing here is synced to `__conv`, replicated,
+    /// indexed or sent. **In-memory only**; re-read each session.
+    archive_threads: RwLock<Vec<ThreadDetail>>,
+    /// The `Archive` rail's read seam — the imported archives' message
+    /// threads, which [`Self::refresh_archive_threads`] reads into
+    /// `archive_threads`. `None` until [`Self::set_archive_thread_source`]
+    /// wires it; a manager without it lists no archive thread. On the manager,
+    /// not the session, because web drives the manager without a session (the
+    /// feed manager's `set_archive_comment_source` twin).
+    archive_thread_source: RwLock<Option<Arc<dyn crate::backend::ArchiveThreadSource>>>,
     /// The nest's 32-byte segment-record id of each message this account
     /// **received** into `INBOX`, by message id — the key
     /// `fauna.bridges.get_message_scan_result` takes, which the snapshot does
@@ -427,6 +448,18 @@ pub struct ConversationsManager {
     /// a restore for reading across the check and the fill, so no restore can
     /// pass the check against the old identity and fill after the wipe.
     identity_epoch: RwLock<u64>,
+    /// Which identity's **sessions** may still write here: advanced by
+    /// [`Self::clear_for_identity_change`] and never by the harness's
+    /// [`Self::clear_for_test`] wipe, which runs with the session still signed
+    /// in. A [`crate::session::ConversationsSession`] subscribes when it is
+    /// built, and its receive loop exits
+    /// ([`crate::session::ReceiveLoopExit::IdentityChanged`]) at the first
+    /// change — the outgoing account's writer retired by the same drop
+    /// (`account-scoping.md` § The scoping taxonomy, corollary 2), since
+    /// neither the session's own drop (held in three languages) nor the engine
+    /// hand-over (at the next build) comes in time. Native only, like the loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    session_generation: tokio::sync::watch::Sender<u64>,
 }
 
 /// Which recipient picker an async resolve speaks for. Two callers, two
@@ -461,6 +494,18 @@ impl ConversationsManager {
     /// building the thread list around it.
     pub fn selected_thread_id(&self) -> Option<ThreadId> {
         self.selected.read().unwrap().clone()
+    }
+
+    /// Whether any receive loop has claimed a generation on this manager yet
+    /// ([`Self::begin_receive_loop`]). `ConversationsSession::start_receive_loop`
+    /// claims its generation only after its key-package top-up round trips, so
+    /// a freshly signed-in app has a window with no loop at all; an e2e seam
+    /// that stands up a dead rail inside it is retired a moment later by the
+    /// real loop's own claim. The seams read this to wait the window out.
+    pub fn receive_loop_begun(&self) -> bool {
+        self.receive_loop_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0
     }
 
     /// Claim a fresh receive-loop generation — called by
@@ -810,6 +855,92 @@ impl ConversationsManager {
     pub fn attachment_store_resident_bytes(&self) -> usize {
         self.attachments.read().unwrap().resident_bytes()
     }
+
+    /// Replace the [`Rail::Archive`] projection with `records` — what the
+    /// session's [`crate::backend::ArchiveThreadSource`] read — and re-emit.
+    /// Each thread becomes a read-only [`ThreadDetail`]: the archive's other
+    /// participants as [`TypedAddress::Archive`], the owner's own messages
+    /// on the own side, plain-text bodies, no unread count, no compose, no
+    /// room (`behavior/archive-import.md` § What each category becomes).
+    /// A selected archive thread a re-read no longer lists falls out of the
+    /// detail like a deleted thread does.
+    pub fn set_archive_threads(&self, records: Vec<crate::backend::ArchiveThreadRecord>) {
+        let details = records.into_iter().map(archive_thread_detail).collect();
+        *self.archive_threads.write().unwrap() = details;
+        self.notify();
+    }
+
+    /// Register the `Archive` rail's read seam
+    /// ([`crate::backend::ArchiveThreadSource`]): the glue wires the
+    /// archive-import machine's folder reader at login
+    /// (`fauna_archive_import_machine::threads::register_archive_threads`), so
+    /// this crate keeps no archive semantics.
+    pub fn set_archive_thread_source(&self, source: Arc<dyn crate::backend::ArchiveThreadSource>) {
+        *self.archive_thread_source.write().unwrap() = Some(source);
+    }
+
+    /// Re-read the imported archives' threads into the read-only `Archive`
+    /// projection ([`Self::set_archive_threads`]). Run at login, whenever an
+    /// import finishes, and on each visit to the conversations page. A failed
+    /// read keeps the projection the last read left — the folders are the
+    /// truth and the next call re-reads them — and reports the reason; no
+    /// source is a no-op.
+    pub async fn refresh_archive_threads(&self) -> Result<(), String> {
+        let Some(source) = self.archive_thread_source.read().unwrap().clone() else {
+            return Ok(());
+        };
+        let records = source.archive_threads().await?;
+        self.set_archive_threads(records);
+        Ok(())
+    }
+
+    /// The projected archive thread `id`, or `None` for every other thread.
+    fn archive_thread(&self, id: &ThreadId) -> Option<ThreadDetail> {
+        if !id.0.starts_with(ARCHIVE_THREAD_ID_PREFIX) {
+            return None;
+        }
+        self.archive_threads
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| &d.thread_id == id)
+            .cloned()
+    }
+
+    /// The list rows of the archive projection, narrowed by the page's search
+    /// the way the store's rows are: the label, or any message's text.
+    fn archive_summaries(&self, query: Option<&str>) -> Vec<ThreadSummary> {
+        let needle = query.map(|q| q.trim().to_lowercase()).unwrap_or_default();
+        self.archive_threads
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|d| {
+                needle.is_empty()
+                    || d.label.to_lowercase().contains(&needle)
+                    || d.messages
+                        .iter()
+                        .any(|m| m.body.to_lowercase().contains(&needle))
+            })
+            .map(|d| {
+                let last = d.messages.last();
+                ThreadSummary {
+                    thread_id: d.thread_id.clone(),
+                    rail: Rail::Archive,
+                    glyph: Rail::Archive.glyph(),
+                    flavor: d.flavor.clone(),
+                    label: d.label.clone(),
+                    snippet: last.map(|m| m.body.clone()).unwrap_or_default(),
+                    last_activity_ms: last.map(|m| m.timestamp_ms).unwrap_or(0),
+                    // A record of the past is never news.
+                    unread_count: 0,
+                    participant_count: d.participants.len() as u32,
+                    bridge: None,
+                    guardian_state: None,
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -843,6 +974,8 @@ impl ConversationsManager {
             contact_roster: RwLock::new(None),
             contact_roster_poke: RwLock::new(None),
             resolved_previews: RwLock::new(HashMap::new()),
+            archive_threads: RwLock::new(Vec::new()),
+            archive_thread_source: RwLock::new(None),
             received_mail_records: RwLock::new(HashMap::new()),
             scan_results: RwLock::new(HashMap::new()),
             scan_results_hidden: std::sync::atomic::AtomicBool::new(false),
@@ -864,6 +997,8 @@ impl ConversationsManager {
             unopenable_mail: RwLock::new(std::collections::BTreeSet::new()),
             room_invitations: RwLock::new(Vec::new()),
             identity_epoch: RwLock::new(0),
+            #[cfg(not(target_arch = "wasm32"))]
+            session_generation: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -954,8 +1089,18 @@ impl ConversationsManager {
     pub fn snapshot(&self) -> ConversationsSnapshot {
         let sort = *self.sort.read().unwrap();
         let search_query = self.search.read().unwrap().clone();
-        let mut threads = self.threads.list_summaries();
+        let mut threads = self.threads.list_rail_summaries();
+        // Before the filter, so a search for the handle finds the row it names.
+        for t in &mut threads {
+            if let Some(participants) = self.threads.participants_of(&t.thread_id)
+                && let Some(named) = self.roster_named_label(&t.thread_id, &t.label, &participants)
+            {
+                t.label = named;
+            }
+        }
+        self.project_deleted_snippets(&mut threads);
         filter_summaries(&mut threads, search_query.as_deref(), &self.threads);
+        threads.extend(self.archive_summaries(search_query.as_deref()));
         sort_summaries(&mut threads, sort);
         self.project_bridge_identities(&mut threads);
         ConversationsSnapshot {
@@ -1053,6 +1198,9 @@ impl ConversationsManager {
     }
 
     pub fn thread_detail(&self, id: ThreadId) -> Option<ThreadDetail> {
+        if let Some(archived) = self.archive_thread(&id) {
+            return Some(archived);
+        }
         self.threads.get(&id).map(|mut d| {
             d.compose = self.drafts.get(&id);
             // The viewer's own nickname for a fauna-native sender paints as the
@@ -1065,6 +1213,10 @@ impl ConversationsManager {
             self.project_sender_nicknames(&mut d.messages);
             // And on the member chips, index-parallel with `participants`.
             self.project_participant_nicknames(&mut d);
+            // And the header label the list row shares (`thread-header`).
+            if let Some(named) = self.roster_named_label(&d.thread_id, &d.label, &d.participants) {
+                d.label = named;
+            }
             // D2b: project an in-bubble reply-quote onto each reply
             // (render-model.md § D2 QuotedMessage). A read-time projection like
             // the D3 reveal below — the parent may be ingested *after* the reply,
@@ -1220,7 +1372,70 @@ impl ConversationsManager {
 /// own type (`fauna_core::room_post`), read by the feed in shared Rust through
 /// `ConversationsSession`'s `RoomPostKeys` impl — never across FFI. Likewise
 /// the harvest offer's writer, whose `ChannelId` key never crosses it either.
+/// And [`Self::wipe_identity_state`]: UniFFI exports every method of an
+/// exported block whatever its visibility, so a private helper that must not
+/// be callable across FFI (it skips the `session_generation` bump) lives here.
 impl ConversationsManager {
+    /// The wipe both [`Self::clear_for_identity_change`] and the harness's
+    /// [`Self::clear_for_test`] run: every piece of identity-scoped state, and
+    /// the [`Self::identity_epoch`] bump that retires a pending drafts restore.
+    fn wipe_identity_state(&self) {
+        let mut epoch = self
+            .identity_epoch
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *epoch = epoch.wrapping_add(1);
+        // The read-position seam is the outgoing account's store: retire it
+        // before the wipe, so no delivery of its positions lands after it.
+        // The incoming account registers its own at its store-ready edge.
+        {
+            let mut slot = self.read_positions.write().unwrap();
+            slot.generation += 1;
+            slot.seam = None;
+        }
+        // So are the peer anchors: the incoming account's witness must never
+        // read — or write — the outgoing account's heads.
+        *self.peer_anchor_store.write().unwrap() = None;
+        // The overlay seam, its verdicts and its projection are the outgoing
+        // account's too.
+        {
+            let mut slot = self.contact_overlays.write().unwrap();
+            slot.generation += 1;
+            slot.folds = None;
+            slot.successions.clear();
+        }
+        // The refused-change log and anything held for it are the outgoing
+        // account's notices.
+        self.refused_changes.clear();
+        self.contacts.replace(Default::default());
+        self.threads.clear();
+        self.received_mail_records.write().unwrap().clear();
+        self.scan_results.write().unwrap().clear();
+        self.scan_results_hidden
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.delivery_stamps.write().unwrap().clear();
+        *self.alias_labels.write().unwrap() = None;
+        *self.withheld_records.write().unwrap() = None;
+        self.drafts.clear_all();
+        *self.selected.write().unwrap() = None;
+        *self.selected_message.write().unwrap() = None;
+        *self.search.write().unwrap() = None;
+        *self.room_search.write().unwrap() = None;
+        *self.sort.write().unwrap() = SortOrder::default();
+        *self.add_participant.write().unwrap() = None;
+        // A page error left standing would make the next identity (or the next
+        // test) start with an `error-message` it never caused.
+        *self.page_error.write().unwrap() = None;
+        self.reactions.write().unwrap().clear();
+        self.deleted.write().unwrap().clear();
+        self.delete_claims.write().unwrap().clear();
+        // Owed `\Seen` writes and the flag cursor name the outgoing account's
+        // mailbox.
+        *self.mail_read.lock().unwrap() = MailReadSync::default();
+        drop(epoch);
+        self.notify();
+    }
+
     /// The room (`conversation-rooms.md` § The room): asked of the thread's
     /// rail on every emit, and the one place the roles table becomes gating
     /// (`RoomSnapshot::gate`) — so no app ever computes a class or a role
@@ -1317,7 +1532,8 @@ impl ConversationsManager {
                     let envelope = state.posts.get(post_id_hex);
                     RoomSearchResultSnapshot {
                         kind: RoomSearchResultKind::Post,
-                        sender_display: envelope.map(|e| room_post_author_display(d, e)),
+                        sender_display: envelope
+                            .map(|e| room_post_author_display(d, e, &self.contacts)),
                         sent_at_ms: envelope.map(|e| e.created_at_ms),
                         text: envelope
                             .map(|e| e.teaser.lines().next().unwrap_or_default().to_string())
@@ -1391,6 +1607,14 @@ impl ConversationsManager {
     /// the thread never went idle, and every barrier ack and dialog map
     /// beneath DEFAULT priority starved (`apps/linux.md` § Message Flow).
     pub fn thread_state_facts(&self, id: &ThreadId) -> Option<ThreadStateFacts> {
+        if let Some(mut detail) = self.archive_thread(id) {
+            let messages = std::mem::take(&mut detail.messages);
+            return Some(ThreadStateFacts {
+                detail,
+                message_count: messages.len(),
+                subject_lines: vec![String::new(); messages.len()],
+            });
+        }
         let (mut detail, message_count, subject_lines) = self.threads.get_without_messages(id)?;
         self.project_room(&mut detail);
         Some(ThreadStateFacts {
@@ -1428,12 +1652,37 @@ impl ConversationsManager {
             if let (Some(me), Some(log)) = (me, logs.get(&m.message_id)) {
                 m.reactions = fold_reactions(log, me);
             }
-            if deleted.contains(&m.message_id)
-                || claims
-                    .get(&m.message_id)
-                    .is_some_and(|cs| cs.iter().any(|c| c.admits(sender_actor(m))))
-            {
+            if folded_delete(&deleted, &claims, m) {
                 m.deleted = true;
+            }
+        }
+    }
+
+    /// A receiver that sees the next [`Self::clear_for_identity_change`] — taken
+    /// by a session when it is built, so a change between the build and the
+    /// receive loop's start still counts. Public for the per-session tasks
+    /// outside this crate that must not outlive their identity either — the
+    /// tokio replica autosave (`fauna-client-mls-sync` `launcher.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn session_generation_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.session_generation.subscribe()
+    }
+
+    /// The thread list's half of [`Self::project_reactions_and_deletes`]: a
+    /// row's snippet previews the newest message the read-time delete fold
+    /// did not take, never a deleted body. Without it the bubble showed the
+    /// tombstone while the list row kept quoting the deleted text. A no-op
+    /// when nothing was deleted (the common case).
+    fn project_deleted_snippets(&self, threads: &mut [ThreadSummary]) {
+        let deleted = self.deleted.read().unwrap();
+        let claims = self.delete_claims.read().unwrap();
+        if deleted.is_empty() && claims.is_empty() {
+            return;
+        }
+        for t in threads {
+            let gone = |m: &MessageSnapshot| folded_delete(&deleted, &claims, m);
+            if let Some(snippet) = self.threads.snippet_past(&t.thread_id, gone) {
+                t.snippet = snippet;
             }
         }
     }
@@ -1578,14 +1827,21 @@ impl ConversationsManager {
                 let detail = self.threads.get(&id)?;
                 let backend = self.backends.read().unwrap().get(&detail.rail).cloned()?;
                 let class = backend.room_state(&detail)?.class;
-                (matches!(
+                if !(matches!(
                     class,
                     crate::room::RoomClass::EndToEnd | crate::room::RoomClass::Community
                 ) && backend.seated_on_room(&detail))
-                .then_some(fauna_core::room_post::RoomPostRoom {
-                    room,
-                    label: detail.label,
-                })
+                {
+                    return None;
+                }
+                // The list row's own label: a Welcome-met member's short-id
+                // join is re-named from the roster there, so it is here too
+                // (`roster_named_label`), and a roster change re-emits, which
+                // every app answers with a fresh `refresh_own_rooms`.
+                let label = self
+                    .roster_named_label(&id, &detail.label, &detail.participants)
+                    .unwrap_or(detail.label);
+                Some(fauna_core::room_post::RoomPostRoom { room, label })
             })
             .collect();
         rooms.sort_by(|a, b| a.label.cmp(&b.label).then(a.room.cmp(&b.room)));
@@ -1609,7 +1865,7 @@ impl ConversationsManager {
     /// own lock, so — like every snapshot read — an observer calls it after
     /// the notifying mutation unwinds, never inline on the mutator's thread.
     pub fn unread_total(&self) -> u32 {
-        crate::snapshot::sum_unread(&self.threads.list_summaries())
+        crate::snapshot::sum_unread(&self.threads.list_rail_summaries())
     }
 
     /// The Status page's `status-mls-channels` count —
@@ -1618,7 +1874,7 @@ impl ConversationsManager {
     /// inline on a mutator's thread). The shared snapshot's MLS leg
     /// (`ui/status.md` § State & data shape) takes this number as its input.
     pub fn secure_channel_count(&self) -> u64 {
-        crate::snapshot::secure_channel_count(&self.threads.list_summaries())
+        crate::snapshot::secure_channel_count(&self.threads.list_rail_summaries())
     }
 
     /// Drop all registered observers. Each GTK client attaches a fresh observer
@@ -1681,60 +1937,12 @@ impl ConversationsManager {
     /// It also advances [`Self::identity_epoch`], which retires every launch
     /// restore the outgoing account started ([`Self::restore_drafts_at`]).
     pub fn clear_for_identity_change(&self) {
-        let mut epoch = self
-            .identity_epoch
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        *epoch = epoch.wrapping_add(1);
-        // The read-position seam is the outgoing account's store: retire it
-        // before the wipe, so no delivery of its positions lands after it.
-        // The incoming account registers its own at its store-ready edge.
-        {
-            let mut slot = self.read_positions.write().unwrap();
-            slot.generation += 1;
-            slot.seam = None;
-        }
-        // So are the peer anchors: the incoming account's witness must never
-        // read — or write — the outgoing account's heads.
-        *self.peer_anchor_store.write().unwrap() = None;
-        // The overlay seam, its verdicts and its projection are the outgoing
-        // account's too.
-        {
-            let mut slot = self.contact_overlays.write().unwrap();
-            slot.generation += 1;
-            slot.folds = None;
-            slot.successions.clear();
-        }
-        // The refused-change log and anything held for it are the outgoing
-        // account's notices.
-        self.refused_changes.clear();
-        self.contacts.replace(Default::default());
-        self.threads.clear();
-        self.received_mail_records.write().unwrap().clear();
-        self.scan_results.write().unwrap().clear();
-        self.scan_results_hidden
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.delivery_stamps.write().unwrap().clear();
-        *self.alias_labels.write().unwrap() = None;
-        *self.withheld_records.write().unwrap() = None;
-        self.drafts.clear_all();
-        *self.selected.write().unwrap() = None;
-        *self.selected_message.write().unwrap() = None;
-        *self.search.write().unwrap() = None;
-        *self.room_search.write().unwrap() = None;
-        *self.sort.write().unwrap() = SortOrder::default();
-        *self.add_participant.write().unwrap() = None;
-        // A page error left standing would make the next identity (or the next
-        // test) start with an `error-message` it never caused.
-        *self.page_error.write().unwrap() = None;
-        self.reactions.write().unwrap().clear();
-        self.deleted.write().unwrap().clear();
-        self.delete_claims.write().unwrap().clear();
-        // Owed `\Seen` writes and the flag cursor name the outgoing account's
-        // mailbox.
-        *self.mail_read.lock().unwrap() = MailReadSync::default();
-        drop(epoch);
-        self.notify();
+        // First, so the outgoing session's loop stops sweeping before the wipe
+        // (a sweep already under way completes, as at every loop exit).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.session_generation
+            .send_modify(|g| *g = g.wrapping_add(1));
+        self.wipe_identity_state();
     }
 
     // ── Selection ───────────────────────────────────────────────
@@ -1841,7 +2049,10 @@ impl ConversationsManager {
     /// change (`docs/goal/behavior/file-sync.md` § Drafts Sync). Byte-stable for
     /// equal logical state, so an unchanged draft set re-uploads identically.
     pub fn drafts_snapshot_bytes(&self) -> Vec<u8> {
-        self.drafts.snapshot_bytes()
+        // Drafts rest under the thread's stable key, never the device-local
+        // id (`conversation-drafts.md` § Persistence).
+        let keys = self.threads.routing_keys();
+        self.drafts.snapshot_bytes(|id| keys.get(id).cloned())
     }
 
     // ── Compose mutators (per-thread drafts) ─────────────────────
@@ -2337,34 +2548,6 @@ impl ConversationsManager {
             return true;
         }
         false
-    }
-
-    /// `recipient-picker-suggestion[i]` — accept the active picker's `index`th
-    /// suggestion. **The click is the Enter path, not a shortcut past it**
-    /// (`conversations.md` § Where logic lives → *Recipient suggestions*): the
-    /// suggestion's spelling ([`suggestion_spelling`]) is written into the
-    /// picker as typing would write it, the ordinary probe runs
-    /// ([`Self::resolve_recipient`]), and the chip commits through
-    /// [`Self::accept_current_recipient_chip`] — so a person whose key
-    /// packages ran out, or whose nest stopped answering, reads `not-found` /
-    /// `error` and commits nothing. Returns whether a chip was pushed; an
-    /// index past the list is a no-op `false`.
-    pub async fn accept_suggestion(&self, index: u32) -> bool {
-        let Some(picker) = self.active_picker() else {
-            return false;
-        };
-        let (suggestions, _) = self.suggestions_for_active(&picker);
-        let Some(addr) = suggestions.get(index as usize) else {
-            return false;
-        };
-        let spelling = suggestion_spelling(addr);
-        if self.add_participant.read().unwrap().is_some() {
-            self.set_add_participant_recipient_input(spelling);
-        } else {
-            self.set_new_thread_recipient_input(spelling);
-        }
-        self.resolve_recipient().await;
-        self.accept_current_recipient_chip()
     }
 
     /// `recipient-picker-chip[i]`'s × — drop the active picker's `index`th
@@ -2958,17 +3141,74 @@ impl ConversationsManager {
     /// thread's *current* roster is deliberately not consulted: a departed
     /// member's bubbles and a community room's authors were authenticated when
     /// written, and un-naming them would buy nothing.
+    ///
+    /// With no nickname, a sender whose address carries no handle (a member
+    /// met through a Welcome or an inbound roster) is named by the contact
+    /// roster's handle for them ([`ContactsCache::roster_address`]) rather
+    /// than the short id its address displays as (`value-formatting.md`
+    /// § Peer display label: the handle precedes the short id). The reply
+    /// preview and a room search's author row read this same field.
     fn project_sender_nicknames(&self, messages: &mut [crate::message::MessageSnapshot]) {
         for m in messages {
             if !m.sender_display.is_empty() {
                 continue;
             }
-            if let Some(actor) = m.sender.person_actor_id()
-                && let Some(nick) = self.contacts.nickname(&actor.to_hex())
-            {
+            let Some(actor) = m.sender.person_actor_id() else {
+                continue;
+            };
+            let hex = actor.to_hex();
+            if let Some(nick) = self.contacts.nickname(&hex) {
                 m.sender_display = nick;
+            } else if m.sender.person_handle().is_none()
+                && let Some(named) = self.contacts.roster_address(&hex)
+            {
+                m.sender_display = named.display();
             }
         }
+    }
+
+    /// `participant`'s public name: its own address display, or — for a Fauna
+    /// participant whose address carries no handle and whose actor id is a
+    /// verified leaf in `proven` (the paint gate, [`Self::project_participant_nicknames`])
+    /// — the contact roster's address for them.
+    fn roster_named_participant(
+        &self,
+        proven: Option<&[ActorId]>,
+        participant: &TypedAddress,
+    ) -> Option<TypedAddress> {
+        if participant.person_handle().is_some() {
+            return None;
+        }
+        let actor = participant.person_actor_id()?;
+        if !proven.is_some_and(|roster| roster.contains(&actor)) {
+            return None;
+        }
+        self.contacts.roster_address(&actor.to_hex())
+    }
+
+    /// The thread label the list row and the `thread-header` share, re-derived
+    /// from the roster when it was derived from handle-less participants
+    /// (`ThreadStore::find_or_create` joins their displays once, at creation,
+    /// so a member met through a Welcome labels the thread by short id for
+    /// ever). `None` when nothing changes — and always for a label that is not
+    /// such a join (a subject, a room name, a rename).
+    fn roster_named_label(
+        &self,
+        thread: &ThreadId,
+        label: &str,
+        participants: &[TypedAddress],
+    ) -> Option<String> {
+        if !crate::store::threads::label_is_derived(label, participants) {
+            return None;
+        }
+        // Only now, for a derived label: the roster read takes the rail's lock.
+        let proven = self.proven_roster(thread);
+        let named = crate::store::threads::join_displays(participants, |p| {
+            self.roster_named_participant(proven.as_deref(), p)
+                .unwrap_or_else(|| p.clone())
+                .display()
+        });
+        (named != label).then_some(named)
     }
 
     /// The identities the FaunaMls rail has **proven** for `thread` — the
@@ -3019,6 +3259,11 @@ impl ConversationsManager {
                 self.gated_nickname_label(proven.as_deref(), participant, display)
             {
                 *display = painted;
+            }
+            if let Some(named) = self.roster_named_participant(proven.as_deref(), participant)
+                && *display == participant.display()
+            {
+                *display = named.display();
             }
         }
     }
@@ -3663,7 +3908,17 @@ impl ConversationsManager {
     /// succeeds*): it is recorded for the projection-load reconcile, which
     /// runs at once.
     pub fn apply_inbound_succession(&self, id: ThreadId, old: &ActorId, new: ActorId) {
+        // The roster row still sits under the predecessor's id until its next
+        // read, and a handle-less row has no other source for the name the
+        // nest moved to the successor. Display only, as `name_participants` is.
+        let carried = match self.contacts.roster_address(&old.to_hex()) {
+            Some(TypedAddress::Fauna { handle, .. }) => Some(handle),
+            _ => None,
+        };
         self.threads.repoint_participant(&id, old, new);
+        if let Some(handle) = carried {
+            self.threads.name_participants(&id, &[(new, handle)]);
+        }
         if old != &new {
             self.contact_overlays
                 .write()
@@ -5550,6 +5805,39 @@ impl ConversationsManager {
         self.resolve_picker(PickerTarget::Active).await;
     }
 
+    /// `recipient-picker-suggestion[i]` — accept the active picker's `index`th
+    /// suggestion. **The click is the Enter path, not a shortcut past it**
+    /// (`conversations.md` § Where logic lives → *Recipient suggestions*): the
+    /// suggestion's spelling ([`suggestion_spelling`]) is written into the
+    /// picker as typing would write it, the ordinary probe runs
+    /// ([`Self::resolve_recipient`]), and the chip commits through
+    /// [`Self::accept_current_recipient_chip`] — so a person whose key
+    /// packages ran out, or whose nest stopped answering, reads `not-found` /
+    /// `error` and commits nothing. Returns whether a chip was pushed; an
+    /// index past the list is a no-op `false`.
+    ///
+    /// ⚠ Lives in this `async_runtime = "tokio"` block, not beside the sync
+    /// picker methods: it awaits [`Self::resolve_recipient`], whose backend probe
+    /// needs a tokio context — in the plain `uniffi::export` block the native
+    /// apps panicked "there is no reactor running".
+    pub async fn accept_suggestion(&self, index: u32) -> bool {
+        let Some(picker) = self.active_picker() else {
+            return false;
+        };
+        let (suggestions, _) = self.suggestions_for_active(&picker);
+        let Some(addr) = suggestions.get(index as usize) else {
+            return false;
+        };
+        let spelling = suggestion_spelling(addr);
+        if self.add_participant.read().unwrap().is_some() {
+            self.set_add_participant_recipient_input(spelling);
+        } else {
+            self.set_new_thread_recipient_input(spelling);
+        }
+        self.resolve_recipient().await;
+        self.accept_current_recipient_chip()
+    }
+
     /// Restore the draft set from bytes the client glue fetched from `__drafts`
     /// and unsealed with the owner's `BackupKey` — the load-on-launch /
     /// cross-device catch-up path. Refreshes observers so the composer reflects
@@ -5818,7 +6106,10 @@ impl ConversationsManager {
                 );
                 return false;
             }
-            if let Err(e) = self.drafts.restore_from_bytes(bytes) {
+            if let Err(e) = self
+                .drafts
+                .restore_from_bytes(bytes, |key| self.threads.id_for_key(key))
+            {
                 tracing::warn!("failed to restore drafts: {e}");
                 return false;
             }
@@ -5879,6 +6170,7 @@ impl ConversationsManager {
             ResolveResult::Resolved(addr) => (ResolveState::Resolved, Some(addr)),
             ResolveResult::Pending => (ResolveState::Resolving, None),
             ResolveResult::Error(_) => (ResolveState::Error, None),
+            ResolveResult::NotReachable => (ResolveState::NotReachable, None),
             // No rail claimed it. Fall back to the format-only parse so a
             // recipient on a rail with no registered backend (or one the probe
             // can't confirm) still commits by shape; an unrecognized shape is a
@@ -6238,6 +6530,7 @@ impl ConversationsManager {
             match backend.resolve_address(raw).await {
                 ResolveResult::Resolved(addr) => return ResolveResult::Resolved(addr),
                 ResolveResult::Error(e) => return ResolveResult::Error(e),
+                ResolveResult::NotReachable => return ResolveResult::NotReachable,
                 ResolveResult::Pending | ResolveResult::NotFound => {}
             }
         }
@@ -6384,6 +6677,12 @@ impl ConversationsManager {
             && let Some(attended) = self.selected.read().unwrap().clone()
         {
             self.read_thread(&attended);
+        }
+        // A restored draft whose thread had not arrived yet is filled the
+        // moment it does — and every thread arrival ends in this notify, so
+        // no ingest path has to remember it (`store::drafts`, parked drafts).
+        if self.drafts.has_parked() {
+            self.drafts.adopt_parked(|key| self.threads.id_for_key(key));
         }
         for o in self.observers.read().unwrap().iter() {
             o.on_changed();
@@ -6610,6 +6909,20 @@ fn rank_recipient_suggestions(
     kept.into_iter().map(|c| (c.address, c.label)).unzip()
 }
 
+/// Whether the manager's read-time delete fold takes `m`: an own delete, or an
+/// inbound claim the message's sender (or a governing role) made. The one
+/// predicate the bubble's tombstone and the list's snippet both read.
+fn folded_delete(
+    deleted: &HashSet<MessageId>,
+    claims: &HashMap<MessageId, Vec<DeleteClaim>>,
+    m: &MessageSnapshot,
+) -> bool {
+    deleted.contains(&m.message_id)
+        || claims
+            .get(&m.message_id)
+            .is_some_and(|cs| cs.iter().any(|c| c.admits(sender_actor(m))))
+}
+
 /// The Fauna actor id of a message's sender, or None for a non-Fauna sender.
 fn sender_actor(m: &MessageSnapshot) -> Option<ActorId> {
     match &m.sender {
@@ -6668,6 +6981,81 @@ fn infer_flavor(bucket: &crate::backend::InboundBucket) -> ThreadFlavor {
 /// latest message's FULL plaintext — never the bounded `snippet` preview, so a term past
 /// what a row shows still finds its thread (`conversations.md` § Where logic lives →
 /// *Thread-list sort + search filtering*). The body match runs only while a query is set.
+/// Every [`Rail::Archive`] thread id starts with this — the projection's
+/// own namespace, disjoint from the store's ids, so a lookup knows where to
+/// look without searching both.
+pub const ARCHIVE_THREAD_ID_PREFIX: &str = "archive:";
+
+/// One archive thread as a read-only detail — see
+/// [`ConversationsManager::set_archive_threads`].
+fn archive_thread_detail(record: crate::backend::ArchiveThreadRecord) -> ThreadDetail {
+    let platform = record.platform.clone();
+    let address = |name: &str| TypedAddress::Archive {
+        platform: platform.clone(),
+        name: name.to_string(),
+    };
+    let participants: Vec<TypedAddress> = record.participants.iter().map(|n| address(n)).collect();
+    let label = record
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| record.participants.join(", "));
+    let flavor = if participants.len() > 1 {
+        ThreadFlavor::MlsGroup
+    } else {
+        ThreadFlavor::OneToOne
+    };
+    let messages = record
+        .messages
+        .iter()
+        .map(|m| MessageSnapshot {
+            message_id: MessageId(format!(
+                "{ARCHIVE_THREAD_ID_PREFIX}{}:{}",
+                record.external_id, m.external_id
+            )),
+            sender: address(&m.sender_name),
+            sender_display: m.sender_name.clone(),
+            body: m.text.clone(),
+            document: fauna_core::render::plaintext_to_document(&m.text),
+            timestamp_ms: m.created_at_ms,
+            subject_line: None,
+            badges: MessageBadges::default(),
+            reply_to: None,
+            reactions: Vec::new(),
+            deleted: false,
+            is_own: m.is_owner,
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            labels: Vec::new(),
+            plane_ref: None,
+            // A record of the past: nothing to delete here (the folder is
+            // where the user deletes it), nothing in flight, nothing scanned.
+            can_delete: false,
+            undelivered: false,
+            warmup_hold: None,
+            scan_result_lines: Vec::new(),
+            delivered_to: None,
+            withheld: None,
+        })
+        .collect();
+    ThreadDetail {
+        thread_id: ThreadId(format!("{ARCHIVE_THREAD_ID_PREFIX}{}", record.external_id)),
+        rail: Rail::Archive,
+        glyph: Rail::Archive.glyph(),
+        participant_displays: record.participants.clone(),
+        capabilities: crate::capabilities::derive_capabilities(Rail::Archive, flavor.clone()),
+        flavor,
+        label,
+        participants,
+        messages,
+        compose: ComposeState::default(),
+        selected_message_id: None,
+        room: None,
+        bridge: None,
+        guardian_state: None,
+    }
+}
+
 fn filter_summaries(threads: &mut Vec<ThreadSummary>, query: Option<&str>, store: &ThreadStore) {
     let needle = match query {
         Some(q) => q.trim().to_lowercase(),
@@ -6706,6 +7094,36 @@ fn next_test_message_id() -> String {
     format!("msg-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
+/// [`next_test_message_id`], except on the fauna-native rail, whose id is the
+/// nest-assigned `conv:<channel>:<seq>` a native message is unread by
+/// (`conversation-read-state.md` § How the carriers meet the in-memory set): an
+/// injected native message with any other id could never count as unread, and the
+/// banner decision keyed on the count would never fire. One synthetic channel, a
+/// process-wide rising `seq` — above the empty position the mock install registers.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn next_test_message_id_for(rail: Rail) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    if rail == Rail::FaunaMls {
+        format!(
+            "conv:test-seam-channel:{}",
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )
+    } else {
+        next_test_message_id()
+    }
+}
+
+/// The read-position seam [`ConversationsManager::install_mock_backends_for_test`]
+/// registers: a host with no account store, so a raise goes nowhere.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+struct NoopReadPositions;
+
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+impl crate::backend::ReadPositions for NoopReadPositions {
+    fn raise(&self, _channel_id_hex: &str, _through: u64) {}
+}
+
 // The e2e injection seams. Two gates, deliberately different, per
 // `docs/goal/architecture/testing.md` § Cross-app e2e conventions, convention 15
 // (the automation surface is compiled out of release artifacts):
@@ -6722,6 +7140,20 @@ fn next_test_message_id() -> String {
 //   a pure function of the feature set, so debug and release builds of the same
 //   feature set cannot disagree about the FFI surface and no binding regen is owed
 //   for a profile change. Do not "simplify" the two gates into one.
+// Outside the exported block below: `uniffi::export` exports private methods too.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+impl ConversationsManager {
+    /// Ingest a not-own inject as news — the one path the inbound inject
+    /// seams share ([`Self::inject_inbound_for_test`]).
+    fn ingest_injected_news(&self, msg: RailInboundMessage) -> Result<(), BackendError> {
+        let msg_id = msg.message_id.clone();
+        self.threads.announce_injected_news_for_test(&msg_id);
+        let ingested = self.ingest_inbound(msg);
+        self.threads.withdraw_injected_news_for_test(&msg_id);
+        ingested
+    }
+}
+
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 #[cfg_attr(all(feature = "uniffi", feature = "test-helpers"), uniffi::export)]
 impl ConversationsManager {
@@ -6729,8 +7161,13 @@ impl ConversationsManager {
     /// connection. Foreign callers (FlaUI bridge for the Windows e2e)
     /// reach this through the same UniFFI surface as the regular methods
     /// when both `uniffi` and `test-helpers` are enabled.
+    ///
+    /// The arrival is unread on every rail — announced as news before the
+    /// ingest ([`crate::store::threads::ThreadStore::announce_injected_news_for_test`]),
+    /// since an injected native message has no channel position for the
+    /// carrier rule to read.
     pub fn inject_inbound_for_test(&self, msg: RailInboundMessage) -> Result<(), BackendError> {
-        self.ingest_inbound(msg)
+        self.ingest_injected_news(msg)
     }
 
     /// Test-only: inject a message and force its `is_own` flag to `true`, so a
@@ -6766,7 +7203,7 @@ impl ConversationsManager {
         labels: Vec<fauna_core::content_category::ContentLabelEntry>,
     ) -> Result<(), BackendError> {
         let msg_id = msg.message_id.clone();
-        self.ingest_inbound(msg)?;
+        self.ingest_injected_news(msg)?;
         self.threads.set_message_labels_for_test(&msg_id, labels);
         self.notify();
         Ok(())
@@ -6785,7 +7222,7 @@ impl ConversationsManager {
         subject_change: String,
     ) -> Result<(), BackendError> {
         let msg_id = msg.message_id.clone();
-        self.ingest_inbound(msg)?;
+        self.ingest_injected_news(msg)?;
         self.threads
             .set_message_subject_line(&msg_id, subject_change);
         self.notify();
@@ -6965,6 +7402,25 @@ impl ConversationsManager {
         self.mark_receive_stopped(generation);
     }
 
+    /// Test-only: claim a fresh receive-loop generation — the one call a
+    /// starting receive loop makes ([`Self::begin_receive_loop`]), which
+    /// retires an earlier loop's death. [`Self::begin_receive_loop`] lives
+    /// outside the `uniffi::export` block (crate-internal), so the apps that
+    /// reach the manager over FFI (android, apple) need this exported twin to
+    /// drive the notice-retirement half of the dead-receive-rail witness.
+    pub fn begin_receive_loop_for_test(&self) {
+        self.begin_receive_loop();
+    }
+
+    /// Test-only: exported twin of the crate-internal
+    /// [`Self::receive_loop_begun`], for the apps that reach the manager over
+    /// FFI (windows). The dead-rail seam answers `"pending"` until this holds,
+    /// so a death marked before the session's real receive loop claims its
+    /// generation is not retired a moment later by that claim.
+    pub fn receive_loop_begun_for_test(&self) -> bool {
+        self.receive_loop_begun()
+    }
+
     /// Test-only: drive [`Self::unopenable_mail_count`]'s floor arm without a
     /// real unopenable record — [`Self::note_unopenable_mail`] lives outside
     /// the FFI export block (crate-internal, `MailFeed` has no `uniffi`
@@ -6979,14 +7435,16 @@ impl ConversationsManager {
     /// starts from a known empty state. Clears thread store, drafts, selection,
     /// search, and sort but preserves registered backends and observers.
     ///
-    /// A thin alias for the production
-    /// [`Self::clear_for_identity_change`] — same wipe, different caller. Kept
-    /// as its own gated name because the e2e command tables across all 7 apps
-    /// (`testing.md` point 11) speak it, and because a production caller that
-    /// reaches for a `_for_test` seam is exactly what convention 15's recipe
-    /// split is meant to make impossible.
+    /// The same wipe as the production [`Self::clear_for_identity_change`],
+    /// minus its one extra act: it retires no session, because the harness
+    /// wipes between tests with the session still signed in (tui's
+    /// `conversations_disable_real_faunamls`), and that session must keep
+    /// receiving. Kept as its own gated name because the e2e command tables
+    /// across all 7 apps (`testing.md` point 11) speak it, and because a
+    /// production caller that reaches for a `_for_test` seam is exactly what
+    /// convention 15's recipe split is meant to make impossible.
     pub fn clear_for_test(&self) {
-        self.clear_for_identity_change();
+        self.wipe_identity_state();
     }
 
     /// Test-only MLS group bootstrap. Creates a new thread directly with the
@@ -7033,6 +7491,11 @@ impl ConversationsManager {
             }
             self.register_backend(Arc::new(backend));
         }
+        // Positions known and empty — what a signed-in host's first delivery
+        // says of an account that has read nothing — so an injected native
+        // message is unread by its `seq` like a real one.
+        let generation = self.set_read_positions(Arc::new(NoopReadPositions));
+        self.apply_read_positions(generation, vec![]);
     }
 
     /// Test-only: register a `MockRailBackend` for `rail` that knows who the
@@ -7169,7 +7632,7 @@ impl ConversationsManager {
             .get("message_id")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(next_test_message_id);
+            .unwrap_or_else(|| next_test_message_id_for(rail));
         let in_reply_to = p
             .get("in_reply_to")
             .and_then(|v| v.as_str())
@@ -7361,8 +7824,18 @@ fn reply_quote_author(parent: &MessageSnapshot) -> String {
 /// A plaintext preview of a parent body for a reply-quote, derived the same way
 /// the thread-list snippet is (`store::threads::summarize` →
 /// `markdown_to_plaintext`) so the two previews agree, then char-bounded.
+///
+/// Only a byte-bounded prefix of the body is parsed, the thread-list snippet's own
+/// bound ([`crate::store::threads::SNIPPET_PARSE_MAX_BYTES`]): this runs for every
+/// loaded message on every `thread_detail`, and parsing a whole multi-megabyte mail
+/// to keep 240 characters of it stalled tui's UI thread, which projects the open
+/// thread on every frame (`mail-message-size.md` § Implementation status today).
 fn reply_quote_snippet(body: &str) -> String {
-    let plain = fauna_core::markdown::markdown_to_plaintext(body);
+    let prefix = fauna_core::encoding::truncate_to_char_boundary(
+        body,
+        crate::store::threads::SNIPPET_PARSE_MAX_BYTES,
+    );
+    let plain = fauna_core::markdown::markdown_to_plaintext(prefix);
     if plain.chars().count() <= REPLY_QUOTE_SNIPPET_MAX_CHARS {
         plain
     } else {

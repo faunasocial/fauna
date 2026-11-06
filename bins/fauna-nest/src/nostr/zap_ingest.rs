@@ -476,6 +476,8 @@ pub async fn apply_zap_purchase(
         // a redelivered receipt is the same payment to the waist.
         external_ref: zap.zap_event_id().to_string(),
         return_ref: None,
+        purchase_refs: Vec::new(),
+        product_reference: None,
     };
 
     // **Gate surface `payments.unlock.purchase`**, the payments-plane half of a

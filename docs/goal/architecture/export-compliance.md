@@ -68,21 +68,36 @@ software is not subject to the EAR (15 CFR §§ 742.15(b)(1), 734.7(b)).*
   sentence above. The organization's representative checked the attestation on
   2026-08-22, ahead of perfection, on the strength of the imminent publication.
 - **Apple** (`ITSAppUsesNonExemptEncryption` + App Store Connect questionnaire):
-  Fauna uses its own encryption, not merely the OS's TLS/auth facilities, so the
-  expected key value is `YES` with the compliance answer given from this posture
-  (publicly available, standard cryptography, not subject to the EAR). ⚠
-  Apple's `ITSAppUsesNonExemptEncryption` = "exempt" test is a **different legal
-  question** than the EAR public-source-code exemption above — the key tracks
-  whether the app uses its own crypto beyond OS-provided facilities, not the
-  BIS/EAR classification. **The key is declared on the two app-target
+  **the key is `NO`** (corrected 2026-11-06; it read `YES` from 2026-08-23).
+  Apple's own rule, in *Complying with Encryption Export Regulations* (read
+  2026-11-06 from the representative's saved copy): "Set the value to NO if
+  your app … doesn't use encryption, or if it only uses forms of encryption that
+  are exempt from export compliance documentation requirements. Otherwise, set
+  it to YES." The test is therefore whether App Store Connect requires
+  **documents**, not whether the app carries crypto of its own beyond the OS's:
+  Fauna does carry its own (standard algorithms only), and App Store Connect's
+  encryption questionnaire, answered with the decided answers below, replied
+  "Based on your answers, you don't need to upload any documents." With `YES`,
+  upload validation demands an `ITSEncryptionExportComplianceCode`, which Apple
+  issues only after reviewing uploaded documents — so a `YES` with nothing to
+  upload can never pass (measured 2026-11-01, [`installers/ios.md`](installers/ios.md)
+  § Upload mechanics). ⚠ The key remains a **different legal question** than
+  the EAR public-source-code exemption above: it answers Apple's documentation
+  requirement, not the BIS/EAR classification. Apple's page also notes that an
+  app using exempt encryption "might alternatively be required to submit a
+  year-end self-classification report"; that report belongs to the mass-market
+  route (§ Alternatives considered), which is held, not chosen — under the
+  ratified publicly-available posture the software is not subject to the EAR
+  and no report is filed. **The key is declared on the app-target
   Info.plists only** (`Fauna-macOS/Resources/`, `Fauna-iOS/Resources/`), not
   the three appex targets (NSE, FileProvider, FileProviderUI) — App Store
   Connect reads the containing app's Info.plist, not an embedded extension's;
   pinned by `tests/e2e-unified/tests/test_apple_identifier_pins.py`. **The
-  actual App Store Connect questionnaire answer remains a `NEEDS FROM USER:`
-  item** — like the Play checkbox, it is a legal attestation only the org's
-  representative may give, and it requires an authenticated App Store Connect
-  session no dev-machine session has (verified 2026-08-23:
+  App Store Connect questionnaire answer** — like the Play checkbox — is a
+  legal attestation only the org's representative may give, in an
+  authenticated App Store Connect session no dev-machine session has; Apple's
+  developer-documentation pages cannot be read from a dev machine either (a
+  saved copy the representative hands over can; verified 2026-08-23:
   [Apple's export-regulations page](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations)
   and its sibling `/documentation/appstoreconnectapi/*` pages render
   client-side and return no usable content to automated fetching — three URLs
@@ -117,9 +132,10 @@ software is not subject to the EAR (15 CFR §§ 742.15(b)(1), 734.7(b)).*
   French App Store — **No**. If an older-style form asks whether the app
   qualifies for a Category 5 Part 2 exemption, the posture's answer is
   **Yes** (publicly available source, standard cryptography, not subject to
-  the EAR). Giving these answers in an authenticated ASC session remains the
-  representative's own act — the guided walkthrough is tracked
-  internally.
+  the EAR). **Given 2026-11-06** by the representative in an authenticated ASC
+  session (App Information → App Encryption Documentation, three steps: the
+  app's purpose, the algorithm type, France), App Store Connect answering that
+  no documents are needed — the record is § Decision record.
 - **Microsoft Store:** Partner Center asks no encryption questionnaire; the App
   Developer Agreement makes export compliance the developer's responsibility
   generally. Same posture sentence, kept on file.
@@ -166,6 +182,22 @@ by a lawyer is never a gate (`public-texts.md` § Rulings, 20).
   the ASC questionnaire answers (§ What each store form answers) — to be given by
   the representative in an authenticated ASC session, guided walkthrough
   tracked.
+- **2026-11-06** — the representative answered App Store Connect's encryption
+  questionnaire on the iOS app record (App Information → App Encryption
+  Documentation), with the decided answers: algorithm type — standard
+  algorithms instead of, or in addition to, the OS's; France — No. The form's
+  first step asks for the app's purpose (300 characters at most); the text
+  entered, verbatim: "Fauna Social is a free social networking and messaging
+  app. People post, message and share content through a server that they, or
+  someone they trust, maintain through the app. Its complete source code is
+  publicly available at https://github.com/faunasocial/fauna." The
+  representative waived the public-texts round for this one filing, which only
+  Apple's reviewers read, so the iOS app could make the 0.1.6 train. App Store
+  Connect replied "Based on your answers, you don't need to upload any
+  documents", so no compliance code exists; Apple's own key rule (quoted in
+  § What each store form answers) then makes `ITSAppUsesNonExemptEncryption`
+  `NO`, and the representative ruled the flip the same day, correcting the
+  2026-08-23 reading that the key asked whether the app carries its own crypto.
 
 ## Implementation status today
 
@@ -180,16 +212,29 @@ by a lawyer is never a gate (`public-texts.md` § Rulings, 20).
   2026-08-25 — `installers/macos.md` § Build Pipeline → *The `.dmg` release
   pipeline*). No crypto-relevant source in any shipped binary is unpublished; the
   vendored-dependency review is tracked internally.
-- **Apple leg — Info.plist half wired 2026-08-23:** `ITSAppUsesNonExemptEncryption`
-  = `true` is set on both app-target Info.plists (`Fauna-macOS/Resources/`,
-  `Fauna-iOS/Resources/`), citing this doc, and pinned by
-  `tests/e2e-unified/tests/test_apple_identifier_pins.py`. **Decided
+- **Apple leg — done 2026-11-06.** `ITSAppUsesNonExemptEncryption` = `false` on
+  the app-target Info.plists (`Fauna-macOS/Resources/Info.plist`,
+  `Fauna-iOS/Resources/Info.plist`, and the kids target's
+  `Fauna-iOS/Resources/Info-Kids.plist`), citing this doc, and pinned by
+  `tests/e2e-unified/tests/test_apple_identifier_pins.py`; it was `true` from
+  2026-08-23 to 2026-11-06, which is why the 0.1.5 iOS upload failed
+  validation. The questionnaire is answered (§ Decision record, 2026-11-06), and
+  no `ITSEncryptionExportComplianceCode` is owed. **Decided
   2026-08-23:** France is excluded from distribution for now, so no ANSSI
-  declaration is owed (adding France later files the declaration first). **Still open:** giving the
-  decided questionnaire answers in an authenticated ASC session
-  (`NEEDS FROM USER:` — legal attestation only the org's representative may
-  give; the answers themselves are recorded in § What each store form
-  answers, and the guided walkthrough is tracked), plus verifying the territory list excludes France in the same
-  sitting.
+  declaration is owed (adding France later files the declaration first); the App Store Connect territory list
+  excludes France — **read back 2026-11-06** by the representative (Pricing and
+  Availability → App Availability: every country or region but France, 174, plus
+  future App Store countries or regions; a France added later by Apple's list
+  would not be auto-selected, since France already exists and is deselected).
+  **App Store Connect's own record is a read, not an ask:** its API answers the
+  app's encryption declarations, each with its state, answers and `codeValue`,
+  to the Developer-role App Store Connect API key the macOS development VM holds
+  — `just ios-export-compliance` prints them (the per-app relationship path
+  Apple once documented is gone; the top-level `appEncryptionDeclarations`
+  collection filtered by app is the read). Read 2026-11-06 after the
+  questionnaire was answered: **zero** declarations — the answers needed no
+  documents, so App Store Connect created no declaration and no code, which is
+  what the `false` key states. The live witness `installers/ios.md` § Upload
+  mechanics names holds the Info.plist to that record in both directions.
 - Play's attestation is checked (2026-08-22, record above); Microsoft requires no
   affirmative act beyond the agreement already accepted.

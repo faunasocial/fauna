@@ -166,8 +166,8 @@ def _derive_gated_exports(path: Path) -> set[str]:
 # Derived names that also have a PRODUCTION twin under the same Swift name, so
 # deriving them would redden the witness on code that is not a seam call:
 # `FfiChildAgentSpawner::spawn_agent` (gated) vs the production
-# `SyncAgentSpawner.spawnAgent()` in `Fauna-macOS/Sync/SyncAgentSpawner.swift`, a
-# Swift-side DECLARATION of the same-named method on the app's own spawner. The
+# `FfiLaunchdAgentSpawner.spawnAgent()` (ungated, the same-named method on the
+# shared launchd spawner the app constructs in production). The
 # gated seam is still guarded through its type name, `FfiChildAgentSpawner`,
 # which is the only way Swift can reach it.
 _PRODUCTION_TWINS = {"spawnAgent"}

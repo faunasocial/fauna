@@ -51,9 +51,10 @@ internal sealed class FakeMailAliasesMachine : MailAliasesMachineFakeBase
     public static AliasView Row(
         string idHex, AliasKind kind, string pattern, string address,
         string label = "", bool disabled = false, uint? spam = null, long? rate = null,
-        ulong hits = 0, bool isCanonical = false, long? lastHitMs = null) =>
+        ulong hits = 0, bool isCanonical = false, long? lastHitMs = null,
+        long? usesRemaining = null, long? expiresAtMs = null) =>
         new(idHex, "d.test", kind, pattern, address, label, disabled, isCanonical, hits,
-            lastHitMs, spam, rate, null, null, null);
+            lastHitMs, spam, rate, null, usesRemaining, expiresAtMs);
 }
 
 /// <summary>
@@ -122,6 +123,79 @@ public class MailAliasesViewModelTests
 
         Assert.Equal("mail_aliases.hits_with_last", vm.Aliases[0].Hits);
         Assert.Equal("mail_aliases.hits", vm.Aliases[1].Hits);
+    }
+
+    private const long Hour = 3_600_000;
+    private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    private static async Task<MailAliasRow> LoadRow(AliasView row)
+    {
+        var fake = new FakeMailAliasesMachine { NextSnapshot = FakeMailAliasesMachine.Snap(new[] { row }, domain: "d.test") };
+        var vm = new MailAliasesViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+        return vm.Aliases[0];
+    }
+
+    [Fact]
+    public async Task ALiveThrowawayAddress_SaysWhenItExpiresAndOffersExtend()
+    {
+        var row = await LoadRow(FakeMailAliasesMachine.Row(
+            "id-disp", AliasKind.Disposable, "Xy12Ab", "bob-temp-Xy12Ab@d.test",
+            usesRemaining: 3, expiresAtMs: Now + 48 * Hour));
+
+        // No localizer in the test host → the shared label's dotted key.
+        Assert.Equal("mail_aliases.expires_on", row.ExpiresAt);
+        Assert.True(row.HasExpiry);
+        Assert.True(row.CanExtend);
+    }
+
+    [Fact]
+    public async Task AnExpiredThrowawayAddress_SaysSoAndOffersNoExtend()
+    {
+        var row = await LoadRow(FakeMailAliasesMachine.Row(
+            "id-disp", AliasKind.Disposable, "Xy12Ab", "bob-temp-Xy12Ab@d.test",
+            expiresAtMs: Now - Hour));
+
+        Assert.Equal("mail_aliases.expired", row.ExpiresAt);
+        Assert.False(row.CanExtend);
+    }
+
+    [Fact]
+    public async Task AUsedUpThrowawayAddress_OffersNoExtend()
+    {
+        var row = await LoadRow(FakeMailAliasesMachine.Row(
+            "id-disp", AliasKind.Disposable, "Xy12Ab", "bob-temp-Xy12Ab@d.test",
+            usesRemaining: 0, expiresAtMs: Now + 48 * Hour));
+
+        Assert.True(row.HasExpiry);
+        Assert.False(row.CanExtend);
+    }
+
+    [Fact]
+    public async Task AnOrdinaryAddress_ShowsNeitherExpiryNorExtend()
+    {
+        var row = await LoadRow(FakeMailAliasesMachine.Row("id-exact", AliasKind.Exact, "bob", "bob@d.test"));
+
+        Assert.False(row.HasExpiry);
+        Assert.Equal(string.Empty, row.ExpiresAt);
+        Assert.False(row.CanExtend);
+    }
+
+    [Fact]
+    public async Task Extend_DispatchesTheRowWithTheClockOfTheGesture()
+    {
+        var fake = new FakeMailAliasesMachine
+        {
+            NextSnapshot = FakeMailAliasesMachine.Snap(SeededRows(), domain: "d.test"),
+        };
+        var vm = new MailAliasesViewModel(fake);
+        var before = Now;
+
+        await vm.ExtendAsync("id-disp");
+
+        var extend = Assert.IsType<MailAliasesAction.Extend>(Assert.Single(fake.Dispatched));
+        Assert.Equal("id-disp", extend.aliasIdHex);
+        Assert.InRange(extend.nowMs, before, Now);
     }
 
     [Fact]

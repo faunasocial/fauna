@@ -47,14 +47,13 @@ Connection reuse mirrors ``ws_api.py``: one open ``WsRpcAdminClient`` per
 from __future__ import annotations
 
 import atexit
-import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import port_base_url
+from common.nest import register_stop_listener
 
 
 # (base_url, actor_id_hex) → open client. The WsRpcAdminClient is the generic
@@ -130,7 +129,22 @@ def close_all_ws() -> None:
     _CLIENTS.clear()
 
 
+
+def forget_port(port: int) -> None:
+    """Close and drop every cached connection to the nest on ``port`` — called by
+    ``common.nest.stop_nest`` when that nest goes down, so a restart never hands
+    the next caller a socket to the process that is gone."""
+    suffix = f":{port}"
+    for key in [k for k in _CLIENTS if k[0].endswith(suffix)]:
+        client = _CLIENTS.pop(key)
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 atexit.register(close_all_ws)
+register_stop_listener(forget_port)
 
 
 # ── channels ─────────────────────────────────────────────────────────────────
@@ -451,11 +465,8 @@ def welcome_deliver(
 
 # ── real MLS key-package minting (the mls-keypackage-gen helper binary) ───────
 
-_KEYPKG_BIN: Path | None = None
-
-
 def _ensure_keypkg_bin() -> Path:
-    """Build (once per process) + locate the ``mls-keypackage-gen`` e2e helper binary.
+    """The ``mls-keypackage-gen`` e2e helper binary, prebuilt at collection time.
 
     The real ``FaunaMlsBackend`` *parses* each peer's key package during group
     bootstrap (``MlsEngine::key_package_from_bytes``), so API-tier peers can't use
@@ -463,51 +474,16 @@ def _ensure_keypkg_bin() -> Path:
     group. Each peer publishes a **real** key package minted by this helper (a
     throwaway in-memory engine bound to the peer's identity; the private half is
     discarded, fine because the API-tier peer never processes the Welcome).
+
+    Never built here: the helper-binary registry (``helpers/helper_bins.py``)
+    declares this module's reach, so the collection-time prebuild builds it
+    outside every test's clock, stamp-gated on the whole workspace — a binary
+    older than the engine it links (the key package's shape moves with it) is
+    rebuilt there (e2e-conventions.md convention 9).
     """
-    global _KEYPKG_BIN
-    if _KEYPKG_BIN is not None:
-        return _KEYPKG_BIN
-    from common.nest import _build_slot_cmd, _cargo_cmd, get_repo_root
-    repo_root = get_repo_root()
-    cargo_target = os.environ.get("CARGO_TARGET_DIR")
-    # `.exe` on Windows — without it the built binary is never found and the
-    # rebuild below loops into the AssertionError. (Latent until the windows
-    # app gained the `conversations_real_*` bridge commands: every caller of
-    # this helper was linux/web-only.)
-    exe = ".exe" if sys.platform == "win32" else ""
-    name = f"mls-keypackage-gen{exe}"
-    candidates = []
-    if cargo_target:
-        candidates.append(Path(cargo_target) / "debug" / name)
-    candidates.append(repo_root / "target" / "debug" / name)
-    # Build once per process, even when a binary exists — the same rule
-    # `_ensure_group_gen_bin` below keeps. The key package's shape is the
-    # ENGINE's, and it moves: a binary left over from before key packages
-    # advertised the room-policy extension minted packages that the engine,
-    # once it stopped forking policy-less groups (2026-09-25), refuses to seat
-    # ("does not advertise the room-policy extension"). Found by a windows run
-    # of test_thread_membership_real.py against an Aug 27 build of this helper.
-    # Cargo no-ops when fresh. `_cargo_cmd` routes through
-    # `scripts/cargo-win.cmd` on Windows, where a bare `cargo` picks up Git Bash's
-    # `/usr/bin/link.exe` instead of the MSVC linker.
-    # Slot-wrapped like every other e2e cargo build (`_build_slot_cmd`; a warm
-    # build takes the slot for a no-op, an externally held slot runs directly).
-    # It stays in-test, not in `_prebuild_binaries`: it is a helper call whose
-    # cold cost is one small `fauna-mls` bin, and the slot wait is the bounded,
-    # loud kind (the collection-time hoist covers the 74-minute
-    # `recovery_fixture` case, `_ensure_recovery_fixture_built`).
-    subprocess.run(
-        _build_slot_cmd(repo_root)
-        + _cargo_cmd(repo_root)
-        + ["build", "-p", "fauna-mls", "--bin", "mls-keypackage-gen"],
-        cwd=repo_root,
-        check=True,
-    )
-    for p in candidates:
-        if p.exists():
-            _KEYPKG_BIN = p
-            return p
-    raise AssertionError(f"{name} not found after build (looked in {candidates})")
+    from helpers.helper_bins import helper_bin
+
+    return helper_bin("mls-keypackage-gen")
 
 
 def mint_key_packages(secret_bytes: bytes, count: int) -> list[bytes]:
@@ -526,59 +502,20 @@ def mint_key_packages(secret_bytes: bytes, count: int) -> list[bytes]:
 
 # ── real MLS group + Welcome minting (the mls-group-gen helper binary) ────────
 
-_GROUP_GEN_BIN: Path | None = None
-
-
 def _ensure_group_gen_bin() -> Path:
-    """Build (once) + locate the ``mls-group-gen`` e2e helper binary.
+    """The ``mls-group-gen`` e2e helper binary, prebuilt at collection time.
 
     Mints a real MLS group + Welcome for a recipient's published key package — the
     sender side of a GUI *receive* proof (``test_fauna_mls_web_receive.py``). The
     GUI app is the only real engine; the sender is this throwaway engine, the
     same pattern :func:`_ensure_keypkg_bin` uses to give engine-less peers a real
-    key package. See ``libs/fauna-mls/src/group_gen_main.rs``.
+    key package. See ``libs/fauna-mls/src/group_gen_main.rs``. Built with
+    ``test-helpers`` (its ``--future-body`` mode's raw sealer exists only there)
+    by the registry entry, never here.
     """
-    global _GROUP_GEN_BIN
-    if _GROUP_GEN_BIN is not None:
-        return _GROUP_GEN_BIN
-    from common.nest import _build_slot_cmd, _cargo_cmd, get_repo_root
-    repo_root = get_repo_root()
-    cargo_target = os.environ.get("CARGO_TARGET_DIR")
-    # `.exe` on Windows — without it the built binary is never found and the
-    # rebuild below loops into the AssertionError (same latent gap
-    # _ensure_keypkg_bin had until the windows app gained the
-    # conversations_real_* bridge commands; this sibling was never exercised
-    # on windows either until now).
-    exe = ".exe" if sys.platform == "win32" else ""
-    name = f"mls-group-gen{exe}"
-    candidates = []
-    if cargo_target:
-        candidates.append(Path(cargo_target) / "debug" / name)
-    candidates.append(repo_root / "target" / "debug" / name)
-    # Build once per process, even when a binary exists: this helper grows
-    # modes (`--scheduling`), and a binary left over from before one landed
-    # would take the new mode's flag for a secret. Cargo no-ops when fresh.
-    # `_cargo_cmd` routes through `scripts/cargo-win.cmd` on Windows, where a bare
-    # `cargo` picks up Git Bash's `/usr/bin/link.exe` instead of the MSVC
-    # linker.
-    # Slot-wrapped; in-test by the same reasoning as `_ensure_keypkg_bin`.
-    # `test-helpers` compiles in the `--future-body` mode (``FUTURE_BODY``):
-    # its raw sealer exists only in that feature's builds.
-    subprocess.run(
-        _build_slot_cmd(repo_root)
-        + _cargo_cmd(repo_root)
-        + [
-            "build", "-p", "fauna-mls", "--bin", "mls-group-gen",
-            "--features", "test-helpers",
-        ],
-        cwd=repo_root,
-        check=True,
-    )
-    for p in candidates:
-        if p.exists():
-            _GROUP_GEN_BIN = p
-            return p
-    raise AssertionError(f"{name} not found after build (looked in {candidates})")
+    from helpers.helper_bins import helper_bin
+
+    return helper_bin("mls-group-gen")
 
 
 def mint_group_welcome(
@@ -872,3 +809,46 @@ def inbox(base_url: str, actor: dict) -> list:
     client = _client_for(base_url, actor)
     reply = client.call("fauna.inbox.fetch", {"limit": 0})
     return [{"id": it["id"], "payload": it["payload"].hex()} for it in reply.get("items", [])]
+
+
+def await_welcome_applied(
+    port: int,
+    recipient: dict,
+    inbox_id: int,
+    budget_s: float,
+    *,
+    who: str = "the app",
+    scheme: str | None = None,
+) -> None:
+    """Wait until ``recipient``'s app has JOINED the group a Welcome seated it
+    in — the Welcome's inbox row (``inbox_id``, :func:`welcome_deliver`'s
+    return) is gone from the recipient's peek.
+
+    The join witness every real-MLS receive test waits on before posting to the
+    channel. It is nest-side on purpose: the shared drain is the only surface
+    that acks an inbox row, and it acks a Welcome only once ``ingest_welcome``
+    durably applied it (``libs/fauna-client-inbox`` — the ratified ack policy),
+    so the row's disappearance IS the join, on every app alike. The app's thread
+    list is not a join witness for a 1:1: a direct thread whose channel has
+    never carried a renderable message is listed on no rail
+    (``archive-import.md`` § Linking and merging → *Phase two — the rulings*,
+    ruling 1), so a Welcome-only DM is joined and invisible until its first
+    message lands."""
+    from helpers.waiting import wait_until
+
+    base = _base_url(port, scheme)
+
+    def pending() -> bool:
+        return any(item["id"] == inbox_id for item in inbox(base, recipient))
+
+    wait_until(
+        lambda: not pending(),
+        budget_s,
+        interval=0.5,
+        diagnose=lambda: (
+            f"waiting for {who} to drain its inbox and join the Welcome's group "
+            f"(inbox row {inbox_id} still un-acked: the app has not applied the "
+            "Welcome — its receive loop never drained, or ingest_welcome failed "
+            "and left the row for a retry)"
+        ),
+    )

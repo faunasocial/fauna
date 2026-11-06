@@ -13,6 +13,7 @@
   } from '#lib/accounts';
   import { resolve } from '$app/paths';
   import { pushOptedIn, enablePush, disablePush, dropActorPushRow } from '#lib/push';
+  import { flushDraftRailsNow } from '#lib/drafts-leave-flush';
   import {
     ensureWasm,
     encodeEmailFilterRuleInputs,
@@ -168,6 +169,7 @@
   import MailSpamSection from '#lib/components/MailSpamSection.svelte';
   import MailExportSection from '#lib/components/MailExportSection.svelte';
   import MailImportSection from '#lib/components/MailImportSection.svelte';
+  import ArchiveImportSection from '#lib/components/ArchiveImportSection.svelte';
   import WebSettingsSection from '#lib/components/WebSettingsSection.svelte';
   import SubscriptionsSection from '#lib/components/SubscriptionsSection.svelte';
   import NostrSettingsSection from '#lib/components/NostrSettingsSection.svelte';
@@ -211,6 +213,7 @@
     : current === 'logs' ? t.logs.title
     : current === 'connected-apps' ? t.connected_apps.title
     : current === 'sessions' ? t.sessions.title
+    : current === 'archive-import' ? t.archive_import.title
     : t.common.settings
   );
 
@@ -328,6 +331,14 @@
       // refused switch leaves the user where they were, and that includes
       // their notifications (`multiple-accounts` outcome 11).
       if (outgoing) await dropActorPushRow(outgoing.secretHex);
+      // The leave-flush (`reserved-folders.md` § The leave-flush promise —
+      // switching to another account is a leave door): every drafts rail
+      // saved NOW on the outgoing session, awaited, because the hard reload
+      // below retires that session and `pagehide`'s own fire-and-forget flush
+      // gets no reliable async work after it. After the activation, like the
+      // push drop: a refused switch leaves the composer where it was, still on
+      // its debounce. Each rail is bounded, so an offline switch still switches.
+      await flushDraftRailsNow();
       // Count the teardown at its INITIATION point — synchronously, in the same
       // job as the navigation below, never after it (the navigation never
       // returns). Convention 14's negative-assert observable
@@ -424,6 +435,12 @@
     // on its next identity settle.
     const outgoing = $identity;
     if (outgoing) void dropActorPushRow(outgoing.secretHex);
+    // The drafts leave-flush, for the same reason and in the same place: the
+    // wizard's switch commit is a hard reload on an identity that is no longer
+    // this one, so the outgoing session's rails are saved here, while it still
+    // holds them. Fire-and-forget like the push drop (the soft `goto` keeps it
+    // alive); each rail is bounded and logs its own failure.
+    void flushDraftRailsNow();
     goto('/app/onboarding?add=1');
   }
   // Inline sign-out confirm (uniform with admin-factory-reset-confirm-button —
@@ -607,6 +624,17 @@
       recoveryBusy = false;
     }
   }
+  // ENTERING the Status landing re-reads the quota: cross-sub-page navigation
+  // is a param change that leaves this component mounted (see `rawSubpage`),
+  // so the mount-time `loadAll` read would otherwise be shown for the life of
+  // the tab — an archive imported on `/settings/archive-import` never moved
+  // the storage line. tui and the desktop shells rebuild Status on entry.
+  $effect(() => {
+    if (current !== '' || loading) return;
+    const id = $identity;
+    if (!id) return;
+    void fetchQuota(id.secretHex).then((q) => { quota = q; }, () => { /* keep the last read */ });
+  });
   $effect(() => {
     if (current !== 'account') return;
     // ⚠ ENTERING the section clears any kit on screen — the shown-once custody
@@ -2309,9 +2337,6 @@
              unstamped build renders no row (`status.md` § Build). -->
         <code class="mono" data-testid={IDS.STATUS_BUILD_SHA}>{statusText.build_sha}</code>
       </div>
-      <p class="muted small">
-        {t.status.build.verify_hint}
-      </p>
     {/if}
   </section>
 
@@ -3249,21 +3274,23 @@
   <!-- ── Encryption — MLS key packages. ── -->
   <section class="section">
     <h2>{t.settings.encryption_page.title}</h2>
-    {#if keyPackageCount != null}
-      <div class="field">
-        <span class="field-label">{t.status.encryption.key_packages}</span>
-        <span>{t.status.encryption.available({ count: String(keyPackageCount) })}</span>
-      </div>
-      {#if keypackagesLow(keyPackageCount)}
-        <p class="muted small">{t.status.encryption.low_keys}</p>
-      {/if}
-    {:else}
-      <p class="muted">{t.status.encryption.checking}</p>
+    <!-- The low flag reads the SAME count the row below states, and only once
+         read: an unread page has no basis to claim either "fine" or "low"
+         (tui's `settings/encryption.rs`). Read-only — never a mint trigger
+         (`direct-messages.md` § Key Package Management). -->
+    {#if keyPackageCount != null && keypackagesLow(keyPackageCount)}
+      <p class="muted small" data-testid={IDS.ENCRYPTION_KEYPACKAGE_LOW_WARNING}>
+        {t.settings.encryption_page.low_key_warning_body({ count: String(keyPackageCount) })}
+      </p>
     {/if}
+    <div class="field">
+      <span class="field-label">{t.settings.encryption_page.available_key_packages}</span>
+      <span data-testid={IDS.ENCRYPTION_KEYPACKAGE_COUNT}>{keyPackageCount != null ? String(keyPackageCount) : t.common.loading}</span>
+    </div>
     {#if keyPackageError}
       <p class="error">{keyPackageError}</p>
     {/if}
-    <button class="btn" onclick={() => { const id = $identity; if (id) publishMlsKeys(id.secretHex, id.actorId); }} disabled={publishingKeys}>
+    <button class="btn" data-testid={IDS.ENCRYPTION_KEYPACKAGE_REFRESH_BUTTON} onclick={() => { const id = $identity; if (id) publishMlsKeys(id.secretHex, id.actorId); }} disabled={publishingKeys}>
       {publishingKeys ? t.status.encryption.publishing : t.settings.encryption_page.refresh_keys}
     </button>
   </section>
@@ -3358,6 +3385,10 @@
 {:else if current === 'mail-import'}
   <!-- Mail import (mailbox-import wizard — the export twin's mirror image). -->
   <MailImportSection bind:error />
+
+{:else if current === 'archive-import'}
+  <!-- Import from other services (the archive-import wizard). -->
+  <ArchiveImportSection bind:error />
 
 {:else if current === 'mail-lists' || current === 'mail-list-members'}
   <!-- Mail lists + the per-list members drill-down (an in-section reveal). ONE

@@ -20,11 +20,14 @@ the nest runs.
 
 from __future__ import annotations
 
+import base64
 import secrets
 import sqlite3
 import time
 
 import pytest
+
+from nacl.public import PrivateKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register
@@ -289,6 +292,14 @@ def test_a_restore_reports_progress_and_says_when_it_is_done(
     )
 
 
+def _kind_snapshot_ids(nest: dict, owner: dict, kind: str) -> set[int]:
+    """The ids the nest's own list serves for `kind` — the split verdict
+    (convention 5) for which row a create added."""
+    with _ws(nest, owner) as ws:
+        rows = ws.call("fauna.filesync.snapshot.list", {"message_kind": kind})["rows"]
+    return {row["id"] for row in rows}
+
+
 def _wrapped_mls_blob_rows(db_path: str, actor_id: bytes) -> list[tuple[str, bytes]]:
     """The actor's `bridge_wrapped_mls_blobs` rows as `(credential_id, blob)` —
     the table the nest's restore reads for its `config_present` advisory. A read
@@ -447,6 +458,63 @@ def test_a_restore_without_the_account_configuration_says_so_and_a_complete_one_
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
+def test_a_contacts_snapshot_restores_from_the_restore_section(
+    logged_in_app, nest_instance, test_user
+):
+    """The checkbox set names the five kinds the nest restores, and a contacts
+    snapshot taken from its kind entry restores end to end (`backups.md`
+    § Restore from backup destination).
+
+    The set read mail and calendar alone while the nest restored five kinds, so
+    a Contacts snapshot had a creator and a restore and no box of its own. The
+    nest's history is the verdict on what landed: the page's DONE line says a
+    restore finished, not which kind it restored.
+    """
+    app = logged_in_app
+    before = _kind_snapshot_ids(nest_instance, test_user, "card")
+    app.backups.navigate()
+
+    labels = [
+        app.driver.get_text("restore-kind-checkbox", index=i)
+        for i in range(app.driver.count("restore-kind-checkbox"))
+    ]
+    expected = [
+        S.backups.restore_kinds_mail,
+        S.backups.restore_kinds_calendar,
+        S.backups.restore_kinds_contacts,
+        S.backups.restore_kinds_posts,
+        S.backups.restore_kinds_conversations,
+    ]
+    assert [label.strip().lower() for label in labels] == expected, (
+        f"restore-kind-checkbox must offer the five kinds in order; it paints "
+        f"{labels!r}"
+    )
+
+    app.backups.select_folder("common.contacts")
+    if before:
+        app.backups.wait_for_snapshot_row(max(before))
+    else:
+        app.backups.wait_for_no_snapshots()
+    app.backups.create_snapshot()
+
+    added = _kind_snapshot_ids(nest_instance, test_user, "card") - before
+    assert added, (
+        "snapshot-create-button on the Contacts entry added no card snapshot on "
+        f"the nest. error-message: {app.error_text()!r}"
+    )
+    snapshot_id = max(added)
+
+    _restore_through_the_page(app, snapshot_id)
+
+    with _ws(nest_instance, test_user) as ws:
+        history = ws.call("fauna.filesync.snapshot.list_restore_history", {})["rows"]
+    assert any(
+        row["snapshot_id"] == snapshot_id and row["kinds_restored"] == "card"
+        for row in history
+    ), f"no card restore of snapshot {snapshot_id} in the nest's history: {history!r}"
+
+
+@pytest.mark.feature("backup-destinations-and-restore")
 def test_restore_divergence_flags_a_reconnected_mail_app_as_it_does_a_calendar(
     logged_in_app, nest_instance, test_user
 ):
@@ -558,7 +626,9 @@ def test_restore_divergence_flags_a_reconnected_mail_app_as_it_does_a_calendar(
 
 
 @pytest.mark.feature("backup-destinations-and-restore")
-def test_restore_divergence_banner_and_modal(logged_in_app, nest_instance, test_user):
+def test_restore_divergence_banner_and_modal(
+    logged_in_app, nest_instance, test_user, run_seal_helper
+):
     """A CalDAV ahead-token divergence against a restored snapshot surfaces
     the per-row banner + the forensic details modal (`backups.md`
     § Restore divergence)."""
@@ -574,7 +644,15 @@ def test_restore_divergence_banner_and_modal(logged_in_app, nest_instance, test_
             {
                 "actor_id": test_user["actor_id_bytes"],
                 "calendar_id": calendar_id,
-                "encrypted_metadata": b"{}",
+                # Must be a genuine calendar-record envelope (the nest
+                # refuses anything else); the recipient key is throwaway.
+                "encrypted_metadata": run_seal_helper("seal-mail-record", {
+                    "plaintext_b64": base64.b64encode(b"{}").decode(),
+                    "recipient_x25519_pubkey_b64": base64.b64encode(
+                        PrivateKey.generate().public_key.encode()
+                    ).decode(),
+                    "kind": "calendar",
+                }),
                 "update_metadata": False,
             },
         )

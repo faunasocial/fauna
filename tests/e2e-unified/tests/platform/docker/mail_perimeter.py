@@ -103,14 +103,23 @@ def put_spam_policy(nest, *, omit: tuple[str, ...] = (), **overrides) -> None:
 
 
 def poll(probe, want, what: str, diag):
-    """Run `probe()` until `want(result)` holds or the apply budget runs out."""
+    """Run `probe()` until `want(result)` holds or the apply budget runs out.
+
+    A probe that raises — a connection refused or dropped while a bridge reloads
+    the policy just written — is an observation like any other, recorded and asked
+    again, never the test's verdict (convention 14)."""
     deadline = time.monotonic() + APPLY_BUDGET_S
     seen = []
     while True:
-        got = probe()
-        if want(got):
-            return got
-        seen.append(got)
+        try:
+            got = probe()
+        except (OSError, smtplib.SMTPException) as e:
+            got = None
+            seen.append(f"raised {type(e).__name__}: {e}")
+        else:
+            if want(got):
+                return got
+            seen.append(got)
         if time.monotonic() > deadline:
             raise AssertionError(
                 f"{what}: never observed within {APPLY_BUDGET_S}s; saw {seen[-5:]!r}{diag()}")

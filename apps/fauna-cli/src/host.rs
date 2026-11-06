@@ -37,15 +37,14 @@ use std::time::{Duration, Instant};
 
 use fauna_anon_client::PrincipalNestClient;
 use fauna_cli::catalog::consent_scope;
-use fauna_cli::device::{
-    DeviceClient, DeviceStart, DpopKey, HolderKey, Issuer, Poll, Tokens, development_client_id,
-};
+use fauna_cli::device::{DeviceClient, DeviceStart, DpopKey, HolderKey, Issuer, Poll, Tokens};
 use fauna_cli::door::DoorIdentity;
 use fauna_cli::tools::{ConnectStarted, ConversationOp, ToolData, UNATTENDED_CUSTODY};
 use fauna_cli::{Host, SessionUnavailable, ToolError};
 use fauna_client_accounts::SecretStore as _;
 use fauna_credential_store::{CredentialStore, MAX_ITEM_VALUE_BYTES};
 use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest};
+use fauna_protocol::principals::CLI_CLIENT_ID;
 use tokio::sync::Mutex;
 
 /// This app's credential namespace. tui used this name before its 2026-07-12
@@ -586,7 +585,7 @@ impl Host for DeviceHost {
             .map_err(ToolError::new)?;
         let nest = issuer.issuer.clone();
         let scope = consent_scope(admin);
-        let client_id = development_client_id(&scope);
+        let client_id = CLI_CLIENT_ID.to_string();
         let dpop = DpopKey::generate();
         let holder = HolderKey::generate();
         let secrets = Secrets {

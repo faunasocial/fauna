@@ -111,6 +111,17 @@ public sealed record RestoreDivergenceDetailRow(string Description);
 /// One local message-kind snapshot offered by the <c>restore-snapshot-select</c>
 /// picker (<c>backups.md</c> § Restore from backup destination — local path).
 /// <see cref="Id"/> is the snapshot id the friction bar re-types;
-/// <see cref="Label"/> is "{kind} (#{id})" (mirrors linux <c>populate_snapshot_select</c>).
+/// <see cref="Label"/> is "{kind} (#{id})" with the kind named by its checkbox label
+/// (mirrors linux <c>populate_snapshot_select</c>); <see cref="Kind"/> is the wire
+/// message kind, which the restore-kind checkboxes gate on.
 /// </summary>
-public sealed record RestoreSnapshotOption(long Id, string Label);
+public sealed record RestoreSnapshotOption(long Id, string Label, string? Kind = null);
+
+/// <summary>
+/// One <c>backup-folder-selector</c> option (<c>backups.md</c> § Snapshot-list
+/// shape). <see cref="Name"/> is the machine row's <c>name</c> — the locale-stable
+/// value the selector selects by and hands back to <c>select_folder</c>;
+/// <see cref="Label"/> is what the option paints: a folder's own name, or a kind
+/// entry's label key resolved (§ *Kind entries*).
+/// </summary>
+public sealed record BackupFolderOption(string Name, string Label);

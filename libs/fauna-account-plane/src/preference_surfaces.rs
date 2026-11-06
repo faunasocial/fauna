@@ -6,7 +6,10 @@
 //! dissolution schedule (the E1 cluster and *The closure order*, steps (1),
 //! (2) and (5)). The four delegable preference kinds live on the account-state
 //! plane and nowhere else: a read is answered from the replica's own store,
-//! and a save is [`AccountStoreHandle::put_preference`]. The page state, its
+//! and a save is [`AccountStoreHandle::put_preference`] — or, for
+//! `fauna.state.moderation`, which is one row per muted term and one per
+//! hidden id, [`AccountStoreHandle::write_moderation`] of the rows a gesture
+//! changed. The page state, its
 //! loaded-bit discipline and the normalization are one implementation for all
 //! seven apps (priority #2: the surface logic lives here, not in seven per-app
 //! copies of decode + normalize + project).
@@ -55,11 +58,11 @@ use anyhow::{Context, Result};
 use fauna_client_config::{MutedWordsSnapshot, preference_records};
 use fauna_client_delegation::{TaskDelegationError, TaskDelegationView};
 use fauna_client_personalization::topics::{TrainedTopicRow, TrainedTopics, TrainedTopicsError};
-// `ModerationConfig` / `SyncPrefsConfig` are deliberately NOT imported: since
-// the plane doors take their payload type FROM the typed
-// kind constant (`records::*`), so no call site here names them. The doc links
-// below carry their full path for the same reason.
-use fauna_core::data::{DelegationConfig, PersonalizationConfig};
+// `SyncPrefsConfig` is deliberately NOT imported: since
+// the preference door takes its payload type FROM the typed kind constant
+// (`records::*`), so no call site here names it. `ModerationConfig` is the
+// moderation rows' fold, which has a typed door of its own.
+use fauna_core::data::{DelegationConfig, ModerationConfig, PersonalizationConfig};
 use fauna_core::delegation::{PinOption, TaskDelegationRow};
 use fauna_core::encoding::{canonical_decode, canonical_encode};
 use fauna_i18n::strings::common::{NEEDS_NEST, NEEDS_OTHER_DEVICE};
@@ -170,128 +173,158 @@ where
     Ok((record, out))
 }
 
-// ── moderation: the muted-keywords list ──
+// ── moderation: the muted-keywords list and the reporter-side hide ──
+//
+// `fauna.state.moderation` is one row per muted term and one per hidden id
+// (`crate::moderation_rows`), not a `self`-keyed sub-record: a gesture reads
+// the fold, runs the shared delta on it, and writes only the rows the delta
+// changed — so a term or an id another device wrote meanwhile is a row this
+// write never touches.
 
-/// Read the muted-keywords list off the account store.
-pub async fn load_muted_words(store: &impl AccountStoreAccess) -> Result<MutedWordsSnapshot> {
-    let moderation = load_record(store, &records::MODERATION).await?;
+/// The moderation record off the replica's own store, behind the
+/// first-listing gate ([`read_record`]'s reasoning).
+async fn read_moderation(handle: &AccountStoreHandle) -> Result<ModerationConfig> {
+    crate::account_driver::first_listing_gate(handle, ACCOUNT_STATE_SCOPE).await?;
+    handle.moderation().await
+}
+
+/// [`read_moderation`] over the access.
+async fn load_moderation(store: &impl AccountStoreAccess) -> Result<ModerationConfig> {
+    let handle = store
+        .account_store("the fauna.state.moderation rows' store")
+        .await?;
+    read_moderation(&handle).await
+}
+
+/// Run `mutate` — a shared delta from `preference_records` — on the
+/// moderation fold and write the rows it changed
+/// ([`ModerationConfig::changes_to`]; a term over the length cap is refused
+/// before anything is written). Returns the record as stored — the fold read
+/// again after the write, so the answer is what a fresh read returns: each
+/// list is in its rows' stamp order, and a row the gesture rewrote (a
+/// re-weighted term) now sorts last.
+async fn update_moderation(
+    store: &impl AccountStoreAccess,
+    mutate: impl FnOnce(&mut ModerationConfig),
+) -> Result<ModerationConfig> {
+    let handle = store
+        .account_store("the fauna.state.moderation rows' store")
+        .await?;
+    let before = read_moderation(&handle).await?;
+    let mut after = before.clone();
+    mutate(&mut after);
+    let changes = before.changes_to(&after)?;
+    if changes.is_empty() {
+        return Ok(before);
+    }
+    handle.write_moderation(changes).await?;
+    handle.moderation().await
+}
+
+fn muted_words_snapshot(moderation: ModerationConfig) -> MutedWordsSnapshot {
     // A completed store read is a completed round trip to the replica's
     // store, so the page is `loaded`.
-    Ok(MutedWordsSnapshot {
+    MutedWordsSnapshot {
         keywords: moderation.muted_keywords,
         loaded: true,
-    })
+    }
+}
+
+/// Read the muted-keywords list off the account store, in the order the
+/// terms were added.
+pub async fn load_muted_words(store: &impl AccountStoreAccess) -> Result<MutedWordsSnapshot> {
+    Ok(muted_words_snapshot(load_moderation(store).await?))
 }
 
 /// Replace the muted-keywords list.
 ///
-/// Read-modify-write over the moderation record (so a sibling field on
-/// [`fauna_core::data::ModerationConfig`] — the hidden-content list — survives
-/// this facet's save), normalized by the shared
-/// [`preference_records::set_muted_keywords`]: the returned rows are what was
-/// stored, never what was typed.
+/// The whole-list intent becomes a diff against the stored rows: puts for the
+/// terms it adds or re-weights, tombstones for the ones it drops, nothing for
+/// the rest — normalized by the shared
+/// [`preference_records::set_muted_keywords`], so the returned rows are what
+/// was stored, never what was typed. The hidden ids beside it are untouched.
 pub async fn save_muted_words(
     store: &impl AccountStoreAccess,
     keywords: Vec<fauna_core::data::MutedKeyword>,
 ) -> Result<MutedWordsSnapshot> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::set_muted_keywords(moderation, keywords)
     })
     .await?;
-    Ok(MutedWordsSnapshot {
-        keywords: moderation.muted_keywords,
-        loaded: true,
-    })
+    Ok(muted_words_snapshot(moderation))
 }
 
-/// Add one term.
-///
-/// The delta (`preference_records::add_muted_keyword`) applies against the
-/// moderation record as `update_record` reads it, never against a page's
-/// stale copy — so a term another device stored since this page loaded
-/// survives, where a whole-list [`save_muted_words`] from that stale copy
-/// would clobber it.
+/// Add one term — one row put, so a term another device
+/// stored, here or anywhere in the fleet, survives
+/// (`preference_records::add_muted_keyword`; a term already muted, in any
+/// case, is a no-op).
 pub async fn add_muted_word(
     store: &impl AccountStoreAccess,
     word: &str,
 ) -> Result<MutedWordsSnapshot> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::add_muted_keyword(moderation, word)
     })
     .await?;
-    Ok(MutedWordsSnapshot {
-        keywords: moderation.muted_keywords,
-        loaded: true,
-    })
+    Ok(muted_words_snapshot(moderation))
 }
 
-/// Remove one term — [`add_muted_word`]'s inverse, same shared delta
+/// Remove one term — [`add_muted_word`]'s inverse, one row tombstone
 /// (`preference_records::remove_muted_keyword`): exact stored spelling,
 /// absent-term removal is a success no-op.
 pub async fn remove_muted_word(
     store: &impl AccountStoreAccess,
     word: &str,
 ) -> Result<MutedWordsSnapshot> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::remove_muted_keyword(moderation, word)
     })
     .await?;
-    Ok(MutedWordsSnapshot {
-        keywords: moderation.muted_keywords,
-        loaded: true,
-    })
+    Ok(muted_words_snapshot(moderation))
 }
 
 /// Set one term's level — how hard it mutes
 /// (`fauna_core::scoring::MutedKeywordLevel`, the muted-words page's level
 /// picker; the weights behind the two levels are the one place that maps
 /// them). The shared delta `preference_records::set_muted_keyword_weight` at
-/// the level's weight, applied as `update_record` reads the record like
-/// [`add_muted_word`]: exact stored spelling, and a term the list does not
-/// hold is a success no-op (another device removed it first — convergence,
-/// not an error).
+/// the level's weight, one row put: exact stored spelling, and a term the list
+/// does not hold is a success no-op (another device removed it first —
+/// convergence, not an error).
 pub async fn set_muted_word_level(
     store: &impl AccountStoreAccess,
     word: &str,
     level: fauna_core::scoring::MutedKeywordLevel,
 ) -> Result<MutedWordsSnapshot> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::set_muted_keyword_weight(moderation, word, level.weight())
     })
     .await?;
-    Ok(MutedWordsSnapshot {
-        keywords: moderation.muted_keywords,
-        loaded: true,
-    })
+    Ok(muted_words_snapshot(moderation))
 }
-
-// ── moderation: the reporter-side hide ──
 
 /// The ids the user hid by reporting them (`moderation.md` § Corollary — block
 /// also hides).
 pub async fn load_hidden_content(store: &impl AccountStoreAccess) -> Result<Vec<String>> {
-    let moderation: fauna_core::data::ModerationConfig =
-        load_record(store, &records::MODERATION).await?;
-    Ok(moderation.hidden_content)
+    Ok(load_moderation(store).await?.hidden_content)
 }
 
-/// Hide a reported subject: the shared delta
-/// (`preference_records::hide_reported_content`) applied as `update_record`
-/// reads the record, so the muted words beside it and an entry another device
-/// hid meanwhile both survive. What the report sheet runs after a submit
-/// lands; returns the stored list the app's render verdict then reads.
+/// Hide a reported subject: one row put
+/// (`preference_records::hide_reported_content`), so the muted words beside
+/// it and an id another device hid meanwhile both survive. What the report
+/// sheet runs after a submit lands; returns the stored list the app's render
+/// verdict then reads.
 pub async fn hide_reported(store: &impl AccountStoreAccess, id: &str) -> Result<Vec<String>> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::hide_reported_content(moderation, id)
     })
     .await?;
     Ok(moderation.hidden_content)
 }
 
-/// Show a hidden subject again — [`hide_reported`]'s inverse; returns the
-/// stored list.
+/// Show a hidden subject again — [`hide_reported`]'s inverse, one row
+/// tombstone; returns the stored list.
 pub async fn unhide_reported(store: &impl AccountStoreAccess, id: &str) -> Result<Vec<String>> {
-    let (moderation, ()) = update_record(store, &records::MODERATION, |moderation| {
+    let moderation = update_moderation(store, |moderation| {
         preference_records::unhide_reported_content(moderation, id)
     })
     .await?;
@@ -560,9 +593,7 @@ macro_rules! impl_preference_store {
             async fn moderation(
                 &self,
             ) -> Result<fauna_core::data::ModerationConfig, fauna_client_config::StoreError> {
-                load_record(self, &records::MODERATION)
-                    .await
-                    .map_err(seam_failure)
+                load_moderation(self).await.map_err(seam_failure)
             }
 
             async fn personalization(

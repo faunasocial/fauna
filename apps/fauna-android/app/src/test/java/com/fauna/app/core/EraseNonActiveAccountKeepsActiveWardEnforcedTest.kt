@@ -2,9 +2,9 @@ package com.fauna.app.core
 
 import androidx.test.core.app.ApplicationProvider
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.app.testing.GuardianRulesFixture
 import com.fauna.app.ui.viewmodel.SupervisedIndicatorVM
 import com.fauna.ffi.FfiAccountRegistry
-import com.fauna.ffi.FfiContentPolicy
 import com.fauna.ffi.FfiFamilyGuardianInfo
 import com.fauna.ffi.FfiFamilyStatus
 import com.fauna.ffi.FfiReachPolicy
@@ -37,7 +37,7 @@ import org.robolectric.annotation.Config
  * `ScreenTimeStore` and `SupervisedIndicatorVM` each guard their re-seed on
  * `newActor != seededActorHex`, but the pre-guard blank ran regardless — so
  * erasing a DIFFERENT, non-active account blanked the ACTIVE ward's guardian
- * floor, bedtime lock and indicator, and the same-actor guard then re-seeded
+ * rules, bedtime lock and indicator, and the same-actor guard then re-seeded
  * nothing, exactly like the debug reset/logout same-actor-drop case
  * ([ContentPolicyStoreTest], [ScreenTimeStoreTest],
  * [com.fauna.app.ui.viewmodel.SupervisedIndicatorVMTest]).
@@ -78,7 +78,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
 
     private fun supervisedFamilyStatus(): FfiFamilyStatus {
         val guardian = FfiFamilyGuardianInfo(actorId = ByteArray(32) { 9 }, handle = "guardian")
-        val floor = FfiContentPolicy(nsfw = "block", spam = "inherit", phishing = "inherit", commercial = "inherit")
+        val guardianRules = GuardianRulesFixture.blocking("nsfw")
         // Locked all day regardless of the real wall clock (testing.md
         // convention 14) — mirrors ScreenTimeStoreTest.alwaysLockedWindow.
         val window = FfiScreenTimePolicy(windowStart = 0u, windowEnd = 0u, dailyMinutes = null)
@@ -89,7 +89,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
                 unknownSenderMail = "allow",
                 federationContact = true,
                 feedSources = "allow",
-                contentPolicy = floor,
+                contentPolicy = guardianRules,
                 screenTime = window,
                 contentNotify = true,
                 unknownPeerDm = null,
@@ -103,7 +103,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
             // The gated fold shared Rust attaches to a real supervised reply.
             supervision = FfiSupervisionSnapshot(
                 supervisedBy = guardian,
-                contentPolicy = floor,
+                contentPolicy = guardianRules,
                 contentNotify = true,
                 screenTime = window,
             ),
@@ -111,7 +111,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
     }
 
     @Test
-    fun `erasing a non-active account leaves the active ward's floor, lock and indicator intact`() = runBlocking {
+    fun `erasing a non-active account leaves the active ward's rules, lock and indicator intact`() = runBlocking {
         val registry = FfiAccountRegistry(LogicalSecretStore(MemoryBackend()))
         // The FIRST added account auto-activates (AccountSettingsVM.kt's own
         // doc on `addAccount`); the second stays non-active — exactly the row
@@ -139,7 +139,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
         val supervisedIndicatorVM = SupervisedIndicatorVM(api, screenTimeStore, accountStores)
 
         assertNotNull(
-            "precondition: the active ward's floor restores from the persisted snapshot",
+            "precondition: the active ward's guardian rules restore from the persisted snapshot",
             contentPolicyStore.inputs.value.contentPolicy,
         )
         assertNotNull(
@@ -162,7 +162,7 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
 
         assertNotNull(
             "erasing a non-active account must not blank the ACTIVE ward's " +
-                "content floor — the identity closers describe the active " +
+                "content rules — the identity closers describe the active " +
                 "session, which did not change (family-client-enforcement.md:98-99)",
             contentPolicyStore.inputs.value.contentPolicy,
         )

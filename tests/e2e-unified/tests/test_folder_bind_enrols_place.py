@@ -28,13 +28,16 @@ from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui leads. linux and windows joined once their confirmed bind repaints
-    # the expanded row (windows: OnBindingsChanged re-runs LoadPlaceRowsAsync);
-    # apple and android join when their on-demand toggle calls the enrol. Grow
-    # this list and the parametrization below together.
+    # tui leads. linux, windows and macos joined once their confirmed bind
+    # repaints the expanded row (windows: OnBindingsChanged re-runs
+    # LoadPlaceRowsAsync; macos: the bind's push task re-reads the roster). iOS
+    # binds no folder in-process (`apps/ios.md`); android joins when its
+    # on-demand toggle calls the enrol. Grow this list and the parametrization
+    # below together.
     pytest.mark.tui,
     pytest.mark.linux,
     pytest.mark.windows,
+    pytest.mark.macos,
 ]
 
 # Generous ceiling (convention 14): the bind's agent round trip, the agent's
@@ -42,7 +45,7 @@ pytestmark = [
 _SEAT_WINDOW_SECS = 60.0
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui", "linux", "windows"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "linux", "windows", "macos"], indirect=True)
 @pytest.mark.real_conversations
 # The bind must reach a real agent — the seam under test lives there.
 @pytest.mark.real_sync_agent

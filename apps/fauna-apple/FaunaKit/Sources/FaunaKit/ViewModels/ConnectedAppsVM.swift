@@ -60,6 +60,15 @@ public final class ConnectedAppsVM {
     /// machine and snapshot a newer visit owns. Every await below re-checks.
     private var visitGeneration = 0
 
+    /// The visit whose machine has returned its first read — gestures act only
+    /// on that machine (``readyMachine()``).
+    private var readyGeneration = -1
+    private var readyWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// This visit's number at the route door (``ConsentHandoff/registerVisit()``),
+    /// which hands a staged request only to the newest visit of any instance.
+    private var doorVisit = 0
+
     #if DEBUG
     /// The live instance the page is rendering off, for the `open_route` TestAgent
     /// command's wait. **Weak** — the slot must never keep a dismissed page's VM
@@ -86,6 +95,7 @@ public final class ConnectedAppsVM {
         #endif
         visitGeneration += 1
         let generation = visitGeneration
+        doorVisit = ConsentHandoff.shared.registerVisit()
         self.handle = handle
         code = ""
         revokeArmed = nil
@@ -107,6 +117,7 @@ public final class ConnectedAppsVM {
         } catch {
             guard generation == visitGeneration else { return }
             connectError = DisplayError.message(error)
+            wakeReadyWaiters()
             return
         }
         guard generation == visitGeneration else { return }
@@ -115,7 +126,28 @@ public final class ConnectedAppsVM {
         await built.refresh()
         guard generation == visitGeneration else { return }
         snapshot = built.snapshot()
+        readyGeneration = generation
+        wakeReadyWaiters()
         await openStagedHandoff()
+    }
+
+    /// The current visit's machine once its first read has returned, or `nil`
+    /// when the visit could not build one. The page's fields render before the
+    /// machine exists, so a gesture made in that window (a code typed the moment
+    /// the field shows) waits for it here instead of being dropped; and an
+    /// action taken after the read can never be overwritten by that older read.
+    private func readyMachine() async -> ConnectedAppsMachine? {
+        while true {
+            if let machine, readyGeneration == visitGeneration { return machine }
+            if connectError != nil { return nil }
+            await withCheckedContinuation { readyWaiters.append($0) }
+        }
+    }
+
+    private func wakeReadyWaiters() {
+        let waiters = readyWaiters
+        readyWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     fileprivate func onMachineChanged() {
@@ -123,19 +155,26 @@ public final class ConnectedAppsVM {
     }
 
     /// Open the staged `fauna://consent/<request_uri>` route, if any, through the
-    /// shared machine (`ConsentHandoff`), and clear it only after the open has
-    /// returned — a waiter (the e2e `open_route` command) then knows the card is
-    /// painted. Safe to call whenever the page is on screen: with nothing staged
+    /// shared machine (`ConsentHandoff`), and clear it only once the card is
+    /// painted — a waiter (the e2e `open_route` command) then knows it is on
+    /// screen. Safe to call whenever the page is on screen: with nothing staged
     /// it is a no-op.
     public func openStagedHandoff() async {
-        guard let machine, let requestUri = ConsentHandoff.shared.peekPending() else { return }
-        let generation = visitGeneration
-        await machine.openHandoff(requestUri: requestUri)
-        // A newer visit owns the page now: leave the request staged so ITS open
-        // (a fresh machine) reveals the card and clears it.
-        guard generation == visitGeneration else { return }
-        snapshot = machine.snapshot()
-        ConsentHandoff.shared.finishOpen(requestUri)
+        guard let machine else { return }
+        let door = ConsentHandoff.shared
+        let visit = doorVisit
+        if let requestUri = door.beginOpen(visit: visit) {
+            await machine.openHandoff(requestUri: requestUri)
+            if door.finishOpen(requestUri, visit: visit) { snapshot = machine.snapshot() }
+            return
+        }
+        // An older visit opened it — the nest has spent the request, so it is
+        // never opened again: re-read this visit's tray, where the nest lists
+        // the card.
+        guard let requestUri = await door.awaitSpent(visit: visit) else { return }
+        await machine.refresh()
+        if doorVisit == visit { snapshot = machine.snapshot() }
+        door.finishReread(requestUri)
     }
 
     // MARK: - Gestures
@@ -190,7 +229,7 @@ public final class ConnectedAppsVM {
     /// without being drawn on a screen someone else can read. A failed read
     /// leaves the machine's own error on the snapshot.
     public func readSecret(_ key: String) async -> String? {
-        guard let machine else { return nil }
+        guard let machine = await readyMachine() else { return nil }
         let secret = await machine.revealSecret(key: key)
         snapshot = machine.snapshot()
         return secret
@@ -203,7 +242,7 @@ public final class ConnectedAppsVM {
     }
 
     private func run(_ gesture: (ConnectedAppsMachine) async -> Void) async {
-        guard let machine else { return }
+        guard let machine = await readyMachine() else { return }
         await gesture(machine)
         snapshot = machine.snapshot()
     }

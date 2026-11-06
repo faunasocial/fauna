@@ -51,6 +51,21 @@ internal static class ContactOverlayNames
     /// when the pass is done.</summary>
     internal static Reader Open() => new(new FfiContactOverlays(_source()));
 
+    /// <summary>Re-read the contact roster into the current manager's projection now
+    /// (shared <c>FfiContactOverlays::refresh_roster</c>), so a surface that holds no
+    /// handle — the OTHER Profile header — names a contact accepted a moment ago by the
+    /// roster's handle at once, not at the receive loop's next tick
+    /// (<c>value-formatting.md</c> § Peer display label → <i>the roster handle</i>). A
+    /// change moves the projection's revision, which raises <see cref="Moved"/>; with no
+    /// roster source on the manager it does nothing. Every login registers that source:
+    /// the conversations session the app builds over the manager — under e2e too — does
+    /// it, so windows needs no <c>RegisterContactRoster</c> call of its own.</summary>
+    internal static async System.Threading.Tasks.Task RefreshRosterAsync()
+    {
+        using var face = new FfiContactOverlays(_source());
+        await face.RefreshRoster();
+    }
+
     /// <summary>The projection's reads, one face for one pass.</summary>
     internal sealed class Reader : IDisposable
     {
@@ -66,6 +81,13 @@ internal static class ContactOverlayNames
         /// nickname replaced, for the secondary line.</summary>
         internal PeerLabel PeerLabel(string? displayName, string? handle, string actorId) =>
             _face.PeerLabel(displayName, handle, actorId);
+
+        /// <summary>What a notification row says, a fauna-native row's sender named as
+        /// the viewer calls them (<c>notifications.md</c> § Localized body → <i>The
+        /// sender arg</i>): shared <c>notification_text_naming_for</c>, never the
+        /// unnamed <c>NotificationTextFor</c>.</summary>
+        internal FfiNotificationText NotificationText(FfiNotifItem item) =>
+            FaunaFfiMethods.NotificationTextNamingFor(item, _face);
 
         /// <summary>The roster row's <c>contact-labels</c> line; null = no label.</summary>
         internal string? LabelsLine(string actorId) => _face.LabelsLine(actorId);

@@ -23,7 +23,7 @@ restamps the store, so there would be no prompt and the bytes would move.
 The dedicated actor is load-bearing: the forged store is that actor's alone,
 so no later test that signs in as the shared ``test_user`` opens it.
 
-tier_3: needs a real ``fauna-nest`` (``nest_instance``); tui and linux (the
+tier_3: needs a real ``fauna-nest`` (``nest_instance``); tui, linux, macos, ios and windows (the
 store's file name per app is ``helpers/skew_client.py::SCOPED_MLS_DB_NAME``).
 android's store is on-device (``AndroidScopeStore``), so its witness waits on
 the emulator venue; its arm is pinned by a Robolectric unit test meanwhile. The
@@ -47,7 +47,17 @@ from helpers.skew_client import SCOPED_MLS_DB_NAME
 from helpers.waiting import wait_until
 from i18n.strings import S
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux]
+# `real_conversations`: the apple e2e launch otherwise runs the mock conversations
+# backend, which never builds the session — so no `mls.db` would exist to forge.
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
+    pytest.mark.real_conversations,
+]
 
 #: Far above any reader floor this build will carry, so the verdict stays
 #: ``Incompatible`` across future baseline bumps (the same choice as
@@ -57,7 +67,15 @@ FUTURE_VERSION = 9999
 
 def _client(driver) -> str:
     """The app under test: the key of ``SCOPED_MLS_DB_NAME`` / the scope store."""
-    return "linux" if driver.is_linux() else "tui"
+    if driver.is_linux():
+        return "linux"
+    if driver.is_macos():
+        return "macos"
+    if driver.is_ios():
+        return "ios"
+    if driver.is_windows():
+        return "windows"
+    return "tui"
 
 
 def _mls_db(driver, actor_id_hex: str) -> Path | None:
@@ -112,7 +130,12 @@ def test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched
         "without the pin the driver relaunches on a fresh client-local store"
     )
     # The engine holds the store open; stop the process before the forge.
-    app.driver.teardown()
+    if app.driver.is_windows():
+        # windows' `teardown()` kills the bridge and reclaims the data dir the
+        # store lives in; `quit_app()` closes only the app and leaves both.
+        app.driver.quit_app()
+    else:
+        app.driver.teardown()
     _forge_newer_build_stamp(db)
     forged = _sha256(db)
 
@@ -148,7 +171,14 @@ def test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched
     app.feed.create_post(text)
     assert app.feed.wait_for_post_text(text), f"error-message={app.error_text()!r}"
 
-    assert _sha256(db) == forged, (
+    # Re-resolve the store: a relaunch may land in a new app container (ios
+    # carries the pinned state across by copying it), so the path read before the
+    # relaunch is not the file the refusing launch had open.
+    db_now = _mls_db(app.driver, actor)
+    assert db_now is not None, (
+        "the refusing launch's MLS store is gone — it must be left in place, untouched"
+    )
+    assert _sha256(db_now) == forged, (
         "the app is too old for this store and must never write it — the newer "
         "build's conversations changed on disk across the refusing launch"
     )

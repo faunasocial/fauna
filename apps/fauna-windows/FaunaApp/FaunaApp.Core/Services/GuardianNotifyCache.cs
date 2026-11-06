@@ -46,6 +46,21 @@ public static class GuardianNotifyCache
     /// <c>FaunaFfiMethods.GuardianEnforcedCategories</c> — never the ward's own-
     /// threshold collapse (Notify is a guardian-floor-only lens).
     /// </summary>
+    /// <summary>
+    /// Would Guardian Notify count an item whose guardian-floor categories are
+    /// <paramref name="categories"/> (<c>FaunaFfiMethods.GuardianEnforcedCategories</c>)?
+    /// The same two conditions <see cref="Record"/> counts under: the
+    /// <c>content_notify</c> knob is on and the guardian floor bites on the item's
+    /// labels. The region sealed-item sentence's <c>notify_counted</c> input, so it
+    /// never says "nothing was reported" of an item Notify counted (android's
+    /// <c>ContentPolicyInputs.notifyWouldCount</c>).
+    /// </summary>
+    public static bool WouldCount(IReadOnlyList<string> categories)
+    {
+        if (categories.Count == 0) return false;
+        lock (_gate) return _accumulator.IsEnabled;
+    }
+
     public static void Record(string itemId, IReadOnlyList<string> categories)
     {
         if (categories.Count == 0) return;

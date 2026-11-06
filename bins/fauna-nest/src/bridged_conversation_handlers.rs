@@ -10,8 +10,9 @@
 //! by a principal handler here, reached through `principal_handlers`' gate
 //! (ceiling, then the `fauna:conversations:bridge` arm). A principal whose
 //! consented document declares no `bridge` block, or attested no key to seal
-//! outbound items to, holds no conversation door. **The user's four** are
-//! `User`-class and caller-scoped.
+//! outbound items to, holds no conversation door. **The user's six** are
+//! `User`-class and caller-scoped — the two removes the nest's copy only
+//! (`docs/goal/behavior/bridged-adapter.md` § Removing bridged rows).
 //!
 //! **A room outlives its bridge** (`apps/bridges.md` § Phase G → *When the
 //! bridge stops serving*): with no live principal declaring its bridge id a
@@ -31,12 +32,14 @@ use std::time::Duration;
 use fauna_protocol::bridged_conversations::{
     BRIDGED_PAGE_DEFAULT, BRIDGED_PAGE_MAX, BridgedAck, BridgedMessageInfo, BridgedRoomInfo,
     ConversationChangedPush, DepositReply, DepositRequest, InboxFetchReply, InboxFetchRequest,
-    KIND_DEPOSIT, KIND_INBOX_FETCH, KIND_OUTBOX_ACK, KIND_OUTBOX_FETCH, KIND_RECEIPT,
-    KIND_ROOM_MEMBERS, KIND_ROOM_UPSERT, KIND_ROOMS_LIST, KIND_ROOMS_OPEN, KIND_SEND,
-    MAX_BRIDGED_FAR_ID_BYTES, MAX_BRIDGED_PARTICIPANTS, MAX_BRIDGED_SEALED_BYTES, OutboxAckReply,
-    OutboxAckRequest, OutboxFetchReply, OutboxFetchRequest, OutboxItem, RECEIPT_DELIVERED,
-    RECEIPT_READ, ReceiptRequest, RoomMembersRequest, RoomUpsertReply, RoomUpsertRequest,
-    RoomsListReply, RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, SendReply, SendRequest,
+    KIND_DEPOSIT, KIND_INBOX_FETCH, KIND_MESSAGES_REMOVE, KIND_OUTBOX_ACK, KIND_OUTBOX_FETCH,
+    KIND_RECEIPT, KIND_ROOM_MEMBERS, KIND_ROOM_UPSERT, KIND_ROOMS_LIST, KIND_ROOMS_OPEN,
+    KIND_ROOMS_REMOVE, KIND_SEND, MAX_BRIDGED_FAR_ID_BYTES, MAX_BRIDGED_PARTICIPANTS,
+    MAX_BRIDGED_SEALED_BYTES, MessagesRemoveRequest, OutboxAckReply, OutboxAckRequest,
+    OutboxFetchReply, OutboxFetchRequest, OutboxItem, RECEIPT_DELIVERED, RECEIPT_READ,
+    ReceiptRequest, RemoveReply, RoomMembersRequest, RoomUpsertReply, RoomUpsertRequest,
+    RoomsListReply, RoomsListRequest, RoomsOpenReply, RoomsOpenRequest, RoomsRemoveRequest,
+    SendReply, SendRequest,
 };
 use fauna_protocol::kind_manifest::{BridgeBlock, BridgeCapabilityValue};
 use fauna_protocol::{RpcError, decode_strict as decode};
@@ -211,6 +214,7 @@ fn room_info(
         last_at: row.last_at,
         guardian_state,
         disconnected: bridge.is_none(),
+        last_removed_at: row.last_removed_at,
         extra: Default::default(),
     }
 }
@@ -281,6 +285,7 @@ pub(crate) fn principal_room_members_handler() -> PrincipalHandler {
                 .set_bridged_room_participants(
                     &caller.account,
                     &bridge.principal_id,
+                    &bridge.block.id,
                     &req.far_room_id,
                     &req.participants,
                 )
@@ -291,7 +296,12 @@ pub(crate) fn principal_room_members_handler() -> PrincipalHandler {
             }
             if let Some(room) = state
                 .db
-                .get_bridged_room_by_far_id(&caller.account, &bridge.principal_id, &req.far_room_id)
+                .get_bridged_room_by_far_id(
+                    &caller.account,
+                    &bridge.principal_id,
+                    &bridge.block.id,
+                    &req.far_room_id,
+                )
                 .await
                 .map_err(internal)?
             {
@@ -333,6 +343,7 @@ pub(crate) fn principal_deposit_handler() -> PrincipalHandler {
                 .deposit_bridged_message(
                     &caller.account,
                     &bridge.principal_id,
+                    &bridge.block.id,
                     &req.far_room_id,
                     &req.far_message_id,
                     &req.sender,
@@ -437,7 +448,13 @@ pub(crate) fn principal_receipt_handler() -> PrincipalHandler {
             }
             if let Some(room_id) = state
                 .db
-                .record_bridged_receipt(&caller.account, &bridge.principal_id, req.id, &req.state)
+                .record_bridged_receipt(
+                    &caller.account,
+                    &bridge.principal_id,
+                    &bridge.block.id,
+                    req.id,
+                    &req.state,
+                )
                 .await
                 .map_err(internal)?
             {
@@ -448,7 +465,7 @@ pub(crate) fn principal_receipt_handler() -> PrincipalHandler {
     })
 }
 
-// ── the user's four ────────────────────────────────────────────────────
+// ── the user's six ─────────────────────────────────────────────────────
 
 fn rooms_list_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
@@ -464,9 +481,9 @@ fn rooms_list_handler() -> RpcHandler {
                 .map_err(internal)?
                 .into_iter()
                 .map(|row| {
-                    let bridge = bridges
-                        .iter()
-                        .find(|b| b.principal_id == row.bridge_principal_id);
+                    let bridge = bridges.iter().find(|b| {
+                        b.principal_id == row.bridge_principal_id && b.block.id == row.bridge_id
+                    });
                     room_info(row, bridge, gate.as_ref())
                 })
                 .collect();
@@ -534,7 +551,14 @@ async fn rooms_open(
         .upsert_bridged_room(actor_id, &seat, &far_room_id, &shape)
         .await
         .map_err(store_error)?;
-    if created {
+    // The user's own open lists a room they removed again (`bridged-adapter.md`
+    // § Removing bridged rows, rule 4); the bridge's upsert never does.
+    let reopened = state
+        .db
+        .reopen_bridged_room(actor_id, &row.room_id)
+        .await
+        .map_err(internal)?;
+    if created || reopened {
         notify_changed(state, actor_id, &row.room_id);
     }
     let gate = crate::bridge_dm_gate::gate_context(state, actor_id).await?;
@@ -584,6 +608,7 @@ fn inbox_fetch_handler() -> RpcHandler {
                     received_at: m.received_at,
                     receipt: m.receipt,
                     undelivered: m.undelivered,
+                    removed: m.removed,
                     extra: Default::default(),
                 })
                 .collect();
@@ -615,7 +640,7 @@ fn send_handler() -> RpcHandler {
             if !serving_bridges(&state, &actor_id)
                 .await?
                 .iter()
-                .any(|b| b.principal_id == room.bridge_principal_id)
+                .any(|b| b.principal_id == room.bridge_principal_id && b.block.id == room.bridge_id)
             {
                 return Err(bridge_disconnected());
             }
@@ -668,6 +693,54 @@ fn send_handler() -> RpcHandler {
     })
 }
 
+/// `conversation.messages.remove` — the nest's copy only; the far side sees
+/// nothing and no outbox item is withdrawn.
+fn messages_remove_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, KIND_MESSAGES_REMOVE).await?;
+            let req: MessagesRemoveRequest = decode(&payload).map_err(malformed)?;
+            if req.ids.len() > BRIDGED_PAGE_MAX as usize {
+                return Err(invalid_params_ns(
+                    NS,
+                    format!("at most {BRIDGED_PAGE_MAX} ids per remove"),
+                ));
+            }
+            let removed = state
+                .db
+                .remove_bridged_messages(&actor_id, &req.room_id, &req.ids)
+                .await
+                .map_err(store_error)?;
+            notify_changed(&state, &actor_id, &req.room_id);
+            encode_reply(&RemoveReply {
+                removed,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+/// `conversation.rooms.remove` — every row tombstoned, the room hidden until
+/// a new live row reopens it.
+fn rooms_remove_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, KIND_ROOMS_REMOVE).await?;
+            let req: RoomsRemoveRequest = decode(&payload).map_err(malformed)?;
+            let removed = state
+                .db
+                .remove_bridged_room(&actor_id, &req.room_id)
+                .await
+                .map_err(store_error)?;
+            notify_changed(&state, &actor_id, &req.room_id);
+            encode_reply(&RemoveReply {
+                removed,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
 /// The actor-router half of a `ThirdParty`-only kind: the wire contract lives
 /// in the actor router (one kind, one wire contract), but no actor class holds
 /// it, so this runs the central gate and is refused there, always — the
@@ -694,10 +767,11 @@ pub(crate) fn principal_handlers() -> [(&'static str, PrincipalHandler); 6] {
     ]
 }
 
-/// Register the ten kinds. All light (5 s). Replay: the bridge's writes are
+/// Register the twelve kinds. All light (5 s). Replay: the bridge's writes are
 /// idempotent (deposit on its far id, upsert and members by value, ack and
-/// receipt by id) and replay-safe; the user's `send` mints a row per call, so
-/// it forbids replay.
+/// receipt by id) and replay-safe, as are the user's removes (a tombstoned row
+/// counts nothing twice); the user's `send` mints a row per call, so it
+/// forbids replay.
 pub fn register_bridged_conversation_handlers(b: &mut RpcRouterBuilder) {
     let light = || Duration::from_secs(5);
     for kind in [
@@ -722,6 +796,8 @@ pub fn register_bridged_conversation_handlers(b: &mut RpcRouterBuilder) {
         (KIND_ROOMS_OPEN, false, rooms_open_handler()),
         (KIND_INBOX_FETCH, false, inbox_fetch_handler()),
         (KIND_SEND, true, send_handler()),
+        (KIND_MESSAGES_REMOVE, false, messages_remove_handler()),
+        (KIND_ROOMS_REMOVE, false, rooms_remove_handler()),
     ] {
         b.add(
             kind,
@@ -844,11 +920,11 @@ mod tests {
     const OTHER: &str = "https://other.example/client.json";
     const NEVER: i64 = i64::MAX;
 
-    fn manifest() -> PrincipalManifest {
+    fn manifest(id: &str) -> PrincipalManifest {
         PrincipalManifest {
             publisher_key: [0x9B; 32],
             bridge: Some(BridgeBlock {
-                id: "matrix".into(),
+                id: id.into(),
                 glyph: "bridge".into(),
                 address_grammar: "^@[^:]+:.+$".into(),
                 capabilities: [(
@@ -864,6 +940,17 @@ mod tests {
     }
 
     async fn consent(db: &CacheDb, family: &[u8], client: &str, holder: [u8; 32]) -> Vec<u8> {
+        consent_as(db, family, client, holder, "matrix").await
+    }
+
+    /// A consent whose manifest declares the bridge id `id`.
+    async fn consent_as(
+        db: &CacheDb,
+        family: &[u8],
+        client: &str,
+        holder: [u8; 32],
+        id: &str,
+    ) -> Vec<u8> {
         db.record_atproto_oauth_grant(
             &ACCOUNT,
             family,
@@ -881,7 +968,7 @@ mod tests {
                     writer_ed25519: None,
                 },
                 execution_form: ExecutionForm::Device,
-                manifest: Some(manifest()),
+                manifest: Some(manifest(id)),
             },
         )
         .await
@@ -999,5 +1086,150 @@ mod tests {
         );
         // And `rooms.open` finds the same room on the new bridge.
         assert_eq!(open(&state).await.unwrap().room_id, room.room_id);
+    }
+
+    /// Phase G rule 2: a re-consent of the same document whose manifest
+    /// declares another id disconnects the old id's rooms — the serving
+    /// principal is whichever live roster row declares the room's `bridge.id`,
+    /// so the principal that moved no longer lists, sends to or deposits into
+    /// the room it served under the old id.
+    #[tokio::test]
+    async fn a_reconsent_that_moves_the_bridge_id_disconnects_the_old_rooms() {
+        const KEY: [u8; 32] = [1; 32];
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::bridge_legs::test_support::init_leg_tables(&db).await;
+        db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+        let p = consent(&db, b"family-1", CLIENT, KEY).await;
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let room = open(&state).await.unwrap();
+        assert!(!room.disconnected);
+
+        // The same document, now declaring another id.
+        let moved = consent_as(&db, b"family-2", CLIENT, KEY, "signal").await;
+        assert_eq!(moved, p, "a re-consent keeps the principal");
+
+        let rooms = list(&state).await;
+        assert_eq!(rooms.len(), 1);
+        assert!(rooms[0].disconnected);
+        assert_eq!(rooms[0].bridge_id, "matrix");
+        assert_eq!(rooms[0].glyph, "bridge");
+        let err = send(&state, &room.room_id).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.bridge_disconnected");
+
+        // The principal now serving "signal" cannot deposit into the matrix room.
+        let caller = PrincipalCaller {
+            account: ACCOUNT,
+            principal_id: p.clone(),
+            scopes: vec!["fauna:conversations:bridge".into()],
+            holder_x25519: Some(KEY),
+            writer_ed25519: None,
+            execution_form: ExecutionForm::Device,
+        };
+        let req = DepositRequest {
+            far_room_id: "@bob:example.org".into(),
+            far_message_id: "$1".into(),
+            sender: "@bob:example.org".into(),
+            sealed_content: b"x".to_vec(),
+            created_at: 1,
+            extra: Default::default(),
+        };
+        let err = principal_deposit_handler()(state.clone(), caller, enc(&req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.not_found");
+        assert!(inbox(&state, &room.room_id).await.is_empty());
+    }
+
+    async fn next_changed(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> Vec<u8> {
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a remove nudges the account's clients")
+            .expect("connection open");
+        let fauna_protocol::Frame::Push(push) = fauna_protocol::decode_frame(&frame).unwrap()
+        else {
+            panic!("expected a Push frame")
+        };
+        let fauna_protocol::PushEvent::BridgeConversationChanged(changed) =
+            fauna_protocol::PushEvent::from_push(&push.kind, push.payload)
+        else {
+            panic!("expected conversation_changed, got {}", push.kind)
+        };
+        changed.room_id
+    }
+
+    /// `bridged-adapter.md` § Removing bridged rows, rule 6: the two removes
+    /// are caller-scoped (another account's room is not found), idempotent,
+    /// bounded to a page of ids, and nudge the account's clients every time;
+    /// the list then carries `last_removed_at`, the inbox the tombstone, and
+    /// the user's own `rooms.open` lists a removed room again.
+    #[tokio::test]
+    async fn the_removes_are_caller_scoped_idempotent_and_push() {
+        const STRANGER: [u8; 32] = [0xB0; 32];
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        crate::bridge_legs::test_support::init_leg_tables(&db).await;
+        db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+        db.create_user(&STRANGER, "free", "test").await.unwrap();
+        consent(&db, b"family-1", CLIENT, [1; 32]).await;
+        let state = Arc::new(AppState::for_test(db.clone()));
+        let room = open(&state).await.unwrap();
+        assert_eq!(room.last_removed_at, 0);
+        let sent = send(&state, &room.room_id).await.unwrap();
+        let (_conn, mut rx) = state.ws.subscribe(ACCOUNT);
+
+        let remove = |actor: [u8; 32], ids: Vec<i64>| {
+            let state = state.clone();
+            let room_id = room.room_id.clone();
+            async move {
+                let req = MessagesRemoveRequest {
+                    room_id,
+                    ids,
+                    extra: Default::default(),
+                };
+                messages_remove_handler()(state, actor, enc(&req))
+                    .await
+                    .map(|r| decode::<RemoveReply>(&r).unwrap().removed)
+            }
+        };
+        let err = remove(STRANGER, vec![sent]).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.not_found");
+        let err = remove(ACCOUNT, vec![0; BRIDGED_PAGE_MAX as usize + 1])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.invalid_params");
+        assert_eq!(remove(ACCOUNT, vec![sent]).await.unwrap(), 1);
+        assert_eq!(next_changed(&mut rx).await, room.room_id);
+        assert_eq!(remove(ACCOUNT, vec![sent]).await.unwrap(), 0);
+        assert_eq!(next_changed(&mut rx).await, room.room_id);
+        let rows = inbox(&state, &room.room_id).await;
+        assert_eq!(
+            rows.iter()
+                .map(|m| (m.id, m.removed, m.sealed_content.is_empty()))
+                .collect::<Vec<_>>(),
+            vec![(sent, true, true)]
+        );
+        assert!(list(&state).await[0].last_removed_at > 0);
+
+        let remove_room = |actor: [u8; 32]| {
+            let state = state.clone();
+            let room_id = room.room_id.clone();
+            async move {
+                let req = RoomsRemoveRequest {
+                    room_id,
+                    extra: Default::default(),
+                };
+                rooms_remove_handler()(state, actor, enc(&req))
+                    .await
+                    .map(|r| decode::<RemoveReply>(&r).unwrap().removed)
+            }
+        };
+        let err = remove_room(STRANGER).await.unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.not_found");
+        assert_eq!(remove_room(ACCOUNT).await.unwrap(), 0);
+        assert_eq!(next_changed(&mut rx).await, room.room_id);
+        assert!(list(&state).await.is_empty());
+        // The user's own open lists it again — and says so.
+        assert_eq!(open(&state).await.unwrap().room_id, room.room_id);
+        assert_eq!(next_changed(&mut rx).await, room.room_id);
+        assert_eq!(list(&state).await.len(), 1);
     }
 }

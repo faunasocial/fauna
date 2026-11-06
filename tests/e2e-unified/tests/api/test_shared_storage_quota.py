@@ -51,16 +51,18 @@ def quota_nest(request, nest_mode, tmp_path_factory):
 
 
 def _sealer(run_seal_helper):
-    """A genuine recipient envelope — the only body shape the PUT accepts (the
-    at-rest seal is proven at the wire edge), from the same shared-Rust seal the
-    apps and the MDA use. The recipient key is throwaway: these tests read sizes,
-    never bodies."""
+    """A genuine ``calendar-record`` envelope — the only body and metadata shape
+    the calendar RPCs accept (the at-rest seal and its kind are proven at the
+    wire edge, ``owner-key-material.md`` § Path B-sibling-5), from the same
+    shared-Rust seal the apps and the MDA use. The recipient key is throwaway:
+    these tests read sizes, never bodies."""
     recipient = base64.b64encode(PrivateKey.generate().public_key.encode()).decode()
 
     def _sealed(plaintext: bytes) -> bytes:
         return run_seal_helper("seal-mail-record", {
             "plaintext_b64": base64.b64encode(plaintext).decode(),
             "recipient_x25519_pubkey_b64": recipient,
+            "kind": "calendar",
         })
 
     return _sealed
@@ -100,7 +102,7 @@ def test_an_events_bytes_move_the_one_storage_number_mail_reads(quota_nest, run_
             {
                 "actor_id": owner["actor_id_bytes"],
                 "calendar_id": calendar_id,
-                "encrypted_metadata": b"{}",
+                "encrypted_metadata": _sealed(b"{}"),
                 "update_metadata": False,
             },
         )
@@ -178,7 +180,7 @@ def test_an_event_past_the_storage_ceiling_is_refused_and_moves_nothing(
             {
                 "actor_id": owner["actor_id_bytes"],
                 "calendar_id": calendar_id,
-                "encrypted_metadata": b"{}",
+                "encrypted_metadata": _sealed(b"{}"),
                 "update_metadata": False,
             },
         )

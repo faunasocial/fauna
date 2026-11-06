@@ -34,11 +34,17 @@ gesture on `admin-dns` — no WS-RPC shortcut stands in for the admin:
     thing without proving the *admin* can see it, which is the product claim.
 
 **Credential hygiene (the reason this test is safe to run against production).**
-The client starts with **no** DNS credential — asserted, not assumed — and the
-credential is removed again in a `finally`, along with any managed-mode flip the
-test made. Both live in `fauna.state.dns`, which is BackupKey-sealed and *synced*,
-so leaving either behind would durably change the admin's real account state on
-every device. The token is never printed, never written to a file, and never
+The run exercises "the admin supplies the token for the first time", so the
+client holds **no** DNS credential when it types the token — asserted, not
+assumed. A box whose admin already holds the zone's credential (a Fauna-managed
+deployment, the normal case) has it cleared for the run and **rebuilt in a
+`finally`** from the same zone token, and the domain's mode is put back to what
+it was before anything was touched (clearing a credential drops its domains to
+manual); a box with no prior credential is left with none. A held credential the
+run could not rebuild — any provider other than the zone's Hetzner one — fails
+the run before anything is cleared. All of it lives in `fauna.state.dns`, which
+is BackupKey-sealed and *synced*, so a leftover or a loss would durably change
+the admin's real account state on every device. The token is never printed, never written to a file, and never
 reaches the nest (it is used only inside the client, by design).
 
 What this test does leave behind, by design: a **new certificate**. That is the
@@ -255,6 +261,29 @@ def _sign_in_as_admin(app, timeout: float = 180.0) -> None:
     )
 
 
+def _prior_credentials(app) -> int:
+    """How many DNS credentials the admin held before the run — each one the
+    teardown rebuilds from ``DNS_TOKEN``. Fails, touching nothing, on a held
+    credential the run cannot rebuild: the form is write-only, so clearing one
+    whose secret this test does not hold would destroy it for good."""
+    providers = [p.strip().lower() for p in app.admin.dns_credential_providers()]
+    foreign = [p for p in providers if p != "hetzner"]
+    if foreign or len(providers) > 1:
+        pytest.fail(
+            f"the admin holds DNS credentials this run cannot rebuild after clearing "
+            f"them ({providers!r}); only a single zone Hetzner credential is restorable "
+            "from the zone token. Nothing was changed."
+        )
+    return len(providers)
+
+
+def _zone_covers(zone: str, domain: str) -> bool:
+    """Whether DNS zone ``zone`` holds ``domain``: its apex or any name under it."""
+    z = zone.strip().lower().rstrip(".")
+    d = domain.strip().lower().rstrip(".")
+    return bool(z) and (d == z or d.endswith("." + z))
+
+
 def _clear_all_credentials(app) -> None:
     """Remove every held DNS credential through the UI. Used both as the
     precondition (the client must start with none) and as teardown."""
@@ -281,9 +310,7 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
     date to beat, so the certificate served on :443 must itself have changed —
     a date merely appearing is not proof that anything was issued.
     """
-    skip_unless_live_drive_app(
-        app.driver, surface="the live DNS-01 cert-renewal drive (native order core)"
-    )
+    skip_unless_live_drive_app(app.driver)
 
     token = DNS_TOKEN
     nest_url = NEST_URL
@@ -304,14 +331,20 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
     before_served = _served_cert_fingerprint(TARGET_DOMAIN)
     print(f"[dns01] before: {before_badge!r} (expiry {before_expiry}; served {before_served})")
 
-    # Precondition, asserted not assumed: the client holds NO DNS credential, so
-    # this run genuinely exercises "admin supplies the token for the first time".
-    _clear_all_credentials(app)
-    assert app.admin.dns_credential_count() == 0, "the client must start with no DNS credential"
-
+    # Snapshot what the teardown puts back BEFORE anything is cleared: clearing a
+    # credential re-renders its domains manual, so the mode read after the clear
+    # would be the wrong one to restore.
+    prior_count = _prior_credentials(app)
+    prior_zones = sorted(z.strip().lower() for z in app.admin.dns_credential_zones())
     mode_before = app.admin.dns_domain_modes()[idx]
-    flipped_mode = False
+    print(f"[dns01] prior: {prior_count} credential(s), {TARGET_DOMAIN} mode {mode_before!r}")
+
     try:
+        # Precondition, asserted not assumed: the client holds NO DNS credential, so
+        # this run genuinely exercises "admin supplies the token for the first time".
+        _clear_all_credentials(app)
+        assert app.admin.dns_credential_count() == 0, "the client must start with no DNS credential"
+
         # ── 1. Type the API token into the write-only add-credential form ──────
         # `PutCredentials` verifies against the provider API before storing, so a
         # bad token never lands — and the zone list that comes back is what
@@ -330,7 +363,10 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
             f"expected a hetzner credential row; got {app.admin.dns_credential_providers()!r}"
         )
         zones = app.admin.dns_credential_zones()
-        assert any(TARGET_DOMAIN.lower() in z.lower() for z in zones), (
+        # A zone covers its apex and every name under it (dev.fauna.build sits
+        # in the fauna.build zone) — never a substring test, which read the
+        # relation backwards and refused a subdomain of a held zone.
+        assert any(_zone_covers(z, TARGET_DOMAIN) for z in zones), (
             f"the token's zones {zones!r} do not cover {TARGET_DOMAIN!r}, so DNS-01 "
             "cannot publish its _acme-challenge. Is the domain in this Hetzner account?"
         )
@@ -343,7 +379,6 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         idx = _domain_index(app, TARGET_DOMAIN)
         if app.admin.dns_domain_modes()[idx].strip().lower() != "fauna-managed":
             app.admin.toggle_domain_mode(idx)
-            flipped_mode = True
         wait_until(
             lambda: app.admin.dns_domain_modes()[_domain_index(app, TARGET_DOMAIN)]
             .strip()
@@ -407,18 +442,44 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
 
     finally:
         # ── 5. Leave no durable trace but the new certificate ─────────────────
-        # `fauna.state.dns` is synced to every one of the admin's devices, so both
-        # the credential and the mode flip must be undone even when the test fails
-        # mid-flight.
-        try:
-            if flipped_mode:
-                i = _domain_index(app, TARGET_DOMAIN)
-                if app.admin.dns_domain_modes()[i].strip().lower() != mode_before.strip().lower():
-                    app.admin.toggle_domain_mode(i)
-        except Exception as e:  # noqa: BLE001 — teardown must never mask the real failure
-            print(f"[dns01] teardown WARNING: restoring domain mode failed: {e!r}")
+        # `fauna.state.dns` is synced to every one of the admin's devices, so the
+        # credential set and the domain's mode go back to what they were before
+        # the run, even when it fails mid-flight. Credentials first: opting back in
+        # to Fauna-managed needs a held credential covering the domain.
         try:
             _clear_all_credentials(app)
-            print("[dns01] teardown: DNS credential removed from the client")
+            if prior_count:
+                app.admin.add_dns_credential("hetzner", {"api-token": token})
+                wait_until(
+                    lambda: app.admin.dns_credential_count() == prior_count,
+                    60.0,
+                    interval=2.0,
+                    diagnose=lambda: (
+                        "the admin's prior Hetzner credential was not rebuilt; "
+                        f"error={app.error_text()!r}"
+                    ),
+                )
+                zones = sorted(z.strip().lower() for z in app.admin.dns_credential_zones())
+                if zones != prior_zones:
+                    print(f"[dns01] teardown WARNING: rebuilt credential covers {zones!r}, "
+                          f"the prior one covered {prior_zones!r}")
+                print("[dns01] teardown: the admin's prior DNS credential rebuilt")
+            else:
+                print("[dns01] teardown: DNS credential removed from the client")
+        except Exception as e:  # noqa: BLE001 — teardown must never mask the real failure
+            print(f"[dns01] teardown WARNING: restoring the DNS credentials failed: {e!r}")
+        try:
+            i = _domain_index(app, TARGET_DOMAIN)
+            if app.admin.dns_domain_modes()[i].strip().lower() != mode_before.strip().lower():
+                app.admin.toggle_domain_mode(i)
+            wait_until(
+                lambda: app.admin.dns_domain_modes()[_domain_index(app, TARGET_DOMAIN)]
+                .strip()
+                .lower()
+                == mode_before.strip().lower(),
+                60.0,
+                interval=2.0,
+                diagnose=lambda: f"{TARGET_DOMAIN}'s mode was not restored to {mode_before!r}",
+            )
         except Exception as e:  # noqa: BLE001
-            print(f"[dns01] teardown WARNING: clearing the credential failed: {e!r}")
+            print(f"[dns01] teardown WARNING: restoring domain mode failed: {e!r}")

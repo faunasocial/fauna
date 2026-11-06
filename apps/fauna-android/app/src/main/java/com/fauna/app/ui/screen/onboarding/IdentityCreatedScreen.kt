@@ -53,7 +53,7 @@ class IdentityCreatedVM @Inject constructor(
      * error on `error-message` (see [commitConfirmedIdentity]); confirming again
      * is the retry. Returns whether the identity is committed — the caller
      * navigates on only then. [persistFailedTemplate] is the resolved
-     * `onboarding.session_error.persist_successor` string.
+     * `onboarding.session_error.persist_identity` string.
      */
     fun confirm(persistFailedTemplate: String): Boolean {
         val secret = host.machine.confirmGeneratedIdentity()
@@ -66,7 +66,7 @@ fun IdentityCreatedScreen(
     navController: NavController,
     vm: IdentityCreatedVM = hiltViewModel(),
 ) {
-    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_successor)
+    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_identity)
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

@@ -656,6 +656,10 @@ pub(crate) struct FleetWriter<'a, R> {
     /// **named** row, the app's own derived id
     /// ([`AccountRuntimeParams::enrollment_target_device_id`]).
     pub(crate) enrollment_target: &'a str,
+    /// The label a register-create of that row names it with
+    /// ([`super::DriverConfig::enrollment_device_label`]); `None` → the
+    /// `fauna` placeholder.
+    pub(crate) enrollment_label: Option<&'a str>,
     /// The predecessor fleets' device ids this device recorded at a ceremony
     /// it ran (`AttestedPredecessors::departed_devices`) — what
     /// [`attest_departed_step`] writes as departed. Empty on every device

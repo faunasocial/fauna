@@ -1,6 +1,6 @@
 ---
 slug: import-your-social-archive
-title: Bring your posts from Facebook or Instagram
+title: Bring your posts from Facebook
 section: bridges and other networks
 goal: docs/goal/behavior/archive-import.md § Goal
 guide: docs/guides/import-your-social-archive.md § 2. Import it
@@ -8,15 +8,14 @@ guide: docs/guides/import-your-social-archive.md § 2. Import it
 
 ## What a user gets
 
-Download the export archive Facebook or Instagram gives you and bring it into
-Fauna from the app. Your posts and albums come back at the dates they
-happened, shown to the same kind of people who could see them before, each
-marked with the service it came from, and your events land in your own
-calendar. The untouched archive rests sealed in a
-folder on your nest, so nothing in it is ever lost. Other people's comments and
-messages in your archive are kept for you alone and never republished — and
-once a friend who also imported links with you, your comments and reactions on
-each other's posts come back, each signed by the person who wrote it.
+Download the export archive Facebook gives you and bring it into Fauna from the
+app; importing Instagram archives is planned. Your posts and albums come back at the dates they happened — unless you choose Only me, a public one can be seen on Fauna, a Friends-only one by the people who follow you, and any other only by you — each marked with the service it came from, and your events land in your
+own calendar. The untouched archive is stored encrypted in a folder on your
+nest, so nothing in it is lost. Other people's comments, and your message
+threads, stay in the archive for you alone and are never published; showing them
+in the app is planned, and so is linking with a friend who also imported, so
+that your comments and reactions on each other's posts come back, each signed by
+the person who wrote it.
 
 ## Coverage contract
 
@@ -27,7 +26,7 @@ Stamped 2026-10-21 at 77c610862e.
 2. [app] The import is reachable from Settings and opens on choosing which service your archive is from, with how to request the export there — `docs/goal/behavior/archive-import.md` § The wizard and its machine
    - `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_is_reachable_and_opens_on_the_source_step`
 3. [app] An Instagram archive imports just as a Facebook one does — `docs/goal/behavior/archive-import.md` § Goal
-   - (none)
+   - `tests/e2e-unified/tests/test_archive_import.py::test_an_instagram_archive_walks_to_done_and_its_posts_land_at_their_original_dates`
 4. [app] Opening your archive shows what it holds — the account, and how many posts, albums and other records — before you choose anything, and your friends lists are kept in the archive, never imported as contacts — `docs/goal/behavior/archive-import.md` § The wizard and its machine
    - `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates`
    - `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder`
@@ -52,19 +51,19 @@ Stamped 2026-10-21 at 77c610862e.
 12. [app] When it finishes you see how many records were imported, and the archive's folder by name — `docs/goal/behavior/archive-import.md` § The wizard and its machine
     - `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates`
 13. [app] Your old profile's name, bio, links and picture are offered as a one-tap fill-in at the end, never applied without asking — `docs/goal/behavior/archive-import.md` § What each category becomes
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_import.py::test_the_archived_profile_is_offered_at_done_and_applied_only_on_the_tap`
 14. [app] Importing the same archive again, or a newer one, adds only what is new — `docs/goal/behavior/archive-import.md` § Goal
     - `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own`
 15. [app] Other people's comments on your posts are kept for you alone and shown folded under the post they were left on, never published — `docs/goal/behavior/archive-import.md` § What each category becomes
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone`
 16. [app] Your message threads from the archive are kept for you alone and listed among your conversations, read-only, marked as coming from an archive — `docs/goal/behavior/archive-import.md` § What each category becomes
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_import.py::test_an_archive_thread_is_listed_read_only_on_the_archive_rail_for_its_owner_alone`
 17. [nest] A post you imported is never sent on to another network or shown to anonymous visitors from outside Fauna — `docs/goal/behavior/archive-import.md` § Compatibility
-    - (none)
+    - `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_is_never_sent_on_or_shown_to_anonymous_outside_visitors`
 18. [app] When a contact who also imported confirms, as you do, that they are the same person as in your archive, their comments and reactions on your imported posts, and yours on theirs, come back automatically — each one signed by the person who wrote it — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 19. [app] Unlinking from a contact stops future merges, while what already came back stays with the person who wrote it — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 20. [app] Your events land in your calendar at their original times, with where they were and your own reply — `docs/goal/behavior/archive-import.md` § What each category becomes
     - `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone`
 21. [app] A friends-only or private imported post shows anyone who cannot open it only a neutral line naming the service it came from, never any of its own words — `docs/goal/behavior/archive-import.md` § What each category becomes
@@ -128,99 +127,99 @@ Stamped 2026-10-21 at 77c610862e.
 49. [nest] Nobody can look you up by your identity on the other service: no nest keeps a directory of them — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
     - `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_nobody_can_look_the_importer_up_by_their_identity_on_the_other_service`
 50. [app] Linking with someone from your archive is offered only for people who are already your accepted contacts — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 51. [app] When a contact matches someone in your archive, the app asks you once whether they are the same person, and never asks again for that contact — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 52. [app] The exchange that links you with a contact never shows up as messages in your conversation with them — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 53. [app] Once a friend's comment comes back as their own reply, the private copy kept under your post is no longer shown, so it never appears twice — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 54. [app] A friend's reaction that comes back shows as the matching emoji, and a plain like as a like — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 55. [app] After you are linked, a newer import on either side brings back the new comments and reactions, and nothing arrives twice — `docs/goal/behavior/archive-import.md` § Linking and merging (phase two)
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author`
 56. [app] The folder holds your archive untouched — exactly the file you chose — so a later version of the app can read it again without another export — `docs/goal/behavior/archive-import.md` § Goal
     - `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts`
 57. [app] From the finished import you can open a view of just the posts you imported, review what was skipped, and go to the archive's folder — `docs/goal/behavior/archive-import.md` § The wizard and its machine
-    - (none)
+    - `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| linux | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| android | ⚠ partial | 0.1.5-dev+61b844ca standalone |
-| tui | ⚠ partial | 0.1.4-dev+46d105c1.dirty standalone |
+| web | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| linux | ✅ full | 0.1.5-dev+3b591c2e standalone |
+| windows | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| macos | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| ios | ⚠ partial | 0.1.5-dev+3b591c2e standalone |
+| android | 🚧 unbuilt | 0.1.5-dev+3b591c2e standalone |
+| tui | ✅ full | 0.1.5-dev+3b591c2e standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_is_reachable_and_opens_on_the_source_step` | tui (linux): passed |
-| 3 | app | (none) | — |
-| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_one_day_only_me_import_takes_that_whole_day_visible_to_the_owner_alone` | tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_user_pauses_resumes_and_cancels_and_what_arrived_stays` | tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 13 | app | (none) | — |
-| 14 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | tui (linux): passed |
-| 15 | app | (none) | — |
-| 16 | app | (none) | — |
-| 17 | nest | (none) | — |
-| 18 | app | (none) | — |
-| 19 | app | (none) | — |
-| 20 | app | `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone` | tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | tui (linux): passed |
-| 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 22 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | tui (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone` | tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 25 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 26 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 27 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 30 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_one_day_only_me_import_takes_that_whole_day_visible_to_the_owner_alone` | tui (linux): passed |
-| 31 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | tui (linux): passed |
-| 32 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | tui (linux): passed |
-| 33 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | tui (linux): passed |
-| 34 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 35 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_started_on_one_device_is_finished_from_another` | tui (linux): passed |
-| 36 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 37 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | tui (linux): passed |
-| 37 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | tui (linux): passed |
-| 38 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_record_with_too_many_pictures_is_noted_in_the_skip_list_with_how_many_were_dropped` | tui (linux): passed |
-| 39 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | tui (linux): passed |
-| 40 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | tui (linux): passed |
-| 41 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_stays_on_the_nest_and_no_device_holds_a_copy` | tui (linux): passed |
-| 42 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | tui (linux): passed |
-| 43 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 2 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_is_reachable_and_opens_on_the_source_step` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 3 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_instagram_archive_walks_to_done_and_its_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 4 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 5 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_one_day_only_me_import_takes_that_whole_day_visible_to_the_owner_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 7 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 8 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 10 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_user_pauses_resumes_and_cancels_and_what_arrived_stays` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archived_profile_is_offered_at_done_and_applied_only_on_the_tap` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 15 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_comment_on_the_owners_post_is_folded_under_it_for_the_owner_alone` — requires `post-archive-comments` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_archive_thread_is_listed_read_only_on_the_archive_rail_for_its_owner_alone` — requires `conversations-archive-rail` (not built: android) | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_is_never_sent_on_or_shown_to_anonymous_outside_visitors` | nest (linux): passed |
+| 18 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 19 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 20 | app | `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 21 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 22 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 23 | app | `tests/e2e-unified/tests/test_archive_import.py::test_imported_events_land_in_the_calendar_at_their_times_visible_to_the_owner_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 24 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 25 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 26 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 27 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 28 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 29 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 30 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_one_day_only_me_import_takes_that_whole_day_visible_to_the_owner_alone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 31 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_wizard_guards_each_step_and_writes_nothing_before_start` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 32 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 33 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_restart_mid_import_resumes_from_the_folder` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 34 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 35 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_started_on_one_device_is_finished_from_another` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 36 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 37 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_follower_sees_a_friends_only_import_and_a_stranger_does_not` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 37 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 38 | app | `tests/e2e-unified/tests/test_archive_import.py::test_a_record_with_too_many_pictures_is_noted_in_the_skip_list_with_how_many_were_dropped` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 39 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 40 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 41 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_stays_on_the_nest_and_no_device_holds_a_copy` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 42 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 43 | app | `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 44 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_the_nest_holds_the_archive_and_what_the_app_worked_out_only_sealed` | nest (linux): passed |
 | 45 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_carries_nothing_that_identifies_it_on_the_other_service` | nest (linux): passed |
-| 46 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_others` | tui (linux): passed |
+| 46 | app | `tests/e2e-unified/tests/test_archive_import.py::test_an_imported_post_can_be_liked_replied_to_and_reposted_by_the_owner_and_others` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 47 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_the_only_you_audience_is_never_offered_and_cannot_be_subscribed` | nest (linux): passed |
 | 48 | nest | `tests/e2e-unified/tests/api/test_only_me_tier_never_offered.py::test_a_subscriber_to_the_highest_tier_never_opens_an_only_you_import` | nest (linux): passed |
 | 49 | nest | `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_nobody_can_look_the_importer_up_by_their_identity_on_the_other_service` | nest (linux): passed |
-| 50 | app | (none) | — |
-| 51 | app | (none) | — |
-| 52 | app | (none) | — |
-| 53 | app | (none) | — |
-| 54 | app | (none) | — |
-| 55 | app | (none) | — |
-| 56 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | tui (linux): passed |
-| 57 | app | (none) | — |
+| 50 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 51 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 52 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 53 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 54 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 55 | app | `tests/e2e-unified/tests/test_archive_link_merge.py::test_two_contacts_link_their_archives_and_each_comment_and_reaction_comes_back_signed_by_its_author` | linux (linux): passed, tui (linux): passed, tui (windows): passed |
+| 56 | app | `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 57 | app | `tests/e2e-unified/tests/test_archive_import.py::test_view_imported_lists_only_the_imported_posts_and_the_done_links_lead_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 <!-- features-render:end -->

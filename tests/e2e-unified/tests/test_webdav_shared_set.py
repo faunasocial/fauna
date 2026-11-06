@@ -16,8 +16,8 @@ two seats:
   * **owner** — the mail venue's claimed admin on the cached `app`, mail enabled
     through its own UI (the MSEK the serve seals the `WebdavKeysBlob` under) and
     the WebDAV client authenticated with that mail credential;
-  * **member** — a fresh app launch (tui, linux, macOS, windows or android,
-    `_MEMBER_SEATS`) signed in as a handled actor the owner shares the set with
+  * **member** — a fresh app launch (tui, linux, macOS, windows, android or
+    iOS, `_MEMBER_SEATS`) signed in as a handled actor the owner shares the set with
     and promotes to writer (a reader never binds an engine).
 
 Journey, every mutation through the app UI (convention 8): the owner creates the
@@ -50,12 +50,12 @@ other bound-folder apps follow by gaining a param here — the owner is the run'
 cached `app`, the member a `_MEMBER_SEATS` arm, so every owner × member pairing
 the run's app axis can drive is collected (`served_share_member` is in
 `conftest._REAL_SECOND_APP_FIXTURES`: both seats must be drivable here). macOS
-is a MEMBER column only — the owner promotes the member to writer, and apple
-declares no owner-side access-grant UI (`ui/folders.md`), so a macOS owner arm
-is a declared absence and the macOS witness is `[tui-macos]`, run with
-`--app macos,tui`. macOS spawns its agent only under `real_sync_agent`, which
-the module already carries; the restart barrier reads the macOS launch's
-`app.err`, where the direct-spawned agent's stderr lands.
+is an owner AND a member column — its member row's role select promotes the
+member to writer (`ui/folders.md` § Sharing) — so `--app macos,tui` collects
+`[macos-tui]` (the macOS owner, first green 2026-10-24) and `[tui-macos]`.
+macOS spawns its agent only under `real_sync_agent`, which the module already
+carries; the restart barrier reads the macOS launch's `app.err`, where the
+direct-spawned agent's stderr lands. iOS binds no folder, so it is no owner here.
 
 linux is an owner AND a member column too — it carries the owner-side
 access-grant UI and direct-spawns its agent like tui, so `--app linux` on Linux
@@ -91,10 +91,26 @@ same bytes IS the barrier, the Media-side reader exemption reading the MDA's row
 (`writer-signed-change-records.md` ruling (7)(b)(ii) and rule (6)'s digest echo).
 Before the serve the member reads the owner's seed the same way, so a red after
 the serve cannot be misread as a sharing fault. The owner is the tui seat:
-`--app android,tui` collects `[tui-android]` (an android owner is a declared
-absence — it binds no place for the seed). The module's `android` mark is what
+`--app android,tui` collects `[tui-android]` (an android owner is narrowed out at
+collection — it binds no place for the seed). The module's `android` mark is what
 lets the feature catalog see this test as android's witness: it reads marks off
 the module and the test, never off a parametrize arm's own mark.
+
+iOS binds no folder either (`architecture/apps/sync-agent.md` § Scope per
+platform), so its column is the same member-reads leg: the iOS member downloads
+through its Media page into the launch's `download_dir()` (the simulator shares
+the host filesystem). The owner is the macOS or tui seat on macOS:
+`--app ios,macos` collects `[macos-ios]`, `--app ios,tui` `[tui-ios]`. Its
+module mark is load-bearing for the feature catalog exactly as android's is.
+
+**A phone is never the owner, and `first_seat` is what says so.** Both phones are
+marked for the module because the catalog reads their column off that mark, so
+the marks alone would keep `[ios-ios]` and `[ios-macos]`. Those arms bind no
+place, and every item is attributed to the apps its params name, so one that ran
+would write a `skipped` onto a column whose outcome the member-reads leg passes,
+and onto the macOS column beside it. `first_seat` narrows them out at collection
+(`feature-catalog.md` § Cell semantics: a seat an app cannot drive is narrowed
+out, never gated by a `declared_absence`).
 
 web is an OWNER column — the witness is `[web-tui]`, run with `--app web,tui`
 (and `[web-android]` with `--app web,android`). web binds no local folder
@@ -140,8 +156,11 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.windows,
     pytest.mark.android,
+    pytest.mark.ios,
     # The OWNER seat only (`_MEMBER_SEATS` carries no web arm).
     pytest.mark.web,
+    # Who can hold the owner's seat: every app above but the two phones.
+    pytest.mark.first_seat("tui", "linux", "macos", "windows", "web"),
     pytest.mark.real_conversations,
     pytest.mark.real_sync_agent,
     pytest.mark.isolated_sync_agent,
@@ -176,31 +195,6 @@ def _served(nest, name: str) -> bool:
         reply = ws.call("fauna.folders.list", {})
     row = find_set(reply.get("folders", []), name)
     return bool(row and row.get("webdav_enabled"))
-
-
-def _require_owner_seat(app) -> None:
-    """The owner seat is the run's cached ``app``; skip, declared, where that app
-    cannot be the owner of this journey."""
-    from helpers.app_surface import declared_absence
-
-    if app.driver.is_macos() or app.driver.is_ios():
-        # The owner promotes the member to writer, and apple carries no
-        # owner-side access-grant UI; its column is the MEMBER seat of a tui
-        # owner (`[tui-macos]`, the `test_folder_writer_revocation.py` shape).
-        declared_absence(
-            app.driver,
-            capability="owner-side access-grant surface (folder-member-role-select)",
-            doc="ui/folders.md § Implementation status today (macOS and iOS have none at all)",
-        )
-    if app.driver.is_android():
-        # The owner binds a place to seal the seed (and, in the bound-folder
-        # witness, to read leg (a) back); android binds none. Its column is the
-        # MEMBER seat of a tui owner (`[tui-android]`).
-        declared_absence(
-            app.driver,
-            capability="user-bindable folder location (the owner's sealed seed)",
-            doc="architecture/apps/sync-agent.md § Scope per platform",
-        )
 
 
 def _share_with_writer_member(owner_app, member_app, member, nest) -> str:
@@ -257,7 +251,7 @@ def _share_with_writer_member(owner_app, member_app, member, nest) -> str:
     # The folder list re-fetches on page-VISIBLE, so toggle away and back after
     # each miss (the proven pattern in the content-sync twin).
     def _accepted_set_listed() -> bool:
-        if any(set_name in mb.folder_title(i) for i in range(mb.folder_count())):
+        if any(set_name in t for t in mb.folder_titles()):
             return True
         mb.navigate_devices()
         mb.navigate_folders()
@@ -394,7 +388,7 @@ def _member_media_reads(member_app, name: str, expected: bytes, window: float, w
 
 
 def _member_reads_leg(owner_app, member_app, client, nest, set_name: str, tmp_path) -> None:
-    """The column of a member seat that binds no folder (android): the owner's
+    """The column of a member seat that binds no folder (android, iOS): the owner's
     seed, then a mount-written file, each read on the member's own Media page.
     No member bind, no seed hydration, no leg (a), no restart barrier — the
     member runs no agent; the mount-written file painting and downloading to the
@@ -431,13 +425,14 @@ def _member_reads_leg(owner_app, member_app, client, nest, set_name: str, tmp_pa
 # The member seat's arms — each carries its app mark, so the run's app axis
 # selects it (the `_MEMBER_SEATS` shape of `test_folder_member_media_decrypt.py`).
 # A seat that binds a folder holds the writer's place and runs both legs; one
-# that binds none (android) runs the member-reads leg (`_member_reads_leg`).
+# that binds none (android, iOS) runs the member-reads leg (`_member_reads_leg`).
 _MEMBER_SEATS = [
     pytest.param("tui", marks=pytest.mark.tui),
     pytest.param("linux", marks=pytest.mark.linux),
     pytest.param("macos", marks=pytest.mark.macos),
     pytest.param("windows", marks=pytest.mark.windows),
     pytest.param("android", marks=pytest.mark.android),
+    pytest.param("ios", marks=pytest.mark.ios),
 ]
 
 
@@ -471,8 +466,6 @@ def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
     through the mount hydrates byte-identically into the member's bound place —
     or, for a member that binds no folder, downloads byte-identically from the
     member's own Media page."""
-    _require_owner_seat(app)
-
     handle = dedicated_caldav_mailbox_less_nest
     handle.assert_mta_running()
     member_app, member = served_share_member
@@ -485,7 +478,7 @@ def test_a_shared_and_served_folder_shows_owner_mount_and_member_the_same_files(
 
     set_name = _share_with_writer_member(owner_app, member_app, member, nest)
 
-    if member_app.driver.is_android():
+    if member_app.driver.is_android() or member_app.driver.is_ios():
         _member_reads_leg(owner_app, member_app, client, nest, set_name, tmp_path)
         assert not member_app.has_error(), (
             f"the member surfaced an error: {member_app.error_text()!r}"

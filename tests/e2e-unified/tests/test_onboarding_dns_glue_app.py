@@ -54,7 +54,6 @@ _e2e_dir = str(Path(__file__).resolve().parent.parent)
 if _e2e_dir not in sys.path:
     sys.path.insert(0, _e2e_dir)
 
-from common.nest import CLAIM_CODE
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.waiting import wait_until
 
@@ -71,7 +70,8 @@ _SECRET_HEX = "00000000000000000000000000000000000000000000000000000000000000a1"
 
 @pytest.fixture
 def unclaimed_dns_nest(request, nest_mode, tmp_path_factory):
-    """A fresh, never-claimed nest whose claim code is `common.nest.CLAIM_CODE`.
+    """A fresh, never-claimed nest; its claim code is `nest["claim_code"]`
+    (docker mints one per container, so never the standalone constant).
 
     The journey below drives the real UI claim against it. `unclaimed` is
     honoured in every nest mode (the docker provider declares it), so the
@@ -106,7 +106,7 @@ def _claim_to_nat_mode(app, nest) -> None:
         json.dumps([nest["url"], "admin@localhost"]),
     )
     app.driver.wait_for("claim-code-input", timeout=RPC_ROUNDTRIP_S)
-    app.driver.clear_and_type("claim-code-input", CLAIM_CODE)
+    app.driver.clear_and_type("claim-code-input", nest["claim_code"])
     app.driver.click("claim-code-submit-button")
     # A real WS-RPC claim against a cold nest — the budget is a ceiling, not a
     # target.

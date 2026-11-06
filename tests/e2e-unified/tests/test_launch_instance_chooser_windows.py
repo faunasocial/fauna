@@ -68,13 +68,19 @@ EXIT_BUDGET_S = 45.0
 
 
 def _seed_two_accounts(nest_instance):
-    """A claimed-admin account + a freshly-registered regular-user account, active
-    on the regular user — the shape ``test_account_instance_lock_windows.py`` and
-    ``test_account_switcher_windows.py`` both seed. Returns (seed_map,
-    user_actor_id, admin_actor_id)."""
+    """Two freshly-registered regular-user accounts, active on the regular user
+    (the shape ``test_launch_instance_chooser_linux.py`` seeds). Returns
+    (seed_map, user_actor_id, other_actor_id).
+
+    The second account is a dedicated identity, never the run's shared admin:
+    both instances share a test-owned store the teardown cannot retire, and a
+    shared actor signed in on it would keep a live grant that pins the
+    account's fleet scope for the rest of the run (`e2e-launch-isolation.md`,
+    *A discarded driver retires its machine*)."""
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    other_actor = other["actor_id_hex"]
+    other_secret = bytes(other["signing_key"]).hex()
 
     user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
     user_actor = user["actor_id_hex"]
@@ -85,12 +91,12 @@ def _seed_two_accounts(nest_instance):
         [
             {"actor_id": user_actor, "secret_hex": user_secret, "nest_url": url,
              "device_id": "chooser-user", "handle": "user"},
-            {"actor_id": admin_actor, "secret_hex": admin_secret, "nest_url": url,
-             "device_id": "chooser-admin", "handle": "admin"},
+            {"actor_id": other_actor, "secret_hex": other_secret, "nest_url": url,
+             "device_id": "chooser-other", "handle": "other"},
         ],
         active=user_actor,
     )
-    return seed, user_actor, admin_actor
+    return seed, user_actor, other_actor
 
 
 def _shared_instance_world():
@@ -143,7 +149,7 @@ def test_windows_second_plain_launch_renders_chooser_and_pick_completes_as_that_
     exactly the OTHER registered account (accounts - served = 1) offered — and
     picking it must complete this (second) process's routing as that account,
     leaving A untouched."""
-    seed, user_actor, admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, other_actor = _seed_two_accounts(nest_instance)
     world_base, world = _shared_instance_world()
 
     first = create_driver("windows")
@@ -178,17 +184,17 @@ def test_windows_second_plain_launch_renders_chooser_and_pick_completes_as_that_
             second.wait_for(CHOOSER_ANCHOR, timeout=45)
             assert second.count(CHOOSER_ITEM) == 1, (
                 "with 2 registered accounts and 1 (the user) already served, the "
-                "chooser must offer exactly the other one (the admin)"
+                "chooser must offer exactly the other one"
             )
 
             second.click(CHOOSER_ITEM, index=0)
             state = second.wait_for_state(
-                lambda s: s.get("session", {}).get("actor_id") == admin_actor
+                lambda s: s.get("session", {}).get("actor_id") == other_actor
                 and bool(s.get("session", {}).get("authenticated")),
                 timeout=60,
             )
-            assert state["session"]["actor_id"] == admin_actor, (
-                "picking the only offered row must bind THIS process to the admin "
+            assert state["session"]["actor_id"] == other_actor, (
+                "picking the only offered row must bind THIS process to the other "
                 f"account — no third process; got {state.get('session')!r}"
             )
 
@@ -234,7 +240,7 @@ def test_windows_focus_existing_raises_a_bound_sibling_over_the_per_account_chan
     state transition the harness can observe, and the serving instance's continued
     health is asserted beside it so a "raise" that killed the wrong process cannot
     pass."""
-    seed, user_actor, _admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, _other_actor = _seed_two_accounts(nest_instance)
     world_base, world = _shared_instance_world()
 
     first = create_driver("windows")
@@ -372,7 +378,7 @@ def test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally(
     The order is causal, not timed: the first instance is torn down and its
     account lock observed released (the probe the click re-runs) before the
     click."""
-    seed, user_actor, _admin_actor = _seed_two_accounts(nest_instance)
+    seed, user_actor, _other_actor = _seed_two_accounts(nest_instance)
     world_base, world = _shared_instance_world()
 
     first = create_driver("windows")

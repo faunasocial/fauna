@@ -233,6 +233,13 @@ struct Ctx {
     /// `None` for the orphaned store's, `Some(destination_id)` for a
     /// destination row's. The confirm runs the leg that row's source names.
     reseed_source: RefCell<Option<String>>,
+    /// The pull-back's preflight, held while its confirm is open: the lines
+    /// the modal shows and the acceptance the run carries (`backups.md`
+    /// § Restore after losing the nest). `None` outside a nest-kind confirm.
+    reseed_preflight: RefCell<Option<fauna_client_backup::reseed::PullBackPreflight>>,
+    /// A pull-back's preflight is running: a second press is a no-op until
+    /// it answers.
+    reseed_preflighting: std::cell::Cell<bool>,
     /// `Some(destination_id)` while the recovery confirm is armed for it.
     recovering: RefCell<Option<String>>,
     /// A recovery is running: every `backup-audit-recover-button` is disarmed
@@ -871,6 +878,8 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
         orphaned_store: RefCell::new(None),
         reseed_running: std::cell::Cell::new(false),
         reseed_source: RefCell::new(None),
+        reseed_preflight: RefCell::new(None),
+        reseed_preflighting: std::cell::Cell::new(false),
         recovering: RefCell::new(None),
         recover_running: std::cell::Cell::new(false),
         w: widgets,
@@ -1131,8 +1140,11 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
                                 .find(|d| d.destination_id == id)
                                 .cloned()
                         });
-                        if let Some(destination) = destination {
-                            dispatch_pull_back(&ctx, destination);
+                        // The run takes exactly the preflight the confirm
+                        // showed; without one (a stale press) it does not run.
+                        let accepted = ctx.reseed_preflight.borrow_mut().take();
+                        if let (Some(destination), Some(accepted)) = (destination, accepted) {
+                            dispatch_pull_back(&ctx, destination, accepted);
                         }
                     }
                     Some(fauna_client_backup::reseed::ReseedLeg::ThisDeviceStore) => {
@@ -1569,35 +1581,113 @@ fn open_reseed_confirm(ctx: &Rc<Ctx>, source: Option<String>) {
     let Some(leg) = reseed_leg(ctx, &source) else {
         return;
     };
-    let pulled_from = match leg {
-        fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack => {
-            source.as_ref().and_then(|id| {
-                ctx.last_destinations
-                    .borrow()
-                    .iter()
-                    .find(|d| &d.destination_id == id)
-                    .map(destination_label)
-            })
+    if leg == fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack {
+        // A nest-kind row's confirm opens on the preflight's answer, so the
+        // lines it accepts are on screen before the owner confirms.
+        let destination = source.as_ref().and_then(|id| {
+            ctx.last_destinations
+                .borrow()
+                .iter()
+                .find(|d| &d.destination_id == id)
+                .cloned()
+        });
+        if let Some(destination) = destination {
+            start_pull_back_preflight(ctx, source, destination);
         }
-        fauna_client_backup::reseed::ReseedLeg::ThisDeviceStore => None,
-    };
-    match pulled_from {
-        Some(name) => {
-            ctx.w
-                .reseed_title
-                .set_text(&s::backup_reseed_pull_back_confirm_title(&name));
-            ctx.w
-                .reseed_body
-                .set_text(&s::backup_reseed_pull_back_confirm_body(&name));
-        }
-        None => {
-            ctx.w.reseed_title.set_text(s::BACKUP_RESEED_CONFIRM_TITLE);
-            ctx.w.reseed_body.set_text(s::BACKUP_RESEED_CONFIRM_BODY);
-        }
+        return;
     }
+    ctx.w.reseed_title.set_text(s::BACKUP_RESEED_CONFIRM_TITLE);
+    ctx.w.reseed_body.set_text(s::BACKUP_RESEED_CONFIRM_BODY);
+    *ctx.reseed_preflight.borrow_mut() = None;
     *ctx.reseed_source.borrow_mut() = source;
     ctx.w.reclaim_modal.set_visible(false);
     ctx.w.reseed_modal.set_visible(true);
+}
+
+/// The pull-back confirm's body: the consequence sentence, then one line per
+/// preflight line (the shared `preflight_lines`, resolved) — no id of its own.
+fn pull_back_confirm_body(name: &str, lines: &[String]) -> String {
+    let mut body = s::backup_reseed_pull_back_confirm_body(name);
+    for line in lines {
+        body.push('\n');
+        body.push_str(line);
+    }
+    body
+}
+
+/// Run the shared pull-back preflight for `destination`, then open the
+/// confirm carrying its lines and holding it as the run's acceptance. A press
+/// while one is in flight is a no-op; a preflight failure is the reseed's
+/// failure label and opens nothing.
+fn start_pull_back_preflight(
+    ctx: &Rc<Ctx>,
+    source: Option<String>,
+    destination: BackupDestination,
+) {
+    if ctx.reseed_preflighting.get() {
+        return;
+    }
+    let secret = match secret_from_hex(ctx.client.secret_hex()) {
+        Ok(secret) => secret,
+        Err(e) => {
+            ctx.w.error_label.add_css_class("error");
+            crate::settings::render_error_label(
+                &ctx.w.error_label,
+                Some(&s::BACKUP_RESEED_FAILED.replace("{reason}", &e)),
+            );
+            return;
+        }
+    };
+    ctx.reseed_preflighting.set(true);
+    let name = destination_label(&destination);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            let audit = crate::backup_audit::store(
+                &fauna_core::identity::ActorKeypair::from_secret(secret).actor_id_hex(),
+            );
+            fauna_sync_engine::reseed_pull::pull_back_preflight(
+                fauna_sync_engine::reseed_pull::NativePullBackPreflight {
+                    owner_secret: secret,
+                    destination: &destination,
+                    audit: &audit,
+                },
+            )
+            .await
+        },
+        move |result| {
+            ctx_render.reseed_preflighting.set(false);
+            match result {
+                Ok(preflight) => {
+                    let lines: Vec<String> =
+                        fauna_client_backup::reseed::preflight_lines(&preflight)
+                            .iter()
+                            .map(crate::report::resolve_nested)
+                            .collect();
+                    ctx_render
+                        .w
+                        .reseed_title
+                        .set_text(&s::backup_reseed_pull_back_confirm_title(&name));
+                    ctx_render
+                        .w
+                        .reseed_body
+                        .set_text(&pull_back_confirm_body(&name, &lines));
+                    *ctx_render.reseed_preflight.borrow_mut() = Some(preflight);
+                    *ctx_render.reseed_source.borrow_mut() = source;
+                    ctx_render.w.reclaim_modal.set_visible(false);
+                    ctx_render.w.reseed_modal.set_visible(true);
+                }
+                Err(e) => {
+                    ctx_render.w.error_label.add_css_class("error");
+                    crate::settings::render_error_label(
+                        &ctx_render.w.error_label,
+                        Some(&s::BACKUP_RESEED_FAILED.replace("{reason}", &e)),
+                    );
+                }
+            }
+        },
+    );
 }
 
 /// Arm or disarm every painted `backup-destination-reseed-button`.
@@ -2775,7 +2865,11 @@ enum ReseedDone {
 /// `fauna_sync_engine::reseed_pull::pull_back_from_destination` — the order,
 /// the folder names, the post-ceremony re-enrollment and the verdict are all
 /// its; tui calls the same one. No sync agent is involved.
-fn dispatch_pull_back(ctx: &Rc<Ctx>, destination: BackupDestination) {
+fn dispatch_pull_back(
+    ctx: &Rc<Ctx>,
+    destination: BackupDestination,
+    accepted: fauna_client_backup::reseed::PullBackPreflight,
+) {
     let secret = match secret_from_hex(ctx.client.secret_hex()) {
         Ok(secret) => secret,
         Err(e) => {
@@ -2812,6 +2906,9 @@ fn dispatch_pull_back(ctx: &Rc<Ctx>, destination: BackupDestination) {
         &ctx.rt,
         move || async move {
             let store = backup_seam();
+            let audit = crate::backup_audit::store(
+                &fauna_core::identity::ActorKeypair::from_secret(secret).actor_id_hex(),
+            );
             let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
                 fauna_sync_engine::reseed_pull::NativePullBack {
                     target: nest,
@@ -2820,6 +2917,9 @@ fn dispatch_pull_back(ctx: &Rc<Ctx>, destination: BackupDestination) {
                     destination: &destination,
                     store: store.as_ref(),
                     folder_keys: crate::account_runtime::folder_key_store(),
+                    audit: Some(&audit),
+                    // Exactly the preflight the confirm showed.
+                    accepted: Some(accepted),
                 },
             )
             .await;
@@ -3022,6 +3122,22 @@ mod tests {
     /// The orphaned row offers the restore ahead of the reclaim, and the
     /// confirm modal paints both of its ui.yaml ids (`backups.md` § Restore
     /// after losing the nest).
+    /// The pull-back confirm's body is the consequence sentence followed by one
+    /// line per preflight line, in order (`backups.md` § Restore after losing
+    /// the nest).
+    #[test]
+    fn the_pull_back_confirm_body_carries_the_preflight_lines() {
+        let lines = vec!["first line".to_string(), "second line".to_string()];
+        let body = pull_back_confirm_body("Home nest", &lines);
+        let head = s::backup_reseed_pull_back_confirm_body("Home nest");
+        assert_eq!(body, format!("{head}\nfirst line\nsecond line"));
+        assert_eq!(
+            pull_back_confirm_body("Home nest", &[]),
+            head,
+            "no lines leaves the bare sentence"
+        );
+    }
+
     #[test]
     fn the_orphaned_row_offers_the_reseed_ahead_of_the_reclaim() {
         crate::testid::run_on_gtk_thread(|| {

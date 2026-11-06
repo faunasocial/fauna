@@ -1117,6 +1117,29 @@ fn is_profile_not_found<E: fauna_protocol::RpcErrorClass>(e: &E) -> bool {
         .is_some_and(|r| r.code == fauna_protocol::RpcError::CODE_PROFILE_NOT_FOUND)
 }
 
+/// A relayed profile must be the asked-for actor's (`profile.md` § Where logic
+/// lives → *The remote read*): bytes that do not verify, or that verify as
+/// another actor's profile, are refused as `fauna.profile.not_found` — the
+/// home served no profile of `actor_id`, and the header falls to the id
+/// rather than paint another key's name and pictures. The reader's
+/// own nest refuses the same bytes at its relay; this is the app's own check,
+/// the twin of `fauna-feed`'s byline binding.
+fn bind_relayed_profile<E: From<fauna_protocol::RpcError>>(
+    body: &[u8],
+    actor_id: &str,
+) -> Result<(), E> {
+    match decode_profile(body) {
+        Ok((profile, _)) if hex::encode(profile.actor_id.0).eq_ignore_ascii_case(actor_id) => {
+            Ok(())
+        }
+        _ => Err(fauna_protocol::RpcError::new(
+            fauna_protocol::RpcError::CODE_PROFILE_NOT_FOUND,
+            "profile not served by its home nest",
+        )
+        .into()),
+    }
+}
+
 /// Typed `fauna.profile.*` call surface, generic over the WS-RPC transport
 /// (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the wasm SPA
 /// passes its `WsRpcClient`. Errors propagate as the transport's `R::Error`.
@@ -1185,7 +1208,7 @@ impl<R: RpcRequester> ProfileClient<R> {
         home: Option<&str>,
     ) -> Result<ProfileGetReply, R::Error>
     where
-        R::Error: fauna_protocol::RpcErrorClass,
+        R::Error: fauna_protocol::RpcErrorClass + From<fauna_protocol::RpcError>,
     {
         self.profile_header_read(actor_id, home)
             .await
@@ -1200,19 +1223,24 @@ impl<R: RpcRequester> ProfileClient<R> {
     /// blob route the app reads through `fauna_client::PostBlobHosts` —
     /// handing it `home_nest_actor_id`, the home's identity the relay reply
     /// stamped, so the plane's pin graduates before the first byte.
+    ///
+    /// A relayed reply is bound to `actor_id`: bytes that are not that
+    /// actor's verified signed profile are the home's `not_found`, the
+    /// header's id fallback ([`bind_relayed_profile`]).
     pub async fn profile_header_read(
         &self,
         actor_id: impl Into<String>,
         home: Option<&str>,
     ) -> Result<HeaderRead, R::Error>
     where
-        R::Error: fauna_protocol::RpcErrorClass,
+        R::Error: fauna_protocol::RpcErrorClass + From<fauna_protocol::RpcError>,
     {
         let actor_id = actor_id.into();
         match self.profile_get(actor_id.clone()).await {
             Err(e) if is_profile_not_found(&e) => match home {
                 Some(home) => {
-                    let reply = self.profile_get_remote(actor_id, home).await?;
+                    let reply = self.profile_get_remote(actor_id.clone(), home).await?;
+                    bind_relayed_profile(&reply.body, &actor_id)?;
                     let home_nest_actor_id = reply.home_nest_actor_id.clone();
                     Ok(HeaderRead {
                         reply,
@@ -2815,21 +2843,33 @@ mod tests {
         "ab".repeat(32)
     }
 
+    /// The actor the relay tests ask for, and its own signed profile — the
+    /// only bytes a relayed read keeps.
+    fn x_kp() -> ActorKeypair {
+        ActorKeypair::from_secret([31u8; 32])
+    }
+    fn x_hex() -> String {
+        hex::encode(x_kp().actor_id().0)
+    }
+    fn x_profile() -> Vec<u8> {
+        build_profile(&x_kp(), &base_profile(&x_kp())).expect("sign X's profile")
+    }
+
     #[test]
     fn the_header_read_relays_to_the_carried_home_only_on_a_local_not_found() {
         // Local hit: the relay is never asked.
-        let nest = RelayNest::new(Ok(vec![1]), Ok(vec![2]));
-        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+        let nest = RelayNest::new(Ok(vec![1]), Ok(x_profile()));
+        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), Some(HOME)))
             .expect("local hit");
         assert_eq!(reply.body.into_vec(), vec![1]);
         assert!(nest.relayed().is_empty());
 
         // Local not_found with a home: the relay's bytes, asked of that home.
-        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
-        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+        let nest = RelayNest::new(Err(not_found()), Ok(x_profile()));
+        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), Some(HOME)))
             .expect("relayed");
-        assert_eq!(reply.body.into_vec(), vec![2]);
-        assert_eq!(nest.relayed(), vec![(hex32(), HOME.to_string())]);
+        assert_eq!(reply.body.into_vec(), x_profile());
+        assert_eq!(nest.relayed(), vec![(x_hex(), HOME.to_string())]);
     }
 
     /// The header's pictures rest where its bytes came from: a profile this
@@ -2840,17 +2880,17 @@ mod tests {
     /// (`transport-trust.md` § The post arm → *A relayed profile's pictures*).
     #[test]
     fn the_header_read_names_the_home_a_relayed_profile_came_from() {
-        let nest = RelayNest::new(Ok(vec![1]), Ok(vec![2]));
-        let read = block_on(ProfileClient::new(&nest).profile_header_read(hex32(), Some(HOME)))
+        let nest = RelayNest::new(Ok(vec![1]), Ok(x_profile()));
+        let read = block_on(ProfileClient::new(&nest).profile_header_read(x_hex(), Some(HOME)))
             .expect("local hit");
         assert_eq!(read.reply.body.into_vec(), vec![1]);
         assert_eq!(read.relayed_from, None, "this nest answered: its own blobs");
         assert_eq!(read.home_nest_actor_id, None, "and no foreign home to pin");
 
-        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
-        let read = block_on(ProfileClient::new(&nest).profile_header_read(hex32(), Some(HOME)))
+        let nest = RelayNest::new(Err(not_found()), Ok(x_profile()));
+        let read = block_on(ProfileClient::new(&nest).profile_header_read(x_hex(), Some(HOME)))
             .expect("relayed");
-        assert_eq!(read.reply.body.into_vec(), vec![2]);
+        assert_eq!(read.reply.body.into_vec(), x_profile());
         assert_eq!(read.relayed_from.as_deref(), Some(HOME));
         assert_eq!(
             read.home_nest_actor_id.as_deref(),
@@ -2862,24 +2902,44 @@ mod tests {
     #[test]
     fn the_header_read_falls_back_without_a_home_or_on_any_other_error() {
         // No home in hand: the local not_found stands, no relay.
-        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
-        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), None))
+        let nest = RelayNest::new(Err(not_found()), Ok(x_profile()));
+        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), None))
             .expect_err("no home, no relay");
         assert!(is_profile_not_found(&err));
         assert!(nest.relayed().is_empty());
 
         // A local fault is not a not_found: no relay behind it.
-        let nest = RelayNest::new(Err(MirrorErr(None)), Ok(vec![2]));
+        let nest = RelayNest::new(Err(MirrorErr(None)), Ok(x_profile()));
         assert!(
-            block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME))).is_err()
+            block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), Some(HOME))).is_err()
         );
         assert!(nest.relayed().is_empty());
 
         // The home refusing (not opted in, not hosted) is the same not_found.
         let nest = RelayNest::new(Err(not_found()), Err(not_found()));
-        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), Some(HOME)))
             .expect_err("home refused");
         assert!(is_profile_not_found(&err));
+    }
+
+    /// A hostile home answering for X with another actor's validly signed
+    /// profile — or with bytes that do not verify — served no profile of X:
+    /// both doors answer the home's `not_found`, the header's id fallback,
+    /// never V's name and pictures on X's header.
+    #[test]
+    fn a_relayed_profile_not_bound_to_the_asked_for_actor_is_not_found() {
+        let v = ActorKeypair::from_secret([32u8; 32]);
+        let v_profile = build_profile(&v, &base_profile(&v)).expect("sign V's profile");
+        for remote in [v_profile, vec![2]] {
+            let nest = RelayNest::new(Err(not_found()), Ok(remote.clone()));
+            let err = block_on(ProfileClient::new(&nest).profile_header_read(x_hex(), Some(HOME)))
+                .expect_err("the header read refuses an unbound profile");
+            assert!(is_profile_not_found(&err));
+            let nest = RelayNest::new(Err(not_found()), Ok(remote));
+            let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(x_hex(), Some(HOME)))
+                .expect_err("so does the bytes-only door");
+            assert!(is_profile_not_found(&err));
+        }
     }
 
     // ── publish_recovery_head: the read-modify-write transport hop ────────
@@ -2897,6 +2957,12 @@ mod tests {
                 Some(e) => write!(f, "rejected: {}", e.code),
                 None => write!(f, "transport fault"),
             }
+        }
+    }
+
+    impl From<fauna_protocol::RpcError> for MirrorErr {
+        fn from(e: fauna_protocol::RpcError) -> Self {
+            Self(Some(e))
         }
     }
 

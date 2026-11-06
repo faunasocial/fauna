@@ -14,7 +14,7 @@ refusals) and ``docs/goal/behavior/identity-succession.md`` § Seed escrow →
 """
 from __future__ import annotations
 
-from helpers.app_surface import skip_environment, skip_unbuilt
+from helpers.app_surface import skip_environment
 from helpers.waiting import wait_until
 
 #: How long a restore may take to land or refuse: challenge, sign, fetch, unseal
@@ -23,26 +23,16 @@ from helpers.waiting import wait_until
 RESTORE_OUTCOME_S = 45.0
 
 
-def skip_unless_restore_is_built(app) -> None:
-    """Temporary debt gate: has this app's restore leg landed yet?
+def require_restore_button(app) -> None:
+    """The restore leg's entry is on the status screen.
 
-    Not a declared absence — every app owes this screen. ``skip_unbuilt``
-    fails under ``--strict-app`` and is tallied every run, so the gap stays
-    visible instead of reading as a pass.
+    Every app renders ``restore-from-recovery-kit-button`` (onboarding.md § 1
+    Identity), so its absence is a regression the journey reports, not unbuilt
+    debt it skips (convention 7, *The surface registry*).
     """
-    if app.is_visible("restore-from-recovery-kit-button"):
-        return
-    skip_unbuilt(
-        app.driver,
-        surface="restore-from-recovery-kit-button",
-        detail=(
-            "onboarding.md § 1 Identity; tui leads and the other six follow "
-            "in batched trickle-down"
-        ),
-        tracked=(
-            "docs/goal/behavior/identity-succession.md "
-            "§ Implementation status today"
-        ),
+    assert app.is_visible("restore-from-recovery-kit-button"), (
+        "restore-from-recovery-kit-button is not on the status screen:\n"
+        + app.driver.diagnose("restore-from-recovery-kit-button")
     )
 
 
@@ -129,7 +119,7 @@ def lose_every_device_and_open_restore(app, nest_instance) -> None:
     """
     app.driver.reset()
     app.onboarding.navigate_to_status()
-    skip_unless_restore_is_built(app)
+    require_restore_button(app)
     point_the_restore_at(app, nest_instance)
     app.onboarding.open_recovery_entry()
 

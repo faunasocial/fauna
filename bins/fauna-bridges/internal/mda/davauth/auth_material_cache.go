@@ -3,6 +3,8 @@ package davauth
 import (
 	"sync"
 	"time"
+
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 )
 
 // authMaterialTTL bounds how long the auth middleware reuses a cached
@@ -44,6 +46,11 @@ type authMaterial struct {
 	mlkemEk      []byte // the ML-KEM half of pubkey; set whenever pubkey is
 	indexKey     []byte // nil when nest has no index key on file
 	snapshotBlob []byte // nil when nest has no snapshot on file
+	// registeredCalendar / registeredCard are the calendar and card keys the
+	// nest has registered (nil when it sent none). The session seals to the
+	// keys its MSEK derives; these are only compared against them at AUTH.
+	registeredCalendar *wsrpc.SealKeyPair
+	registeredCard     *wsrpc.SealKeyPair
 }
 
 type authMaterialEntry struct {

@@ -538,6 +538,19 @@ private fun SpamGroup(
                     baselineStandingPublish = initial.baselineStandingPublish,
                 ),
             )
+            // A non-number saved as the previous value (`parse_count(..).unwrap_or(prev)`):
+            // show what was kept, since `remember(initial)` does not reset when the saved
+            // config is unchanged.
+            junk = (parseCount(junk) ?: initial.maxScoreBeforeSpamFolder).toString()
+            reject = (parseCount(reject) ?: initial.maxScoreBeforeReject).toString()
+            greylistDelay = (parseCount(greylistDelay) ?: initial.greylistDelaySecs).toString()
+            maxConn = (parseCount(maxConn) ?: initial.maxConnPerMin).toString()
+            maxBytes = (parseCount(maxBytes) ?: initial.maxMessageBytes).toString()
+            bayesianWeight = (parseCount(bayesianWeight) ?: initial.bayesianWeightMilli).toString()
+            bayesianMinSamples = (parseCount(bayesianMinSamples) ?: initial.bayesianMinSamples).toString()
+            bayesianFullConfidence = (parseCount(bayesianFullConfidence) ?: initial.bayesianFullConfidenceSamples).toString()
+            trainingRetention = (parseCount(trainingRetention) ?: initial.trainingHistoryRetentionDays).toString()
+            unlistedRecipientPenalty = (parseCount(unlistedRecipientPenalty) ?: initial.unlistedRecipientPenalty).toString()
         }
         // ── Deployment baseline (admin opt-in aggregate; publish_spam_baseline) ──
         val baselineGate = faunaGate("fauna.bridges.publish_spam_baseline", enabled = !working)
@@ -836,6 +849,7 @@ private fun DmarcGroup(
     var foMode by remember(initial) { mutableStateOf(initial.foMode) }
     var aggregateRetention by remember(initial) { mutableStateOf(initial.aggregateRetentionDays.toString()) }
     var forensicRetention by remember(initial) { mutableStateOf(initial.forensicRetentionDays.toString()) }
+    var outboundAggregate by remember(initial) { mutableStateOf(initial.outboundAggregateEnabled) }
 
     GroupCard(
         stringResource(R.string.admin_mail_page_dmarc_group_title),
@@ -862,6 +876,7 @@ private fun DmarcGroup(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        ToggleRow(stringResource(R.string.admin_mail_page_dmarc_outbound_aggregate_label), null, outboundAggregate, !working, { outboundAggregate = it }, Ids.ADMIN_MAIL_DMARC_OUTBOUND_AGGREGATE_TOGGLE)
         SaveButton(
             Ids.ADMIN_MAIL_DMARC_SAVE_BUTTON,
             stringResource(R.string.admin_mail_page_dmarc_save),
@@ -873,6 +888,7 @@ private fun DmarcGroup(
                     foMode = foMode,
                     aggregateRetentionDays = parseCount(aggregateRetention) ?: initial.aggregateRetentionDays,
                     forensicRetentionDays = parseCount(forensicRetention) ?: initial.forensicRetentionDays,
+                    outboundAggregateEnabled = outboundAggregate,
                 ),
             )
         }

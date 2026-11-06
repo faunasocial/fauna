@@ -97,6 +97,7 @@ use fauna_protocol::sync::{
 use fauna_transport::PeerTransport;
 use futures_util::future::BoxFuture;
 
+use crate::account_runtime::ServeStoreFacts;
 use crate::device_endpoints_writer::EndpointFacts;
 use crate::principal_bundle::PrincipalCustody;
 /// The ensure and dial passes' report shapes — the driver's vocabulary
@@ -160,6 +161,11 @@ pub struct PeerLegFactoryInputs {
     /// are correct for a production `relay.<domain>` certificate, and
     /// `custom_roots` stays the test-relay injection point.
     pub relay_url: Option<String>,
+    /// The enrollment witness the leg admits under (the slot's
+    /// `DeviceAuthorization`, the one the serve side presents). Production
+    /// factories ignore it; a host's e2e probe arm keeps it, to dial as this
+    /// device outside the runtime's own passes (the agent's `ProbePeerLeg`).
+    pub device_authorization: fauna_core::encoding::EmbedAsBytes,
 }
 
 /// Constructs the peer transport bound to this machine's device principal.
@@ -425,8 +431,8 @@ where
     let participation = reconcile_participation(state, store, writer_key, slot, rpc).await;
     if !participation.effective() {
         if state.node.is_some() {
-            drop_listener(state);
-            tracing::info!("peer leg: participation is off on this device — listener dropped");
+            stand_down(state).await;
+            tracing::info!("peer leg: participation is off on this device — listener closed");
         }
         return Ok(PeerLegPass::ParticipationOff);
     }
@@ -513,6 +519,7 @@ where
     let binding = factory(PeerLegFactoryInputs {
         writer_key: writer_key.clone(),
         relay_url: nest_facts.iroh_relay_url.clone(),
+        device_authorization: witness.wire.clone(),
     })
     .await
     .context("peer leg: transport factory")?;
@@ -522,15 +529,14 @@ where
     // posture).
     let account: [u8; 32] = fauna_core::hex32::decode(&state.actor_id_hex)
         .map_err(|e| anyhow::anyhow!("peer leg: actor id: {e}"))?;
-    let writer = WriterId(writer_key.verifying_key().to_bytes());
-    let serve_backend = match &state.seal_key {
-        Some(key) => SqliteBackend::open_with_key(&state.store_dir, key.clone()),
-        None => SqliteBackend::open(&state.store_dir),
-    }
-    .context("peer leg: open serve backend")?;
-    let serve_store = AccountStore::open(serve_backend, &state.actor_id_hex, writer)
-        .await
-        .context("peer leg: open serve store")?;
+    let serve_store = open_serve_store(ServeStoreFacts {
+        store_dir: state.store_dir.clone(),
+        seal_key: state.seal_key.clone(),
+        actor_id_hex: state.actor_id_hex.clone(),
+        writer: WriterId(writer_key.verifying_key().to_bytes()),
+    })
+    .await
+    .context("peer leg: open serve store")?;
     let now: NowFn = Arc::new(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -538,7 +544,7 @@ where
             .unwrap_or(0)
     });
     let server = Arc::new(PeerSyncServer::new(
-        ServeStoreHandle::spawn(serve_store),
+        serve_store,
         account,
         PeerSyncServerConfig {
             // Pre-auth-visible surface: no name by design (a label is a user
@@ -899,10 +905,11 @@ where
 /// Dial a target's transport candidates and open the peer channel on the
 /// resulting connection — shared by the sibling dial pass ([`dial_one`])
 /// and the custody dial pass (`custody_leg::dial_one_owner`), which
-/// otherwise re-derived this identically (scouted 2026-08-19). Mutual
-/// admission differs per caller (a sibling admits over the fleet witness, a
-/// custodian over the custody grant) and stays local to each.
-pub(crate) async fn dial_and_open_channel(
+/// otherwise re-derived this identically (scouted 2026-08-19), and by the
+/// agent's e2e probe arm (`ProbePeerLeg`), which dials as this device outside
+/// any pass. Mutual admission differs per caller (a sibling admits over the
+/// fleet witness, a custodian over the custody grant) and stays local to each.
+pub async fn dial_and_open_channel(
     transport: &Arc<dyn PeerTransport>,
     target: &fauna_peer_sync::PeerDialTarget,
 ) -> Result<Arc<fauna_peer_channel::PeerChannel>> {
@@ -1085,19 +1092,87 @@ fn drop_listener(state: &mut PeerLegState) {
     }
 }
 
-/// The yield's half of the peer leg (`account-runtime.md` § Multi-instance
-/// concurrency → *The agent holds the role when present*, part 3): the node is
-/// shut down and AWAITED — its accept loop ended, its listener gone — before
-/// everything [`drop_listener`] drops goes too. The caller releases
+/// How long a stand-down waits for the transport's graceful close before it
+/// drops the transport anyway — a budget a green run never pays (convention
+/// 14): a close sends one frame per connection and returns, and only a
+/// transport that cannot send at all would reach this.
+const CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The peer leg coming down — the yield's half (`account-runtime-roles.md`
+/// § Multi-instance concurrency → *The agent holds the role when present*,
+/// part 3) and the participation switch's (`p2p.md` § Per-device
+/// participation): the node is shut down and AWAITED — its accept loop
+/// ended, its listener gone — then the transport is CLOSED, which tells every
+/// sibling holding a connection to it that the connection is over, and only
+/// then does everything [`drop_listener`] drops go. The caller releases
 /// `engine.lock` after this returns, and the sync agent binds the same NodeId
 /// only once it holds that lock, so the machine's one identity is never an
 /// endpoint in two processes. The next bind, if this runtime ever holds the
 /// role again, starts from the factory as a first bind does.
+///
+/// The close is not a courtesy. A transport that is only dropped leaves each
+/// connected sibling sending into a port nothing listens on until its idle
+/// timer gives up, and on Windows every such send draws an ICMP
+/// port-unreachable that leaves the sibling's own socket receiving nothing
+/// more — all its other connections die with it (`p2p.md` § Implementation
+/// status today).
+///
+/// A shutdown stands the leg down too, and last of all the serve side's own
+/// connection to this account's store is waited CLOSED: a shutdown's receipt
+/// follows this, and a sign-out's erase follows the receipt, which on windows
+/// cannot delete a store still open (`account-scoping.md` § Erasure follows
+/// scope, the open-store note).
 pub(crate) async fn stand_down(state: &mut PeerLegState) {
+    // Named before anything drops: once the server goes, nothing names its
+    // serving thread any more.
+    let closed = state
+        .server
+        .as_ref()
+        .map(|server| server.own_store_closed());
     if let Some(node) = state.node.take() {
         node.shutdown().await;
     }
+    if let Some(transport) = state.transport.as_ref()
+        && tokio::time::timeout(CLOSE_BUDGET, transport.close())
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            "peer leg: the transport did not close within {CLOSE_BUDGET:?} — dropping it; \
+             its connected siblings learn of it only from their idle timers"
+        );
+    }
     drop_listener(state);
+    await_serve_closes(closed.into_iter().collect(), "peer leg").await;
+}
+
+/// How long a stand-down waits for a serving thread's close once its last
+/// handle is gone — a bound, not a clock: the close takes milliseconds, and an
+/// elapse is reported, never taken for a close.
+const SERVE_CLOSE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Wait until each serving thread in `closes` has closed its store, under
+/// [`SERVE_CLOSE_BUDGET`]. Called once every handle to those threads has been
+/// dropped: dropping the last one only asks a thread to end
+/// ([`fauna_peer_sync::server::ServeStoreClosed`]).
+pub(crate) async fn await_serve_closes(
+    closes: Vec<fauna_peer_sync::server::ServeStoreClosed>,
+    what: &str,
+) {
+    if closes.is_empty() {
+        return;
+    }
+    let all = futures_util::future::join_all(
+        closes
+            .into_iter()
+            .map(fauna_peer_sync::server::ServeStoreClosed::wait),
+    );
+    if tokio::time::timeout(SERVE_CLOSE_BUDGET, all).await.is_err() {
+        tracing::warn!(
+            "{what}: a serving store was still open {SERVE_CLOSE_BUDGET:?} after its stand-down \
+             — an erase now meets it open, which windows refuses (os error 32)"
+        );
+    }
 }
 
 /// The participation half of the ensure step (`p2p.md` § Per-device
@@ -1187,6 +1262,37 @@ where
         }
     }
     row
+}
+
+/// Open a serve handle over a SECOND connection to an account's store — the
+/// store's multi-connection posture, the serve shape every serving side
+/// shares: the peer leg's sync server, and the share plane's group feed
+/// (`group-set.md` § decision 6), whose facts the runtime seats on its handle
+/// ([`crate::account_runtime::AccountStoreHandle::serve_store_facts`]). ONE
+/// opener, so no host builds its own copy.
+///
+/// The open runs on a blocking thread of its own: the store's AFIT futures
+/// are not `Send`, and a caller on a multi-thread runtime (the share plane's
+/// driver task) must still be able to await this.
+pub async fn open_serve_store(facts: ServeStoreFacts) -> Result<ServeStoreHandle> {
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .context("serve store: current-thread runtime")?;
+        let store = rt.block_on(async {
+            let backend = match facts.seal_key {
+                Some(key) => SqliteBackend::open_with_key(&facts.store_dir, key),
+                None => SqliteBackend::open(&facts.store_dir),
+            }
+            .context("serve store: open backend")?;
+            AccountStore::open(backend, &facts.actor_id_hex, facts.writer)
+                .await
+                .context("serve store: open store")
+        })?;
+        Ok(ServeStoreHandle::spawn(store))
+    })
+    .await
+    .context("serve store: open task")?
 }
 
 /// One live `fauna.nest.info` read, as the facts the peer leg and the
@@ -2268,6 +2374,90 @@ mod tests {
         sibling_admits(&net, &enrolled, sibling)
             .await
             .expect("a derived snapshot that lists no one admits every sibling");
+    }
+
+    /// **A stood-down leg has CLOSED its serve connection by the time
+    /// `stand_down` returns** — the property the account runtime's stop
+    /// receipt rests on, and so every sign-out's erase.
+    ///
+    /// The bind opens a second connection to the account's own store (the
+    /// serve side's, owned by its own thread). Dropping the node and the server
+    /// only asks that thread to end; it closes the store some time later, on
+    /// its own. Measured 2026-11-02 `--app tui` on Windows: the runtime reported
+    /// the store stopped, the erase ran within milliseconds, and the scope
+    /// survived with `account-store.db` and both sidecars still held — the
+    /// serve connection, still open. POSIX unlinks an open file, so only
+    /// windows shows it (`account-scoping.md` § Erasure follows scope, the
+    /// open-store note).
+    ///
+    /// The witness is the sidecars: the test's own connection is dropped
+    /// first, so the serve side's is the last one, and SQLite deletes
+    /// `-wal`/`-shm` only when the last connection closes cleanly.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stand_down_returns_only_once_the_serve_connection_is_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let enrolled = Enrolled::at(dir.path()).await;
+        let net = fauna_transport::testing::listeners();
+        let me = enrolled.key.verifying_key().to_bytes();
+        let factory: PeerTransportFactory = {
+            let net = Arc::clone(&net);
+            Arc::new(move |_inputs: PeerLegFactoryInputs| {
+                let net = Arc::clone(&net);
+                Box::pin(async move {
+                    let transport: Arc<dyn PeerTransport> =
+                        Arc::new(fauna_transport::testing::MemTransport {
+                            me: fauna_transport::EndpointKey::from_bytes(me),
+                            listeners: net,
+                        });
+                    Ok(PeerLegBinding {
+                        transport,
+                        bound_addrs: Vec::new(),
+                        file_sync: None,
+                    })
+                })
+            })
+        };
+        let mut state = PeerLegState::new(
+            Some(factory),
+            dir.path().to_path_buf(),
+            enrolled.actor_hex.clone(),
+        );
+        let pass = ensure_bound(
+            &mut state,
+            &enrolled.store,
+            &enrolled.key,
+            &enrolled.slot,
+            &UnreachableNest,
+            &[],
+        )
+        .await
+        .expect("every bind gate is open");
+        assert_eq!(pass, PeerLegPass::Bound);
+        fauna_transport::testing::await_listening(&net, &me).await;
+
+        // The serve side's connection is now the only one.
+        drop(enrolled.store);
+        let db = fauna_account_store::sqlite::ACCOUNT_STORE_DB_FILENAME;
+        let wal = dir.path().join(format!("{db}-wal"));
+        let shm = dir.path().join(format!("{db}-shm"));
+        assert!(
+            wal.is_file(),
+            "precondition: the bound serve side holds the store open, so its \
+             -wal sidecar stands ({})",
+            wal.display()
+        );
+
+        stand_down(&mut state).await;
+
+        assert!(
+            !wal.exists() && !shm.exists(),
+            "stand_down returned with the serve connection still OPEN (-wal \
+             present: {}, -shm present: {}): the runtime's stop receipt follows \
+             this, and the erase follows the receipt — on windows an open file \
+             cannot be deleted, so the signed-out scope survives",
+            wal.exists(),
+            shm.exists()
+        );
     }
 
     /// The snapshot's whole answer table, through the two views production

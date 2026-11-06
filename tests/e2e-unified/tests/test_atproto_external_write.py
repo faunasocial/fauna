@@ -137,7 +137,7 @@ def test_external_app_write_becomes_a_fauna_post(
     bluesky_nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
 ):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
     from conftest import _make_nest, _repo_root
     from helpers.bridge_enrollment import approve_bridge
     from drivers.port_util import (
@@ -195,9 +195,7 @@ def test_external_app_write_becomes_a_fauna_post(
 
         # ── 1. Alice enters the hosted level; the bridge boots with the XRPC +
         # firehose listener up. ──
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
+        alice = admit_adult(nest, "alice", domain=HANDLE_DOMAIN, token=True)
         alice_secret = bytes(alice["signing_key"])
         alice_ws = WsRpcAdminClient(
             nest["url"], actor_id=alice["actor_id_bytes"], signing_key=alice_secret

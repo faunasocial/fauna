@@ -88,6 +88,9 @@ public struct DmMessageBubble: View {
     /// and re-emits the snapshot with `RemoteImage.revealed = true`; the bubble holds **no** reveal
     /// state of its own and repaints off the fresh `message.document`.
     public var onRevealRemoteImages: (MessageId) -> Void
+    /// `dm-message-withheld-badge` tap: open the Moderation page's appeal draft on the
+    /// queue row with this `content_id` (``PendingAppealStore``), never a second form.
+    public var onAppealWithheld: (String) -> Void
     /// Toggle `emoji` on this message — the shared
     /// `ConversationsManager.toggle_reaction(thread, msg, emoji)`, threaded down from
     /// `ConversationsVM` (conversations.md § Reactions & message delete). The manager
@@ -137,6 +140,7 @@ public struct DmMessageBubble: View {
         loadAttachment: @escaping (String) -> Data? = { _ in nil },
         attachmentResidency: [Bool] = [],
         onRevealRemoteImages: @escaping (MessageId) -> Void = { _ in },
+        onAppealWithheld: @escaping (String) -> Void = { _ in },
         onToggleReaction: @escaping (MessageId, String) -> Void = { _, _ in },
         onDeleteMessage: @escaping (MessageId) -> Void = { _ in },
         onMarkAsSpam: @escaping (MessageId) -> Void = { _ in },
@@ -152,6 +156,7 @@ public struct DmMessageBubble: View {
         self.loadAttachment = loadAttachment
         self.attachmentResidency = attachmentResidency
         self.onRevealRemoteImages = onRevealRemoteImages
+        self.onAppealWithheld = onAppealWithheld
         self.onToggleReaction = onToggleReaction
         self.onDeleteMessage = onDeleteMessage
         self.onMarkAsSpam = onMarkAsSpam
@@ -304,6 +309,14 @@ public struct DmMessageBubble: View {
         return matchesMutedKeywords(body: message.body, mutedKeywords: mutedKeywords)
     }
 
+    /// Reply / Reply All are offered (enabled) only where the rail takes a per-message
+    /// reply AND the room can take a send at all — `canSend` is `false` on a bridged
+    /// room whose bridge is disconnected (and on iOS, where the bar has no inline field,
+    /// these buttons are the only way into the compose screen).
+    private var replyAllowed: Bool {
+        capabilities.supportsPerMessageReply && capabilities.canSend
+    }
+
     public var body: some View {
         let decision = decision
         let contentVerdict = decision.verdict
@@ -312,11 +325,26 @@ public struct DmMessageBubble: View {
                 deletedPlaceholder
             } else if let reference = message.legalTakedownRef {
                 legalTakedownPlaceholder(reference)
+            } else if let reason = message.adminBlockReason, adminBlockInPlace(message.document) {
+                // A withheld record (empty document): the notice stands in the
+                // bubble's place; the author's own kept body paints it beside
+                // the body in `messageContent` (takedown-and-block.md decision 4).
+                adminBlockPlaceholder(reason)
             } else if let withheld = decision.withheld(revealed: contentRevealed) {
                 // The region arm, AHEAD of the family arm (same verb, better
                 // attributed — region-blocking.md § The blocked render); its
                 // collapse reveal shares the family reveal state.
-                RegionPlaceholderView(placeholder: withheld, witnessKey: witnessKey) {
+                RegionPlaceholderView(
+                    placeholder: withheld, witnessKey: witnessKey,
+                    sealedNote: decision.sealedNote(
+                        encryption: capabilities.encryption, inputs: contentPolicy,
+                        labels: message.labels)
+                ) {
+                    contentRevealed = true
+                }
+                timestampLabel
+            } else if let withheldNest = decision.withheldByNest(revealed: contentRevealed) {
+                NestPlaceholderView(placeholder: withheldNest, witnessKey: witnessKey) {
                     contentRevealed = true
                 }
                 timestampLabel
@@ -324,10 +352,10 @@ public struct DmMessageBubble: View {
                 // AHEAD of the muted arm on purpose (the linux/web/android
                 // ordering): a guardian `block` must never be reachable through
                 // the muted-keyword reveal.
-                ContentPolicyBlockedNotice(reported: decision.reported)
+                ContentPolicyBlockedNotice(reported: decision.reported, reason: decision.guardianReason)
                 timestampLabel
             } else if contentVerdict == "collapse" && !contentRevealed {
-                ContentPolicyCollapsedPlaceholder { contentRevealed = true }
+                ContentPolicyCollapsedPlaceholder(reason: decision.guardianReason) { contentRevealed = true }
                 timestampLabel
             } else if isMutedMatch && !mutedRevealed {
                 mutedPlaceholder
@@ -352,6 +380,9 @@ public struct DmMessageBubble: View {
         .regionBlockWitness(
             witnessKey,
             blocked: !message.deleted && message.legalTakedownRef == nil && decision.isRegionBlocked)
+        .nestBlockWitness(
+            witnessKey,
+            blocked: !message.deleted && message.legalTakedownRef == nil && decision.isNestBlocked)
         // Fire-once resolve for each still-`Resolving` link preview in this bubble (render-model.md
         // § D4) → the manager folds `Resolved`/`Failed` onto the block + re-emits → the card paints.
         // Keyed on the resolving-url set so it fires once and settles (the feed card's fire-once
@@ -388,9 +419,24 @@ public struct DmMessageBubble: View {
     /// timestamp, body and actions are all hidden — rather than painting an empty or
     /// failed-decrypt bubble. No dedicated ui.yaml id (presentation inside the existing
     /// bubble scope, like the quoted-post tombstone). Mirrors web / linux / android.
+    private func adminBlockPlaceholder(_ reason: String) -> some View {
+        HStack(spacing: 6) {
+            Text(adminBlockNoticeText(reason))
+                .font(.caption)
+                .italic()
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            timestampLabel
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Tagged `dm-message-legal-takedown` (the twin of `dm-message-deleted`, owner-approved
+    /// 2026-10-16); `automationText` registers the id + painted string like `deletedPlaceholder`.
     private func legalTakedownPlaceholder(_ reference: String) -> some View {
         HStack(spacing: 6) {
-            Text(renderLocalizedText(legalTakedownTombstone(reference: reference)))
+            automationText(Ids.dmMessageLegalTakedown,
+                           renderLocalizedText(legalTakedownTombstone(reference: reference)))
                 .font(.caption)
                 .italic()
                 .foregroundStyle(.secondary)
@@ -482,6 +528,29 @@ public struct DmMessageBubble: View {
             // large body's FFI render doesn't repeat on every automation touch.
             .automationValue(Ids.dmMessageText, text: { cachedDocumentPlaintext(for: message) })
 
+        // The author's own blocked message keeps its body; the shared notice paints
+        // right beside it (no new id).
+        // When the withheld badge's ground is `blocked` the badge carries the block
+        // notice, so it replaces this line (one notice, never two).
+        let withheld = message.withheld
+        if let reason = message.adminBlockReason, withheld?.ground != .blocked {
+            AdminBlockNoticeLine(reason: reason)
+        }
+
+        // The author's own withheld message (`takedown-and-block.md` § Legal takedown →
+        // *App render*): the shared `withheld.lines` (the ground — its argument is itself a
+        // key, so resolved NESTED — the "decided by {nest}" suffix, the appeal entry),
+        // joined ` · `; its tap opens the queue row's appeal.
+        if let withheld {
+            let text = withheld.lines.map(renderLocalizedTextNested).joined(separator: " · ")
+            Button { onAppealWithheld(withheld.contentId) } label: {
+                Text(text).font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier(Ids.dmMessageWithheldBadge)
+            .automationActivate(Ids.dmMessageWithheldBadge, text: { text }) { onAppealWithheld(withheld.contentId) }
+        }
+
         // Per-message remote-image reveal (html-mail Slice 3 / D3): shown only while this
         // body has ≥1 still-blocked remote image. Tapping dispatches to the manager, which
         // flips its reveal set + re-emits with `revealed = true` (the sole inbound image
@@ -530,11 +599,48 @@ public struct DmMessageBubble: View {
         // fills them once `refreshMessageScanResults` ran for the opened thread).
         // Below the body and its attachments, after delivered-to where that row
         // exists, before the timestamp's slot (mirrors tui).
+        //
+        // The alias a received mail message arrived on, and its label
+        // (`mail-aliases.md` § Label): the shared `MessageSnapshot.deliveredTo`,
+        // already worded — the manager resolves it once `refreshDeliveredAliases`
+        // ran for the opened thread, the snapshot path every app shares.
+        if let deliveredTo = message.deliveredTo {
+            automationText(Ids.dmMessageDeliveredToAlias, deliveredTo)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
         if !message.scanResultLines.isEmpty {
             automationText(
                 Ids.dmMessageScanResult,
                 message.scanResultLines.map(renderLocalizedText).joined(separator: "\n"))
                 .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+
+        // A Sent message the bridge never took (`conversations.md` § A bridged room
+        // no bridge serves, and a Sent message the bridge never took): the body stays
+        // in view and this one indexed line says it did not go out — no resend. Shared
+        // Rust sets `MessageSnapshot.undelivered`; after attachments and link previews,
+        // before reactions (tui's placement, the `dm-message-deleted` family).
+        if message.undelivered {
+            automationText(Ids.dmMessageUndelivered, L.conversations.unified.dmMessageUndelivered)
+                .font(.caption2)
+                .italic()
+                .foregroundStyle(.secondary)
+        }
+
+        // A Sent message the fresh-IP warm-up holds (`mail-deliverability.md`
+        // § Enforcement at submission time): one indexed line right after
+        // `dm-message-undelivered`, worded by the shared Rust door
+        // `warmupDeferredText` — nil once the release time has come, so no app
+        // formats the date or the count.
+        if let hold = message.warmupHold,
+           let warmupText = warmupDeferredText(
+               hold: hold, nowSecs: Int64(Date().timeIntervalSince1970))
+        {
+            automationText(Ids.dmMessageWarmupDeferred, warmupText)
+                .font(.caption2)
+                .italic()
                 .foregroundStyle(.secondary)
         }
 
@@ -560,9 +666,9 @@ public struct DmMessageBubble: View {
                     .font(.caption2)
             }
             .buttonStyle(.borderless)
-            .disabled(!capabilities.supportsPerMessageReply)
+            .disabled(!replyAllowed)
             .accessibilityIdentifier(Ids.dmReplyButton)
-            .automationActivate(Ids.dmReplyButton, isEnabled: { capabilities.supportsPerMessageReply }) {
+            .automationActivate(Ids.dmReplyButton, isEnabled: { replyAllowed }) {
                 onReply(message.messageId, false)
             }
 
@@ -574,9 +680,9 @@ public struct DmMessageBubble: View {
                         .font(.caption2)
                 }
                 .buttonStyle(.borderless)
-                .disabled(!capabilities.supportsPerMessageReply)
+                .disabled(!replyAllowed)
                 .accessibilityIdentifier(Ids.dmReplyAllButton)
-                .automationActivate(Ids.dmReplyAllButton, isEnabled: { capabilities.supportsPerMessageReply }) {
+                .automationActivate(Ids.dmReplyAllButton, isEnabled: { replyAllowed }) {
                     onReply(message.messageId, true)
                 }
             }
@@ -745,7 +851,10 @@ public struct DmMessageBubble: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier(Ids.dmMessageMarkAsSpamButton)
-                .automationActivate(Ids.dmMessageMarkAsSpamButton) { performMarkAsSpam() }
+                .automationActivate(
+                    Ids.dmMessageMarkAsSpamButton,
+                    text: { L.conversations.detail.markAsSpam }
+                ) { performMarkAsSpam() }
             }
             #endif
 
@@ -762,7 +871,10 @@ public struct DmMessageBubble: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier(Ids.dmMessageReportButton)
-                .automationActivate(Ids.dmMessageReportButton) { openReport() }
+                .automationActivate(
+                    Ids.dmMessageReportButton,
+                    text: { L.conversations.detail.reportMessage }
+                ) { openReport() }
             }
         }
         .padding(8)

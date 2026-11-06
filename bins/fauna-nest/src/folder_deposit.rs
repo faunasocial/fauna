@@ -23,15 +23,20 @@
 //! What the handler checks, in order, after the dispatch chokepoint admitted
 //! the kind for the `folder_deposit` arm: the request's shape; that one of the
 //! session's scopes names THIS folder (the per-folder half of the arm); that
-//! the owner minted a LIVE keyless `deposit` grant over this folder to the
-//! key the principal attested (the audit + revocation record,
+//! the principal attested a writer key and the owner minted a LIVE keyless
+//! `deposit` grant over this folder to the key the principal attested,
+//! confined to that writer (the audit + revocation record,
 //! `encryption-at-rest.md` § Capability tiering → *Third-party holders*,
 //! re-resolved at every deposit like the oracle's `identity.op` grants); that
 //! the folder is the account's own; and that its residency is not
 //! metadata-only — the one ruled refusal pair (`ui/folders.md` § Audience and
 //! website serving → *Third-party deposit and read*: nothing to park). Every
 //! refusal but that last answers alike, so a depositor never learns whether a
-//! folder it does not hold exists.
+//! folder it does not hold exists. Before it seals, the handler verifies the
+//! depositor's signature over the [`DepositStatement`] under the caller's own
+//! attested writer key — never a key the request names — and writes that key
+//! and the signature into the sealed envelope (`folder-deposit.md` § The
+//! depositor signs, the owner's device verifies).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,14 +49,15 @@ use serde_bytes::ByteBuf;
 
 use fauna_protocol::folders::{
     DEPOSIT_UPLOAD_TOKEN_BYTES, DEPOSITS_LIST_PAGE_BYTES, DepositEnvelope, DepositPart,
-    FolderDepositBeginReply, FolderDepositBeginRequest, FolderDepositCommitRequest,
-    FolderDepositPartRequest, FolderDepositReply, FolderDepositRequest, FolderDepositsListReply,
-    FolderDepositsListRequest, FolderDepositsPartReply, FolderDepositsPartRequest,
-    FolderDepositsRetireReply, FolderDepositsRetireRequest, KIND_FOLDERS_DEPOSIT,
-    KIND_FOLDERS_DEPOSIT_BEGIN, KIND_FOLDERS_DEPOSIT_COMMIT, KIND_FOLDERS_DEPOSIT_PART,
-    KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_PART, KIND_FOLDERS_DEPOSITS_RETIRE,
-    MAX_DEPOSIT_BYTES, MAX_DEPOSIT_PART_BYTES, MAX_DEPOSIT_PARTS, MAX_DEPOSIT_TOTAL_BYTES,
-    ParkedDeposit, is_deposit_name,
+    DepositStatement, FolderDepositBeginReply, FolderDepositBeginRequest,
+    FolderDepositCommitRequest, FolderDepositPartRequest, FolderDepositReply, FolderDepositRequest,
+    FolderDepositsListReply, FolderDepositsListRequest, FolderDepositsPartReply,
+    FolderDepositsPartRequest, FolderDepositsRetireReply, FolderDepositsRetireRequest,
+    KIND_FOLDERS_DEPOSIT, KIND_FOLDERS_DEPOSIT_BEGIN, KIND_FOLDERS_DEPOSIT_COMMIT,
+    KIND_FOLDERS_DEPOSIT_PART, KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_PART,
+    KIND_FOLDERS_DEPOSITS_RETIRE, MAX_DEPOSIT_BYTES, MAX_DEPOSIT_CONTENT_TYPE_BYTES,
+    MAX_DEPOSIT_PART_BYTES, MAX_DEPOSIT_PARTS, MAX_DEPOSIT_TOTAL_BYTES, ParkedDeposit,
+    is_deposit_name,
 };
 use fauna_protocol::{RpcError, decode_strict as decode};
 
@@ -83,11 +89,13 @@ fn scope_names_folder(scopes: &[String], folder_id: i64) -> bool {
         .any(|s| fauna_bridge_atproto::fauna_scope::folder_deposit_qualifier(s) == Some(folder_id))
 }
 
-/// Does any of `blobs` carry a `deposit` tuple over `folder_id` whose window
-/// is open at `now`? The door's re-resolution of the owner's grant.
+/// Does any of `blobs` carry a `deposit` tuple over `folder_id` confined to
+/// `writer`, whose window is open at `now`? The door's re-resolution of the
+/// owner's grant: a tuple naming another writer admits nothing.
 fn any_grant_admits_deposit<'a>(
     blobs: impl IntoIterator<Item = &'a [u8]>,
     folder_id: i64,
+    writer: &[u8; 32],
     now: i64,
 ) -> bool {
     blobs.into_iter().any(|blob| {
@@ -98,7 +106,7 @@ fn any_grant_admits_deposit<'a>(
                 && grant
                     .scope
                     .iter()
-                    .any(|t| t.is_folder_deposit_for(folder_id))
+                    .any(|t| t.names_deposit_writer(folder_id, writer))
         })
     })
 }
@@ -116,6 +124,31 @@ const _: () = assert!(MAX_DEPOSIT_TOTAL_BYTES == DEPOSIT_INBOX_CEILING_BYTES);
 
 /// How long a staged upload may sit idle before it expires with its parts.
 pub(crate) const DEPOSIT_UPLOAD_IDLE_SECS: i64 = 60 * 60;
+
+/// The most staged uploads one principal may hold open at once, across every
+/// folder it deposits into. A begun upload parks no byte the inbox quota
+/// counts until its first part, so without this count a principal looping
+/// `fauna.folders.deposit.begin` piles up rows that every sweep then scans
+/// under the database lock (`folder-deposit.md` § Deposits larger than one
+/// message).
+pub(crate) const MAX_STAGED_DEPOSIT_UPLOADS_PER_PRINCIPAL: u32 = 16;
+
+/// The most staged uploads one folder may hold open at once, across every
+/// principal depositing into it — the bound on the owner's side, however many
+/// principals the owner consented to.
+pub(crate) const MAX_STAGED_DEPOSIT_UPLOADS_PER_FOLDER: u32 = 64;
+
+/// The typed refusal for a begin past
+/// [`MAX_STAGED_DEPOSIT_UPLOADS_PER_PRINCIPAL`] or
+/// [`MAX_STAGED_DEPOSIT_UPLOADS_PER_FOLDER`] (HTTP `429`).
+fn too_many_uploads() -> RpcError {
+    crate::rpc_errors::coded_ns(
+        NS,
+        "too_many_uploads",
+        "too many staged uploads are open; commit or abandon one (an idle upload expires \
+         after an hour) before beginning another",
+    )
+}
 
 /// The typed refusal for a deposit or part that would take the account's
 /// inbox segment past its quota.
@@ -145,11 +178,13 @@ async fn inbox_limit(state: &AppState, account: &[u8; 32]) -> Result<u64, RpcErr
 }
 
 /// What every deposit call is admitted with: the folder, the key its items
-/// seal to, and the inbox quota.
+/// seal to, the inbox quota, and the caller's attested writer key — the one
+/// its signature is verified under and the envelope names.
 struct Admitted {
     folder: crate::db::FolderRow,
     key: crate::db::bridge_routing::RecipientSealKey,
     limit: u64,
+    writer: [u8; 32],
 }
 
 /// The checks the module doc lists, run at EVERY deposit call — a
@@ -166,13 +201,17 @@ async fn admit(
     let Some(holder) = caller.holder_x25519 else {
         return Err(not_depositable());
     };
+    // A principal that attested no writer key cannot sign, so cannot deposit.
+    let Some(writer) = caller.writer_ed25519 else {
+        return Err(not_depositable());
+    };
     let now = crate::db::now_epoch_secs();
     let grants = state
         .db
         .fetch_capability_grants_for_holder_owned_by(&caller.account, &holder, now)
         .await
         .map_err(internal)?;
-    if !any_grant_admits_deposit(grants.iter().map(Vec::as_slice), folder_id, now) {
+    if !any_grant_admits_deposit(grants.iter().map(Vec::as_slice), folder_id, &writer, now) {
         return Err(not_depositable());
     }
     let folder = state
@@ -201,7 +240,30 @@ async fn admit(
         ));
     };
     let limit = inbox_limit(state, &caller.account).await?;
-    Ok(Admitted { folder, key, limit })
+    Ok(Admitted {
+        folder,
+        key,
+        limit,
+        writer,
+    })
+}
+
+/// Verify the depositor's signature over `statement` under `writer` — a
+/// missing or failing one is `invalid_params`.
+fn verify_statement(
+    statement: &DepositStatement,
+    writer: &[u8; 32],
+    sig: &[u8],
+) -> Result<(), RpcError> {
+    statement.verify(writer, sig).map_err(|e| {
+        invalid_params_ns(
+            NS,
+            format!(
+                "fauna.folders.deposit: {e} under the writer key this principal attested \
+                 (folder-deposit.md § The depositor signs)"
+            ),
+        )
+    })
 }
 
 /// Seal `value`'s canonical CBOR to the owner's recipient key — the
@@ -212,6 +274,7 @@ fn seal_to_owner<T: serde::Serialize>(
 ) -> Result<Vec<u8>, RpcError> {
     let plaintext = fauna_protocol::encode_canonical(value).map_err(internal)?;
     crate::bridge_routing_handlers::seal_recipient_blob(
+        fauna_mls::wrapped_blob::RecordKind::Mail,
         &plaintext,
         &key.mls_pubkey,
         Some(key.mlkem_ek.as_slice()),
@@ -223,6 +286,19 @@ fn accepted() -> FolderDepositReply {
     FolderDepositReply {
         accepted: true,
         extra: Default::default(),
+    }
+}
+
+/// A media type longer than [`MAX_DEPOSIT_CONTENT_TYPE_BYTES`] is refused on
+/// both kinds: it is sealed into the item, and its bytes must stay small.
+fn require_deposit_content_type(content_type: &str) -> Result<(), RpcError> {
+    if content_type.len() <= MAX_DEPOSIT_CONTENT_TYPE_BYTES {
+        Ok(())
+    } else {
+        Err(invalid_params_ns(
+            NS,
+            format!("content_type is at most {MAX_DEPOSIT_CONTENT_TYPE_BYTES} bytes"),
+        ))
     }
 }
 
@@ -245,6 +321,7 @@ async fn deposit(
     req: FolderDepositRequest,
 ) -> Result<FolderDepositReply, RpcError> {
     require_deposit_name(&req.name)?;
+    require_deposit_content_type(&req.content_type)?;
     if req.body.len() > MAX_DEPOSIT_BYTES {
         return Err(invalid_params_ns(
             NS,
@@ -254,7 +331,17 @@ async fn deposit(
             ),
         ));
     }
-    let Admitted { folder, key, limit } = admit(state, caller, req.folder_id).await?;
+    let Admitted {
+        folder,
+        key,
+        limit,
+        writer,
+    } = admit(state, caller, req.folder_id).await?;
+    // The nest holds the whole plaintext here, so the statement binds the
+    // body too.
+    let statement =
+        DepositStatement::for_body(req.folder_id, &req.name, &req.content_type, &req.body);
+    verify_statement(&statement, &writer, &req.sig)?;
     let sealed = seal_to_owner(
         &key,
         &DepositEnvelope {
@@ -262,7 +349,9 @@ async fn deposit(
             content_type: req.content_type,
             body: req.body,
             parts: 0,
-            extra: Default::default(),
+            writer: Some(writer),
+            sig: req.sig,
+            ..Default::default()
         },
     )?;
     let now = crate::db::now_epoch_secs();
@@ -332,9 +421,12 @@ async fn deposit_begin(
             &caller.principal_id,
             &token,
             crate::db::now_epoch_secs(),
+            MAX_STAGED_DEPOSIT_UPLOADS_PER_PRINCIPAL,
+            MAX_STAGED_DEPOSIT_UPLOADS_PER_FOLDER,
         )
         .await
-        .map_err(internal)?;
+        .map_err(internal)?
+        .ok_or_else(too_many_uploads)?;
     Ok(FolderDepositBeginReply {
         upload: ByteBuf::from(token.to_vec()),
         extra: Default::default(),
@@ -359,7 +451,9 @@ async fn deposit_part(
             format!("a deposit has at most {MAX_DEPOSIT_PARTS} parts"),
         ));
     }
-    let Admitted { folder, key, limit } = admit(state, caller, req.folder_id).await?;
+    let Admitted {
+        folder, key, limit, ..
+    } = admit(state, caller, req.folder_id).await?;
     let (id, committed) = find_upload(state, caller, folder.id, &req.upload).await?;
     if committed {
         return Err(crate::rpc_errors::invalid_request_ns(
@@ -367,6 +461,7 @@ async fn deposit_part(
             "this upload is committed; it takes no more parts",
         ));
     }
+    let plain_len = req.body.len() as u64;
     let sealed = seal_to_owner(
         &key,
         &DepositPart {
@@ -377,7 +472,14 @@ async fn deposit_part(
     )?;
     if !state
         .db
-        .put_folder_deposit_part(id, req.index, &sealed, crate::db::now_epoch_secs(), limit)
+        .put_folder_deposit_part(
+            id,
+            req.index,
+            &sealed,
+            plain_len,
+            crate::db::now_epoch_secs(),
+            limit,
+        )
         .await
         .map_err(internal)?
     {
@@ -386,8 +488,15 @@ async fn deposit_part(
     Ok(accepted())
 }
 
-/// `fauna.folders.deposit.commit` — seal the header (the name, the media type
-/// and the part count) and make the item adoptable in one write.
+/// `fauna.folders.deposit.commit` — verify the depositor's signature, seal the
+/// header (the name, the media type, the part count, the writer and the
+/// signature) and make the item adoptable in one write.
+///
+/// The parts may arrive out of order or be re-sent and rest sealed, so the
+/// nest cannot hash them: the statement is built from the request's own
+/// `hash` and the staged parts' summed plaintext length, and verifies
+/// authorship alone — the body binding is the adopter's (a principal lying
+/// about its own hash loses only its own deposit).
 async fn deposit_commit(
     state: &AppState,
     caller: &PrincipalCaller,
@@ -399,7 +508,13 @@ async fn deposit_commit(
             format!("a staged deposit has 1 to {MAX_DEPOSIT_PARTS} parts"),
         ));
     }
-    let Admitted { folder, key, .. } = admit(state, caller, req.folder_id).await?;
+    require_deposit_content_type(&req.content_type)?;
+    let Admitted {
+        folder,
+        key,
+        limit,
+        writer,
+    } = admit(state, caller, req.folder_id).await?;
     let (id, committed) = find_upload(state, caller, folder.id, &req.upload).await?;
     if committed {
         return Ok(accepted());
@@ -414,6 +529,24 @@ async fn deposit_commit(
             .map_err(internal)?;
         return Err(e);
     }
+    let hash: [u8; 32] = req.hash.as_slice().try_into().map_err(|_| {
+        invalid_params_ns(
+            NS,
+            "hash is the whole body's 32-byte BLAKE3 (folder-deposit.md § The depositor signs)",
+        )
+    })?;
+    let statement = DepositStatement {
+        folder_id: req.folder_id,
+        name: req.name.clone(),
+        content_type: req.content_type.clone(),
+        len: state
+            .db
+            .staged_folder_deposit_plain_length(id)
+            .await
+            .map_err(internal)?,
+        hash,
+    };
+    verify_statement(&statement, &writer, &req.sig)?;
     let header = seal_to_owner(
         &key,
         &DepositEnvelope {
@@ -421,12 +554,14 @@ async fn deposit_commit(
             content_type: req.content_type,
             body: ByteBuf::new(),
             parts: req.parts,
-            extra: Default::default(),
+            writer: Some(writer),
+            sig: req.sig,
+            ..Default::default()
         },
     )?;
     match state
         .db
-        .commit_folder_deposit_upload(id, req.parts, &header, crate::db::now_epoch_secs())
+        .commit_folder_deposit_upload(id, req.parts, &header, crate::db::now_epoch_secs(), limit)
         .await
         .map_err(internal)?
     {
@@ -435,6 +570,7 @@ async fn deposit_commit(
             Ok(accepted())
         }
         DepositCommit::AlreadyCommitted => Ok(accepted()),
+        DepositCommit::InboxFull => Err(inbox_full()),
         DepositCommit::PartsMismatch => Err(invalid_params_ns(
             NS,
             "the staged parts are not exactly the indices 0..parts",
@@ -679,10 +815,30 @@ pub struct DepositQuery {
     name: String,
 }
 
+/// The header the HTTP door's depositor signature rides: the 64-byte Ed25519
+/// signature over the [`DepositStatement`], unpadded base64url
+/// (`folder-deposit.md` § The depositor signs, the owner's device verifies).
+pub const DEPOSIT_SIGNATURE_HEADER: &str = "fauna-deposit-signature";
+
+/// The signature [`DEPOSIT_SIGNATURE_HEADER`] carries; `None` when it is
+/// absent or not 64 bytes of unpadded base64url.
+fn deposit_signature(headers: &HeaderMap) -> Option<[u8; 64]> {
+    use base64::Engine as _;
+    let value = headers.get(DEPOSIT_SIGNATURE_HEADER)?.to_str().ok()?;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.trim())
+        .ok()?
+        .try_into()
+        .ok()
+}
+
 /// `POST /api/v1/folders/{id}/deposit` — a remote principal's deposit. The
 /// token rides `Authorization: DPoP <token>` with its `DPoP` proof (RFC 9449;
-/// `htm` POST, `htu` this folder's door); the body is the file's bytes and
-/// `?name=` its name. Answers `202 {"accepted": true}` and nothing else.
+/// `htm` POST, `htu` this folder's door); the body is the file's bytes,
+/// `?name=` its name and [`DEPOSIT_SIGNATURE_HEADER`] the depositor's
+/// signature over the statement of the folder, the name, the request's
+/// `Content-Type`, the body's length and its BLAKE3 (`400` when absent or
+/// malformed). Answers `202 {"accepted": true}` and nothing else.
 ///
 /// The body streams: a file that fits one message goes through
 /// `fauna.folders.deposit` as it always has; a larger one — up to
@@ -690,6 +846,9 @@ pub struct DepositQuery {
 /// through `fauna.folders.deposit.{begin,part,commit}`, each part sealed before
 /// the next is read, so the door never holds more than two parts of plaintext
 /// and the item becomes adoptable only once the whole body has arrived. The
+/// door hashes the body as it streams and verifies the signature over the
+/// streamed length and hash before it dispatches the kind that makes the item
+/// adoptable, so the body binding holds on this door whatever its size. The
 /// route is mounted outside the router's blanket body limit for this reason
 /// (`lib.rs`); this handler is the one that bounds it.
 pub async fn deposit_http_handler(
@@ -717,6 +876,13 @@ pub async fn deposit_http_handler(
         Ok(admission) => admission,
         Err(response) => return response,
     };
+    let Some(sig) = deposit_signature(&headers) else {
+        return crate::principal_session::rpc_error_response(&invalid_params_ns(
+            NS,
+            "the deposit carries no Fauna-Deposit-Signature header of 64 bytes, unpadded \
+             base64url (folder-deposit.md § The depositor signs)",
+        ));
+    };
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -727,7 +893,7 @@ pub async fn deposit_http_handler(
         binding: admission.binding,
         folder_id,
     };
-    match door.deposit(query.name, content_type, body).await {
+    match door.deposit(query.name, content_type, sig, body).await {
         Ok(()) => (
             StatusCode::ACCEPTED,
             axum::Json(serde_json::json!({ "accepted": true })),
@@ -777,15 +943,37 @@ impl HttpDoor {
         decode(&reply).map_err(|_| DoorError::Status(StatusCode::INTERNAL_SERVER_ERROR))
     }
 
+    /// Verify `sig` over the statement of the whole streamed body, under the
+    /// caller's attested writer key, before the kind that makes the item
+    /// adoptable is dispatched. A caller with no writer key (or no longer a
+    /// principal) is left to that kind, which refuses it with the gate's
+    /// own answer.
+    async fn verify_streamed(
+        &self,
+        statement: &DepositStatement,
+        sig: &[u8],
+    ) -> Result<(), DoorError> {
+        let caller = crate::principal_handlers::resolve_principal(&self.state, &self.binding)
+            .await
+            .map_err(|_| DoorError::Status(StatusCode::INTERNAL_SERVER_ERROR))?;
+        if let Some(writer) = caller.and_then(|c| c.writer_ed25519) {
+            verify_statement(statement, &writer, sig)?;
+        }
+        Ok(())
+    }
+
     async fn deposit(
         &self,
         name: String,
         content_type: String,
+        sig: [u8; 64],
         body: axum::body::Body,
     ) -> Result<(), DoorError> {
         use futures_util::StreamExt;
-        // Refuse a name the commit would refuse before reading any body.
+        // Refuse a name or type the commit would refuse before reading any body.
         require_deposit_name(&name)?;
+        require_deposit_content_type(&content_type)?;
+        let mut hasher = blake3::Hasher::new();
         let mut stream = body.into_data_stream();
         let mut buf: Vec<u8> = Vec::with_capacity(MAX_DEPOSIT_PART_BYTES);
         let mut upload: Option<ByteBuf> = None;
@@ -798,6 +986,7 @@ impl HttpDoor {
                 // The staged parts expire on their own; nothing was committed.
                 return Err(DoorError::Status(StatusCode::PAYLOAD_TOO_LARGE));
             }
+            hasher.update(&frame);
             buf.extend_from_slice(&frame);
             // A part leaves only once more bytes follow it, so a body that
             // fits one message never opens an upload.
@@ -808,7 +997,15 @@ impl HttpDoor {
                 parts += 1;
             }
         }
+        let statement = DepositStatement {
+            folder_id: self.folder_id,
+            name: name.clone(),
+            content_type: content_type.clone(),
+            len: total,
+            hash: *hasher.finalize().as_bytes(),
+        };
         let Some(_) = upload else {
+            self.verify_streamed(&statement, &sig).await?;
             let _: FolderDepositReply = self
                 .call(
                     KIND_FOLDERS_DEPOSIT,
@@ -817,7 +1014,8 @@ impl HttpDoor {
                         name,
                         content_type,
                         body: ByteBuf::from(buf),
-                        extra: Default::default(),
+                        sig: ByteBuf::from(sig.to_vec()),
+                        ..Default::default()
                     },
                 )
                 .await?;
@@ -825,6 +1023,9 @@ impl HttpDoor {
         };
         self.send_part(&mut upload, parts, buf).await?;
         parts += 1;
+        // The staged commit verifies authorship alone; the body binding on
+        // this door is this check, over what actually streamed.
+        self.verify_streamed(&statement, &sig).await?;
         let _: FolderDepositReply = self
             .call(
                 KIND_FOLDERS_DEPOSIT_COMMIT,
@@ -834,7 +1035,9 @@ impl HttpDoor {
                     name,
                     content_type,
                     parts,
-                    extra: Default::default(),
+                    hash: ByteBuf::from(statement.hash.to_vec()),
+                    sig: ByteBuf::from(sig.to_vec()),
+                    ..Default::default()
                 },
             )
             .await?;

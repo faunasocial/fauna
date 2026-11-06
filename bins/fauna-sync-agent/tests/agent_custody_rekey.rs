@@ -748,9 +748,15 @@ async fn an_agent_cut_off_from_its_control_plane_publishes_nothing_under_the_gen
         let key = *keys
             .key_for(version)
             .expect("the owner holds every generation");
-        fauna_core::blob_seal::seal_blob(&bytes, Some((key, Some(version))))
-            .unwrap()
-            .manifest_hash
+        fauna_core::blob_seal::seal_blob(
+            &bytes,
+            Some((
+                key,
+                Some(fauna_core::blob_seal::SealStamp::Version(version)),
+            )),
+        )
+        .unwrap()
+        .manifest_hash
     };
     let (stale, fresh) = (seal(1), seal(2));
     let token = state.auth.token_store.insert(alice.id, 3600).await;

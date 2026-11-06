@@ -40,6 +40,12 @@ def assert_never_reached_the_nest(nest: dict, secret: bytes, what: str) -> None:
                 holding.append(str(path))
         except FileNotFoundError:
             continue  # a `-shm`/`-wal` side file SQLite removed mid-scan
+        except PermissionError:
+            # On Windows the live nest holds its `*.lock` files byte-range
+            # locked, so they cannot be read; they carry no data. Any other
+            # unreadable file is still a failure — it could hold the secret.
+            if path.suffix != ".lock":
+                raise
     assert not holding, f"the {what} is in {holding}"
 
 

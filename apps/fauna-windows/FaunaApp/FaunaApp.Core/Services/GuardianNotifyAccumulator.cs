@@ -40,6 +40,10 @@ public sealed class GuardianNotifyAccumulator
         if (!on) _pending.Clear();
     }
 
+    /// <summary>Whether the <c>content_notify</c> knob is on — the gate
+    /// <see cref="Record"/> counts behind.</summary>
+    public bool IsEnabled => _on;
+
     /// <summary>
     /// Count one guardian-floor enforcement on <paramref name="itemId"/> for
     /// each of <paramref name="categories"/>, deduped per <c>(item, category)</c>

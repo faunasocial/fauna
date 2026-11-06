@@ -355,13 +355,15 @@ class AppleFileCredStore(FileCredStore):
 class WindowsFileCredStore(FileCredStore):
     """windows via the shared file backend — the same
     ``FAUNA_E2E_CREDENTIAL_DIR``/``{namespace}.json`` mechanism linux/tui use.
-    ``FileSecretBackend`` (``apps/fauna-windows/FaunaApp/FaunaApp.Core/Services/
-    SecretBackend.cs``) is a deliberate twin of linux's ``cred_file_read``/
-    ``cred_file_write``: same path convention, same flat map, keyed by the
-    logical key verbatim (``SecretKeyMap`` remaps nothing since the windows leg
-    retired the pre-registry single slot). There is no real-Credential-Manager
-    equivalent to fall back to (the suite must never write the dev box's real
-    Credential Manager), so this is the only backend for windows and
+    The app's ``SharedSecretBackend`` (``apps/fauna-windows/FaunaApp/FaunaApp.Core/
+    Services/SharedSecretBackend.cs``) reaches the shared Rust credential store,
+    whose file arm is the very ``cred_file_read``/``cred_file_write`` linux uses:
+    same path convention, same flat map, keyed by the logical key verbatim
+    (``LogicalSecretStore`` passes every key straight through). There is no real-Credential-Manager
+    equivalent to fall back to (the ordinary suite must never write the dev box's
+    real Credential Manager; the one venue that may is convention 12's, which
+    reads its rows with ``helpers/windows_credman.py``, not through a store
+    here), so this is the only backend for windows and
     ``requires_secret_service`` stays ``False``.
 
     **One thing differs from the tui/linux parent, and it is load-bearing:**
@@ -484,9 +486,7 @@ class WebCredStore(CredStore):
     ``WebLaunchHarness`` (``tests/common/launch_harness.py``), not this store.
 
     It deliberately has **no ``launch_config``** (web launches no binary and has
-    no ``app_path``). ``stored_accounts`` is likewise unimplemented here — the
-    cross-app sign-out erase lift is its first consumer and owns proving it
-    (see below)."""
+    no ``app_path``)."""
 
     client = "web"
 

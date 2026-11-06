@@ -54,6 +54,30 @@ DESKTOP_BIN="$PREFIX/bin/fauna-desktop"
 # runs AS that user, so it is the one channel that can remove the unit.
 AGENT_UNIT="fauna-sync-agent.service"
 AGENT_UNIT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$AGENT_UNIT"
+# The macOS twin: the per-user LaunchAgent the app writes there instead (the
+# shared agent_spawner's launchd arm; sync-agent.md § Packaging + lifecycle,
+# *A tui-only mac*). launchd has no ExecCondition, so a plist left pointing at a
+# removed binary is KeepAlive-retried for ever — it goes with the agent it names.
+AGENT_LABEL="social.fauna.sync-agent"
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+
+# Boot the LaunchAgent out and remove its plist — only when it runs THIS
+# prefix's agent. A plist naming another copy (the desktop app's bundle, the
+# .pkg's /usr/local/bin) belongs to that install and is left alone.
+remove_launch_agent() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ -f "$AGENT_PLIST" ] || return 0
+    local target
+    target=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$AGENT_PLIST" 2>/dev/null || true)
+    if [ "$target" != "$INSTALL_AGENT" ]; then
+        echo "  Kept $AGENT_PLIST — it runs ${target:-an unreadable target}, not $INSTALL_AGENT"
+        return 0
+    fi
+    launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+    rm -f "$AGENT_PLIST"
+    echo "  Removed $AGENT_PLIST"
+    removed=$((removed + 1))
+}
 
 uninstall() {
     echo "Uninstalling the Fauna terminal app from $PREFIX..."
@@ -76,6 +100,9 @@ uninstall() {
     if [ -f "$DESKTOP_BIN" ]; then
         echo "  Kept $INSTALL_AGENT — the Fauna desktop app at $DESKTOP_BIN still uses it"
     else
+        # Before the binary: the job must be booted out while the plist still
+        # says which agent it runs.
+        remove_launch_agent
         if [ -f "$INSTALL_AGENT" ]; then
             rm -f "$INSTALL_AGENT"
             echo "  Removed $INSTALL_AGENT"

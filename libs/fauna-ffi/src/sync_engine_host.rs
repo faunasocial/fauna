@@ -99,7 +99,8 @@ pub struct FfiSyncBacklog {
 ///
 /// `Debug` because this summary IS the restore's own witness — the bug was
 /// a `files_restored: 0` that still returned `Ok`, so a failing assertion on it
-/// has to be able to print what it actually got. Three counters, no user content.
+/// has to be able to print what it actually got. Three counters plus the
+/// redacted paths of files not written.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct FfiRestoreSummary {
     /// Files decrypted + written into the chosen directory.
@@ -108,11 +109,15 @@ pub struct FfiRestoreSummary {
     pub bytes_written: u64,
     /// Entries skipped by the path-traversal guard (never written).
     pub skipped: u64,
+    /// Files that failed to fetch, open or verify and were NOT written
+    /// (redacted paths; everything else was restored). Empty on a whole restore.
+    pub unverified: Vec<String>,
 }
 
 /// Parse the `folder_id` every set-addressing call on this surface takes — a
-/// [`FolderRef`] wire string (`local:<id>` / `foreign:<hex>`, the value the
-/// shared `folder_ref_for_row` mints for a row) — refusing anything else.
+/// [`FolderRef`] wire string (`local:<id>` / `foreign:<hex>` / `group:<hex>`,
+/// the value the shared `folder_ref_for_row` mints for a row, or a group
+/// scope's `GroupScopeView::folder_id`) — refusing anything else.
 ///
 /// The ref is a set's only key; a name is a label two sets can share
 /// (`on-demand-files.md` § Hosting multiple on-demand folders). So a caller
@@ -120,7 +125,9 @@ pub struct FfiRestoreSummary {
 /// resolving a name to a ref is the caller's act, over the row it displays.
 pub(crate) fn parse_folder_id(folder_id: &str) -> Result<FolderRef, FfiError> {
     FolderRef::parse(folder_id).ok_or_else(|| FfiError::General {
-        msg: format!("not a folder ref: {folder_id:?} (expected `local:<id>` or `foreign:<hex>`)"),
+        msg: format!(
+            "not a folder ref: {folder_id:?} (expected `local:<id>`, `foreign:<hex>` or `group:<hex>`)"
+        ),
     })
 }
 
@@ -546,25 +553,17 @@ async fn restore(
     .await
     .map_err(|e| format!("{e:#}"))?;
 
-    // The shared walk (`fauna_sync_engine::engine::restore_snapshot_walk`) no
-    // longer aborts the whole restore on one bad file — it writes everything
-    // recoverable and names the rest in `summary.unverified`. Fail the command
-    // loudly on a non-empty list rather than let `Ok` read as "every file
-    // restored" when some were refused — this host's contract with Swift; tui,
-    // the other caller of the shared entry point, lists them on the page instead.
-    if !summary.unverified.is_empty() {
-        return Err(format!(
-            "restore incomplete: {} file(s) failed their whole-file integrity check and \
-             were NOT written (everything else was restored): {}",
-            summary.unverified.len(),
-            summary.unverified.join(", ")
-        ));
-    }
-
+    // The shared walk (`fauna_sync_engine::engine::restore_snapshot_walk`) does
+    // not abort the whole restore on one bad file — it writes everything
+    // recoverable and names the rest in `summary.unverified`. A partial result
+    // is a RESULT, not an error (`ui/backups.md` § Whole-snapshot restore →
+    // *Outcome*): it crosses the door in `unverified`, and the shell words it
+    // through the shared `snapshot_restore_result_text`, as tui and linux do.
     Ok(FfiRestoreSummary {
         files_restored: summary.files_restored,
         bytes_written: summary.bytes_written,
         skipped: summary.skipped,
+        unverified: summary.unverified,
     })
 }
 
@@ -739,6 +738,7 @@ pub(crate) fn file_provider_host_context(
         actor_id,
         backup_key: fauna_core::crypto::BackupKey::from_bytes(backup_key),
         signer,
+        state_dir: PathBuf::from(&state_dir),
     });
     HostContext {
         state_dir: PathBuf::from(state_dir),

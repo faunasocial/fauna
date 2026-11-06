@@ -52,16 +52,13 @@ type Session struct {
 	mlsUnwrap *mailfauna.MLSCapability
 
 	// actorMLSPubkey caches the AUTH'd actor's 32-byte X25519 MLS
-	// pubkey, fetched right after the AEAD-unwrap. The CalDAV write
-	// path (E.3) seals event-body ciphertext to this key before
-	// shipping to nest.
+	// pubkey (the mail key), fetched with the auth material. The DAV
+	// seals use calendarKey / cardKey, never this key.
 	actorMLSPubkey []byte
 	// actorMlkemEk caches the AUTH'd actor's 1184-byte ML-KEM-768
-	// encapsulation key (the post-quantum half of the same seal key),
+	// encapsulation key (the post-quantum half of the same mail key),
 	// fetched alongside actorMLSPubkey and set whenever it is: the fetch
-	// refuses a key without both halves. The CalDAV and CardDAV body
-	// seals seal X-Wing to the pair
-	// (`architecture/security/post-quantum.md` § Capability negotiation).
+	// refuses a key without both halves.
 	actorMlkemEk []byte
 	// actorIndexKey caches the AUTH'd actor's 32-byte X25519 index
 	// pubkey. Nil when nest returns None (Phase E will land
@@ -69,6 +66,13 @@ type Session struct {
 	// surface the missing-key error at call time; reads succeed
 	// regardless.
 	actorIndexKey []byte
+	// calendarKey / cardKey are the public halves of the calendar and card
+	// keypairs the session MSEK derives (`owner-key-material.md` § Path
+	// B-sibling-5 / -6): every CalDAV body, sidecar and calendar metadata
+	// seals to calendarKey as a `calendar-record`, every CardDAV one to
+	// cardKey as a `card-record`. Set at AUTH beside the capability.
+	calendarKey wsrpc.SealKeyPair
+	cardKey     wsrpc.SealKeyPair
 	// recordOpener is the per-session F2 opener (Phase-3 S2): built ONCE
 	// at AUTH from the MLS-snapshot plaintext — fetched encrypted via
 	// `fauna.bridges.fetch_mls_snapshot_blob`, AEAD-unwrapped under MSEK
@@ -123,6 +127,8 @@ func (s *Session) Close() {
 	s.actorMLSPubkey = nil
 	s.actorMlkemEk = nil
 	s.actorIndexKey = nil
+	s.calendarKey = wsrpc.SealKeyPair{}
+	s.cardKey = wsrpc.SealKeyPair{}
 	s.actorID = nil
 	s.credentialID = ""
 	s.authedLocalPart = ""
@@ -198,11 +204,10 @@ func (s *Session) MLSPubkey() []byte {
 }
 
 // MlkemEk returns the AUTH'd actor's 1184-byte ML-KEM-768 encapsulation
-// key (the post-quantum half of the seal key MLSPubkey returns), or nil on
-// a session with no key cached. The CalDAV and CardDAV body seals (put.go,
-// encrypted_metadata.go) pass it to mailfauna.EncryptToRecipientHybrid,
-// which seals X-Wing to the pair. Returns a copy so callers cannot mutate
-// session state.
+// key (the post-quantum half of the mail seal key MLSPubkey returns), or nil
+// on a session with no key cached. The CalDAV and CardDAV seals use their own
+// kind's key instead (CalendarMlkemEk, CardMlkemEk). Returns a copy so
+// callers cannot mutate session state.
 func (s *Session) MlkemEk() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,12 +219,52 @@ func (s *Session) MlkemEk() []byte {
 	return out
 }
 
+// CalendarPubkey returns the 32-byte X25519 calendar pubkey the session seals
+// calendar records to, or nil on a session with no key derived. A copy.
+func (s *Session) CalendarPubkey() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneBytes(s.calendarKey.Pubkey)
+}
+
+// CalendarMlkemEk returns the ML-KEM-768 half of CalendarPubkey's keypair, or
+// nil. A copy.
+func (s *Session) CalendarMlkemEk() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneBytes(s.calendarKey.MlkemEk)
+}
+
+// CardPubkey returns the 32-byte X25519 card pubkey the session seals card
+// records to, or nil on a session with no key derived. A copy.
+func (s *Session) CardPubkey() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneBytes(s.cardKey.Pubkey)
+}
+
+// CardMlkemEk returns the ML-KEM-768 half of CardPubkey's keypair, or nil. A
+// copy.
+func (s *Session) CardMlkemEk() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneBytes(s.cardKey.MlkemEk)
+}
+
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
 // IndexKey returns the AUTH'd actor's 32-byte X25519 index pubkey, or
-// nil when nest had no index key on file at AUTH time. CalDAV PUT
-// falls back to MLSPubkey when this is nil — mirrors the IMAP APPEND
-// path so the recipient's MDA opens both shapes identically (see
-// `bins/fauna-bridges/internal/mda/imap/append.go` Phase-E gap
-// fallback). Returns a copy so callers cannot mutate session state.
+// nil when nest had no index key on file at AUTH time. A CalDAV / CardDAV
+// index hint seals to the record kind's own key when this is nil
+// (mailfauna.SealRecordIndexHint). Returns a copy so callers cannot mutate
+// session state.
 func (s *Session) IndexKey() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()

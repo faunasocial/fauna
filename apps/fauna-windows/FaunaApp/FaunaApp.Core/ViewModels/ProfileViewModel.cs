@@ -120,6 +120,12 @@ public partial class ProfileViewModel : ViewModelBase
     // §5 Manual claim codes (monetization.md § Pillar 3)
     public ObservableCollection<PaymentClaimRow> Claims { get; } = new();
     [ObservableProperty] private string _claimTier = "";
+    /// <summary>The last §5 list read, kept so arming/disarming a Void button
+    /// re-projects the rows without a round trip.</summary>
+    private IReadOnlyList<FfiClaimItem> _rawClaims = Array.Empty<FfiClaimItem>();
+    /// <summary>The claim code whose Void button is armed (first press done), else null.
+    /// Keyed by code; any landed re-read clears it.</summary>
+    private string? _armedClaimCode;
 #endif   // PAYMENTS
 
     // ── Profile edit (display-name / bio / links read-modify-write) ──────────
@@ -130,6 +136,24 @@ public partial class ProfileViewModel : ViewModelBase
     /// <summary>The header's secondary line (<c>profile-public-name</c>): the public name
     /// a nickname replaced, empty while no nickname is the primary line.</summary>
     [ObservableProperty] private string _headerPublicName = "";
+
+    /// <summary>Content hash of the stored avatar the last <see cref="RefreshHeaderAsync"/>
+    /// read named (<c>profile-avatar</c>), null when the profile names none or the read
+    /// failed — the element is then absent, never an error (profile.md § The remote read).</summary>
+    [ObservableProperty] private string? _avatarHash;
+    /// <summary>As <see cref="AvatarHash"/>, for <c>profile-banner</c>.</summary>
+    [ObservableProperty] private string? _bannerHash;
+    /// <summary>The nest the pictures' bytes rest on, as the post-blob plane takes it (a
+    /// <c>FfiPostBlobHome</c>, typed <c>object</c> because the generated record is
+    /// internal): null = this nest served the profile, else the relayed-from home with the
+    /// identity this nest dial-proved for it — never derived from the profile's own
+    /// <c>nests</c> (transport-trust.md § The post arm → <i>A relayed profile's pictures</i>).</summary>
+    [ObservableProperty] private object? _pictureHome;
+
+    /// <summary>Bumped by every header read; a read that finishes after a later one began
+    /// does not paint (the epoch check tui's <c>fetch_header_profile</c> keeps).</summary>
+    private int _headerEpoch;
+
     [ObservableProperty] private bool _showEditForm;
     [ObservableProperty] private string _editDisplayName = "";
     [ObservableProperty] private string _editBio = "";
@@ -139,6 +163,27 @@ public partial class ProfileViewModel : ViewModelBase
     /// hands back to <c>build_edited_profile_with_images</c> so the non-display
     /// fields survive.
     private byte[]? _baseBody;
+    private byte[]? _lastDirectBody;
+
+    /// <summary>The audience the stored profile reads at (the base's
+    /// <c>DecodeOwnProfileDisplay(...).audience_everyone</c>).</summary>
+    private bool _baseAudience;
+
+    /// <summary>A press of <c>profile-edit-audience-toggle</c> that differs from the
+    /// base — <c>null</c> = untouched, so the save passes <c>None</c> and the builder
+    /// keeps the stored audience (tui's <c>EditBase</c> fold: a press equal to the base
+    /// is no press).</summary>
+    private bool? _pendingAudience;
+
+    /// <summary>The toggle's current value (<c>profile-edit-audience-toggle</c>).</summary>
+    [ObservableProperty] private bool _editAudienceEveryone;
+
+    /// <summary>The toggle was pressed to <paramref name="on"/>.</summary>
+    public void SetAudience(bool on)
+    {
+        EditAudienceEveryone = on;
+        _pendingAudience = on == _baseAudience ? null : on;
+    }
 
     // ── Avatar / banner (profile.md § Where logic lives → Field ownership) ──
     // The page owns the OS file picker + reads the bytes immediately on pick
@@ -187,11 +232,15 @@ public partial class ProfileViewModel : ViewModelBase
     /// <summary>The viewed profile. <paramref name="isSelf"/> <c>false</c> = another
     /// actor's profile (tap-through), rendering the OTHER header (follow button) + the
     /// Tiers-tab offers browse instead of the SELF author management.</summary>
-    internal ProfileViewModel(INestRpcClient nest, string actorId, bool isSelf)
+    internal ProfileViewModel(INestRpcClient nest, string actorId, bool isSelf, string? home = null)
     {
         _nest = nest;
         ActorId = actorId;
         IsSelf = isSelf;
+        // The actor-home slot, seeded at open through the shared rule (the carried
+        // hint, else nothing yet); the header read replaces it with the profile's word.
+        _carriedHome = home;
+        _actorHome = isSelf ? null : ResolveActorHome(null);
         HeaderName = actorId;   // the actor-id fallback until a refresh lands a name
         _knockAsk = KnockAskState.ForPeer(isSelf ? null : actorId);
     }
@@ -243,11 +292,10 @@ public partial class ProfileViewModel : ViewModelBase
             // Shared 3-state decision (redeemed wins over voided) —
             // fauna_core::format::claim_status_label; the single source every
             // app resolves so a row can never disagree across clients.
-            Claims.Clear();
-            foreach (var c in claims)
-                Claims.Add(new PaymentClaimRow(
-                    c.code, c.tier,
-                    Strings.Resolve(FaunaFfiMethods.ClaimStatusLabel(c.redeemedBy is not null, c.voidedAt is not null))));
+            // A landed re-read disarms any armed Void button.
+            _rawClaims = claims;
+            _armedClaimCode = null;
+            RebuildClaimRows();
 #endif
 
             // Repopulate §3/§4/§5 tier pickers, preserving each prior selection by
@@ -487,9 +535,26 @@ public partial class ProfileViewModel : ViewModelBase
     /// address" — dead, not silently live.</summary>
     public async Task HydrateSiteOriginAsync(string? handle)
     {
+        IFfiWebClient web;
         try
         {
-            var web = await _nest.BuildWebClientAsync();
+            web = await _nest.BuildWebClientAsync();
+        }
+        catch (Exception)
+        {
+            _siteOrigin = null;
+            UpdateReturnUrlPreview();
+            return;
+        }
+        await HydrateSiteOriginAsync(handle, web);
+    }
+
+    /// <summary>The resolve over a given web client — the seam a unit test drives with a
+    /// fake, since the mock nest cannot build a real one.</summary>
+    internal async Task HydrateSiteOriginAsync(string? handle, IFfiWebClient web)
+    {
+        try
+        {
             var resolved = await WebOrigin.ResolveAsync(web, handle);
             _siteOrigin = resolved.SiteLink.@origin;
         }
@@ -584,6 +649,70 @@ public partial class ProfileViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Project <see cref="_rawClaims"/> into <see cref="Claims"/>: the shared
+    /// 3-state status label, plus the Void button text per row (the Void label, or the
+    /// armed row's consequence text — redeemed names the redeemer and tier).</summary>
+    private void RebuildClaimRows()
+    {
+        Claims.Clear();
+        foreach (var c in _rawClaims)
+        {
+            var voided = c.voidedAt is not null;
+            var armed = !voided && c.code == _armedClaimCode;
+            var voidText = !armed
+                ? Strings.Get("subscriptions/void_claim")
+                : c.redeemedBy is null
+                    ? Strings.Get("subscriptions/void_claim_confirm_unredeemed")
+                    : Strings.Get("subscriptions/void_claim_confirm_redeemed")
+                        .Replace("{redeemer}", Hex(c.redeemedBy)).Replace("{tier}", c.tier);
+            Claims.Add(new PaymentClaimRow(
+                c.code, c.tier,
+                Strings.Resolve(FaunaFfiMethods.ClaimStatusLabel(c.redeemedBy is not null, voided)),
+                CanVoid: !voided, VoidText: voidText, Armed: armed));
+        }
+    }
+
+    /// <summary>The §5 Void button (<c>subscription-claim-void-button</c>): the first
+    /// press on a row arms it; the second press on the same row calls
+    /// <c>fauna.payments.claims.void</c> and re-reads §§1–5. A code the nest no longer
+    /// has (<c>claim_not_found</c>) means the list is what is stale, so it re-reads
+    /// instead of erroring.</summary>
+    public async Task VoidClaimAsync(string code)
+    {
+        if (_armedClaimCode != code)
+        {
+            _armedClaimCode = code;
+            RebuildClaimRows();
+            return;
+        }
+        ErrorMessage = null;
+        try
+        {
+            await _nest.PaymentsClaimsVoidAsync(code);
+        }
+        catch (Exception ex) when (IsClaimNotFound(ex))
+        {
+            // fall through to the re-read below
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            return;
+        }
+        await HydrateAsync();
+    }
+
+    /// <summary>The Keep button: disarm without calling the nest.</summary>
+    public void CancelVoidClaim()
+    {
+        if (_armedClaimCode is null) return;
+        _armedClaimCode = null;
+        RebuildClaimRows();
+    }
+
+    private static bool IsClaimNotFound(Exception ex) =>
+        (ex is FfiException.General g ? g.msg : ex.Message).Contains("claim_not_found", StringComparison.Ordinal);
+
 #endif   // PAYMENTS
 
     // ── OTHER-profile offers browse ──────────────────────────────────────
@@ -668,7 +797,7 @@ public partial class ProfileViewModel : ViewModelBase
         ErrorMessage = null;
         try
         {
-            await _nest.SubscriptionSubscribeAsync(AuthorIdBytes(), FollowersTier);
+            await _nest.SubscriptionSubscribeAsync(AuthorIdBytes(), FollowersTier, _actorHome);
             IsFollowing = true;
         }
         catch (Exception ex)
@@ -697,11 +826,10 @@ public partial class ProfileViewModel : ViewModelBase
             if (epoch != _blockEpoch) return;
             // Shared predicate (fauna_core::format::contact_row_blocks_actor; FFI
             // ContactRowBlocksActor) — a blocked edge whose peer_id matches this actor
-            // (case-insensitive hex). The wire status string is the lowercased enum
-            // name. contacts.md § Where logic lives → Unblock.
+            // (case-insensitive hex), over the row's wire status string.
+            // contacts.md § Where logic lives → Unblock.
             IsBlocked = contacts.Any(c =>
-                FaunaFfiMethods.ContactRowBlocksActor(
-                    c.ActorId, c.Status.ToString().ToLowerInvariant(), ActorId));
+                FaunaFfiMethods.ContactRowBlocksActor(c.ActorId, c.WireStatus, ActorId));
             IsBlockKnown = true;
         }
         catch (Exception)
@@ -762,7 +890,31 @@ public partial class ProfileViewModel : ViewModelBase
     /// <see cref="RefreshHeaderAsync"/> already fetched. <c>null</c> until that read
     /// lands, and whenever the profile gives no better answer — the knock then goes to
     /// this nest.</summary>
-    private string? _knockRoute;
+    private string? _actorHome;
+
+    /// <summary>The home the open carried in (the door's hint), kept so the
+    /// post-read <c>actor_home</c> call sees the same <c>carried</c> as the seed.</summary>
+    private readonly string? _carriedHome;
+
+    /// <summary>The page's actor-home slot — the nest URL the follow, the knock and
+    /// the remote header read all go to; <c>null</c> = this nest. Reported as
+    /// <c>profile.home_nest_url</c> by the state read.</summary>
+    public string? ActorHomeUrl => _actorHome;
+
+    /// <summary>The shared <c>actor_home(carried, actor, body, own)</c> rule; a
+    /// non-32-byte actor id (never a real one) just keeps the carried hint.</summary>
+    private string? ResolveActorHome(byte[]? profileBody)
+    {
+        try
+        {
+            return FaunaFfiMethods.ActorHome(
+                _carriedHome, Convert.FromHexString(ActorId), profileBody, _nest.HomeUrl);
+        }
+        catch (Exception)
+        {
+            return string.IsNullOrWhiteSpace(_carriedHome) ? null : _carriedHome;
+        }
+    }
 
     /// <summary>The pair's render — durable pending first (rule (c)); <c>null</c> on
     /// SELF.</summary>
@@ -783,7 +935,7 @@ public partial class ProfileViewModel : ViewModelBase
         var before = KnockAsk;
         if (before.KnockSent || before.KnockInFlight) return;
         KnockAsk = before with { KnockInFlight = true };
-        var route = _knockRoute;
+        var route = _actorHome;
         var result = await WardAskFolds.ClassifyKnockAsync(() => _nest.SendKnockAsync(peer, route));
         var (next, effect) = WardAskFolds.FoldKnockReply(KnockAsk, peer, result);
         KnockAsk = next;
@@ -844,6 +996,10 @@ public partial class ProfileViewModel : ViewModelBase
         {
             var res = await _nest.LoadProfileEditBaseAsync();
             _baseBody = res?.RawBody;
+            _lastDirectBody = res?.LastDirectBody;
+            _baseAudience = res?.AudienceEveryone ?? false;
+            _pendingAudience = null;
+            EditAudienceEveryone = _baseAudience;
             EditDisplayName = res?.Display.DisplayName ?? "";
             EditBio = res?.Display.Bio ?? "";
             EditLinks.Clear();
@@ -891,7 +1047,8 @@ public partial class ProfileViewModel : ViewModelBase
         {
             var avatar = await ResolveImageEditAsync(_stagedAvatarBytes, EditAvatarClear, http, "avatar").ConfigureAwait(true);
             var banner = await ResolveImageEditAsync(_stagedBannerBytes, EditBannerClear, http, "banner").ConfigureAwait(true);
-            await _nest.ProfileSetAsync(display, _baseBody, avatar, banner);
+            await _nest.ProfileSetAsync(
+                display, _baseBody, avatar, banner, _lastDirectBody, _pendingAudience);
             ShowEditForm = false;
             await RefreshHeaderAsync();
         }
@@ -937,35 +1094,47 @@ public partial class ProfileViewModel : ViewModelBase
     /// names</i>).</summary>
     public async Task RefreshHeaderAsync()
     {
+        var epoch = ++_headerEpoch;
         try
         {
-            var res = await _nest.ProfileGetAsync(ActorId);
+            // The OTHER header goes through the composed shared read with the slot as
+            // the open seeded it (a remote actor that has not opted in is the id
+            // fallback, never error-message); SELF reads its own nest as before.
+            var res = IsSelf
+                ? await _nest.ProfileGetAsync(ActorId)
+                : await _nest.ProfileHeaderReadAsync(ActorId, _actorHome);
+            if (epoch != _headerEpoch) return;
             _publicDisplayName = !string.IsNullOrWhiteSpace(res?.Display.DisplayName)
                 ? res!.Display.DisplayName!
                 : null;
-            // The same read fills the knock route: the profile the header renders is
-            // the one whose home nest a knock from this page goes to (profile.md §
-            // Where logic lives → Request contact routing — the shared rule refuses
-            // anyone else's word, so a route cannot leak across two opens).
-            _knockRoute = null;
-            if (!IsSelf && res is not null)
-            {
-                try
-                {
-                    _knockRoute = FaunaFfiMethods.KnockRecipientNestUrl(
-                        Convert.FromHexString(ActorId), res.RawBody, _nest.HomeUrl);
-                }
-                catch (Exception)
-                {
-                    _knockRoute = null;   // no better answer ⇒ this nest
-                }
-            }
+            PaintPictures(res?.Pictures);
+            // The same read replaces the slot: the profile the header renders is the
+            // one whose home nest a follow or a knock from this page goes to (profile.md
+            // § Where logic lives → The actor's home — the shared rule refuses anyone
+            // else's word, so a route cannot leak across two opens).
+            if (!IsSelf)
+                _actorHome = ResolveActorHome(res?.RawBody);
         }
         catch (Exception)
         {
+            if (epoch != _headerEpoch) return;
             _publicDisplayName = null;
+            PaintPictures(null);
         }
         RepaintHeader();
+    }
+
+    /// <summary>Fold the read's pictures into the header: a hash only when the profile
+    /// names it, and the host pick — this nest for a profile it served, the
+    /// <c>relayed_from</c> home (with its stamped identity) for a relayed one. A failed
+    /// read names nothing, so the elements are absent (never <c>error-message</c>).</summary>
+    private void PaintPictures(ProfilePictures? pictures)
+    {
+        PictureHome = pictures?.RelayedFrom is { Length: > 0 } url
+            ? new FfiPostBlobHome(url, pictures.HomeNestActorId)
+            : null;
+        AvatarHash = Opt(pictures?.AvatarHashHex ?? "");
+        BannerHash = Opt(pictures?.BannerHashHex ?? "");
     }
 
     /// <summary>Re-ask the overlay face what the header calls this person — the page

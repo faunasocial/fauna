@@ -357,8 +357,15 @@ def create_run_set(
     user_create_folder(port, set_name, secret_key=secret_key, base_url=node_url)
 
 
-def harness_sign_in(node_url: str, secret_key: str, actor_id: str, handle: str):
+def harness_sign_in(
+    node_url: str, secret_key: str, actor_id: str, handle: str, *, spa_url: str | None = None
+):
     """The ``set_state`` sign-in a seat uses against a HARNESS nest.
+
+    A web seat signs in through ``spa_url`` instead — the CORS-adding SPA proxy
+    in front of the same nest, which is the only ``node_url`` a browser can
+    fetch from (``conftest._login_app_as``); a web seat without one fails here
+    rather than as a session that never connects.
 
     A harness nest (standalone binary or container alike) has no handle in DNS,
     so the live onboarding flow (seed import + the REAL DoH handle check)
@@ -370,14 +377,18 @@ def harness_sign_in(node_url: str, secret_key: str, actor_id: str, handle: str):
     meaningful, and having it once for every seat count is the point of the
     fold: a second copy is a second place for it to go wrong.
     """
-    from conftest import _E2E_LOGIN_DEVICE_ID
+    from helpers.e2e_session import e2e_login_device_id
 
     def _sign_in(app, seat: str) -> None:
+        url = node_url
+        if app.driver.is_web():
+            assert spa_url, f"seat {seat} is a web seat, but its sign-in was given no spa_url"
+            url = spa_url
         app.driver.set_state(
             {
                 "session": {
                     "authenticated": True,
-                    "node_url": node_url,
+                    "node_url": url,
                     "secret_hex": secret_key,
                     "handle": handle,
                     "actor_id": actor_id,
@@ -385,7 +396,7 @@ def harness_sign_in(node_url: str, secret_key: str, actor_id: str, handle: str):
                     # scenario the whole multi-seat shape models. A shared
                     # device id would make the nest treat the seats as one
                     # device and the run would prove nothing.
-                    "device_id": _E2E_LOGIN_DEVICE_ID[:-1] + seat,
+                    "device_id": e2e_login_device_id(app)[:-1] + seat,
                 },
                 "nav": {"stack": [{"view": "feed"}]},
             }

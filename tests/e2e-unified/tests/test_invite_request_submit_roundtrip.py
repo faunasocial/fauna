@@ -56,3 +56,16 @@ def test_invite_request_submit_reaches_pending_review(app, nest_instance):
         "invite-request submit did not reach PendingReview (the real "
         f"invite_request.submit over WS failed). error: {app.error_text()!r}"
     )
+
+    # Continue is DEAD throughout PendingReview: the journey advances by polling
+    # (`onboarding.md` § The pending-invite surface), and Continue is the
+    # out-of-band code's redeem alone (§ 3). A live Continue here would be a
+    # control with nothing behind it — the failure `continue_enabled_for` exists
+    # to prevent. Asserted on this REAL pending row rather than an injected one:
+    # the app's own poll answers a real row with PendingReview again, so the
+    # state holds however soon the first poll fires (convention 14).
+    assert not app.is_enabled("invite-request-continue-button"), (
+        "PendingReview must DISABLE Continue — the journey advances by polling: "
+        f"{app.driver.diagnose('invite-request-continue-button')} "
+        f"error={app.error_text()!r}"
+    )

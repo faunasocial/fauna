@@ -37,7 +37,8 @@ from helpers import nest_mode as nm
 # same FFI).
 RUST_LOG_TARGET = {
     "linux": "fauna_desktop", "tui": "fauna_tui",
-    "windows": "fauna_ffi", "macos": "fauna_ffi", "android": "fauna_ffi",
+    "windows": "fauna_ffi", "macos": "fauna_ffi", "ios": "fauna_ffi",
+    "android": "fauna_ffi",
 }
 
 # The custody leg runs in the shared runtime crate, not the app crate, so its

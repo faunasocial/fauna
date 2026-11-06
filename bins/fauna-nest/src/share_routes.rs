@@ -317,14 +317,15 @@ async fn private_manifest(
 }
 
 /// The viewer page's file in the SPA build (`apps/fauna-web`'s second build
-/// entry, `vite.share-viewer.config.ts`), as a path of the `/app/` service.
-const SHARE_VIEWER_ENTRY: &str = "/share-viewer.html";
+/// entry, `vite.share-viewer.config.ts`), a file of `static_dir`.
+const SHARE_VIEWER_ENTRY: &str = "share-viewer.html";
 
-/// `GET /share/{token}` for a private link: the viewer page, served exactly as
-/// `/app/` serves the SPA — the same service (`web_app_origin::app_router`)
-/// under the same security headers ([`crate::with_spa_headers`]), so the
-/// admin's web-app-origin choice binds it too: bundled serves the SPA build's
-/// page, central answers the same `302` with the path kept. The redirect names
+/// `GET /share/{token}` for a private link: the viewer page, served as `/app/`
+/// serves the SPA — the same web-app-origin choice
+/// (`web_app_origin::entry_router`) under the same security headers
+/// ([`crate::with_spa_headers`]): bundled serves the SPA build's page, central
+/// answers the same `302` with the path kept. A build without the page answers
+/// `503`, never the app shell in its place. The redirect names
 /// no fragment, so the browser carries the link key across the hop and sends
 /// it to no server. No byte of the file, and nothing about it, is in the page.
 async fn private_viewer(
@@ -347,14 +348,15 @@ async fn private_viewer(
     // off the address bar; a redirect reads the original path.
     let mut req = axum::http::Request::builder()
         .method(axum::http::Method::GET)
-        .uri(SHARE_VIEWER_ENTRY)
+        .uri("/")
         .body(axum::body::Body::empty())
         .expect("static request parts are valid");
     req.extensions_mut()
         .insert(axum::extract::OriginalUri(original));
-    let mut svc = crate::with_spa_headers(crate::web_app_origin::app_router(
+    let mut svc = crate::with_spa_headers(crate::web_app_origin::entry_router(
         state.config.nest.static_dir.as_deref(),
         crate::web_app_origin::live_probe(state.clone()),
+        SHARE_VIEWER_ENTRY,
     ));
     use tower_service::Service as _;
     match svc.call(req).await {

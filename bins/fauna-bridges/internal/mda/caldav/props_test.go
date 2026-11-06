@@ -38,7 +38,7 @@ func propPatchFixture(t *testing.T, displayname, color, description string) (*mo
 		Displayname: displayname,
 		Color:       color,
 		Description: description,
-	}, fx.leaf.Pubkey, nil) // nil ek = classical seal
+	}, fixtureCalendarPubkey(), nil) // nil ek = classical seal
 	if err != nil {
 		t.Fatalf("SealCollectionMetadata: %v", err)
 	}
@@ -584,7 +584,7 @@ func openSealedMetadata(t *testing.T, sealed []byte, fx reportFixture) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	opener, err := mailfauna.NewMailRecordOpener(snapshotPlaintext)
+	opener, err := mailfauna.NewRecordOpener(cap, snapshotPlaintext)
 	if err != nil {
 		return nil, err
 	}

@@ -412,10 +412,61 @@ fn render_versions(ctx: &Rc<DetailCtx>, versions: &[FileVersionSummary]) {
     for version in versions {
         ctx.list.append(&build_version_row(ctx, version));
     }
+    read_depositor_roster(ctx, versions);
     // The newest row is the current file; the download paints once it exists.
     let latest = versions.last().cloned();
     ctx.download.set_visible(latest.is_some());
     *ctx.latest.borrow_mut() = latest;
+}
+
+/// A version row's author line — the shared connected-apps machine composes it
+/// (`folder-deposit.md` ruling 3: "<app> via <owner>" for a version a connected
+/// app deposited), so no app re-derives the depositor wording. With no machine
+/// (no signed-in window) the recorder alone, or the generic depositor wording.
+fn version_author(version: &FileVersionSummary) -> String {
+    match crate::settings::connected_apps::shared_machine() {
+        Some(apps) => apps
+            .version_author(version.author_display.clone(), version.deposited_by.clone())
+            .resolve(strings::lookup),
+        None if version.deposited_by.is_some() => {
+            media_strings::version_author_deposited_unknown(&version.author_display)
+        }
+        None => media_strings::version_author(&version.author_display),
+    }
+}
+
+/// The roster read a version list needs before its depositors can be named:
+/// some version names a depositor the connected-apps roster cannot name yet
+/// (never read, or read before that app's principal row existed). The shared
+/// machine asks once per key (`ConnectedAppsMachine::depositor_read_wanted`);
+/// the rows repaint when the read lands. tui's `depositor_roster_op` is the
+/// same shape.
+fn read_depositor_roster(ctx: &Rc<DetailCtx>, versions: &[FileVersionSummary]) {
+    let keys: Vec<String> = versions
+        .iter()
+        .filter_map(|v| v.deposited_by.clone())
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    let Some(apps) = crate::settings::connected_apps::shared_machine() else {
+        return;
+    };
+    if !apps.depositor_read_wanted(keys) {
+        return;
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    ctx.runtime.spawn(async move {
+        apps.refresh().await;
+        let _ = tx.send(()).await;
+    });
+    let ctx = Rc::clone(ctx);
+    let versions = versions.to_vec();
+    gtk::glib::spawn_future_local(async move {
+        if rx.recv().await.is_ok() {
+            render_versions(&ctx, &versions);
+        }
+    });
 }
 
 /// One `file-version-item` row: `file-version-timestamp` + `file-version-size`
@@ -440,7 +491,7 @@ fn build_version_row(ctx: &Rc<DetailCtx>, version: &FileVersionSummary) -> gtk::
     set_test_id(&size, ids::FILE_VERSION_SIZE);
 
     let author_label = gtk::Label::builder()
-        .label(media_strings::version_author(&version.author_display))
+        .label(version_author(version))
         .halign(gtk::Align::Start)
         .css_classes(["dim-label", "caption"])
         .build();

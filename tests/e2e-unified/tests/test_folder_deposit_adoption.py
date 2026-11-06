@@ -42,7 +42,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from common.accounts import actor_id_hex
 from common.auth import UNBINDING_MAX_DEVICES, set_tier_caps, user_create_folder
@@ -56,18 +56,47 @@ from helpers.client_metadata_server import client_document
 from helpers.oauth_client import OAuthClient
 from helpers.waiting import wait_until
 from tests.api.test_folder_deposit import (  # noqa: F401 — fixtures adopted by import
-    _approve_with_grant,
     _everything_on_disk,
     _http_deposit,
     _inbox,
+    _signed,
     _large_body,
     _raw,
     consent_nest_env,
     metadata_server,
 )
-from helpers.principal_session import PrincipalSession, upgrade
+from helpers.principal_session import PrincipalSession, redeem, upgrade
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3]
+
+# The bound-folder case's app axis: the owner and the member are seats of the
+# app under test. linux joins tui here; linux's own two-seat shape for the
+# parked-deposit cases is its on-demand twin
+# (`test_folder_deposit_adoption_on_demand_linux.py`). macos binds through
+# its real sync agent, as `test_folder_member_media_decrypt.py`'s macos owner
+# seat does; windows with the two markers that file's `_OWNER_SEATS` documents.
+_BOUND_APPS = [
+    pytest.param("tui", marks=pytest.mark.tui),
+    pytest.param("linux", marks=pytest.mark.linux),
+    pytest.param("macos", marks=[pytest.mark.macos, pytest.mark.real_sync_agent]),
+    pytest.param(
+        "windows",
+        marks=[
+            pytest.mark.windows,
+            pytest.mark.real_sync_agent,
+            pytest.mark.isolated_sync_agent,
+        ],
+    ),
+]
+
+# The parked-deposit cases' app axis, as the seat mode `sync_seats.make_seat`
+# takes: two tui seats, or two native seats (macos on darwin, windows on win32;
+# `make_seat` pins each macos seat's agent and isolates each windows seat's).
+_PARKED_APPS = [
+    pytest.param("tui", marks=pytest.mark.tui),
+    pytest.param("native", marks=pytest.mark.macos, id="macos"),
+    pytest.param("native", marks=pytest.mark.windows, id="windows"),
+]
 
 DOCUMENT = "/adoption-client.json"
 REDIRECT_URI = "http://127.0.0.1:17777/callback"
@@ -80,9 +109,9 @@ WINDOW = 180.0
 
 
 @contextlib.contextmanager
-def _owner_seats(nest, request, folder: str):
-    """The consent nest's owner on two tui seats bound to ``folder`` — the same
-    account, two devices. Yields ``(seat_a, seat_b)``."""
+def _owner_seats(nest, request, folder: str, mode: str = "tui"):
+    """The consent nest's owner on two seats of ``mode`` bound to ``folder`` —
+    the same account, two devices. Yields ``(seat_a, seat_b)``."""
     from tests.test_filesync_seats import harness_sign_in
 
     alice = nest["user"]
@@ -99,7 +128,7 @@ def _owner_seats(nest, request, folder: str):
             seats = [
                 stack.enter_context(
                     sync_seats.make_seat(
-                        "tui",
+                        mode,
                         name=name,
                         run_token=run_token,
                         root=tmp / name,
@@ -144,11 +173,17 @@ def _await_landed(seat, what: str, name: str = NAME, body: bytes = MARKER) -> No
     )
 
 
-def _depositor(nest, metadata_server, folder_id: int):
+def _depositor(nest, metadata_server, folder_id: int, app):
     """A connected app holding ``fauna:folder:deposit:<folder_id>`` through a
     real consent ceremony — one client document per folder, since the nest
     caches a client's document by its URL and the module shares the nest.
-    Returns ``(client, access token)``."""
+
+    The owner approves on ``app``'s own request card, which mints the keyless
+    ``deposit`` grant the product's way, its ``Mint`` recorded in the grant
+    log first: a raw ``fauna.capabilities.mint`` beside the seats' live
+    account runtime is revoked by its reconcile sweep as a row the log never
+    held (``ui/nests.md`` § Trust facet — grants → *Reconcile*), and the
+    deposit door then refuses. Returns ``(client, access token)``."""
     scope = f"fauna:folder:deposit:{folder_id}"
     document = DOCUMENT.replace(".json", f"-{folder_id}.json")
     metadata_server.documents[document] = client_document(
@@ -156,18 +191,31 @@ def _depositor(nest, metadata_server, folder_id: int):
     )
     holder = x25519.X25519PrivateKey.generate()
     holder_pub = _raw(holder.public_key())
+    writer_key = ed25519.Ed25519PrivateKey.generate()
     client = OAuthClient(
         base=nest["url"],
         htu_origin=f"https://{HANDLE_DOMAIN}",
         redirect_uri=REDIRECT_URI,
         scope=scope,
         holder_x25519=holder_pub,
+        # A deposit scope is never granted blind of its writer
+        # (`folder-deposit.md` § The depositor signs, the owner's device verifies).
+        writer_ed25519=_raw(writer_key.public_key()),
         client_id_url=metadata_server.client_id(document),
     )
-    token = _approve_with_grant(
-        nest, client, holder_pub, folder_id, scope, choose=False
-    )["access_token"]
-    return client, token
+    # The private half signs the app's deposits (`_signed`, `_http_deposit`).
+    client.writer_key = writer_key
+    request_uri = client.push_authorization_request()
+    browser_code, flow_token = client.open_consent_page(request_uri)
+    ca = app.connected_apps
+    assert ca.visit(), f"the Connected apps page must read. error: {ca.current_error_text()!r}"
+    index = ca.wait_for_request_code(browser_code)
+    assert index is not None, (
+        "the depositor's request must open its card in the owner's tray. "
+        f"error: {ca.current_error_text()!r} code: {browser_code!r}"
+    )
+    ca.approve_request(index)
+    return client, redeem(client, flow_token)["access_token"]
 
 
 def _parts_at_rest(nest) -> int:
@@ -190,10 +238,45 @@ def _await_drained(nest, folder_id: int, seats) -> None:
     )
 
 
+def _await_version_author(app, name: str, wanted: str, who: str) -> str:
+    """Open ``name``'s detail on ``app``'s Media page and wait until its version
+    row's author (``file-version-author``) reads ``wanted`` — the depositor
+    beside the owner (``folder-deposit.md`` ruling 3). Returns the text read."""
+    media = app.media
+    media.navigate()
+    wait_until(
+        lambda: name in media.item_names(), WINDOW, interval=1.0,
+        diagnose=lambda: (
+            f"[{who}] {name} never listed on Media: {media.item_names()!r}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    media.open_item_detail(media.item_names().index(name))
+    assert media.wait_for_version_count(1, timeout=WINDOW) >= 1, (
+        f"[{who}] {name}'s version history never rendered; error={app.error_text()!r}"
+    )
+    seen: list[str] = []
+
+    def reads() -> bool:
+        seen.append(media.version_author(0))
+        return wanted in seen[-1]
+
+    wait_until(
+        reads, WINDOW, interval=1.0,
+        diagnose=lambda: (
+            f"[{who}] the version row's author never named the depositor "
+            f"({wanted!r}); last read {seen[-1:]!r}; error={app.error_text()!r}"
+        ),
+    )
+    media.close_detail()
+    return seen[-1]
+
+
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 240))
+@pytest.mark.parametrize("seat_mode", _PARKED_APPS)
 @pytest.mark.feature("connected-apps")
 def test_an_owner_seat_adopts_a_parked_deposit_once(
-    consent_nest, consent_bridge, metadata_server, request
+    consent_nest, consent_bridge, metadata_server, request, seat_mode
 ):
     nest = consent_nest
     alice = nest["user"]
@@ -203,7 +286,7 @@ def test_an_owner_seat_adopts_a_parked_deposit_once(
         base_url=nest["url"],
     )["id"]
 
-    with _owner_seats(nest, request, folder) as (seat_a, seat_b):
+    with _owner_seats(nest, request, folder, seat_mode) as (seat_a, seat_b):
         # The owner's mailbox, enabled the way a user enables one: the MSEK
         # custody both seats' engines open deposits with, and the recipient
         # key the nest seals them to.
@@ -211,13 +294,13 @@ def test_an_owner_seat_adopts_a_parked_deposit_once(
         mail.navigate()
         mail.ensure_mail_enabled()
 
-        client, token = _depositor(nest, metadata_server, folder_id)
+        client, token = _depositor(nest, metadata_server, folder_id, seat_a.app)
         session = PrincipalSession(upgrade(nest, client, token))
         try:
             ok, reply = session.call(
                 "fauna.folders.deposit",
-                {"folder_id": folder_id, "name": NAME, "content_type": "text/plain",
-                 "body": MARKER},
+                _signed(client, {"folder_id": folder_id, "name": NAME, "content_type": "text/plain",
+                 "body": MARKER}),
             )
         finally:
             session.ws.close()
@@ -245,9 +328,10 @@ LARGE_NAME = "deposited-scan-7f.bin"
 
 
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 240))
+@pytest.mark.parametrize("seat_mode", _PARKED_APPS)
 @pytest.mark.feature("connected-apps")
 def test_an_owner_seat_adopts_a_deposit_larger_than_one_message(
-    consent_nest, consent_bridge, metadata_server, request
+    consent_nest, consent_bridge, metadata_server, request, seat_mode
 ):
     """Several MiB over the HTTP door in one streamed POST — cut into sealed
     parts nest-side — adopted by the owner's seats: each fetches and opens
@@ -263,12 +347,12 @@ def test_an_owner_seat_adopts_a_deposit_larger_than_one_message(
     )["id"]
     body, markers = _large_body(b"adopt-large")
 
-    with _owner_seats(nest, request, folder) as (seat_a, seat_b):
+    with _owner_seats(nest, request, folder, seat_mode) as (seat_a, seat_b):
         mail = seat_a.app.mail_settings
         mail.navigate()
         mail.ensure_mail_enabled()
 
-        client, token = _depositor(nest, metadata_server, folder_id)
+        client, token = _depositor(nest, metadata_server, folder_id, seat_a.app)
         status, reply = _http_deposit(nest, client, token, folder_id, LARGE_NAME, body)
         assert status == 202 and reply == {"accepted": True}, (
             f"the HTTP door refused a body larger than one message: {status} {reply!r}"
@@ -315,10 +399,11 @@ def _enter(stack: contextlib.ExitStack, seat):
 
 
 @pytest.mark.timeout(1500)
+@pytest.mark.parametrize("seat_app", _BOUND_APPS)
 @pytest.mark.real_conversations
 @pytest.mark.feature("connected-apps")
 def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
-    consent_nest, consent_bridge, metadata_server, request, tmp_path
+    consent_nest, consent_bridge, metadata_server, request, tmp_path, seat_app
 ):
     """Adoption into a **bound** folder: the owner's seat re-seals the parked
     item under the set's M2 content key — the ordinary upload's seal; adoption
@@ -330,7 +415,7 @@ def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
     disk only through the pull every member makes. The folder is shared before
     the deposit, so the member receives a live change, not history on join.
 
-    Two tui apps on the consent nest: the owner (``alice``, the account the
+    Two seats of the app under test (``seat_app``) on the consent nest: the owner (``alice``, the account the
     connected-app ceremony approves for) with a live conversations session to
     share from, and a member who accepts the share and binds a folder of their
     own as a writer — the bound recipient's shape in
@@ -356,12 +441,12 @@ def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
 
     with contextlib.ExitStack() as stack:
         owner_app, _ = _enter(
-            stack, _folder_share_owner_seat("tui", nest, request, owner=alice)
+            stack, _folder_share_owner_seat(seat_app, nest, request, owner=alice)
         )
         member_app, member = _enter(
             stack,
             _folder_share_recipient_seat(
-                "tui", nest, request, handle_prefix="member", domain=HANDLE_DOMAIN,
+                seat_app, nest, request, handle_prefix="member", domain=HANDLE_DOMAIN,
                 screenshot="teardown-deposit-member",
             ),
         )
@@ -395,7 +480,7 @@ def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
         mb.accept_pending_share(0)
 
         def _member_row_listed() -> bool:
-            if any(folder in mb.folder_title(k) for k in range(mb.folder_count())):
+            if any(folder in t for t in mb.folder_titles()):
                 return True
             mb.navigate_devices()
             mb.navigate_folders()
@@ -415,13 +500,13 @@ def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
         mail.ensure_mail_enabled()
 
         # ── A connected app deposits into the shared folder. ──
-        client, token = _depositor(nest, metadata_server, folder_id)
+        client, token = _depositor(nest, metadata_server, folder_id, owner_app)
         session = PrincipalSession(upgrade(nest, client, token))
         try:
             ok, reply = session.call(
                 "fauna.folders.deposit",
-                {"folder_id": folder_id, "name": BOUND_NAME,
-                 "content_type": "text/plain", "body": BOUND_MARKER},
+                _signed(client, {"folder_id": folder_id, "name": BOUND_NAME,
+                 "content_type": "text/plain", "body": BOUND_MARKER}),
             )
         finally:
             session.ws.close()
@@ -457,6 +542,21 @@ def test_an_owner_seat_adopts_into_a_bound_folder_and_a_member_receives_it(
             member_folder / BOUND_NAME, BOUND_MARKER.decode(), seat="member",
             app=member_app, window=MEMBER_WINDOW,
         )
+        # ── Ruling 3: the adopted row names its depositor, signed by the
+        # owner's device — on the wire, and on each seat's version row: the
+        # owner's app names the app from its roster, a member's app (no roster
+        # of the owner's) the generic wording (folder-deposit.md ruling 3). ──
+        depositor = _raw(client.writer_key.public_key()).hex()
+        deposited = [
+            c.get("deposited_by") for c in changes
+            if c.get("path_hash") == _path_hash(BOUND_NAME)
+        ]
+        assert deposited and all(d == depositor for d in deposited), (
+            "the adopted change row must carry the depositor's writer key "
+            f"(deposited_by) — expected {depositor}, rows carry {deposited!r}"
+        )
+        _await_version_author(owner_app, BOUND_NAME, "Example Notes via", "owner")
+        _await_version_author(member_app, BOUND_NAME, "a connected app via", "member")
         for who, path in (("owner", owner_folder), ("member", member_folder)):
             files = sorted(p.name for p in path.iterdir() if not p.name.startswith("."))
             assert files == [BOUND_NAME], (

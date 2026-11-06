@@ -132,9 +132,11 @@ public static class RegionPlaneHost
 
     /// <summary>
     /// One item's render decision with the region composed in — the region, the
-    /// guardian floor and the viewer's own thresholds, strictest-wins in shared Rust.
-    /// With no plane open (a unit test, a preview) the family-only verdict stands and
-    /// no region placeholder exists.
+    /// session nest's rules (<see cref="NestRulesHost"/>, <c>nest-rules.md</c> § The
+    /// nest source in the engine), the guardian floor and document, and the viewer's
+    /// own thresholds, strictest-wins in shared Rust, in the ONE composed call. With
+    /// no plane open (a unit test, a preview) the family-only verdict stands and no
+    /// region or nest placeholder exists.
     /// </summary>
     internal static RegionRenderDecision Render(
         ContentLabelEntry[] labels, ContentPolicyInputs inputs, RegionSubject subject)
@@ -146,20 +148,43 @@ public static class RegionPlaneHost
         var plane = Plane;
         if (plane is null)
             return new RegionRenderDecision(item.Verdict, null, item.Reported);
-        var r = plane.Render(
-            labels, inputs.ContentPolicy, inputs.OwnSpamPermille, inputs.OwnPhishingPermille,
-            subject.ContentIdHex, subject.AuthorHex, subject.Text, subject.Hashtags,
-            subject.HasMedia, UiLang);
+        // The nest source rides the same call once the session nest's
+        // self-description has been read (android's and apple's render →
+        // render_with_nest); before that, the region-and-family call alone.
+        var nest = NestRulesHost.Source();
+        var r = nest is { } source
+            ? plane.RenderWithNest(
+                source.Book, source.NestId,
+                labels, inputs.ContentPolicy, inputs.OwnSpamPermille, inputs.OwnPhishingPermille,
+                subject.ContentIdHex, subject.AuthorHex, subject.Text, subject.Hashtags,
+                subject.HasMedia, UiLang)
+            : plane.Render(
+                labels, inputs.ContentPolicy, inputs.OwnSpamPermille, inputs.OwnPhishingPermille,
+                subject.ContentIdHex, subject.AuthorHex, subject.Text, subject.Hashtags,
+                subject.HasMedia, UiLang);
         var placeholder = RegionPlaceholderModel.From(r.@placeholder);
+        var nestPlaceholder = NestPlaceholderModel.From(r.nestPlaceholder);
         if (!item.Reported)
-            return new RegionRenderDecision(r.@verdict, placeholder, false);
+            return new RegionRenderDecision(
+                r.@verdict, placeholder, false, nestPlaceholder,
+                GuardianReasonOf(r.guardianPlaceholder));
         // Reported: the item is blocked whatever the region said. A region BLOCK keeps
         // its placeholder (convention 17: a region block never renders silent); a
         // region COLLAPSE is dropped — the viewer's own act is the more specific
-        // explanation, and a reveal must not lift it.
+        // explanation, and a reveal must not lift it. A nest BLOCK keeps its
+        // placeholder too (convention 17's nest twin, android's render); the
+        // guardian's reason goes — the notice then names the viewer's own report.
         return new RegionRenderDecision(
-            "block", placeholder is { IsBlock: true } ? placeholder : null, true);
+            "block", placeholder is { IsBlock: true } ? placeholder : null, true,
+            nestPlaceholder is { IsBlock: true } ? nestPlaceholder : null);
     }
+
+    /// The guardian rule's reason, verbatim, to paint beside the family-policy frame
+    /// (<c>content-policy-blocked-reason</c>) — <c>null</c> for a floor, the viewer's
+    /// own threshold, an unreadable document or any other source (<c>nest-rules.md</c>
+    /// § The shared rule editor → <i>The reason is the member's to read</i>).
+    private static string? GuardianReasonOf(FfiGuardianPlaceholder? g) =>
+        g?.reason is { Length: > 0 } reason ? reason : null;
 
     /// <summary>What the settings region section paints; <c>null</c> before the plane
     /// is open.</summary>
@@ -196,13 +221,16 @@ public static class RegionPlaneHost
         _painted.Remove(key);
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
     /// The <c>region_block_render</c> state field
-    /// (<c>tests/e2e-unified/helpers/frame_invariants.py</c>).
+    /// (<c>tests/e2e-unified/helpers/frame_invariants.py</c>). Read only by the
+    /// e2e state protocol, so it compiles out of Release with it (convention 15).
     public static Dictionary<string, object?> BlockRenderState() => new()
     {
         ["blocked"] = _blocked.Count,
         ["placeholders"] = _painted.Count,
     };
+#endif
 }
 
 /// <summary>The scorer input a bundled region scorer reads for one item — the item's
@@ -249,12 +277,54 @@ public sealed record RegionPlaceholderModel(
         p is null ? null : new(p.@verb, p.@region, p.@authorityName, p.@reason);
 }
 
+/// <summary>A nest placeholder, ready to paint (<c>nest-rules.md</c> § The nest
+/// source in the engine; § Element IDs): the verb, the nest's domain, the admin's
+/// reason verbatim, and the app's frame naming the nest
+/// (<c>nest_rules.blocked_notice</c> / <c>nest_rules.collapsed_notice</c>) — the
+/// <see cref="RegionPlaceholderModel"/>'s twin. A public record (the generated
+/// <c>FfiNestPlaceholder</c> is UniFFI-internal) so XAML can bind it.</summary>
+public sealed record NestPlaceholderModel(string Verb, string Domain, string Reason)
+{
+    /// Whether this placeholder is a <c>block</c> (no reveal: a member never loosens
+    /// a nest rule) rather than a <c>collapse</c> (one reveal away, sharing the
+    /// family reveal set).
+    public bool IsBlock => Verb == "block";
+
+    /// The app's frame naming the nest, in the verb's words — the reason is painted
+    /// beside it, never inside it.
+    public string NoticeText => Strings.Resolve(new uniffi.fauna_core.LocalizedText(
+        IsBlock ? "nest_rules.blocked_notice" : "nest_rules.collapsed_notice",
+        new Dictionary<string, string> { ["nest"] = Domain }));
+
+    internal static NestPlaceholderModel? From(FfiNestPlaceholder? p) =>
+        p is null ? null : new(p.verb, p.domain, p.reason);
+}
+
 /// <summary>One item's render decision: the composed verdict, and the region
-/// placeholder to paint AHEAD of the family arm when the region drove a
-/// <c>block</c> or <c>collapse</c> (<c>null</c> → the app's existing arms).</summary>
+/// placeholder — or the <see cref="NestPlaceholder"/>, when a rule of the nest the
+/// item was read through drove the verb — to paint AHEAD of the family arm when
+/// that source drove a <c>block</c> or <c>collapse</c> (<c>null</c> → the app's
+/// existing arms). One source wins a verdict, so at most one of the two is set.
+/// <see cref="GuardianReason"/> is the guardian rule's reason the family arm
+/// paints beside its fixed frame. android's <c>RegionRenderDecision</c>.</summary>
 internal sealed record RegionRenderDecision(
-    string Verdict, RegionPlaceholderModel? Placeholder, bool Reported = false)
+    string Verdict, RegionPlaceholderModel? Placeholder, bool Reported = false,
+    NestPlaceholderModel? NestPlaceholder = null, string? GuardianReason = null)
 {
     /// Whether the region blocks this item — convention 17's verdict side.
     public bool IsRegionBlocked => Placeholder?.IsBlock == true;
+
+    /// Whether a nest rule blocks this item — convention 17's nest twin.
+    public bool IsNestBlocked => NestPlaceholder?.IsBlock == true;
+
+    /// Does this item's region placeholder owe the sealed-item sentence
+    /// (<c>region.sealed_note</c>, <c>region-blocking.md</c> § Implementation status
+    /// today)? Asked of the shared rule through its reduced UniFFI face, as android and
+    /// apple ask it: the region drove the placeholder and the viewer's own report did
+    /// not hide the item, the verdict, the open thread's <paramref name="encryption"/>
+    /// (only end-to-end is sealed) and whether Guardian Notify counted the item
+    /// (<see cref="GuardianNotifyCache.WouldCount"/>). No copy of the rule here.
+    public bool SealedNoteOwed(uniffi.fauna_conversations.ThreadEncryption encryption, bool notifyCounted) =>
+        FaunaFfiMethods.RegionSealedNoteOwed(
+            Placeholder is not null && !Reported, Verdict, encryption, notifyCounted);
 }

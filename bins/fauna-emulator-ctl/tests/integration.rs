@@ -4,16 +4,15 @@
 // never runs on Windows).
 #![cfg(unix)]
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
-/// How long a request waits for the freshly spawned server to bind. A fixed
-/// ten 100 ms retries (about 1.2 s with the spawn sleep) lost the race on a
-/// loaded box during a public-CI replay (2026-10-21), while the server was fine.
+/// How long `start_server` waits for the freshly spawned server to report its
+/// bound address (a loaded box can be slow to exec; the server itself is fine).
 const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
@@ -24,15 +23,6 @@ fn write_token_file(dir: &tempfile::TempDir) -> PathBuf {
     let path = dir.path().join("token");
     std::fs::write(&path, "test-token-abc123\n").expect("write token file");
     path
-}
-
-/// Finds a free port by briefly binding 0.0.0.0:0 and recording the assigned port.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind port 0")
-        .local_addr()
-        .expect("local_addr")
-        .port()
 }
 
 /// Creates a fake ANDROID_HOME with mock emulator and adb binaries.
@@ -59,49 +49,56 @@ fn create_mock_sdk(dir: &std::path::Path) -> PathBuf {
     sdk
 }
 
-fn start_server(token_file: &std::path::Path, port: u16) -> Child {
-    // Locate the binary. Cargo sets CARGO_BIN_EXE_fauna-emulator-ctl at
-    // compile time for integration tests.
+/// Spawns the server on `127.0.0.1:0` (the server itself binds, so no port is
+/// ever picked and released by the test) and returns it with the port it
+/// reports on its `listening on <addr>` stderr line. Returning means the
+/// listener is bound: no sleep, no connect-retry.
+fn start_server(token_file: &std::path::Path) -> (Child, u16) {
+    start_server_with_sdk(token_file, std::path::Path::new("/nonexistent"))
+}
+
+fn start_server_with_sdk(token_file: &std::path::Path, sdk_path: &std::path::Path) -> (Child, u16) {
+    // Cargo sets CARGO_BIN_EXE_fauna-emulator-ctl at compile time for
+    // integration tests.
     let bin = env!("CARGO_BIN_EXE_fauna-emulator-ctl");
-    let child = Command::new(bin)
+    let mut child = Command::new(bin)
         .args([
             "--bind",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:0",
             "--token-file",
             token_file.to_str().expect("token path utf8"),
             "--android-home",
-            "/nonexistent",
+            sdk_path.to_str().expect("sdk path utf8"),
             "--avd",
             "test-avd",
         ])
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn server");
-    // Give the server a moment to bind the port.
-    std::thread::sleep(Duration::from_millis(200));
-    child
-}
-
-fn start_server_with_sdk(
-    token_file: &std::path::Path,
-    port: u16,
-    sdk_path: &std::path::Path,
-) -> Child {
-    let bin = env!("CARGO_BIN_EXE_fauna-emulator-ctl");
-    let child = Command::new(bin)
-        .args([
-            "--bind",
-            &format!("127.0.0.1:{port}"),
-            "--token-file",
-            token_file.to_str().unwrap(),
-            "--android-home",
-            sdk_path.to_str().unwrap(),
-            "--avd",
-            "test-avd",
-        ])
-        .spawn()
-        .expect("spawn server");
-    std::thread::sleep(Duration::from_millis(200));
-    child
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Keeps draining stderr for the server's life so it never blocks on a full pipe.
+    std::thread::spawn(move || {
+        let mut sent = false;
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if !sent
+                && let Some(addr) = line.strip_prefix("listening on ")
+                && let Ok(a) = addr.trim().parse::<std::net::SocketAddr>()
+            {
+                tx.send(a.port()).ok();
+                sent = true;
+            }
+        }
+    });
+    // Disconnected (server exited / stderr closed) or deadline → fail loudly.
+    match rx.recv_timeout(CONNECT_DEADLINE) {
+        Ok(port) => (child, port),
+        Err(e) => {
+            child.kill().ok();
+            child.wait().ok();
+            panic!("server never reported its listening address: {e}");
+        }
+    }
 }
 
 /// Sends a raw HTTP/1.1 request and returns (status_code, body).
@@ -118,15 +115,9 @@ fn http_request_timeout(
     timeout: Duration,
 ) -> (u16, String) {
     let addr = format!("127.0.0.1:{port}");
-    let deadline = Instant::now() + CONNECT_DEADLINE;
-    let mut stream = None;
-    while stream.is_none() && Instant::now() < deadline {
-        match TcpStream::connect(&addr) {
-            Ok(s) => stream = Some(s),
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
-        }
-    }
-    let mut stream = stream.unwrap_or_else(|| panic!("could not connect to {addr} after retries"));
+    // The server reported its bound address before `start_server` returned, so
+    // the listener exists: a plain connect, no retry loop.
+    let mut stream = TcpStream::connect(&addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
     stream.set_read_timeout(Some(timeout)).unwrap();
 
     let auth_header = match token {
@@ -191,8 +182,7 @@ fn http_request_timeout(
 fn test_missing_token_returns_401() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/status", None);
     child.kill().ok();
@@ -206,8 +196,7 @@ fn test_missing_token_returns_401() {
 fn test_wrong_token_returns_401() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/status", Some("wrong-token"));
     child.kill().ok();
@@ -221,8 +210,7 @@ fn test_wrong_token_returns_401() {
 fn test_valid_token_routes_correctly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/status", Some("test-token-abc123"));
     child.kill().ok();
@@ -236,8 +224,7 @@ fn test_valid_token_routes_correctly() {
 fn test_unknown_route_returns_404() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/unknown", Some("test-token-abc123"));
     child.kill().ok();
@@ -251,8 +238,7 @@ fn test_unknown_route_returns_404() {
 fn test_status_returns_stopped_when_no_emulator() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/status", Some("test-token-abc123"));
     child.kill().ok();
@@ -273,8 +259,7 @@ fn test_status_returns_stopped_when_no_emulator() {
 fn test_logs_returns_empty_when_no_emulator() {
     let dir = tempfile::tempdir().expect("tempdir");
     let token_file = write_token_file(&dir);
-    let port = free_port();
-    let mut child = start_server(&token_file, port);
+    let (mut child, port) = start_server(&token_file);
 
     let (status, body) = http_request(port, "GET", "/logs?tail=10", Some("test-token-abc123"));
     child.kill().ok();
@@ -296,8 +281,7 @@ fn test_full_lifecycle_start_status_logs_stop() {
     let dir = tempfile::tempdir().unwrap();
     let token_file = write_token_file(&dir);
     let sdk = create_mock_sdk(dir.path());
-    let port = free_port();
-    let mut server = start_server_with_sdk(&token_file, port, &sdk);
+    let (mut server, port) = start_server_with_sdk(&token_file, &sdk);
     let token = "test-token-abc123";
 
     // 1. Start — should succeed (mock emulator script runs).
@@ -444,8 +428,7 @@ fn test_start_with_missing_emulator_binary_returns_500() {
     let dir = tempfile::tempdir().unwrap();
     let token_file = write_token_file(&dir);
     // Use /nonexistent as android-home — no emulator binary there
-    let port = free_port();
-    let mut server = start_server(&token_file, port);
+    let (mut server, port) = start_server(&token_file);
 
     let (status, body) = http_request_timeout(
         port,

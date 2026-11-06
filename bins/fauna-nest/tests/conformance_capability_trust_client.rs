@@ -529,6 +529,195 @@ async fn a_plain_user_discovers_holders_and_mints_then_revokes() {
     );
 }
 
+/// The paid-posts twin of the test above: a PLAIN member lets the nest serve
+/// their paid posts (`nests.md` § Trust facet — grants → *Mint* → *Who may let
+/// the nest serve their paid posts*, ruled 2026-10-23). The nest carries its
+/// own self-enrolled IN-PROCESS web-serve holder beside an off-box MDA; the
+/// member holds one author-created tier's period key in custody. Production
+/// data flow asserted: the User-class holder view lists the in-process
+/// `content-processor` holder → the shared catalog (`mint_options`) offers ONE
+/// *Serve paywalled posts — ‹tier›* option whose single candidate is
+/// `web-serve` (never the MDA) → `Mint` seals the tier's period key to the
+/// web-serve x25519 and deposits a `content.read{post, tier}` grant the
+/// holder's self-scoped fetch returns → `Revoke` darkens it.
+#[tokio::test]
+async fn a_plain_user_lets_the_in_process_web_serve_holder_serve_a_paid_tier() {
+    use fauna_client_pair::TrustMintUseCase;
+    use fauna_mls::wrapped_blob::{GrantBlob, ScopeTuple};
+
+    const MEMBER_SEED: [u8; 32] = [55u8; 32];
+    const WEB_SERVE_SEED: [u8; 32] = [66u8; 32];
+    const TIER: &str = "gold";
+
+    let (base, state, _tmp) = start_trust_nest().await;
+
+    // A registered, NON-admin member.
+    let member = ActorKeypair::from_secret(MEMBER_SEED);
+    let member_id = member.actor_id().0;
+    state
+        .db
+        .create_user(&member_id, "free", "paidauthor")
+        .await
+        .unwrap();
+
+    // An off-box MDA (the mail family's holder) and the nest's own in-process
+    // web-serve holder, both approved and x25519-attested — the in-process
+    // enrollment is what the nest's web-serve self-enrollment writes.
+    let mda_ed = ActorKeypair::from_secret(HOLDER_SEED).actor_id().0;
+    let web_ed = ActorKeypair::from_secret(WEB_SERVE_SEED).actor_id().0;
+    let (_mda_sk, mda_x25519_pk) = generate_x25519_keypair();
+    let (_web_sk, web_x25519_pk) = generate_x25519_keypair();
+    for (ed, x, role, id) in [
+        (&mda_ed, &mda_x25519_pk, BridgeRole::Mda, "mda-1"),
+        (
+            &web_ed,
+            &web_x25519_pk,
+            BridgeRole::ContentProcessor,
+            "web-serve",
+        ),
+    ] {
+        state
+            .db
+            .create_pending_bridge_service_user(ed, role, id)
+            .await
+            .unwrap();
+        state.db.upsert_bridge_x25519(ed, x).await.unwrap();
+        state
+            .db
+            .approve_bridge_service_user(ed, None)
+            .await
+            .unwrap();
+    }
+    state
+        .db
+        .mark_bridge_service_user_in_process(&web_ed)
+        .await
+        .unwrap();
+
+    // The member's period-key custody holds one author-created tier — fixture
+    // precondition (creating the tier is the Tiers tab's own gesture).
+    let mut custody = fauna_core::data::SubscriptionsConfig::default();
+    fauna_client_subscriptions::custody::record_new_tier(
+        &mut custody,
+        member.actor_id(),
+        TIER,
+        [0x11u8; 32],
+        1000,
+    );
+    let period_keys = fauna_client_subscriptions::period_keys::MemoryPeriodKeyStore::new();
+    period_keys.restore_to(&custody);
+
+    let nest = connected_client(&base, ActorKeypair::from_secret(MEMBER_SEED)).await;
+    let machine = build_linked_nests_machine_with_trust(
+        Arc::clone(&nest),
+        ActorKeypair::from_secret(MEMBER_SEED),
+        Arc::new(FakeSuccessionLedgerStore::empty(
+            ActorKeypair::from_secret(MEMBER_SEED).actor_id(),
+        )),
+        Arc::new(fauna_client_config::test_helpers::FakeBackupStateStore::empty()),
+        Arc::new(fauna_client_pair::NoAccountRuntime),
+        period_keys.shared(),
+        // Mail not enabled: the paid-posts option is the one under test.
+        Arc::new(FakeMailStore::with(&MailConfig::default())),
+    );
+    machine.hydrate().await.expect("hydrate as a plain member");
+
+    let home = machine
+        .snapshot()
+        .home
+        .expect("home row for a plain member");
+    let home_nest_id = home.nest_id.clone();
+    assert_eq!(
+        home.mint_options.len(),
+        1,
+        "one option: serve the one held tier ({:?})",
+        home.mint_options
+    );
+    let option = home.mint_options[0].clone();
+    assert_eq!(option.use_case, TrustMintUseCase::PaywalledPosts);
+    assert_eq!(option.tier.as_deref(), Some(TIER));
+    assert_eq!(
+        option.holder_candidates,
+        vec!["web-serve".to_string()],
+        "the in-process web-serve holder is the paid-posts option's only candidate"
+    );
+
+    // MINT through the option the Nests page renders.
+    machine
+        .dispatch(LinkedNestsAction::Mint {
+            nest_id: home_nest_id,
+            holder_bridge_id: option.holder_candidates[0].clone(),
+            scope: option.scope.clone(),
+            duration: Some(TrustGrantDuration::Standard),
+        })
+        .await
+        .expect("a plain member lets the nest serve their paid tier");
+
+    let home = machine.snapshot().home.expect("home row after mint");
+    assert_eq!(home.trust_grants.len(), 1, "Now lens shows the grant");
+    assert_eq!(home.trust_grants[0].holder, web_x25519_pk.to_vec());
+    let grant_id = home.trust_grants[0].grant_id.clone();
+
+    let now = now_epoch();
+    let row = state
+        .db
+        .get_capability_grant(&member_id, &grant_id)
+        .await
+        .unwrap()
+        .expect("the member's mint deposited the grant");
+    let blob = GrantBlob::from_canonical_bytes(&row).expect("row blob decodes");
+    assert_eq!(blob.holder, web_x25519_pk, "sealed to the web-serve holder");
+    assert!(
+        blob.scope
+            .iter()
+            .any(|t| t.class == ScopeTuple::CLASS_CONTENT_READ
+                && t.kind.as_deref() == Some(ScopeTuple::KIND_POST)
+                && t.tier.as_deref() == Some(TIER)),
+        "the grant declares content.read{{post, {TIER}}}: {:?}",
+        blob.scope
+    );
+    assert!(
+        !blob.wrapped_keys.is_empty(),
+        "the tier's key is wrapped in"
+    );
+    assert_eq!(
+        state
+            .db
+            .fetch_capability_grants_for_holder(&web_x25519_pk, now)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the web-serve holder's self-scoped fetch returns it"
+    );
+    assert!(
+        state
+            .db
+            .fetch_capability_grants_for_holder(&mda_x25519_pk, now)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing reached the mail holder"
+    );
+
+    // REVOKE — the web-serve holder goes dark.
+    machine
+        .dispatch(LinkedNestsAction::Revoke {
+            grant_id: grant_id.clone(),
+        })
+        .await
+        .expect("a plain member revokes their paid-posts grant");
+    assert!(
+        state
+            .db
+            .fetch_capability_grants_for_holder(&web_x25519_pk, now)
+            .await
+            .unwrap()
+            .is_empty(),
+        "revoked ⇒ the web-serve holder's fetch is dark"
+    );
+}
+
 /// The CUSTODY kind over the real capability doors (W8.2 (account-data-plane.md § Workstreams) — T13's lifecycle
 /// bullet: "each verb also drives a keyless nest-side capability row").
 /// Production data flow asserted end-to-end: the owner records the custody

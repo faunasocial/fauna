@@ -310,6 +310,57 @@ fn an_empty_document_summarises_to_no_rules() {
     let s = summary(DOMAIN, 1, 0, &ContentPolicyDocument::empty(), "en");
     assert!(s.rules.is_empty());
     assert_eq!(s.not_applied, None);
+    assert_eq!(s.not_applied_sentence, None);
+}
+
+#[test]
+fn an_empty_applied_document_paints_nothing() {
+    let s = summary(DOMAIN, 1, 0, &ContentPolicyDocument::empty(), "en");
+    assert!(!s.is_shown());
+}
+
+/// A newer grammar's document decodes to no rules here, and joining still
+/// accepts it: the heading and the not-applied sentence paint with no rule
+/// listed (`nest-rules.md` § Acceptance at joining).
+#[test]
+fn a_newer_version_with_no_rules_listed_still_paints_its_sentence() {
+    let mut newer = ContentPolicyDocument::empty();
+    newer.version += 1;
+    let s = summary(DOMAIN, 1, 0, &newer, "en");
+    assert!(s.rules.is_empty());
+    assert_eq!(s.not_applied, Some(NestRulesNotApplied::NewerVersion));
+    assert!(s.is_shown());
+    assert_eq!(
+        s.not_applied.map(NestRulesNotApplied::sentence),
+        Some(LocalizedText::key("nest_rules.not_applied_newer_version"))
+    );
+    // The same sentence as data, for the apps across the UniFFI / wasm faces.
+    assert_eq!(
+        s.not_applied_sentence,
+        s.not_applied.map(NestRulesNotApplied::sentence)
+    );
+}
+
+#[test]
+fn a_document_with_rules_paints() {
+    assert!(summary(DOMAIN, 1, 0, &one_rule(), "en").is_shown());
+}
+
+#[test]
+fn each_not_applied_reason_has_its_own_sentence() {
+    for (why, key) in [
+        (
+            NestRulesNotApplied::NewerVersion,
+            "nest_rules.not_applied_newer_version",
+        ),
+        (
+            NestRulesNotApplied::Malformed,
+            "nest_rules.not_applied_malformed",
+        ),
+    ] {
+        assert_eq!(why.sentence(), LocalizedText::key(key));
+        assert!(fauna_i18n::strings::lookup(key).is_some(), "{key}");
+    }
 }
 
 #[test]
@@ -359,6 +410,15 @@ fn a_keyword_rule_joins_its_factor_to_the_labels_of_a_matching_body() {
     let source = verdict.nest().expect("the nest drove the block");
     assert_eq!(source.domain, DOMAIN);
     assert_eq!(source.reason_code, "rule-1");
+
+    // The placeholder every app paints carries the nest's domain, the verb
+    // and the admin's reason; a verdict no nest drove has none.
+    let placeholder = nest_placeholder(&verdict, "en").expect("a nest-driven verdict");
+    assert_eq!(placeholder.domain, DOMAIN);
+    assert!(placeholder.is_block());
+    assert_eq!(placeholder.verdict, RenderVerdict::Block);
+    let quiet = render_verdict_composed(&labels, None, None, &[], &sets);
+    assert!(nest_placeholder(&quiet, "en").is_none());
 
     // A nest with no rules on the device joins nothing, and never builds the
     // scorer input.

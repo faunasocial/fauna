@@ -152,6 +152,19 @@ public struct TakedownArmed {
     public let confirmLabel: String
 }
 
+/// The armed admin Block / Unblock confirm (`takedown-and-block.md` § Admin
+/// block of a reported item): the target report, the verb, and the summary
+/// folded ONCE at arm time over the row the admin is looking at, so a refresh
+/// underneath cannot change what the confirm already named.
+public struct BlockArmed {
+    public let reportId: String
+    public let restore: Bool
+    /// `admin-nest-report-block-confirm-summary` — verb + item + reason.
+    public let summary: String
+    /// `admin-nest-report-block-confirm-button`'s label.
+    public let confirmLabel: String
+}
+
 /// The legal-takedown console's state in ONE value, the `OauthSectionState`
 /// shape: every transition is one observable write, and both gestures' guards
 /// live here, pure, so the view's `.disabled` and a driver-forced press answer
@@ -358,6 +371,17 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// Disables the radios + save mid-dispatch (re-tap guard).
     public private(set) var webAppOriginWorking = false
 
+    /// Update channel (`admin-nest-update-channel-*`; admin.md § N Nest →
+    /// *Update channel*). Every sentence, the three radios' labels and
+    /// descriptions and the `canSet` verdict are the shared
+    /// `FfiAdminUpdateChannelView` fold — this VM decides nothing. `nil` until
+    /// the read lands: the radios stay unmarked and disabled meanwhile.
+    public private(set) var updateChannelView: FfiAdminUpdateChannelView?
+    /// The marked radio — the local selection the save commits.
+    public private(set) var updateChannelDraft: UpdateChannel?
+    /// Disables the radios + save mid-dispatch (re-tap guard).
+    public private(set) var updateChannelWorking = false
+
     /// The outside-app sign-in key section (`admin-nest-oauth-*`), one value
     /// so each transition is one write (`OauthSectionState`).
     public private(set) var oauth = OauthSectionState()
@@ -376,6 +400,16 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// The verdict line of the last resolve or failed read, `nil` before one —
     /// its own element, never the page's `error-message`.
     public private(set) var reportsStatus: String?
+
+    /// The blocked items, newest first (`admin-nest-blocked-section`;
+    /// `fauna.moderation.admin_block.list`), already worded by the shared fold.
+    public private(set) var blocked: [FfiBlockedRow] = []
+    /// Whether the blocked list has been read — its empty line paints only off this bit.
+    public private(set) var blockedLoaded = false
+    /// `admin-nest-report-block-confirm-*` — `nil` while un-armed.
+    public private(set) var blockArmed: BlockArmed?
+    /// The last Block / Unblock verdict line — its own element, never `error-message`.
+    public private(set) var blockStatus: String?
 
     private var admin: FfiAdminClient?
     private var api: APIClient?
@@ -406,12 +440,16 @@ public final class AdminNestVM: BusyAdminCommandVM {
         // Its own read, outside `hydrate()`'s one `do` (a failed read leaves
         // the radios unmarked and disabled, never blanks the page).
         if let view = try? await api.adminWebAppOriginStatus() { paintWebAppOrigin(view) }
+        // Likewise its own read: an older nest's answer is the fold's "predates
+        // the choice" state, and a failure never blanks the page.
+        if let view = try? await api.adminUpdateChannelStatus() { paintUpdateChannel(view) }
         // Its own read, after and outside `hydrate()`'s one `do`: a throw
         // there blanks the whole page's error surface, and this one must not.
         oauth.keysLoaded(await readOauthKeys())
         // The reports queue is read in the page's load too, and likewise outside
         // `hydrate()`'s one `do` — a failed read must not blank the page.
         await loadReports()
+        await loadBlocked()
         // The feature-limits host: its own read, so a failure paints the host's
         // own line and never blanks the page.
         let host = featureAuthoring ?? FeatureAuthoringHost(
@@ -430,6 +468,75 @@ public final class AdminNestVM: BusyAdminCommandVM {
         } catch {
             reportsStatus = renderLocalizedText(reportResolveVerdict(acted: false, error: String(describing: error)))
         }
+    }
+
+    /// Read the blocked list (`fauna.moderation.admin_block.list`).
+    public func loadBlocked() async {
+        guard let api else { return }
+        do {
+            blocked = try await api.moderationClient().adminBlockList()
+            blockedLoaded = true
+        } catch {
+            // List unavailable — the empty line stays off.
+        }
+    }
+
+    /// `admin-nest-report-block-button` — arm the confirm for a queue row, the
+    /// summary folded now over this row. Refused on the shared form view's own
+    /// test, so a driver-forced press cannot arm what the fold refuses.
+    public func armBlock(_ row: FfiReportQueueRow) {
+        let form = reportBlockFormView(subject: row.subject, restore: false)
+        guard form.canSubmit else { return }
+        blockStatus = nil
+        blockArmed = BlockArmed(
+            reportId: row.reportId, restore: false,
+            summary: renderLocalizedTextNested(reportBlockConfirmSummary(subject: row.subject, reason: row.reasonToken, restore: false)),
+            confirmLabel: renderLocalizedText(form.confirmLabel))
+    }
+
+    /// `admin-nest-blocked-unblock-button` — arm the same confirm for a blocked row.
+    public func armUnblock(_ row: FfiBlockedRow) {
+        guard row.unblock.canSubmit else { return }
+        blockStatus = nil
+        blockArmed = BlockArmed(
+            reportId: row.reportId, restore: true,
+            summary: renderLocalizedTextNested(reportBlockConfirmSummary(subject: row.subject, reason: row.reasonToken, restore: true)),
+            confirmLabel: renderLocalizedText(row.unblock.confirmLabel))
+    }
+
+    /// `admin-nest-report-block-cancel-button` — disarm, touching nothing.
+    public func cancelBlock() { blockArmed = nil }
+
+    /// `admin-nest-report-block-confirm-button` — dispatch `fauna.moderation.admin_block`.
+    /// Disarms FIRST (a double press must not repeat the act), words the verdict,
+    /// and re-reads both lists.
+    public func confirmBlock() async {
+        guard let armed = blockArmed, let api else { return }
+        blockArmed = nil
+        do {
+            _ = try await api.moderationClient().adminBlock(reportId: armed.reportId, restore: armed.restore)
+            blockStatus = renderLocalizedTextNested(reportBlockVerdict(restore: armed.restore, error: nil))
+        } catch {
+            blockStatus = renderLocalizedTextNested(reportBlockVerdict(restore: armed.restore, error: String(describing: error)))
+        }
+        await loadReports()
+        await loadBlocked()
+    }
+
+    /// One blocked-list row's line — `reason · kind id · when` (tui's
+    /// `blocked_elements`, web's blocked section: the e2e reads this text on every app).
+    public nonisolated static func blockedLine(_ row: FfiBlockedRow) -> String {
+        let kind: String
+        let id: String
+        switch row.subject {
+        case .post(let cid): (kind, id) = ("post", cid)
+        case .message(_, let recordCid): (kind, id) = ("message", recordCid)
+        case .actor(let actorId): (kind, id) = ("actor", actorId)
+        case .unknown: (kind, id) = ("unknown", "")
+        }
+        let when = Date(timeIntervalSince1970: Double(row.blockedAt) / 1_000_000)
+            .formatted(date: .abbreviated, time: .shortened)
+        return "\(renderLocalizedText(row.reason)) · \(kind) \(id) · \(when)"
     }
 
     /// `admin-nest-report-acted-button` / `-dismiss-button` — record the outcome
@@ -467,8 +574,9 @@ public final class AdminNestVM: BusyAdminCommandVM {
         case .actor(let actorId): (kind, id) = ("actor", actorId)
         case .unknown: (kind, id) = ("unknown", "")
         }
-        let when = Date(timeIntervalSince1970: Double(row.createdAt) / 1_000_000)
-            .formatted(date: .abbreviated, time: .shortened)
+        // How old the report is, by the shared relative-time fold (tui's
+        // `format_epoch_us`); `createdAt` is epoch micros.
+        let when = ValueFormat.relativeTime(thenMs: row.createdAt / 1_000)
         var text = "\(renderLocalizedText(row.reason)) · \(kind) \(id) · \(renderLocalizedText(row.origin)) · \(when)"
         if let note = row.note, !note.isEmpty { text += " — \(note)" }
         if let excerpt = row.excerpt, !excerpt.isEmpty { text += " — “\(excerpt)”" }
@@ -580,6 +688,37 @@ public final class AdminNestVM: BusyAdminCommandVM {
         defer { webAppOriginWorking = false }
         do {
             paintWebAppOrigin(try await api.adminSetWebAppOrigin(mode))
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
+    }
+
+    private func paintUpdateChannel(_ view: FfiAdminUpdateChannelView) {
+        updateChannelView = view
+        updateChannelDraft = view.selected
+    }
+
+    /// Whether the update-channel radios + save are live: the read landed, the
+    /// fold says `canSet`, and no dispatch is out.
+    public var updateChannelEditable: Bool {
+        updateChannelView?.canSet == true && !updateChannelWorking
+    }
+
+    /// Radio pick (`admin-nest-update-channel-{stable,test,dev}-radio`) — local,
+    /// it only arms the save.
+    public func selectUpdateChannel(_ channel: UpdateChannel) {
+        if updateChannelEditable { updateChannelDraft = channel }
+    }
+
+    /// `admin-nest-update-channel-save-button` — `fauna.admin.update_channel.set`
+    /// with the marked radio; the section repaints from the set's own reply.
+    public func saveUpdateChannel() async {
+        guard let api, updateChannelEditable, let channel = updateChannelDraft else { return }
+        updateChannelWorking = true
+        defer { updateChannelWorking = false }
+        do {
+            paintUpdateChannel(try await api.adminSetUpdateChannel(channel))
             errorMessage = nil
         } catch {
             errorMessage = DisplayError.message(error)

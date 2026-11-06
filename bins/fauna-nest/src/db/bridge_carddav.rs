@@ -433,6 +433,21 @@ impl CacheDb {
         Ok(ProvisionOutcome::Updated)
     }
 
+    /// Every actor that owns at least one address book — the pre-split boot
+    /// pass's walk (`crate::dav_pre_split`). Twin of `caldav_actor_ids`.
+    pub async fn carddav_actor_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT actor_id FROM bridge_carddav_addressbooks ORDER BY actor_id")
+            .context("prepare carddav_actor_ids")?;
+        let rows = stmt
+            .query_map([], |row| blob_col_to_array(row.get(0)?, 0, "actor_id"))
+            .context("query carddav_actor_ids")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect carddav_actor_ids")?;
+        Ok(rows)
+    }
+
     /// List every address book belonging to `actor`, ordered by `created_at`
     /// ASC.
     pub async fn list_bridge_carddav_addressbooks(
@@ -528,6 +543,30 @@ impl CacheDb {
         )
         .context("floor_bridge_carddav_addressbook_counter")?;
         Ok(())
+    }
+
+    /// The address-book twin of
+    /// [`CacheDb::take_bridge_caldav_calendar_change_number`]: the next change
+    /// number of `(actor, addressbook_id)`, taken in one step — at least `floor`
+    /// — and returned; `None` for an address book that is not provisioned.
+    pub async fn take_bridge_carddav_addressbook_change_number(
+        &self,
+        actor: &[u8; 32],
+        addressbook_id: &[u8; 32],
+        floor: i64,
+    ) -> Result<Option<i64>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "UPDATE bridge_carddav_addressbooks \
+             SET highestmodseq = MAX(highestmodseq + 1, ?1), \
+                 ctag = MAX(ctag, highestmodseq + 1, ?1) \
+             WHERE actor_id = ?2 AND addressbook_id = ?3 \
+             RETURNING highestmodseq",
+            rusqlite::params![floor, &actor[..], &addressbook_id[..]],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("take_bridge_carddav_addressbook_change_number")
     }
 
     /// What the target holds of one resource `(addressbook_id, uid_hash)`: the
@@ -995,6 +1034,17 @@ impl CacheDb {
             rusqlite::params![&actor[..], &addressbook_id[..]],
         )
         .context("delete_carddav_addressbook: delete addressbook row")?;
+
+        // 5. A contacts flip torn mid-way keeps this deletion on its retry
+        //    (`backup-destinations.md` § *the in-flight marker*): recorded in
+        //    the same transaction, and only while the marker stands.
+        super::materialize_in_flight::note_collection_deleted_in_flight(
+            &tx,
+            &actor,
+            "card",
+            &addressbook_id,
+        )
+        .context("delete_carddav_addressbook: note the deletion for a torn flip")?;
         tx.commit().context("delete_carddav_addressbook: commit")?;
 
         Ok(DeleteCarddavAddressbookOutcome::Deleted {
@@ -1897,6 +1947,58 @@ mod tests {
         assert_eq!(rows[1].encrypted_metadata, b"B");
     }
 
+    // ── take_bridge_carddav_addressbook_change_number ────────────────────────
+
+    /// The calendar twin's pin over the address book.
+    #[tokio::test]
+    async fn a_taken_change_number_is_above_one_a_door_minted_after_the_read() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(12);
+        let ab = make_addressbook_id(13);
+        db.insert_bridge_carddav_addressbook(&actor, &ab, b"m", 1_700_000_000)
+            .await
+            .unwrap();
+        let read = db
+            .carddav_addressbook_highestmodseq(&actor, &ab)
+            .await
+            .unwrap()
+            .unwrap();
+        db.update_bridge_carddav_addressbook_metadata(&actor, &ab, b"renamed")
+            .await
+            .unwrap();
+        let door = db
+            .carddav_addressbook_highestmodseq(&actor, &ab)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(door, read + 1);
+        let taken = db
+            .take_bridge_carddav_addressbook_change_number(&actor, &ab, read + 1)
+            .await
+            .unwrap();
+        assert_eq!(taken, Some(door + 1), "never the number the door minted");
+        assert_eq!(
+            db.carddav_addressbook_highestmodseq(&actor, &ab)
+                .await
+                .unwrap(),
+            taken,
+            "the door's next mint goes above it"
+        );
+        assert_eq!(
+            db.take_bridge_carddav_addressbook_change_number(&actor, &ab, 50)
+                .await
+                .unwrap(),
+            Some(50)
+        );
+        assert_eq!(
+            db.take_bridge_carddav_addressbook_change_number(&actor, &make_addressbook_id(99), 1)
+                .await
+                .unwrap(),
+            None,
+            "no address book, no number"
+        );
+    }
+
     // ── carddav_addressbook_highestmodseq ────────────────────────────────────
 
     #[tokio::test]
@@ -2767,6 +2869,60 @@ mod tests {
         assert_eq!(
             o,
             DeleteCarddavAddressbookOutcome::Deleted { cards_deleted: 0 }
+        );
+    }
+
+    /// The delete door notes its deletion for a torn contacts flip's retry
+    /// only while the flip's in-flight marker stands.
+    #[tokio::test]
+    async fn delete_carddav_addressbook_notes_the_deletion_only_under_a_contacts_marker() {
+        use crate::db::materialize_in_flight::{InFlightJournal, MaterializeInFlight};
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(54);
+        let (outside, inside) = (make_addressbook_id(55), make_addressbook_id(56));
+        for ab in [&outside, &inside] {
+            db.insert_bridge_carddav_addressbook(&actor, ab, b"m", 1_700_000_000)
+                .await
+                .unwrap();
+        }
+        db.delete_carddav_addressbook(&actor, &outside)
+            .await
+            .unwrap();
+        assert!(
+            db.materialize_deleted_collections(&actor, "card")
+                .await
+                .unwrap()
+                .is_empty(),
+            "no marker, no note"
+        );
+        db.materialize_in_flight_put(
+            &actor,
+            "card",
+            &MaterializeInFlight {
+                set_name: "s".into(),
+                segment_ids: vec![1],
+                journal: InFlightJournal::Adopt,
+                started_at: 1_700_000_000,
+            },
+        )
+        .await
+        .unwrap();
+        db.delete_carddav_addressbook(&actor, &inside)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.materialize_deleted_collections(&actor, "card")
+                .await
+                .unwrap(),
+            vec![inside],
+            "a deletion under the contacts marker is noted"
+        );
+        assert!(
+            db.materialize_deleted_collections(&actor, "calendar")
+                .await
+                .unwrap()
+                .is_empty(),
+            "under the contacts kind only"
         );
     }
 

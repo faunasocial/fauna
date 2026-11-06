@@ -13,11 +13,14 @@ owns, however connected it was — this machine's own row included.
 **The binding.** A WS-RPC connection is bound to a device when the bearer it
 was upgraded with was minted over ``fauna.auth.device_handshake`` by the device
 key the row carries as its granted ``principal``. The app's own primary bearer
-is seed-minted and binds nothing; what makes THIS machine's row online is the
-account runtime's principal client — its own connection, upgraded with a bearer
-the machine's store writer key minted, on the row the enrollment latched on.
-So the witness is the row carrying ``device-this-mark-badge`` (the enrolled row,
-``devices.md`` § This-device marker: *enrolled wins*) reading Online.
+is seed-minted and binds nothing; what makes THIS machine's row online is, on a
+native app, the account runtime's principal client — its own connection,
+upgraded with a bearer the machine's store writer key minted, on the row the
+enrollment latched on. Web keeps its one socket and binds that socket in band
+instead: the runtime host sends ``fauna.auth.device_bind``, signed by the same
+key (``devices.md`` § *Web binds its one socket in band*). So the witness is the
+row carrying ``device-this-mark-badge`` (the enrolled row, ``devices.md``
+§ This-device marker: *enrolled wins*) reading Online.
 
 ⚠ **A DEDICATED actor, never the shared ``test_user``** — the shared actor's
 roster is the whole session's, and which of its rows is "this device" depends
@@ -28,8 +31,8 @@ lifts the device cap on the tier every test user shares.
 (convention 14): the enrollment latch naming a listed row
 (``helpers.enrollment.await_enrollment``), then a deadline poll on the page —
 re-entering it on tui's nav-edge hydrate cadence — for the state the principal
-client's connect produces. That connect deliberately races the enrollment
-ceremony (``fauna_client::ws_device_handshake_bearer::spawn_connect_retry``,
+client's connect, or web's bind, produces. That connect deliberately races the
+enrollment ceremony (``fauna_client::ws_device_handshake_bearer::spawn_connect_retry``,
 backoff to a 30 s ceiling), which is why the poll has a budget of its own
 rather than asserting on the first paint.
 """
@@ -112,7 +115,7 @@ def test_the_signed_in_apps_own_device_reads_online(app, request, nest_instance,
             f"{last!r}; enrollment latched on row {latched_row}, roster {sorted(roster)!r}). "
             "No this-device card = the marker never landed on the enrolled row; a card "
             "reading Offline = the account runtime's principal client never connected "
-            "(grep the app log for 'device-principal client'), or the nest's "
+            "(grep the app log for 'device-principal client'; on web, 'device bind'), or the nest's "
             "`fauna.sync.devices.list` is not joining the connection's bound device key."
         ),
     )

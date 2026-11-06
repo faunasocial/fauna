@@ -44,9 +44,10 @@ process — `simctl launch` reports a REAL host PID (`drivers/ios.py`
 `IosInProcessDriver.kill_uncleanly`, empirically verified against `ps`/`kill`),
 so it SIGKILLs that specific PID, never a name/bundle-id-based kill. web's
 kill is the page closed with its BrowserContext kept (`drivers/web.py`
-`kill_uncleanly` — no unload handler runs, the storage survives). windows (the
-FlaUI bridge owns the app) still needs its own unclean-kill shape — a declared
-skip until then (drivers/base.py `kill_uncleanly`).
+`kill_uncleanly` — no unload handler runs, the storage survives). windows' kill
+is the FlaUI bridge's own hard process-tree kill of the app it owns
+(`drivers/windows.py` `kill_uncleanly`); android's bridge owns no app child, a
+declared `unclean-kill` skip there (`surfaces.toml`).
 """
 
 from __future__ import annotations
@@ -95,7 +96,8 @@ from helpers.trust_seed_witness import TRUST_SEED_ENV, await_a_tip_sealed_row
 from common.cred_store import attach_account_store
 from helpers import enrollment
 from helpers.bridge_enrollment import enroll_bridge
-from helpers.app_surface import app_name
+from helpers.app_surface import app_name, require_surface
+from helpers.relaunch import pin_store_across_relaunch
 from helpers.waiting import await_device_removal_ready, wait_until
 from i18n.strings import S
 
@@ -1011,8 +1013,8 @@ def test_failed_factory_reset_does_not_trap_the_client(killable_app, crash_nest)
     # trap, not because the reconcile cleared one — a false green, worse than a red;
     # e2e_status_and_tips § Crash-recovery.) `killable_app` +
     # `preserve_state_across_relaunch()` above already restrict this journey to the
-    # drivers that both support an unclean kill and implement the seam (linux +
-    # macOS/iOS); a killable driver without the seam fails loudly (NotImplementedError),
+    # drivers that both support an unclean kill and implement the seam (every
+    # killable driver); a killable driver without the seam fails loudly (NotImplementedError),
     # never skips silently (testing.md § point 11).
 
     _relaunch_trusting_nest(app.driver, nest)
@@ -1368,12 +1370,13 @@ def test_kill_client_mid_domain_remove_box_recovers(killable_app, crash_nest):
     )
 
     # Act: press that row's remove control, then the confirm it opens — the
-    # click that dispatches — and SIGKILL at the dispatch seam. An app not yet
-    # lifted onto the confirm dispatches on the press itself.
+    # click that dispatches — and SIGKILL at the dispatch seam.
     watch = NestLogWatch(crash_nest)
     app.admin.press_domain_remove(domain)
-    if app.admin.remove_confirm_open():
-        app.admin.confirm_domain_remove()
+    assert app.admin.remove_confirm_open(), (
+        f"pressing remove on {domain!r} opened no confirm dialog. error={app.error_text()!r}"
+    )
+    app.admin.confirm_domain_remove()
     beacon = watch.wait_for_dispatch("fauna.bridges.remove_local_domain")
     app.driver.kill_uncleanly()
 
@@ -1416,25 +1419,26 @@ def test_kill_client_mid_domain_remove_box_recovers(killable_app, crash_nest):
 # Journey 8 — kill the client mid-MAIL-DISABLE
 # (common.md § Client-state recoverability line 433: "mail disable" was the
 #  un-audited inverse of journey 2. DisableMail is a CLIENT-orchestrated
-#  multi-RPC cascade — per credential: revoke_wrapped_mls_blob then
-#  revoke_wrapped_submission_token then a per-row mail-plane save; the MSEK
-#  clear is the last write (`fauna-client-mail-settings::machine.rs disable_mail`).
-#  A crash tears it BETWEEN rows; each nest DELETE is idempotent and each row's
-#  progress is committed, so a re-dispatched disable resumes from the survivors.)
+#  multi-RPC cascade (`fauna-client-mail-settings::machine.rs disable_mail`,
+#  `mail-credentials.md` § Trigger taxonomy, the Disable-mail row): the nest's
+#  per-actor mail flag off, then one revoke_wrapped_submission_token per
+#  credential, then the custody's `mail_enabled = false` as the last write. A
+#  crash tears it between RPCs; every step is idempotent and the custody still
+#  reads enabled until the last write, so a re-dispatched disable completes.)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.feature("factory-reset")
 def test_kill_client_mid_mail_disable_box_recovers(killable_app, crash_nest):
     """Enable mail with TWO credentials, then UI-disable (toggle → destructive
     confirm → DisableMail); the client is SIGKILL'd at the first credential's
-    revoke dispatch, tearing the multi-RPC cascade mid-flight. A relaunched
-    client must land on a truthful mail-settings page and be able to drive mail
-    to fully disabled (0 credentials) — no off-box fix, no wedged half-disabled
-    state."""
+    submission-token revoke, tearing the multi-RPC cascade mid-flight. A
+    relaunched client must land on a truthful mail-settings page and be able to
+    drive mail to off with both credentials kept — no off-box fix, no wedged
+    half-disabled state."""
     app = killable_app
 
     # Arrange: mail enabled with two credentials so the disable cascade is
-    # genuinely multi-write (a kill after the first revoke leaves the second).
+    # genuinely multi-write (a kill at the first token revoke leaves the second).
     _relaunch_trusting_nest(app.driver, crash_nest)
     inject_admin_session(app, crash_nest["url"], _admin_secret_hex(crash_nest))
     app.mail_settings.navigate()
@@ -1448,14 +1452,13 @@ def test_kill_client_mid_mail_disable_box_recovers(killable_app, crash_nest):
         f"precondition: second credential add failed. error={app.error_text()!r}"
     )
 
-    # Act: destructive-confirm disable, SIGKILL at the first revoke dispatch. The
-    # first cascade write is always revoke_wrapped_mls_blob for credential #1
-    # (`disable_mail` → `revoke_credential`), so that beacon is the seam.
+    # Act: destructive-confirm disable, SIGKILL at the first token revoke — the
+    # nest's mail flag is already off, the custody still reads enabled.
     app.driver.click("mail-settings-enabled-toggle")  # snaps back; opens the confirm
     app.driver.wait_for("mail-settings-disable-confirm-button", timeout=10.0)
     watch = NestLogWatch(crash_nest)
     app.driver.click("mail-settings-disable-confirm-button")
-    beacon = watch.wait_for_dispatch("fauna.bridges.revoke_wrapped_mls_blob")
+    beacon = watch.wait_for_dispatch("fauna.bridges.revoke_wrapped_submission_token")
     app.driver.kill_uncleanly()
 
     # Ground truth: box answers; credentials/enablement are whatever the torn
@@ -1463,27 +1466,25 @@ def test_kill_client_mid_mail_disable_box_recovers(killable_app, crash_nest):
     services = setup_status(crash_nest["url"])
 
     # Recovery through the UI: relaunch → mail settings renders truthfully, and
-    # disable is drivable to completion. If any credential survived the tear, the
-    # MSEK is still set (it is cleared LAST), so the toggle is still on and a
-    # re-dispatched disable resumes; if the cascade happened to finish first,
-    # the count is already 0.
+    # disable is drivable to completion. The custody's `mail_enabled = false` is
+    # the LAST write, so a torn cascade still reads enabled and a re-dispatched
+    # disable completes; if the cascade happened to finish first, it reads off.
     app.driver.hard_reload()
     inject_admin_session(app, crash_nest["url"], _admin_secret_hex(crash_nest))
     app.mail_settings.navigate()
     app.driver.wait_for("mail-settings-enabled-toggle", timeout=15.0)
 
-    if app.mail_settings.credential_count() > 0:
+    if app.mail_settings.enabled_toggle_state() == "on":
         app.mail_settings.disable_mail()
 
-    deadline = time.monotonic() + 20.0
-    while time.monotonic() < deadline:
-        if app.mail_settings.credential_count() == 0:
-            break
-        time.sleep(0.5)
-    assert app.mail_settings.credential_count() == 0, (
-        f"relaunched client could not drive mail to fully disabled (0 credentials) "
-        f"after a mid-disable crash (beacon: {beacon!r}; services at kill: "
-        f"{services!r}). error={app.error_text()!r}"
+    assert app.mail_settings.wait_for_enabled_toggle_state("off", timeout=20.0), (
+        f"relaunched client could not drive mail to off after a mid-disable "
+        f"crash (beacon: {beacon!r}; services at kill: {services!r}). "
+        f"error={app.error_text()!r}"
+    )
+    assert app.mail_settings.credential_count() == 2, (
+        "turning mail off keeps both credentials (mail-credentials.md, the "
+        f"Disable-mail row). error={app.error_text()!r}"
     )
 
 
@@ -1751,7 +1752,8 @@ def test_kill_client_between_the_removal_legs_reconcile_finishes_it(
       row underneath the reconcile and turns a completion back into a wait.
     """
     from common.auth import UNBINDING_MAX_DEVICES, set_tier_caps
-    from conftest import _E2E_LOGIN_DEVICE_ID, _make_user
+    from conftest import _make_user
+    from helpers.e2e_session import e2e_login_device_id
 
     app = killable_app
     nest = crash_nest
@@ -1854,8 +1856,9 @@ def test_kill_client_between_the_removal_legs_reconcile_finishes_it(
         f"count per card: {marks}"
     )
     own_cards = {index_one}
-    if _E2E_LOGIN_DEVICE_ID in listed:
-        own_cards.add(listed.index(_E2E_LOGIN_DEVICE_ID))
+    login_row = e2e_login_device_id(app)
+    if login_row in listed:
+        own_cards.add(listed.index(login_row))
     marked = [i for i, n in enumerate(marks) if n]
     assert len(marked) == 1 and marked[0] in own_cards, (
         f"the This-device mark is on card(s) {marked}, not exactly one of seat "
@@ -2067,7 +2070,7 @@ def _removals_resumed_at_launch(driver) -> int:
     # `DELETE /session` (`WindowsDriver.kill_uncleanly`) and its app log is
     # append-shared across relaunches, which the `>= 1` count below tolerates.
     [
-        "tui",
+        pytest.param("tui", marks=pytest.mark.tui),
         pytest.param("web", marks=pytest.mark.web),
         pytest.param("linux", marks=pytest.mark.linux),
         pytest.param("macos", marks=pytest.mark.macos),
@@ -2107,28 +2110,14 @@ def test_kill_owner_between_a_member_removals_stage_and_publish_relaunch_finishe
     this journey is about; a fresh store would be a different journey, the
     restore of a lost device.
     """
-    from helpers.app_surface import skip_unbuilt
     from tests.api import conv_api
 
     app, nest, owner = folder_share_owner_app
     driver = app.driver
     port = nest["port"]
 
-    if not driver.supports_unclean_kill():
-        skip_unbuilt(
-            driver,
-            surface="the unclean-kill primitive (driver-owned Popen/pty child)",
-            detail="see PlatformDriver.kill_uncleanly",
-            tracked="testing.md",
-        )
-    if not driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            driver,
-            surface="a long-term store the driver can keep across a relaunch",
-            detail="the resumed removal reads the crashed app's own MLS engine "
-            "state; without the pin the relaunch is a lost-device restore",
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
+    require_surface(driver, "unclean-kill")
+    pin_store_across_relaunch(driver)
 
     # --- arrange: a folder shared with two people who never open an app.
     leaves = headless_member(nest, "leaves")

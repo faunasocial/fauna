@@ -46,14 +46,6 @@ fn bubble_policy_epoch() -> u64 {
     crate::content_policy::epoch() + crate::conversations::muted_keywords_epoch()
 }
 
-/// The room editor's catalog machine has no page of its own to repaint on a
-/// notification: every gesture it issues repaints from its own completion.
-struct NoopLabelerObserver;
-
-impl fauna_labeler_catalog_machine::LabelerCatalogObserver for NoopLabelerObserver {
-    fn on_changed(&self) {}
-}
-
 pub struct ConversationDetail {
     pub root: gtk::Box,
     stack: gtk::Stack,
@@ -738,7 +730,9 @@ impl ConversationDetail {
                     LabelerSeams {
                         machine: crate::views::personalization::build_machine(
                             &client_for_labelers,
-                            Arc::new(NoopLabelerObserver),
+                            // The room editor's catalog machine has no page of its own to repaint:
+                            // every gesture it issues repaints from its own completion.
+                            Arc::new(fauna_labeler_catalog_machine::observer::NullObserver),
                         ),
                         rt: rt_for_labelers,
                     },
@@ -1200,6 +1194,9 @@ impl ConversationDetail {
             // Reply-all is offered only on recipient-selection rails (mail);
             // gated per bubble via the shared capability.
             let show_reply_all = d.capabilities.supports_recipient_selection;
+            // Reply is withheld on a room that cannot take a send (a bridged
+            // room no bridge serves): the buttons stay, insensitive.
+            let can_send = d.capabilities.can_send;
             // The selected bubble — `SearchNav::Mail`'s second half
             // (conversations.md § The selected message).
             let mut selected_bubble: Option<gtk::Box> = None;
@@ -1293,6 +1290,7 @@ impl ConversationDetail {
                         &d.capabilities,
                         &d.thread_id,
                         show_reply_all,
+                        can_send,
                         self.on_reply.clone(),
                         &self.client,
                         &self.rt,

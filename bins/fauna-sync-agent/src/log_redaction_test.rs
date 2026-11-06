@@ -224,11 +224,6 @@ const ERROR_STRING_ALLOWLIST: &[(&str, &str, &str)] = &[
         "refusing to overwrite {}",
         "the agent's own config file, an install-scoped internal root",
     ),
-    (
-        "pipe_server.rs",
-        "another sync-agent instance holds {name}",
-        "the agent's own named pipe, an install-scoped internal name",
-    ),
 ];
 
 /// Every error-message body in `prod`, with its line: each [`ERROR_MACROS`]

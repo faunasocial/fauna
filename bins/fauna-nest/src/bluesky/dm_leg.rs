@@ -72,7 +72,7 @@ pub async fn far_room_id(
 ) -> Option<String> {
     let address = address.trim();
     if address.starts_with("did:") {
-        return Some(address.to_string());
+        return fauna_bridge_atproto::chat::is_peer_did(address).then(|| address.to_string());
     }
     let handle = address
         .strip_prefix('@')
@@ -80,7 +80,7 @@ pub async fn far_room_id(
         .to_ascii_lowercase();
     far.bluesky_handle(account, &handle)
         .await
-        .filter(|did| did.starts_with("did:plc:") || did.starts_with("did:web:"))
+        .filter(|did| fauna_bridge_atproto::chat::is_peer_did(did))
 }
 
 /// The DID the handle `handle` names, asked of the service under `account`'s
@@ -181,8 +181,14 @@ pub async fn ingest_convo(
 #[derive(Debug)]
 pub enum SendFailed {
     /// Worth another pass: the session did not restore, the service did not
-    /// answer. The item stays queued.
+    /// answer, it is rate-limiting or faulting. The item stays queued, and the
+    /// rest of the pass skips only this account.
     Retry(anyhow::Error),
+    /// The service refused this message or this conversation, or the room id
+    /// is no DID it can address: another pass would be refused the same way.
+    /// The item is acked and its Sent row left for the app's undelivered
+    /// marker.
+    Undeliverable(anyhow::Error),
 }
 
 /// The far side of the outbound drain — the one network step, behind a seam
@@ -217,17 +223,22 @@ impl ChatFar for SessionChat<'_> {
             })?;
         fauna_bridge_atproto::chat::send_dm(&agent, peer_did, text)
             .await
-            .map_err(SendFailed::Retry)
+            .map_err(|e| match e {
+                fauna_bridge_atproto::chat::SendDmError::Refused(e) => SendFailed::Undeliverable(e),
+                fauna_bridge_atproto::chat::SendDmError::Transient(e) => SendFailed::Retry(e),
+            })
     }
 }
 
 /// Drain the leg's outbox: every queued item is opened, sent through `far`,
 /// stamped with its far message id and acked. An item that can never be
-/// delivered (it does not open, or the leg no longer serves the account — D7
-/// is re-checked here, where the consume-side path starts) is acked with a
-/// warning and its Sent row stays; a send worth retrying leaves that item and
-/// the rest queued for the next pass. Returns each sent item's id with its
-/// far message id.
+/// delivered (it does not open, the leg no longer serves the account — D7
+/// is re-checked here, where the consume-side path starts — or the service
+/// refused it) is acked with a warning and its Sent row stays; a send worth
+/// retrying leaves that item, and every later item of the same account,
+/// queued for the next pass, while the pass goes on with the other accounts —
+/// one account's fault or refusal never holds another's sends. Returns each
+/// sent item's id with its far message id.
 ///
 /// # Errors
 /// A database fault.
@@ -235,23 +246,66 @@ pub async fn drain_outbox(
     state: &AppState,
     far: &impl ChatFar,
 ) -> anyhow::Result<Vec<(i64, String)>> {
+    drain_outbox_paged(state, far, DRAIN_PAGE).await
+}
+
+/// [`drain_outbox`] with an explicit page size. The pass walks the outbox
+/// page by page with a cursor, so items an account deferred stay queued but
+/// never occupy a page the other accounts' items need.
+async fn drain_outbox_paged(
+    state: &AppState,
+    far: &impl ChatFar,
+    page: u32,
+) -> anyhow::Result<Vec<(i64, String)>> {
     // One pass at a time: the send's nudge and the worker's tick would both
     // fetch the same undrained item and send it twice.
     static DRAINING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_pass = DRAINING.lock().await;
-    let items = state
+    let mut items = state
         .db
-        .fetch_principal_outbox(BLUESKY.principal_id, DRAIN_PAGE)
+        .fetch_principal_outbox(BLUESKY.principal_id, page)
         .await?;
     if items.is_empty() {
         return Ok(Vec::new());
     }
     let (secret, _) = state.db.first_party_bridge_key(BLUESKY.bridge_id).await?;
     let mut sent = Vec::new();
+    // Accounts whose send this pass deferred: their later items wait behind
+    // the deferred one, in order.
+    let mut deferred = std::collections::HashSet::<[u8; 32]>::new();
+    loop {
+        let full = items.len() >= page as usize;
+        let last_id = items.last().map_or(0, |(_, item)| item.id);
+        drain_page(state, far, &secret, items, &mut deferred, &mut sent).await?;
+        if !full {
+            break;
+        }
+        items = state
+            .db
+            .fetch_principal_outbox_after(BLUESKY.principal_id, last_id, page)
+            .await?;
+        if items.is_empty() {
+            break;
+        }
+    }
+    Ok(sent)
+}
+
+async fn drain_page(
+    state: &AppState,
+    far: &impl ChatFar,
+    secret: &[u8; 32],
+    items: Vec<(Vec<u8>, crate::db::bridged_conversations::BridgedOutboxRow)>,
+    deferred: &mut std::collections::HashSet<[u8; 32]>,
+    sent: &mut Vec<(i64, String)>,
+) -> anyhow::Result<()> {
     for (actor, item) in items {
         let Ok(account) = <[u8; 32]>::try_from(actor.as_slice()) else {
             continue;
         };
+        if deferred.contains(&account) {
+            continue;
+        }
         let text = if own_did(&state.db, &account).await?.is_none() {
             tracing::warn!(
                 id = item.id,
@@ -259,7 +313,7 @@ pub async fn drain_outbox(
             );
             None
         } else {
-            let text = bridge_legs::open_outbox_text(&item.ciphertext, &secret);
+            let text = bridge_legs::open_outbox_text(&item.ciphertext, secret);
             if text.is_none() {
                 tracing::warn!(
                     id = item.id,
@@ -279,8 +333,13 @@ pub async fn drain_outbox(
                 }
                 Err(SendFailed::Retry(e)) => {
                     tracing::warn!(id = item.id, "bluesky leg: send deferred: {e:#}");
-                    break;
+                    deferred.insert(account);
+                    continue;
                 }
+                Err(SendFailed::Undeliverable(e)) => tracing::warn!(
+                    id = item.id,
+                    "bluesky leg: outbound item dropped: the service refused it: {e:#}"
+                ),
             }
         }
         state
@@ -288,7 +347,7 @@ pub async fn drain_outbox(
             .ack_bridged_outbox(&account, BLUESKY.principal_id, &[item.id])
             .await?;
     }
-    Ok(sent)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -496,6 +555,10 @@ mod tests {
     struct FakeChat {
         sent: Mutex<Vec<([u8; 32], String, String)>>,
         down: bool,
+        /// Every send as this account is refused by the service.
+        refuses: Option<[u8; 32]>,
+        /// Every send as this account meets a transport fault.
+        faults: Option<[u8; 32]>,
     }
 
     impl ChatFar for FakeChat {
@@ -505,8 +568,13 @@ mod tests {
             peer_did: &str,
             text: &str,
         ) -> Result<String, SendFailed> {
-            if self.down {
+            if self.down || self.faults == Some(*account) {
                 return Err(SendFailed::Retry(anyhow::anyhow!("chat service down")));
+            }
+            if self.refuses == Some(*account) {
+                return Err(SendFailed::Undeliverable(anyhow::anyhow!(
+                    "recipient refuses messages from the sender"
+                )));
             }
             let mut sent = self.sent.lock().unwrap();
             sent.push((*account, peer_did.to_string(), text.to_string()));
@@ -547,5 +615,150 @@ mod tests {
         let rows = family::inbox(&state, ALICE, &room.room_id).await;
         assert_eq!(rows.len(), 1);
         assert!(rows[0].outbound);
+    }
+
+    const CAROL: [u8; 32] = [0xC0; 32];
+    const CAROL_DID: &str = "did:plc:carol";
+
+    /// [`linked_state`] plus CAROL, a second consume-side linked account, and
+    /// one queued item from each — ALICE's first, so hers is the leg's oldest.
+    async fn two_accounts_one_item_each() -> (Arc<AppState>, i64, i64) {
+        let state = linked_state().await;
+        state.db.create_user(&CAROL, "free", "test").await.unwrap();
+        {
+            let conn = state.db.conn().await;
+            db_helpers::upsert_linked_account(
+                &conn,
+                &hex::encode(CAROL),
+                CAROL_DID,
+                "carol.example",
+            )
+            .unwrap();
+        }
+        crate::test_support::seed_recipient_seal_key(&state.db, &CAROL, &SEED).await;
+        let a_room = family::open(&state, ALICE, "bluesky", PEER).await.unwrap();
+        let c_room = family::open(&state, CAROL, "bluesky", PEER).await.unwrap();
+        let a_id = family::send(&state, ALICE, &a_room, "from alice")
+            .await
+            .unwrap();
+        let c_id = family::send(&state, CAROL, &c_room, "from carol")
+            .await
+            .unwrap();
+        (state, a_id, c_id)
+    }
+
+    /// A message the service refuses is acked — never the head
+    /// that blocks every later item of every account — and the next account's
+    /// item is sent in the same pass.
+    #[tokio::test]
+    async fn an_undeliverable_item_does_not_stop_another_accounts_send() {
+        let (state, _, c_id) = two_accounts_one_item_each().await;
+        let far = FakeChat {
+            refuses: Some(ALICE),
+            ..Default::default()
+        };
+        let sent = drain_outbox(&state, &far).await.unwrap();
+        assert_eq!(sent, vec![(c_id, "far-1".to_string())]);
+
+        // ALICE's refused item was acked: a service that now accepts her
+        // sends nothing on the next pass.
+        let far = FakeChat::default();
+        assert!(drain_outbox(&state, &far).await.unwrap().is_empty());
+        assert!(far.sent.lock().unwrap().is_empty());
+    }
+
+    /// A transport fault for one account keeps that account's
+    /// item queued and skips only that account for the rest of the pass.
+    #[tokio::test]
+    async fn a_transport_fault_keeps_its_item_queued_and_sends_the_other_account() {
+        let (state, a_id, c_id) = two_accounts_one_item_each().await;
+        let far = FakeChat {
+            faults: Some(ALICE),
+            ..Default::default()
+        };
+        let sent = drain_outbox(&state, &far).await.unwrap();
+        assert_eq!(sent, vec![(c_id, "far-1".to_string())]);
+
+        // ALICE's item is still queued and goes once the fault clears.
+        let far = FakeChat::default();
+        let sent = drain_outbox(&state, &far).await.unwrap();
+        assert_eq!(sent, vec![(a_id, "far-1".to_string())]);
+    }
+
+    /// A transport fault keeps the account's later items behind its first, in
+    /// order: nothing of that account is sent past a deferred item.
+    #[tokio::test]
+    async fn a_transport_fault_holds_the_accounts_later_items_in_order() {
+        let (state, a_id, c_id) = two_accounts_one_item_each().await;
+        let a_room = family::open(&state, ALICE, "bluesky", PEER).await.unwrap();
+        let a_second = family::send(&state, ALICE, &a_room, "alice again")
+            .await
+            .unwrap();
+        let far = FakeChat {
+            faults: Some(ALICE),
+            ..Default::default()
+        };
+        assert_eq!(
+            drain_outbox(&state, &far).await.unwrap(),
+            vec![(c_id, "far-1".to_string())]
+        );
+        let far = FakeChat::default();
+        let sent: Vec<i64> = drain_outbox(&state, &far)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(sent, vec![a_id, a_second]);
+    }
+
+    /// An account that keeps deferring more items than a page
+    /// holds must not starve another account: the pass pages past them.
+    #[tokio::test]
+    async fn a_deferred_accounts_backlog_does_not_starve_another_account() {
+        let (state, _, c_id) = two_accounts_one_item_each().await;
+        let a_room = family::open(&state, ALICE, "bluesky", PEER).await.unwrap();
+        for i in 0..3 {
+            family::send(&state, ALICE, &a_room, &format!("backlog {i}"))
+                .await
+                .unwrap();
+        }
+        let c_room = family::open(&state, CAROL, "bluesky", PEER).await.unwrap();
+        let c_late = family::send(&state, CAROL, &c_room, "carol late")
+            .await
+            .unwrap();
+        let far = FakeChat {
+            faults: Some(ALICE),
+            ..Default::default()
+        };
+        let sent: Vec<i64> = drain_outbox_paged(&state, &far, 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(sent, vec![c_id, c_late]);
+    }
+
+    /// A room id the chat service cannot address is refused at
+    /// open — only a `did:plc:` or `did:web:` that parses is a Bluesky room.
+    /// The family's grammar turns most away; a trailing `:` or `%` it admits
+    /// is no DID, and the leg refuses it itself.
+    #[tokio::test]
+    async fn a_did_the_service_cannot_address_opens_no_room() {
+        let state = linked_state().await;
+        for address in [
+            "did:x",
+            "did:key:z6Mkabc",
+            "did:plc:bad id",
+            "did:plc:abc:",
+            "did:web:example.com%",
+        ] {
+            let err = family::open(&state, ALICE, "bluesky", address)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.bridges.address_refused", "{address}");
+        }
+        assert!(family::rooms(&state, ALICE).await.is_empty());
     }
 }

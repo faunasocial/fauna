@@ -13,15 +13,21 @@ needs a CA the app can reach and trust — and the CA is a constant no human
 chooses (`tls-certificates.md` § ACME settings). The `acme_pebble` marker runs
 the harness's pebble + fake name server stack (`helpers/acme_pebble.py`) and
 hands every app launch the compile-gated e2e ACME directory seed
-(`e2e-automation-surface-gating.md` § The ACME directory seed), which the shared
-native admin-dns machine builder installs. Nothing about the order is faked: the
+(`e2e-gated-seeds.md` § The ACME directory seed), which the shared native
+admin-dns machine builder installs. Nothing about the order is faked: the
 record on the paste card is the challenge pebble issued.
 
-**Which apps.** tui, linux and android: all three build the admin-dns machine
-through the shared native builder, so the same seed reaches them with no per-app
-glue; android's runs wait on the first venue run (convention 7's environment
-skip). Web is the declared absence (its order runs in
-wasm); the remaining native apps trickle down the same way.
+**Which apps.** tui, linux and android build the admin-dns machine through the
+shared native builder, so the same seed reaches them with no per-app glue;
+android's runs wait on the first venue run (convention 7's environment skip).
+web runs its order in wasm and takes the seed through its own reading
+(`e2e-gated-seeds.md` § The ACME directory seed → *The web order*): the web
+driver writes the directory into the page's `localStorage`, the browser orders
+from pebble directly, and the `test-hooks` nest polls the fake name server for
+the propagation gate — so web's gate is the nest-relayed probe, and outcome 59's
+`attempt` line reaches `app_stderr_text` through the core wasm module's console
+layer. web is marked per test, not in `pytestmark`, so the marker reads as each
+witness's own claim. The remaining native apps trickle down the same way.
 """
 
 import re
@@ -159,6 +165,7 @@ def _restart_and_read_paste_card(request, admin_app, nest_instance, domain):
     return idx, rows
 
 
+@pytest.mark.web
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_manual_issue_shows_the_challenge_record_to_paste_and_cancel_clears_it(
     admin_app, nest_instance
@@ -183,6 +190,7 @@ def test_manual_issue_shows_the_challenge_record_to_paste_and_cancel_clears_it(
     _cancel(admin_app, idx, domain)
 
 
+@pytest.mark.web
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_manual_issue_survives_an_app_restart_with_the_same_record(
     request, admin_app, nest_instance
@@ -205,10 +213,11 @@ def test_manual_issue_survives_an_app_restart_with_the_same_record(
 
 
 # A second device of the admin: the same signing key, a device id distinct from
-# the first seat's `_E2E_LOGIN_DEVICE_ID`.
+# the first seat's `e2e_login_device_id`.
 _SECOND_SEAT_DEVICE_ID = "fedcba9876543210" * 4
 
 
+@pytest.mark.web
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_manual_issue_is_waiting_with_the_same_record_on_another_device(
     request, admin_app, nest_instance
@@ -288,6 +297,7 @@ def test_manual_issue_is_waiting_with_the_same_record_on_another_device(
     _cancel(admin_app, first_idx, domain)
 
 
+@pytest.mark.web
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_a_failed_manual_completion_keeps_the_card_for_a_retry(
     request, admin_app, nest_instance, acme_pebble
@@ -387,6 +397,7 @@ def _gate_attempts(admin_app) -> list[int]:
     ]
 
 
+@pytest.mark.web
 @pytest.mark.feature("admin-dns-and-certificates")
 def test_manual_complete_waits_for_the_name_servers_then_issues(
     admin_app, nest_instance, acme_pebble

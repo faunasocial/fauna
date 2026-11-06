@@ -259,31 +259,31 @@ public struct FamilyView: View {
                     wire: Binding(get: { vm.draftUnknownPeerDm },
                                   set: { vm.draftUnknownPeerDm = $0; vm.unknownPeerDmTouched = true }))
 
-                // ── The v1.x content pillar (family-safety.md § Content policy)
-                // — four per-category render floors over the one shared
-                // `contentFloorOptions()` catalog, so their value list cannot
-                // drift from what `fauna.family.policy.update` accepts, plus
-                // the Guardian Notify knob. Same editor, same save button.
+                // ── The content pillar (family-safety.md § App surface →
+                // *Content rules*) — the shared rule editor. It saves by its OWN
+                // button (`FamilyClient::save_content_rules`); the policy form's
+                // save below sends the content pillar absent. Plus the Guardian
+                // Notify knob, which stays in the policy form. ──
                 Divider()
 
-                contentFloorSelect(L.family.policyContentNsfwLabel, "nsfw",
-                                   Binding(get: { vm.draftContentNsfw },
-                                           set: { vm.draftContentNsfw = $0 }))
-                contentFloorSelect(L.family.policyContentSpamLabel, "spam",
-                                   Binding(get: { vm.draftContentSpam },
-                                           set: { vm.draftContentSpam = $0 }))
-                contentFloorSelect(L.family.policyContentPhishingLabel, "phishing",
-                                   Binding(get: { vm.draftContentPhishing },
-                                           set: { vm.draftContentPhishing = $0 }))
-                contentFloorSelect(L.family.policyContentCommercialLabel, "commercial",
-                                   Binding(get: { vm.draftContentCommercial },
-                                           set: { vm.draftContentCommercial = $0 }))
+                if let client, let ward = vm.selectedWard {
+                    FamilyRulesSection(api: client.api, ward: ward) { await vm.load() }
+                }
 
                 policyToggle(
                     L.family.policyContentNotifyLabel,
                     Ids.familyPolicyContentNotifyToggle,
                     Binding(get: { vm.draftContentNotify },
                             set: { vm.draftContentNotify = $0 }))
+
+                // The honest bound on content categories (family-client-
+                // enforcement.md § Content policy → *Where it binds*): the apps
+                // detect no adult content or ads yet, so a limit on them waits
+                // for a label. Same id and placement as tui.
+                automationText(Ids.familyPolicyContentHint, L.family.policyContentHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 // ── The v1.x screen-time pillar (family-safety.md § Screen
                 // time) — a usage window ("HH:MM"..HH:MM", wrapping allowed)
@@ -304,7 +304,9 @@ public struct FamilyView: View {
                 screenTimeField(L.family.policyScreenDailyMinutesLabel, Ids.familyPolicyScreenDailyMinutesInput,
                                 Binding(get: { vm.draftScreenDailyMinutes },
                                         set: { vm.draftScreenDailyMinutes = $0 }))
-                Text(L.family.policyScreenCaveat)
+                // The conforming-client bound, stated on the editor surface
+                // (family-client-enforcement.md § Screen time). Same id as tui.
+                automationText(Ids.familyPolicyScreenHint, L.family.policyScreenCaveat)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -526,21 +528,6 @@ public struct FamilyView: View {
             #endif
             .accessibilityIdentifier(id)
             .automationField(id, text: text)
-    }
-
-    /// One per-category content floor (`family-policy-content-{category}-select`
-    /// — family-safety.md § Content policy). A thin spelling of `policySelect`
-    /// over the shared `contentFloorOptions()`/`contentFloorLabel` catalog, so
-    /// all four rows are one line each and cannot drift from one another.
-    private func contentFloorSelect(
-        _ labelText: String, _ category: String, _ wire: Binding<String>
-    ) -> some View {
-        policySelect(
-            labelText,
-            "family-policy-content-\(category)-select",
-            options: contentFloorOptions(),
-            label: contentFloorLabel(value:),
-            wire: wire)
     }
 
     /// A policy select. The control's options and the driver's `select`/`get_text`
@@ -778,8 +765,10 @@ public struct FamilyView: View {
                 // sealed to the ward) — decided by the shared
                 // `approvalDisplayText` FFI export; `nil` is the mail_hold
                 // null reverse-path, which falls back to the localized
-                // no-sender label.
-                Text(approvalDisplayText(entry: entry) ?? L.family.approvalNoSender)
+                // no-sender label. A hold also shows when it arrived
+                // ("<sender> · <time>"), the shared `approvalTimestampDisplay`
+                // rule joined by `ValueFormat.approvalRowText`.
+                Text(ValueFormat.approvalRowText(entry: entry))
                     .font(.callout)
                 Text(entry.supervisedHandle)
                     .font(.caption)
@@ -807,7 +796,7 @@ public struct FamilyView: View {
         .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.familyApprovalItem)
-        .automationValue(Ids.familyApprovalItem, text: { approvalDisplayText(entry: entry) ?? L.family.approvalNoSender })
+        .automationValue(Ids.familyApprovalItem, text: { ValueFormat.approvalRowText(entry: entry) })
         .automationScope(Ids.familyApprovalItem, index: offset)
     }
 }
@@ -929,6 +918,21 @@ public final class FamilyStatusStore {
     /// on `supervisedBy` for the same reason. The Bridges page reads it back
     /// through ``feedRequestState(bridgeId:operation:target:)``.
     public private(set) var feedRequests: [FfiFamilyFeedRequest] = []
+    /// Whether every knock waiting on this account waits on its guardian — what
+    /// each knock row's `knock-guardian-pending` paints from (`family-safety.md`
+    /// § App surface): the shared `wardKnocksAwaitGuardian` over the live read's
+    /// own policy, gated on `supervisedBy` like the asks. tui reads
+    /// `FamilyState::own_policy` at its knock loop; android's
+    /// `WardAsks.knocksAwaitGuardian` is the twin.
+    public private(set) var knocksAwaitGuardian = false
+
+    /// The Fauna Kids eligibility verdict (`account-age-band.md` § The account age
+    /// band, the kids-app bullet, item (3)): the shared `kidsAppEligible` over the
+    /// last SUCCESSFUL live status read, never a Swift re-derivation. `nil` until a
+    /// read has landed (and after a teardown) — a failed re-read keeps the last
+    /// verdict, so a connection blip never refuses a supervised child; the nest
+    /// enforces supervision either way. Mirrors android's `KidsEligibilityVM`.
+    public private(set) var kidsEligible: Bool?
 
     public var supervisedByHandle: String? { liveSupervisedByHandle ?? restoredGuardianHandle }
     public var hasRelationship: Bool { liveHasWardOrGuardianRelationship || restoredGuardianHandle != nil }
@@ -958,8 +962,7 @@ public final class FamilyStatusStore {
     /// canonical lowercase); an id that is not hex matches nothing, which is the
     /// honest answer.
     public func contactAskPending(peerActorIdHex: String) -> Bool {
-        guard let want = Data(hexString: peerActorIdHex.lowercased()) else { return false }
-        return contactRequests.contains { $0.peerActorId == want }
+        wardContactAskPending(asks: contactRequests, peerActorIdHex: peerActorIdHex)
     }
 
     /// The live ask state for one feed-source operation, or `nil` when this
@@ -972,8 +975,7 @@ public final class FamilyStatusStore {
     /// up the row of a different follow on the same bridge, and a `link` ask
     /// (whose `target` is empty by construction) must not match either.
     public func feedRequestState(bridgeId: String, operation: String, target: String) -> FeedRequestState? {
-        feedRequests
-            .first { $0.bridgeId == bridgeId && $0.operation == operation && $0.target == target }
+        wardFeedRequestState(asks: feedRequests, bridgeId: bridgeId, operation: operation, target: target)
             .map(Self.state(of:))
     }
 
@@ -982,13 +984,19 @@ public final class FamilyStatusStore {
     /// AND two blocked follows are three independent asks, each with its own
     /// verdict).
     public func feedRequestStates(bridgeId: String) -> [FeedRequestState] {
-        feedRequests.filter { $0.bridgeId == bridgeId }.map(Self.state(of:))
+        // Each row is classified by the shared `wardFeedRequestState` over that
+        // row alone, so the pending/approved mapping lives only in Rust.
+        feedRequests.filter { $0.bridgeId == bridgeId }.compactMap {
+            wardFeedRequestState(asks: [$0], bridgeId: $0.bridgeId, operation: $0.operation, target: $0.target)
+                .map(Self.state(of:))
+        }
     }
 
-    /// `approvedAt` carries the approval INSTANT rather than a state string, so the
-    /// two states are exactly "has one" / "does not".
-    private static func state(of request: FfiFamilyFeedRequest) -> FeedRequestState {
-        request.approvedAt == nil ? .pending : .approved
+    private static func state(of shared: FfiFeedRequestState) -> FeedRequestState {
+        switch shared {
+        case .pending: .pending
+        case .approved: .approved
+        }
     }
 
     /// Restore (or clear) the supervised-side fallback from the persisted
@@ -1011,6 +1019,7 @@ public final class FamilyStatusStore {
         do {
             let status = try await api.familyStatus()
             liveSupervisedByHandle = status.supervisedBy?.handle
+            kidsEligible = kidsAppEligible(status: status)
             liveHasWardOrGuardianRelationship = status.supervisedBy != nil || !status.wards.isEmpty
                 || !status.incomingTransfers.isEmpty
             // The live reply supersedes any restored fallback — the choke
@@ -1022,6 +1031,7 @@ public final class FamilyStatusStore {
             let supervised = status.supervisedBy != nil
             contactRequests = supervised ? status.contactRequests : []
             feedRequests = supervised ? status.feedRequests : []
+            knocksAwaitGuardian = supervised && wardKnocksAwaitGuardian(ownPolicy: status.policy)
         } catch {
             // Fail closed on the guardian/wards/transfer half only; the
             // supervised half (`supervisedByHandle`) keeps whatever live or
@@ -1036,9 +1046,11 @@ public final class FamilyStatusStore {
     @MainActor
     private func clear() {
         liveSupervisedByHandle = nil
+        kidsEligible = nil
         liveHasWardOrGuardianRelationship = false
         restoredGuardianHandle = nil
         contactRequests = []
         feedRequests = []
+        knocksAwaitGuardian = false
     }
 }

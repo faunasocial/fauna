@@ -12,13 +12,15 @@ namespace FaunaApp.Tests;
 
 /// <summary>
 /// The windows newer-version check over the REAL shared update look
-/// (<c>installers/README.md</c> § Knowing a newer version is out): <see cref="UpdateCheck"/>
-/// drives <c>FaunaFfiMethods.CheckForNewerRelease</c> / <c>LookAtSignIn</c> — the native
-/// dll loads in the test host — against a loopback feed serving one answer, the same
-/// shape as <c>libs/fauna-ffi/src/version.rs</c>'s own tests. No C# round trip is
-/// mocked, because none exists any more: a newer release paints the notice, the same
-/// or an older one paints none, and a failure paints none — and the asked check reads
-/// a failure as failed, never as "up to date".
+/// (<c>installers/README.md</c> § Knowing a newer version is out). The asked check
+/// drives <c>FaunaFfiMethods.CheckForNewerRelease</c> — the native dll loads in the
+/// test host — against a loopback feed serving one answer, the same shape as
+/// <c>libs/fauna-ffi/src/version.rs</c>'s own tests: a newer release paints the notice,
+/// the same or an older one paints none, and a failure reads as failed, never as "up
+/// to date". The sign-in look reads the signed-in nest
+/// (<c>INestRpcClient.LookForNewerReleaseAtSignInAsync</c>, over
+/// <c>FfiNestClient.LookForNewerReleaseAtSignIn</c>), so its tests hand it a
+/// <see cref="MockNestRpcClient"/> and point the feed at a closed origin.
 ///
 /// <para>[Collection("StringsGlobal")]: the label and notice resolve through the
 /// process-global <see cref="Strings"/>; this class installs its own
@@ -134,22 +136,38 @@ public class UpdateCheckFfiTests
         Assert.Null(check.Notice);
     }
 
+    // ── The sign-in look: the signed-in nest's newest_release, never the feed ──
+    //
+    // installers/README.md § Knowing a newer version is out → *The nest's
+    // newest-release field*: the look reads the nest the app just signed in to,
+    // through FfiNestClient.LookForNewerReleaseAtSignIn (shared Rust decides
+    // "newer"). Every check below sits over a CLOSED feed origin, so a notice can
+    // only have come from the nest.
+
+    private static NewerRelease Release(string version) =>
+        new($"v{version}", version, $"https://github.com/faunasocial/fauna/releases/tag/v{version}");
+
+    private static string NoticeFor(string version) =>
+        $"Version {version} is available. Get it at https://github.com/faunasocial/fauna/releases/tag/v{version}";
+
     [Fact]
-    public async Task SignInLook_ANewerRelease_PaintsTheSameNoticeAndLeavesTheButtonAlone()
+    public async Task SignInLook_TheNestReportsANewerRelease_PaintsTheSameNoticeAndLeavesTheButtonAlone()
     {
-        var check = Over(ServeOnce(Advertising("v9.9.9")));
-        await check.LookOnceAtSignInAsync();
+        var check = Over(ClosedOrigin());
+        var nest = new MockNestRpcClient { NextNewerReleaseAtSignIn = Release("9.9.9") };
+        await check.LookOnceAtSignInAsync(nest);
 
         Assert.Equal($"Version 9.9.9 is available. Get it at {ReleasePage}", check.Notice);
         Assert.Equal(UpdateCheck.CheckPhase.Idle, check.Phase);
         Assert.Equal("Check for Updates", check.ButtonLabel);
+        Assert.Contains("LookForNewerReleaseAtSignIn", nest.Calls);
     }
 
     [Fact]
-    public async Task SignInLook_TheRunningVersion_PaintsNothing()
+    public async Task SignInLook_TheNestSaysNothingNewer_PaintsNothing()
     {
-        var check = Over(ServeOnce(Advertising($"v{Running}")));
-        await check.LookOnceAtSignInAsync();
+        var check = Over(ClosedOrigin());
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient());
 
         Assert.Null(check.Notice);
     }
@@ -158,10 +176,29 @@ public class UpdateCheckFfiTests
     public async Task SignInLook_AFailedLook_IsSilent()
     {
         var check = Over(ClosedOrigin());
-        await check.LookOnceAtSignInAsync();
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient { NextError = "disconnected" });
 
         Assert.Null(check.Notice);
         Assert.Equal(UpdateCheck.CheckPhase.Idle, check.Phase);
+    }
+
+    [Fact]
+    public async Task SignInLook_SeveralNests_TheNoticeOnlyMovesUp()
+    {
+        var check = Over(ClosedOrigin());
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient { NextNewerReleaseAtSignIn = Release("9.9.9") });
+        Assert.Equal(NoticeFor("9.9.9"), check.Notice);
+
+        // A later nest that knows of an older release, or of none, never moves the
+        // notice down or away (fauna_client::update_look::keep_the_newer's rule).
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient { NextNewerReleaseAtSignIn = Release("9.9.8") });
+        Assert.Equal(NoticeFor("9.9.9"), check.Notice);
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient());
+        Assert.Equal(NoticeFor("9.9.9"), check.Notice);
+
+        // One that knows of a newer one moves it up.
+        await check.LookOnceAtSignInAsync(new MockNestRpcClient { NextNewerReleaseAtSignIn = Release("10.0.0") });
+        Assert.Equal(NoticeFor("10.0.0"), check.Notice);
     }
 
     [Fact]

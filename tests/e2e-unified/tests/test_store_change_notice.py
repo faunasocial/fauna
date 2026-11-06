@@ -8,9 +8,10 @@ a fresh visit would show, within the notice's latency, whichever process
 applied the change. "Read once per visit" is not a contract.
 
 The journey: two seats of one account on this machine (convention 16). Seat A
-is the app under test (tui, linux, web); seat B is the fleet's tui sibling
-(`helpers.fleet.SiblingSeats`), so the linux leg runs under `--app linux,tui`
-and the web leg under `--app web,tui`.
+is the app under test (tui, linux, web, macos, ios); seat B is the fleet's tui
+sibling (`helpers.fleet.SiblingSeats`), so the linux leg runs under
+`--app linux,tui`, the web leg under `--app web,tui`, the android leg under
+`--app android,tui` and the Apple legs under `--app macos,tui` / `--app ios,tui`.
 Seat A opens Muted words and stays there; seat B adds a word through its own page.
 The word must appear on seat A's open page with no re-visit. Seat A's change
 arrives one of two ways, and the ruling makes them one rule: when A's runtime
@@ -33,7 +34,15 @@ import pytest
 from helpers.fleet import SiblingSeats, poked_pass
 from helpers.waiting import account_pump_role, wait_until
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.android,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.ios,
+]
 
 #: The seat's own write: its page's add round trip.
 ADD_S = 120.0

@@ -1,5 +1,6 @@
-//! tier_1: the custodian's authorize, the door's handshake end to end over a
-//! real socket, the endpoint lock's hand-over, and the two classes performed
+//! tier_1: the custodian's authorize, the door's handshake end to end over the
+//! platform's real transport (a unix socket, a windows named pipe), the
+//! endpoint lock's hand-over, and the two classes performed
 //! through a real manager (`conversations-oracle.md` § Done definition).
 
 use std::collections::HashMap;
@@ -9,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fauna_conversations::address::{Rail, TypedAddress};
 use fauna_conversations::backends::mock::MockRailBackend;
 use fauna_core::identity_op::OPS_PER_WINDOW;
+// The door is a unix socket or a windows pipe (`serve` is
+// `#[cfg(any(unix, windows))]`): its two tests are gated alike.
+#[cfg(any(unix, windows))]
 use fauna_ipc::oracle::{ConnectError, OracleClient, OracleEndpoint};
 
 use super::*;
@@ -330,9 +334,24 @@ async fn the_two_classes_read_and_send_through_the_page_without_touching_the_dra
     assert_eq!(records[2], ("conversation.read".into(), room.0.clone()));
 }
 
+/// An endpoint of this test's own: a socket in `dir` on unix, a pipe name
+/// unique to this process on windows.
+#[cfg(any(unix, windows))]
+#[cfg_attr(windows, allow(unused_variables))]
+fn test_endpoint(dir: &std::path::Path, name: &str) -> OracleEndpoint {
+    #[cfg(unix)]
+    return OracleEndpoint::Unix(dir.join(format!("{name}.sock")));
+    #[cfg(windows)]
+    return OracleEndpoint::Pipe(format!(
+        r"\\.\pipe\fauna-oracle-test-{}-{name}",
+        std::process::id()
+    ));
+}
+
 /// The door end to end: the principal proves its holder key through the real
 /// HPKE seal; a wrong account and a principal that cannot open the challenge
 /// are refused before any operation.
+#[cfg(any(unix, windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_handshake_proves_the_holder_key_and_refuses_everything_else() {
     let (secret, holder) = fauna_mls::wrapped_blob::generate_x25519_keypair();
@@ -343,13 +362,10 @@ async fn the_handshake_proves_the_holder_key_and_refuses_everything_else() {
     ));
     let custodian = Arc::new(c);
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oracle-test.sock");
-    let mut keeper = serve::DoorKeeper::at(path.clone(), custodian.clone());
+    let endpoint = test_endpoint(dir.path(), "handshake");
+    // The door is bound before the tick answers: no wait for it.
+    let mut keeper = serve::DoorKeeper::at(endpoint.clone(), custodian.clone());
     assert!(keeper.tick(true).await);
-    while !path.exists() {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    let endpoint = OracleEndpoint::Unix(path);
 
     let outcome = tokio::task::spawn_blocking(move || {
         let open = |secret: [u8; 32]| {
@@ -401,15 +417,16 @@ async fn the_handshake_proves_the_holder_key_and_refuses_everything_else() {
 
 /// One app serves an account's door at a time; the next takes it over when
 /// the first stops.
+#[cfg(any(unix, windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_endpoint_lock_hands_the_door_over() {
     let (_, holder) = fauna_mls::wrapped_blob::generate_x25519_keypair();
     let (first, _) = custodian(FakeAccount::with(holder, &[]));
     let (second, _) = custodian(FakeAccount::with(holder, &[]));
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oracle-handover.sock");
-    let mut a = serve::DoorKeeper::at(path.clone(), Arc::new(first));
-    let mut b = serve::DoorKeeper::at(path.clone(), Arc::new(second));
+    let endpoint = test_endpoint(dir.path(), "handover");
+    let mut a = serve::DoorKeeper::at(endpoint.clone(), Arc::new(first));
+    let mut b = serve::DoorKeeper::at(endpoint, Arc::new(second));
 
     assert!(a.tick(true).await, "first come serves");
     assert!(!b.tick(true).await, "the second waits");

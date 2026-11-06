@@ -67,6 +67,12 @@ Deno.test("sharedAccountPort is the one implementation, over accountPortCall", (
         "account its running runtime does not serve (decision (e)).",
     );
   }
+  if (!/\(\) => runtimeComing\(actorIdHex\)/.test(body)) {
+    throw new Error(
+      "sharedAccountPort must hand `accountPortCall` the `runtimeComing` question — " +
+        "without it a read arriving before the runtime fails for good (decision (j)).",
+    );
+  }
   for (const [name, text] of sources()) {
     if (name === "lib/wasm.ts" || name === "lib/account-runtime.ts") continue;
     if (/\baccountPortCall\b/.test(text)) {

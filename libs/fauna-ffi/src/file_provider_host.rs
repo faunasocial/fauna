@@ -500,6 +500,45 @@ pub(crate) struct CapabilityHostFolderKeys {
     pub(crate) actor_id: [u8; 32],
     pub(crate) backup_key: fauna_core::crypto::BackupKey,
     pub(crate) signer: Arc<dyn FfiChangeSignerProvider>,
+    /// The account's sync state dir the host was built with — where the
+    /// app's group-ring mirror rests (`group-set.md` § decision 12).
+    pub(crate) state_dir: PathBuf,
+}
+
+impl CapabilityHostFolderKeys {
+    /// The app's mirror of the held group rings, read fresh under the key
+    /// the host derives from its `BackupKey`
+    /// ([`fauna_sync_engine::group_ring_mirror`]). A missing mirror is an
+    /// empty list; an unreadable one is an error.
+    fn mirrored_rings(
+        &self,
+    ) -> anyhow::Result<Vec<fauna_sync_engine::group_ring_mirror::MirroredGroupRing>> {
+        let mirror =
+            fauna_sync_engine::group_ring_mirror::GroupRingMirror::in_state_dir(&self.state_dir);
+        mirror.read(
+            &fauna_core::crypto::GroupRingMirrorKey::derive(&self.backup_key),
+            &fauna_core::hex32::encode(&self.actor_id),
+        )
+    }
+
+    /// The group sets the mirror lists, as the presence plan takes them —
+    /// the app-dead presence door's group source
+    /// ([`capability_host_presence_sets`]).
+    pub(crate) fn mirrored_group_sets(
+        &self,
+    ) -> anyhow::Result<Vec<fauna_folders_machine::on_demand_presence::HeldGroupScope>> {
+        Ok(self
+            .mirrored_rings()?
+            .iter()
+            .map(
+                |ring| fauna_folders_machine::on_demand_presence::HeldGroupScope {
+                    scope_id: ring.scope_id.0,
+                    name: ring.name.clone(),
+                    short_id: ring.short_id.clone(),
+                },
+            )
+            .collect())
+    }
 }
 
 #[async_trait::async_trait]
@@ -520,6 +559,41 @@ impl fauna_client_folders::FolderKeyReader for CapabilityHostFolderKeys {
             capability_host_folder_keys(&self.auth, self.actor_id, &self.backup_key, &*self.signer)
                 .map_err(anyhow::Error::msg)?;
         reader.recipient_mseks().await
+    }
+
+    /// The writers the owner's grant log authorizes to deposit into
+    /// `folder_id`, through the same replica — what the refresh pass's adopter
+    /// admits a parked item's signer against (`folder-deposit.md` § The
+    /// depositor signs, the owner's device verifies).
+    async fn deposit_writers(
+        &self,
+        folder_id: i64,
+    ) -> anyhow::Result<std::collections::BTreeSet<[u8; 32]>> {
+        let reader =
+            capability_host_folder_keys(&self.auth, self.actor_id, &self.backup_key, &*self.signer)
+                .map_err(anyhow::Error::msg)?;
+        reader.deposit_writers(folder_id).await
+    }
+
+    /// A group set's ring off the app's mirror (`group-set.md` § Build design
+    /// — the group set, decision 12): the scope's generation keys as the
+    /// app mirrored them, the content keys derived here through the one
+    /// derivation. A scope the mirror does not carry answers a ring with no
+    /// tip — the host builds nothing and the row reads keys-pending, exactly
+    /// as a ring the app has not keyed yet; an unreadable mirror is an error,
+    /// never an empty ring.
+    async fn group_set_keys(
+        &self,
+        scope_id: &[u8; 32],
+    ) -> anyhow::Result<Option<fauna_core::group_content::GroupContentKeys>> {
+        let rings = self.mirrored_rings()?;
+        Ok(Some(
+            rings
+                .iter()
+                .find(|ring| ring.scope_id.0 == *scope_id)
+                .map(fauna_sync_engine::group_ring_mirror::MirroredGroupRing::content_keys)
+                .unwrap_or_default(),
+        ))
     }
 }
 
@@ -635,16 +709,19 @@ pub fn capability_host_folder_keys(
 /// folder-key custody through the capability host's own reader
 /// ([`capability_host_folder_keys`] — the replica the hosts of this account
 /// share, so the plan lists exactly the sets a host can key). `nest_url`,
-/// `backup_key`, `bearer` and `signer` are the values the hosts are built
-/// with.
+/// `backup_key`, `bearer`, `signer` and `state_dir` are the values the hosts
+/// are built with; the group sets come from the app's mirror in `state_dir`
+/// (`group-set.md` § Build design — the group set, decisions 11 (a) and 12),
+/// the one source an app-dead host can list a group set from.
 ///
 /// # Errors
-/// Any read failed — the list, a roster, or custody (no machine principal is
-/// enrolled yet, or the plane could not be walked). An error is never an
-/// empty answer: the caller skips the reconcile rather than tearing down
-/// presences on a state it could not see.
+/// Any read failed — the list, a roster, custody (no machine principal is
+/// enrolled yet, or the plane could not be walked) or an unreadable mirror.
+/// An error is never an empty answer: the caller skips the reconcile rather
+/// than tearing down presences on a state it could not see.
 #[cfg(feature = "folders")]
 #[fauna_uniffi_async::export]
+#[allow(clippy::too_many_arguments)]
 pub async fn capability_host_presence_sets(
     folders: Arc<crate::FfiFoldersClient>,
     nest_url: String,
@@ -653,6 +730,7 @@ pub async fn capability_host_presence_sets(
     backup_key: Vec<u8>,
     bearer: Arc<dyn FfiBearerProvider>,
     signer: Arc<dyn FfiChangeSignerProvider>,
+    state_dir: String,
 ) -> Result<Vec<fauna_folders_machine::on_demand_presence::PresenceSet>, FfiError> {
     let actor_id = bytes32(&actor_id, "actor_id")?;
     let device_id_hex = hex::encode(bytes32(&device_id, "device_id")?);
@@ -667,7 +745,19 @@ pub async fn capability_host_presence_sets(
     ));
     let custody = capability_host_folder_keys(&auth, actor_id, &backup_key, &*signer)
         .map_err(|msg| FfiError::General { msg })?;
-    crate::folders_client::presence_sets_over(&folders.client(), &device_id_hex, &custody).await
+    let groups = CapabilityHostFolderKeys {
+        auth,
+        actor_id,
+        backup_key,
+        signer,
+        state_dir: PathBuf::from(state_dir),
+    }
+    .mirrored_group_sets()
+    .map_err(|e| FfiError::General {
+        msg: format!("the group-ring mirror is unreadable: {e:#}"),
+    })?;
+    crate::folders_client::presence_sets_over(&folders.client(), &device_id_hex, &custody, &groups)
+        .await
 }
 
 /// One enumerated File Provider item — the projection of a tracked row (or a
@@ -686,6 +776,16 @@ pub struct FfiFileProviderItem {
     pub is_dir: bool,
     /// FP `contentVersion` bytes (empty for a directory).
     pub content_version: Vec<u8>,
+    /// The holder-keeps gate keeps this file's body on the device
+    /// (`provider_face::ProviderRow::kept`): the appex holds it out of the OS's
+    /// own eviction while it reads as synced (`on-demand-files-apple.md` § Apple
+    /// File Provider binding).
+    pub kept: bool,
+    /// This file can carry a share link
+    /// (`provider_face::ProviderItem::share_link_eligible`): the appex projects it
+    /// as the item's `userInfo["faunaShare"] = "link"`, the fact Finder's Share
+    /// action gates on (`macos.md` § Sync → *Finder's Share entry*).
+    pub share_link_eligible: bool,
 }
 
 impl From<provider_face::ProviderItem> for FfiFileProviderItem {
@@ -697,6 +797,8 @@ impl From<provider_face::ProviderItem> for FfiFileProviderItem {
             mtime: i.mtime,
             is_dir: i.is_dir,
             content_version: i.content_version,
+            kept: i.kept,
+            share_link_eligible: i.share_link_eligible,
         }
     }
 }
@@ -809,6 +911,10 @@ enum Request {
         base_content_version: Vec<u8>,
         reply: oneshot::Sender<Result<FfiFileProviderAck, String>>,
     },
+    IngestDeletionConflicted {
+        rel: String,
+        reply: oneshot::Sender<Result<FfiFileProviderAck, String>>,
+    },
     Delete {
         rel: String,
         reply: oneshot::Sender<Result<FfiFileProviderAck, String>>,
@@ -831,6 +937,9 @@ enum Request {
     },
     Refresh {
         reply: oneshot::Sender<Result<bool, String>>,
+    },
+    TakeKeptFlips {
+        reply: oneshot::Sender<Result<Vec<FfiFileProviderItem>, String>>,
     },
     ReadOnly {
         reply: oneshot::Sender<Result<bool, String>>,
@@ -1434,6 +1543,19 @@ impl FfiFileProviderHost {
         .await
     }
 
+    /// `createItem` carrying `deletionConflicted` → the OS's re-create of an item
+    /// it held edited when a remote delete removed it: the survivor is uploaded
+    /// with its delete-vs-edit conflict reported (`on-demand-files-apple.md`
+    /// § Apple File Provider binding, *A remote delete of a hydrated item*, case
+    /// (3)). Acks only on recorded, exactly like [`Self::ingest`].
+    pub async fn ingest_deletion_conflicted(
+        &self,
+        rel: String,
+    ) -> Result<FfiFileProviderAck, FfiError> {
+        self.call(|reply| Request::IngestDeletionConflicted { rel, reply })
+            .await
+    }
+
     /// `deleteItem` → record-first tombstone; acks only on recorded, exactly
     /// like [`Self::ingest`] — a not-recorded delete stays pending OS-side.
     pub async fn delete(&self, rel: String) -> Result<FfiFileProviderAck, FfiError> {
@@ -1491,8 +1613,28 @@ impl FfiFileProviderHost {
     /// ahead of the generation held) it re-reads custody and rebuilds the engine
     /// over the same state DB — how a rotation reaches an app-dead host
     /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 2).
+    /// The pull itself starts with the posture read every other host's tick
+    /// runs (`SyncEngine::refresh_sync_mode`), so the folder's residency and
+    /// role reach a running host too; a keep it flips counts as a change and
+    /// waits for [`Self::take_kept_flips`].
     pub async fn refresh(&self) -> Result<bool, FfiError> {
         self.call(|reply| Request::Refresh { reply }).await
+    }
+
+    /// The items whose holder-keeps bit ([`FfiFileProviderItem::kept`]) a
+    /// [`Self::refresh`] flipped since the last take, re-read as they stand
+    /// now; the take empties the set. A refresh that flips any counts as a
+    /// change, and it starts with the posture read every other host's tick
+    /// runs, so a folder flipped between full and metadata-only reaches this
+    /// running host. The macOS appex reports these through the working set's
+    /// change feed, the one signal that makes the OS re-read an item it
+    /// already lists — its keep policy included (`on-demand-files-apple.md`
+    /// § Apple File Provider binding). An item gone since its flip is left out.
+    /// A refresh that flips the set's share-link fact
+    /// ([`FfiFileProviderItem::share_link_eligible`]) reports every file the
+    /// same way, so the OS re-reads the `userInfo` Finder's Share action gates on.
+    pub async fn take_kept_flips(&self) -> Result<Vec<FfiFileProviderItem>, FfiError> {
+        self.call(|reply| Request::TakeKeptFlips { reply }).await
     }
 
     /// Whether this host serves its set read-only — the account holds it as a
@@ -1804,7 +1946,11 @@ impl Resident {
     /// Populate the placeholder rows from the nest (see [`engine_worker`]).
     /// Hands back what the fold's share reconcile retired, for the owned tree
     /// to settle its peer-landed bodies by.
-    async fn populate(&self, folder: &str) -> fauna_sync_engine::engine::OverlayReconcile {
+    async fn populate(
+        &self,
+        folder: &str,
+        owned: Option<&OwnedTree>,
+    ) -> fauna_sync_engine::engine::OverlayReconcile {
         let Some(b) = self.built.as_ref() else {
             return Default::default();
         };
@@ -1814,13 +1960,16 @@ impl Resident {
                     "file-provider host ({folder}): populated {} placeholder row(s)",
                     fold.recorded
                 );
-                // The fold leaves its remote deletes to the host: here the OS keeps
-                // whatever bytes a file holds, so a cloud-only row going is the
-                // whole delete.
-                if let Err(e) = b.engine.drop_cloud_only_deletes(&fold) {
+                // The fold leaves its remote deletes to the host; they go through
+                // the shared verdict, shaped by who keeps the bytes (`own_copies`).
+                let drop_bodies = owned.map(|tree| move |rel: &str| tree.drop_bodies(rel));
+                let own_copies = drop_bodies
+                    .as_ref()
+                    .map(|f| f as fauna_sync_engine::engine::DropOwnCopies<'_>);
+                if let Err(e) = b.engine.apply_folded_deletes(&fold, own_copies).await {
                     tracing::warn!(
-                        "file-provider host ({folder}): dropping remotely deleted \
-                         placeholder rows failed (the next refresh retries): {e}"
+                        "file-provider host ({folder}): applying remote deletes failed \
+                         (the next refresh retries): {e}"
                     );
                 }
                 fold.overlay
@@ -1967,9 +2116,10 @@ async fn serve_requests(
     let folder = folder_ref.to_wire();
     // The FP host owns its (bearer) nest connection and must connect it before
     // serving — the seed-based `FfiSyncEngineHost` is instead handed the app's
-    // already-connected client. A connect failure is logged and left to
-    // `build_engine`'s list-fetch retry / the per-request fail-closed report,
-    // and the OS re-invokes the extension to reconstruct.
+    // already-connected client. The resilient `connect()` on purpose: a nest
+    // not answering yet is its supervisor's to retry; a terminal refusal is
+    // logged and left to `build_engine`'s list-fetch retry / the per-request
+    // fail-closed report, and the OS re-invokes the extension to reconstruct.
     if let Err(e) = ctx.nest_rpc().connect().await {
         tracing::error!("file-provider host ({folder}): nest connect failed: {e}");
     }
@@ -2002,7 +2152,7 @@ async fn serve_requests(
     // `NSFileProviderManager.signalEnumerator` so a remote change appears
     // without a reconstruction (`on-demand-files-apple.md` § Apple File Provider
     // binding).
-    let reconciled = resident.populate(&folder).await;
+    let reconciled = resident.populate(&folder, owned.as_ref()).await;
     if let Some(b) = resident.built.as_ref() {
         settle_peer_bodies(owned.as_ref(), &b.engine, &reconciled, &folder);
     }
@@ -2059,6 +2209,9 @@ async fn serve_requests(
     // step passes the same pre-seal edge a write does ([`Resident::seal_edge`]):
     // it is never sealed under a generation the owner has rotated past.
     let mut prebind = PrebindDrive::armed();
+    // The rels whose holder-keeps bit a refresh flipped, held until the
+    // platform takes them (see [`FfiFileProviderHost::take_kept_flips`]).
+    let mut kept_flips = std::collections::BTreeSet::new();
     loop {
         if resident.take_rebuilt() {
             prebind = PrebindDrive::armed();
@@ -2133,6 +2286,7 @@ async fn serve_requests(
             resident.built.as_deref(),
             owned.as_ref(),
             adopt_into,
+            &mut kept_flips,
             &folder,
             request,
         )
@@ -2207,10 +2361,13 @@ impl PrebindDrive {
 /// binding) reports through the request's reply channel rather than serving.
 /// `adopt_into` is the engine's `watch_dir` when a refresh may adopt the set's
 /// parked deposits (it passed the pre-seal edge), `None` otherwise.
+/// `kept_flips` collects the rels whose holder-keeps bit a refresh flipped,
+/// until the platform takes them.
 async fn serve(
     built: Option<&BuiltEngine>,
     owned: Option<&OwnedTree>,
     adopt_into: Option<&std::path::Path>,
+    kept_flips: &mut std::collections::BTreeSet<String>,
     folder: &str,
     request: Request,
 ) {
@@ -2279,6 +2436,13 @@ async fn serve(
                 .map_err(|e| e.to_string());
             let _ = reply.send(out);
         }
+        Request::IngestDeletionConflicted { rel, reply } => {
+            let out = provider_face::serve_ingest_deletion_conflicted(engine, &rel)
+                .await
+                .map(FfiFileProviderAck::from)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(out);
+        }
         Request::Delete { rel, reply } => {
             let out = provider_face::serve_delete(engine, &rel)
                 .await
@@ -2316,7 +2480,38 @@ async fn serve(
             let _ = reply.send(Ok(engine.is_read_only()));
         }
         Request::Refresh { reply } => {
-            let out = match engine.refresh_from_nest_reconciling().await {
+            let drop_bodies = owned.map(|tree| move |rel: &str| tree.drop_bodies(rel));
+            let own_copies = drop_bodies
+                .as_ref()
+                .map(|f| f as fauna_sync_engine::engine::DropOwnCopies<'_>);
+            // The posture read every other host's tick runs (`file-sync.md`
+            // § 4): the residency — and every posture riding the same read —
+            // reaches this running host here, not only at its next build. The
+            // pull runs inside the same window, so a keep the fold changes is
+            // reported with the ones the posture flipped.
+            // A flip of the set's share-link fact (the public-audience arm)
+            // changes every file's `userInfo`, which the OS reads only as
+            // items sync — so every file is reported through the same feed
+            // (`macos.md` § Sync → *Finder's Share entry*, link 1).
+            let shared_before = provider_face::ProviderEngine::shares_links(engine);
+            let (pulled, mut flipped) = engine
+                .kept_flips_across(async {
+                    engine.refresh_sync_mode().await;
+                    engine.refresh_from_nest_reconciling(own_copies).await
+                })
+                .await;
+            if provider_face::ProviderEngine::shares_links(engine) != shared_before {
+                match provider_face::ProviderEngine::provider_rows(engine).await {
+                    Ok(rows) => flipped.extend(rows.into_iter().map(|r| r.rel)),
+                    Err(e) => tracing::warn!(
+                        "file-provider host ({folder}): the share-link fact flipped but the \
+                         rows could not be read; the OS keeps the items it last read: {e}"
+                    ),
+                }
+            }
+            let flipped_any = !flipped.is_empty();
+            kept_flips.extend(flipped);
+            let out = match pulled {
                 Ok((changed, reconciled)) => {
                     settle_peer_bodies(owned, engine, &reconciled, folder);
                     let adopted = match adopt_into {
@@ -2325,11 +2520,26 @@ async fn serve(
                         }
                         None => false,
                     };
-                    Ok(changed || adopted)
+                    Ok(changed || adopted || flipped_any)
                 }
                 Err(e) => Err(e.to_string()),
             };
             let _ = reply.send(out);
+        }
+        Request::TakeKeptFlips { reply } => {
+            let mut items = Vec::with_capacity(kept_flips.len());
+            for rel in std::mem::take(kept_flips) {
+                match provider_face::serve_item(engine, &rel).await {
+                    Ok(Some(item)) => items.push(FfiFileProviderItem::from(item)),
+                    // Gone since the flip: the OS learns that from the pull.
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(
+                        "file-provider host ({folder}): a kept-flipped item could not be \
+                         read; the OS keeps its last policy for it: {e}"
+                    ),
+                }
+            }
+            let _ = reply.send(Ok(items));
         }
         owned_request => serve_owned(engine, owned, folder, owned_request).await,
     }
@@ -2474,6 +2684,7 @@ impl Request {
             self,
             Request::Ingest { .. }
                 | Request::IngestWithBase { .. }
+                | Request::IngestDeletionConflicted { .. }
                 | Request::Delete { .. }
                 | Request::Rename { .. }
                 | Request::ClosedWrite { .. }
@@ -2506,6 +2717,9 @@ impl Request {
             Request::IngestWithBase { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
+            Request::IngestDeletionConflicted { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
             Request::Delete { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
@@ -2522,6 +2736,9 @@ impl Request {
                 let _ = reply.send(Err(msg));
             }
             Request::Refresh { reply, .. } => {
+                let _ = reply.send(Err(msg));
+            }
+            Request::TakeKeptFlips { reply, .. } => {
                 let _ = reply.send(Err(msg));
             }
             Request::ReadOnly { reply, .. } => {
@@ -2697,6 +2914,82 @@ mod tests {
         )
         .unwrap();
         assert!(!wrong_key.shares_replica_with(&here));
+    }
+
+    /// The host's group arm reads the app's mirror in the state dir it was
+    /// built with, under the key it derives from its own `BackupKey`
+    /// (`group-set.md` § decision 12): a mirrored scope answers its ring
+    /// with the content keys the app would derive; a scope the mirror does
+    /// not carry answers a ring with no tip (keys-pending, never a refusal
+    /// of the host); no mirror at all lists no group set; a mirror sealed
+    /// under another account's key is an error on both doors, never an
+    /// empty list.
+    #[tokio::test]
+    async fn the_hosts_group_arm_reads_the_apps_mirror() {
+        use fauna_client_folders::FolderKeyReader as _;
+        use fauna_sync_engine::group_ring_mirror::{
+            GroupRingMirror, Id32, MirroredGenerationKey, MirroredGroupRing,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let actor = [0xD5; 32];
+        let backup = fauna_core::crypto::BackupKey::from_bytes([0x21; 32]);
+        let host = CapabilityHostFolderKeys {
+            auth: auth(actor),
+            actor_id: actor,
+            backup_key: backup.clone(),
+            signer: Arc::new(Principal(Mutex::new([0x03; 32]))),
+            state_dir: tmp.path().to_path_buf(),
+        };
+
+        // No mirror yet: no group set, and an absent scope is keys-pending.
+        assert!(host.mirrored_group_sets().unwrap().is_empty());
+        let pending = host.group_set_keys(&[0x77; 32]).await.unwrap().unwrap();
+        assert!(pending.tip().is_none());
+
+        let scope = [0x66; 32];
+        let gen_key = fauna_core::crypto::GenerationKey::from_bytes([0x44; 32]);
+        let ring = MirroredGroupRing {
+            scope_id: Id32(scope),
+            name: Some("holiday".into()),
+            short_id: "666666".into(),
+            tip: Some(Id32([0x01; 32])),
+            keys: vec![MirroredGenerationKey {
+                generation: [0x01; 32],
+                key: *gen_key.as_bytes(),
+            }],
+        };
+        GroupRingMirror::in_state_dir(tmp.path())
+            .write(
+                &fauna_core::crypto::GroupRingMirrorKey::derive(&backup),
+                &fauna_core::hex32::encode(&actor),
+                &[ring],
+            )
+            .unwrap();
+
+        let sets = host.mirrored_group_sets().unwrap();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].scope_id, scope);
+        assert_eq!(sets[0].name.as_deref(), Some("holiday"));
+        let keys = host.group_set_keys(&scope).await.unwrap().unwrap();
+        let (tip, content_key) = keys.tip().expect("the mirrored tip");
+        assert_eq!(tip, [0x01; 32]);
+        assert_eq!(
+            *content_key,
+            fauna_core::group_content::group_file_content_key(&gen_key),
+            "the host derives the content key the app would"
+        );
+
+        // Another account's key: the mirror is present but will not open.
+        let other = CapabilityHostFolderKeys {
+            auth: auth(actor),
+            actor_id: actor,
+            backup_key: fauna_core::crypto::BackupKey::from_bytes([0x22; 32]),
+            signer: Arc::new(Principal(Mutex::new([0x03; 32]))),
+            state_dir: tmp.path().to_path_buf(),
+        };
+        assert!(other.mirrored_group_sets().is_err());
+        assert!(other.group_set_keys(&scope).await.is_err());
     }
 
     /// No machine principal provisioned: no replica, and the reason says so.

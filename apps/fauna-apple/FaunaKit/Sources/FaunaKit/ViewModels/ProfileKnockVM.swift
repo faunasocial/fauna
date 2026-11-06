@@ -5,7 +5,7 @@ import Foundation
 /// lives → *Request contact routing* routes. The profile is a CALLER of the contact
 /// lifecycle (`fauna.inbox.send`), never a second implementation of it: the payload is
 /// the shared `buildKnockPayload` writer behind ``APIClient/sendKnock``, and the route
-/// is the shared ``APIClient/knockRoute(actorId:profileBody:)``.
+/// is the page's actor-home slot, the shared ``APIClient/actorHomeSlot(carried:actorId:profileBody:)``.
 ///
 /// **State is keyed on the peer, not on "the page's current open".** A knock's reply
 /// (and its refusal) can outlive the profile open that issued it — the user navigates
@@ -27,11 +27,16 @@ public final class ProfileKnockVM {
     /// The guardian ask for a refused knock.
     public let contactAsk = ContactAsk()
 
-    /// Foreign home nests to route a knock to, by lowercased peer hex. Absent = same
-    /// nest (local delivery). Only ever written from a profile body ABOUT that peer
-    /// (the shared rule refuses anyone else's word), so a route cannot leak across
-    /// two opens.
-    private var routes: [String: String] = [:]
+    /// The page's ACTOR-HOME slot by lowercased peer hex (`profile.md` § Where logic
+    /// lives → *The actor's home*): foreign home nests the follow, the knock and the
+    /// remote header read go to. Absent = this nest (local delivery). Only ever
+    /// written through the shared `actor_home` rule, from the opener's carried home
+    /// and a profile body ABOUT that peer (the rule refuses anyone else's word), so
+    /// a home cannot leak across two opens.
+    private var homes: [String: String] = [:]
+    /// The home each peer's open was handed by its opener, kept so the slot's
+    /// replacement after the header read goes through the rule with it.
+    private var carrieds: [String: String] = [:]
     /// Peers a knock to has landed, lowercased hex.
     private var sentPeers: Set<String> = []
 
@@ -50,7 +55,8 @@ public final class ProfileKnockVM {
         actorId = nil
         familyStatus = nil
         errorMessage = nil
-        routes = [:]
+        homes = [:]
+        carrieds = [:]
         sentPeers = []
         contactAsk.reset()
     }
@@ -66,22 +72,30 @@ public final class ProfileKnockVM {
     /// error and this peer's "sent"/route — starts clean, as a rebuilt page would.
     /// (Other peers' slots are left alone; they can only ever be read by their own
     /// page.)
-    public func beginOpen(peer: String) {
+    ///
+    /// `carried` is the home the opener carried (a Find User result, an author line,
+    /// a contact row, or the nav patch): the slot is SEEDED with it before any read,
+    /// so the follow and the remote header read already have it.
+    public func beginOpen(peer: String, carried: String? = nil) {
         let key = Self.key(peer)
         errorMessage = nil
-        routes[key] = nil
+        carrieds[key] = carried
+        homes[key] = api?.actorHomeSlot(carried: carried, actorId: peer, profileBody: nil)
         sentPeers.remove(key)
     }
 
-    /// Record the knock route from the profile `body` the page's open fetched for
-    /// `peer` (`nil` route = same nest). Pure shared-Rust rule; no second fetch.
+    /// Replace the actor-home slot from the profile `body` the page's open fetched
+    /// for `peer` (`nil` = this nest). Pure shared-Rust rule (`actor_home`); no
+    /// second fetch.
     public func noteProfile(body: Data, peer: String) {
         guard let api else { return }
-        routes[Self.key(peer)] = api.knockRoute(actorId: peer, profileBody: body)
+        let key = Self.key(peer)
+        homes[key] = api.actorHomeSlot(carried: carrieds[key], actorId: peer, profileBody: body)
     }
 
-    /// The route a knock to `peer` would take, for tests and the page's assertions.
-    public func route(peer: String) -> String? { routes[Self.key(peer)] }
+    /// The page's actor-home slot for `peer` — the nest the follow, the knock and
+    /// the remote header read all go to (`nil` = this nest).
+    public func home(peer: String) -> String? { homes[Self.key(peer)] }
 
     /// Whether the knock to `peer` landed (the button flips to "Request sent").
     public func isSent(peer: String) -> Bool { sentPeers.contains(Self.key(peer)) }
@@ -94,7 +108,7 @@ public final class ProfileKnockVM {
         errorMessage = nil
         do {
             try await api.sendKnock(
-                actorId: actorId, peerId: peer, recipientNestUrl: routes[Self.key(peer)])
+                actorId: actorId, peerId: peer, recipientNestUrl: homes[Self.key(peer)])
             guard self.api === api else { return }   // the in-flight clause
             sentPeers.insert(Self.key(peer))
             errorMessage = nil

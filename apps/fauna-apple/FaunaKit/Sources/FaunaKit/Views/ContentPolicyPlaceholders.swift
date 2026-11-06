@@ -20,11 +20,18 @@ import SwiftUI
 /// (`moderation.md` § Corollary — block also hides): "You reported this" in
 /// place of the family words, `source="reported"` on the element, no body and no
 /// reveal. A personal filter, so it names the viewer's own act — not a policy.
+///
+/// `reason` is the guardian rule's own reason, verbatim beside the frame
+/// (`content-policy-blocked-reason`; `nest-rules.md` § The shared rule editor →
+/// *The reason is the member's to read*) — present only when a rule of the
+/// guardian's document drove the verdict.
 public struct ContentPolicyBlockedNotice: View {
     private let reported: Bool
+    private let reason: String?
 
-    public init(reported: Bool = false) {
+    public init(reported: Bool = false, reason: String? = nil) {
         self.reported = reported
+        self.reason = reason
     }
 
     private var text: String {
@@ -32,15 +39,43 @@ public struct ContentPolicyBlockedNotice: View {
     }
 
     public var body: some View {
-        Text(text)
-            .accessibilityIdentifier(Ids.contentPolicyBlockedNotice)
-            .automationValue(
-                Ids.contentPolicyBlockedNotice, text: { text },
-                attributes: { ["source": reported ? "reported" : "policy"] })
-            .font(.caption)
-            .italic()
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text)
+                .accessibilityIdentifier(Ids.contentPolicyBlockedNotice)
+                .automationValue(
+                    Ids.contentPolicyBlockedNotice, text: { text },
+                    attributes: { ["source": reported ? "reported" : "policy", "state": "blocked"] })
+                .font(.caption)
+                .italic()
+                .foregroundStyle(.secondary)
+            GuardianReasonText(reason: reason)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The guardian rule's reason, verbatim, beside a family-policy placeholder's
+/// fixed frame (`content-policy-blocked-reason`). Paints nothing when no rule of
+/// the guardian's document drove the verdict (`reason` nil). The block and
+/// collapse arms of the feed card, the post detail and the conversation bubble
+/// all paint through here, so the surfaces cannot drift on the id or the
+/// placement (android's `GuardianReason`).
+public struct GuardianReasonText: View {
+    private let reason: String?
+
+    public init(reason: String?) {
+        self.reason = reason
+    }
+
+    public var body: some View {
+        if let reason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier(Ids.contentPolicyBlockedReason)
+                .automationValue(Ids.contentPolicyBlockedReason, text: { reason })
+        }
     }
 }
 
@@ -50,27 +85,39 @@ public struct ContentPolicyBlockedNotice: View {
 /// what stops future collapse. A `collapse` can come from either source, so the
 /// text stays neutral rather than naming the family policy.
 ///
-/// Presentation-only, no test id — v1 e2e drives the `block` case (the
-/// linux/web/android precedent).
+/// The block arm's `content-policy-blocked-notice` in `state="collapsed"` beside
+/// `content-policy-collapsed-reveal-button` (ids user-approved 2026-10-16; tui
+/// leads, android's `ContentPolicyCollapsedBody` is the twin).
 public struct ContentPolicyCollapsedPlaceholder: View {
+    private let reason: String?
     private let onReveal: () -> Void
 
-    public init(onReveal: @escaping () -> Void) {
+    public init(reason: String? = nil, onReveal: @escaping () -> Void) {
+        self.reason = reason
         self.onReveal = onReveal
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
-            Text(L.family.contentCollapsedNotice)
-                .font(.caption)
-                .italic()
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
-            Button(L.family.contentRevealButton) {
-                onReveal()
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(L.family.contentCollapsedNotice)
+                    .accessibilityIdentifier(Ids.contentPolicyBlockedNotice)
+                    .automationValue(
+                        Ids.contentPolicyBlockedNotice, text: { L.family.contentCollapsedNotice },
+                        attributes: { ["source": "policy", "state": "collapsed"] })
+                    .font(.caption)
+                    .italic()
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button(L.family.contentRevealButton) {
+                    onReveal()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption2)
+                .accessibilityIdentifier(Ids.contentPolicyCollapsedRevealButton)
+                .automationActivate(Ids.contentPolicyCollapsedRevealButton) { onReveal() }
             }
-            .buttonStyle(.borderless)
-            .font(.caption2)
+            GuardianReasonText(reason: reason)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -63,7 +63,7 @@ damaged at rest there.
 Test taxonomy:
 - `tier_3` (mocking depth): every binary real, real SMTP wire, a real client
   process restart (`hard_reload()`, replaying the login).
-- Marked for the native-relaunch apps (`hard_reload` is a real teardown +
+- Marked for the native-relaunch apps (android included; `hard_reload` is a real teardown +
   relaunch there) plus web, whose reload-based `hard_reload` re-drains the
   same way. The skipped-mail notice assertion runs on every app: the
   page-error floor arm reading `ConversationsManager::unopenable_mail_count`
@@ -91,6 +91,7 @@ pytestmark = [
     pytest.mark.macos,
     pytest.mark.ios,
     pytest.mark.tui,
+    pytest.mark.android,
     pytest.mark.real_conversations,
 ]
 

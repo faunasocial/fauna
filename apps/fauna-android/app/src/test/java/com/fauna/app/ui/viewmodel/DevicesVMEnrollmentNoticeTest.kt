@@ -63,6 +63,7 @@ class DevicesVMEnrollmentNoticeTest {
         // makeVm()) — unstubbed either is null and `init`'s collector NPEs.
         whenever(api.folderChangedTick).thenReturn(MutableSharedFlow())
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
+        whenever(api.devicesStaleTick).thenReturn(MutableSharedFlow())
         whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
         val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
         return Fixture(vm, api)

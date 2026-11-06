@@ -26,7 +26,6 @@ import json
 import pytest
 
 from helpers import budgets
-from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 
 pytestmark = pytest.mark.tier_2
@@ -35,20 +34,9 @@ PROJECT = "proj-ovh-e2e"
 CREDS = {"app-key": "AK", "app-secret": "AS", "consumer-key": "CK"}
 
 
-def _skip_without_the_picker(drv) -> None:
-    if not (drv.is_linux() or drv.is_tui()):
-        skip_unbuilt(
-            drv,
-            surface="the vps-location-picker over a real verify",
-            detail="the verified helper runs on web + linux + tui and web omits "
-            "the picker; the other apps lack set_provider_base_urls",
-            tracked="installers/vps.md",
-        )
-
-
 def test_ovh_project_regions_priced_offers_and_the_resolved_create(app, fake_cloud):
     drv = app.driver
-    _skip_without_the_picker(drv)
+    app.onboarding.require_offers_follow_the_location()
     ovh = fake_cloud.ovh
     ovh.seed_project(PROJECT, "e2e project")
 

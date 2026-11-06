@@ -91,11 +91,11 @@ from conftest import (
     _apply_isolated_sync_agent_env,
     _apply_macos_sync_agent_bin,
     _apply_real_sync_agent_env,
-    _E2E_LOGIN_DEVICE_ID,
     _seeded_environment,
     get_available_apps,
 )
 from drivers import create_driver
+from helpers.e2e_session import e2e_login_device_id
 from helpers.folder_content import agent_diagnosis, atomic_write, bind_location_under_set
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux]
@@ -181,7 +181,7 @@ def _launch_signed_in(app_name, app_path, nest_instance, actor, request) -> Acti
                 "secret_hex": actor["signing_key"].encode().hex(),
                 "handle": "declined-user",
                 "actor_id": actor["actor_id_hex"],
-                "device_id": _E2E_LOGIN_DEVICE_ID,
+                "device_id": e2e_login_device_id(driver),
             },
             "nav": {"stack": [{"view": "feed"}]},
         }

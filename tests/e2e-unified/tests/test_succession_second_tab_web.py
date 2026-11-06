@@ -323,7 +323,7 @@ def test_web_a_tab_pinned_to_the_retired_id_comes_up_as_the_successor(nest_insta
             "secret_hex": bytes(user["signing_key"]).hex(),
             "nest_url": spa_url,
             # A device leaf of this profile's own: never the fixture-wide
-            # `_E2E_LOGIN_DEVICE_ID` every patched seat on the session nest shares.
+            # `e2e_login_device_id` the patched web seat signs in under.
             "device_id": secrets.token_hex(32),
         }],
     )

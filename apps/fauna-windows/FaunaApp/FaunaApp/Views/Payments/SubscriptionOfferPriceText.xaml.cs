@@ -9,7 +9,7 @@ namespace FaunaApp.Views.Payments;
 /// </summary>
 /// <remarks>
 /// Bound by snapshot from ProfilePage's <c>OfferPriceHost_Loaded</c>, the
-/// <see cref="SubscriptionTierPriceText"/> shape. <see cref="SubscriptionOfferRow"/>'s
+/// <see cref="TierPrice"/> shape. <see cref="SubscriptionOfferRow"/>'s
 /// price is immutable (only its status flips in place), and the offer list is rebuilt
 /// with <c>Clear</c> + <c>Add</c>.
 /// </remarks>

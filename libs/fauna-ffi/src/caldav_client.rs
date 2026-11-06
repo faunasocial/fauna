@@ -39,15 +39,15 @@ use std::sync::{Arc, Mutex};
 use fauna_client::NestClient;
 use fauna_client_account::AccountClient;
 use fauna_client_caldav::{
-    AnonAttendeeDiscovery, CalDavClient, CalendarMetadata, DavRecipientKeys, DecodedEvent,
+    AnonAttendeeDiscovery, CalDavClient, CalendarMetadata, DavKind, DavRecipientKeys, DecodedEvent,
     DecodedEventsPage, EventFields, add_attendee, apply_rsvp,
     bridge_routing::{
         DeleteEventRequest, ListCalendarsRequest, ProvisionCalendarRequest, QueryEventsRequest,
     },
     delta_sync::{BackstopVerdict, CalendarSyncTokens, backstop_probe},
     dispatch_imip_request, imip_inputs, imip_reply_for_rsvp, imip_request_for_invite, parse_ical,
-    parse_ical_attendees, parse_ical_organizer, personal_calendar_id, project_attendee_rsvp,
-    seal_calendar_metadata, set_reminder, uid_hash, unseal_calendar_metadata,
+    parse_ical_attendees, parse_ical_organizer, project_attendee_rsvp, seal_calendar_metadata,
+    set_reminder, uid_hash, unseal_calendar_metadata,
 };
 use fauna_client_config::DavStoreContext;
 #[cfg(feature = "account-runtime")]
@@ -371,7 +371,7 @@ impl FfiCaldavClient {
             .map_err(|e| e.to_string())?;
         // Derived once for every calendar this searches, instead of once per
         // calendar .
-        let keys = DavRecipientKeys::from_mseks(msek, prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, msek, prior_mseks);
         for cal in &listing.calendars {
             let Some(calendar_id) = hex32(&hex::encode(&cal.calendar_id)) else {
                 continue;
@@ -404,47 +404,20 @@ impl FfiCaldavClient {
             return Ok(vec![]);
         };
         let client = self.client();
-        let mut entries = client
-            .list_calendars(ListCalendarsRequest {
-                actor_id: actor_id.to_vec(),
-            })
+        // The shared load: lazy-provisions Personal so a fresh actor always has
+        // a calendar. Surface — never swallow — the provision error, so a
+        // failure isn't indistinguishable from "no calendars".
+        let reply = client
+            .list_calendars_with_personal(&actor_id, &msek)
             .await
-            .map_err(|e| e.to_string())?
-            .calendars;
-        // Lazy-provision Personal so a fresh actor always has a calendar (mirrors
-        // Linux `fetch_calendars`). Re-list after; surface — never swallow — the
-        // provision error so a failure isn't indistinguishable from "no calendars".
-        if entries.is_empty() {
-            let metadata = seal_calendar_metadata(
-                &CalendarMetadata {
-                    displayname: "Personal".to_string(),
-                    color: "#3273dc".to_string(),
-                    description: String::new(),
-                    ..Default::default()
-                },
-                &msek,
-            )
             .map_err(|e| e.to_string())?;
-            client
-                .provision_calendar(ProvisionCalendarRequest {
-                    actor_id: actor_id.to_vec(),
-                    calendar_id: personal_calendar_id().to_vec(),
-                    encrypted_metadata: metadata,
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            entries = client
-                .list_calendars(ListCalendarsRequest {
-                    actor_id: actor_id.to_vec(),
-                })
-                .await
-                .map_err(|e| e.to_string())?
-                .calendars;
+        if let Some(e) = reply.personal_provision_error {
+            return Err(e.into());
         }
+        let entries = reply.calendars;
         // Derived once for the whole list — every row's metadata reuses it
         // instead of paying its own X-Wing keygen .
-        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, &msek, &prior_mseks);
         Ok(entries
             .iter()
             .filter_map(|e| {
@@ -510,7 +483,7 @@ impl FfiCaldavClient {
             return Ok(vec![]);
         };
         let self_email = self.self_email().await;
-        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, &msek, &prior_mseks);
         let decoded = self.query_decoded(&actor_id, &calendar_id, &keys).await?;
         Ok(decoded
             .iter()
@@ -576,7 +549,7 @@ impl FfiCaldavClient {
             BackstopVerdict::ReadRequired => {}
         }
         let self_email = self.self_email().await;
-        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, &msek, &prior_mseks);
         let page = client
             .query_events_decoded(
                 QueryEventsRequest {
@@ -643,7 +616,7 @@ impl FfiCaldavClient {
             .map_err(|e| e.to_string())?;
         // Derived once for every calendar this gathers across, instead of once
         // per calendar .
-        let keys = DavRecipientKeys::from_mseks(&msek, &prior_mseks);
+        let keys = DavRecipientKeys::from_mseks(DavKind::Calendar, &msek, &prior_mseks);
         let mut out = Vec::new();
         for cal in &listing.calendars {
             let cal_hex = hex::encode(&cal.calendar_id);
@@ -1018,7 +991,7 @@ impl FfiCaldavClient {
             .export_calendar_ics(
                 &actor_id,
                 &calendar_id,
-                &DavRecipientKeys::from_mseks(&msek, &prior_mseks),
+                &DavRecipientKeys::from_mseks(DavKind::Calendar, &msek, &prior_mseks),
             )
             .await
             .map_err(|e| e.to_string())?)

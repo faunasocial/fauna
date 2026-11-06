@@ -201,7 +201,11 @@ pub fn admit_at(source: LogSource, req: &ReportLogEventsRequest, now_ms: u64) ->
 
         // The source's own overflow count rides the same accounting, so
         // source-side loss is visible rather than silent.
-        bucket.pending_drops += local_drops + req.dropped;
+        // Saturating: `req.dropped` is the source's own u64 (untrusted), and
+        // release builds panic on overflow.
+        bucket.pending_drops = bucket
+            .pending_drops
+            .saturating_add(local_drops.saturating_add(req.dropped));
 
         let due = bucket.pending_drops > 0
             && bucket
@@ -267,11 +271,7 @@ fn sanitize(ev: &fauna_protocol::log_plane::SidecarLogEvent) -> Option<(LogLevel
     // is merely capped (a real catalogue never approaches the cap).
     let event =
         fauna_core::encoding::truncate_to_char_boundary(&ev.event, MAX_EVENT_BYTES).to_string();
-    if event.is_empty()
-        || !event
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
-    {
+    if !fauna_protocol::log_plane::event_id_is_admissible(&event) {
         return None;
     }
 
@@ -562,6 +562,72 @@ mod tests {
         assert!(
             warns[0].message.contains("41"),
             "the source's own overflow count rides the same accounting: {:?}",
+            warns[0].message
+        );
+    }
+
+    #[test]
+    fn a_source_reported_drop_count_saturates_instead_of_overflowing() {
+        // `dropped` is the source's own u64; release builds run with
+        // overflow-checks, so a plain add would panic the caller.
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let huge = |events| ReportLogEventsRequest {
+            events,
+            dropped: u64::MAX,
+            ..Default::default()
+        };
+        with_ring_subscriber(|| {
+            // The first batch earns the (never-warned) warning at once and
+            // drains; the next two land inside one warning interval and sum
+            // past u64::MAX.
+            admit_at(LogSource::Relay, &huge(vec![]), 1_000);
+            admit_at(LogSource::Relay, &huge(vec![ev("x", "m")]), 2_000);
+            admit_at(LogSource::Relay, &huge(vec![ev("x", "m")]), 3_000);
+            // The next warning that falls due carries the saturated count.
+            admit_at(LogSource::Relay, &batch(vec![]), 62_000);
+        });
+        let warns: Vec<_> = fauna_log::snapshot()
+            .into_iter()
+            .filter(|e| e.message.contains("sidecar log plane"))
+            .collect();
+        assert_eq!(warns.len(), 2);
+        assert!(
+            warns[1].message.contains(&u64::MAX.to_string()),
+            "{:?}",
+            warns[1].message
+        );
+    }
+
+    #[test]
+    fn a_source_reported_drop_count_saturates_against_the_nests_own_drops() {
+        // The inner add: this batch's own refusals plus the source's `dropped`.
+        // One malformed event makes the nest's own count 1, so a plain add of
+        // `u64::MAX` overflows inside a single batch — the test above, whose
+        // batches the nest refuses nothing from, cannot see this add.
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let req = ReportLogEventsRequest {
+            events: vec![ev("Not A Catalogue Id", "m")],
+            dropped: u64::MAX,
+            ..Default::default()
+        };
+        let out = with_ring_subscriber(|| admit_at(LogSource::Relay, &req, 1_000));
+        assert_eq!(
+            out,
+            AdmitOutcome {
+                accepted: 0,
+                rejected: 1
+            }
+        );
+        let warns: Vec<_> = fauna_log::snapshot()
+            .into_iter()
+            .filter(|e| e.message.contains("sidecar log plane"))
+            .collect();
+        assert_eq!(warns.len(), 1);
+        assert!(
+            warns[0].message.contains(&u64::MAX.to_string()),
+            "{:?}",
             warns[0].message
         );
     }

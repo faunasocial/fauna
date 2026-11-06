@@ -23,11 +23,9 @@ pytestmark = pytest.mark.tier_2
 
 _repo_root = Path(__file__).resolve().parent.parent.parent.parent
 
-# The macOS debug binary built by `just mac-debug` (via swift build)
-_MACOS_EXE = (
-    _repo_root / "apps" / "fauna-apple" / ".build"
-    / "arm64-apple-macosx" / "debug" / "FaunaMacOS"
-)
+# The macOS debug binary built by `just mac-debug` (via swift build), through
+# SwiftPM's `.build/debug` symlink (conftest's `APP_PATHS["macos"]` says why).
+_MACOS_EXE = _repo_root / "apps" / "fauna-apple" / ".build" / "debug" / "FaunaMacOS"
 
 
 # --- Fake bridge HTTP server ---

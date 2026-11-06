@@ -17,6 +17,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -273,7 +276,13 @@ fun AllDayBand(
     modifier: Modifier = Modifier,
     gutterWidth: Dp = 52.dp,
 ) {
-    Row(modifier = modifier.fillMaxWidth().testTag(Ids.CALENDAR_ALLDAY_BAND)) {
+    // The band answers the bridge's text read with its chips' summaries: the
+    // clickable chips are their own semantics nodes, so a bare tagged Row has no
+    // text of its own and merging does not pull theirs up.
+    val bandText = days.flatMap { (_, dayEvents) ->
+        dayEvents.filter { com.fauna.ffi.eventIsAllDay(it.dtstart, it.dtend) }.map { it.summary }
+    }.joinToString(" ")
+    Row(modifier = modifier.fillMaxWidth().semantics { text = AnnotatedString(bandText) }.testTag(Ids.CALENDAR_ALLDAY_BAND)) {
         Spacer(Modifier.width(gutterWidth))
         days.forEach { (_, dayEvents) ->
             Column(

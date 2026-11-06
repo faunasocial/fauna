@@ -189,6 +189,9 @@ fun FeedComposeScreen(navController: NavController, vm: FeedVM = hiltViewModel()
     }
 
     Scaffold(
+        // The rich compose editor ui.yaml calls `feed-compose-dialog`: on android
+        // it is this full screen, reached from the feed's `compose-dialog-button`.
+        modifier = Modifier.testTag(Ids.FEED_COMPOSE_DIALOG),
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.composer_new_post)) },

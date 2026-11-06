@@ -180,23 +180,7 @@ pub fn classify_silent_challenge(outcome: SilentChallengeOutcome) -> SilentSignI
 /// true for every caller.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn hint_socket_addr(nest_url: &str, reach_ipv4: &str) -> Option<std::net::SocketAddr> {
-    let ip: std::net::Ipv4Addr = reach_ipv4.parse().ok()?;
-    let authority = fauna_anon_client::authority_of(nest_url);
-    let port = authority
-        .rsplit_once(':')
-        .and_then(|(_, p)| p.parse::<u16>().ok())
-        .unwrap_or(
-            // `authority_of` strips four schemes, so a portless `wss://` URL
-            // reaches here too and is a TLS URL like `https://` — defaulting it
-            // to 80 would dial the wrong port. Not live (the launch path stores
-            // `https://{domain}`), fixed at the seam so it cannot become live.
-            if nest_url.starts_with("https://") || nest_url.starts_with("wss://") {
-                443
-            } else {
-                80
-            },
-        );
-    Some(std::net::SocketAddr::from((ip, port)))
+    fauna_core::web::reach_socket_addr(nest_url, reach_ipv4)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -307,53 +291,6 @@ pub(crate) async fn connect_silent_challenge(
     outcome
 }
 
-/// The URL a reach hint dials on wasm: `nest_url` with its host swapped for the
-/// hint's IP, port and scheme untouched.
-///
-/// A browser exposes no resolver seam — there is no `.resolve()` to install — so
-/// unlike the native half the *authority* has to change, which is why web needs
-/// the IP bridge cert (`onboarding.md` § Reach hint). What must **not** move
-/// with it is the identity key: this URL reaches the socket and nothing else
-/// (see [`connect_silent_challenge`]'s wasm arm). `None` for a hint that is not
-/// a bare IPv4 literal, exactly as natively: a malformed hint is no fallback,
-/// never a different dial.
-///
-/// Compiled on **every** target although only the wasm arm calls it: the rule is
-/// pure string logic, and gating it to `wasm32` would put it where no test in
-/// this workspace can execute it — the same reasoning as the pre-claim
-/// `WsNestApi::dial_url` it mirrors, and exactly the combination that let this
-/// arm's pin-key swap ship unseen.
-///
-/// Composes `fauna_core::web`'s shared authority cut —
-/// [`fauna_core::web::generic_authority`], then [`fauna_core::web::strip_userinfo`],
-/// then [`fauna_core::web::split_host_port`] for the port — rather than a
-/// private `/`-only split. The authority ends at the first of `/ \ ? #`, and
-/// any `userinfo@` is dropped before the port is read, so a `?`/`#`-bearing
-/// `nest_url` can no longer have its query or fragment read as a userinfo/host
-/// pair and swapped for the real host, nor keep a stale userinfo that silently
-/// defeats the hint (`security.md` § Transport trust). The production caller only ever passes the onboarding wizard's
-/// `https://{handle_domain}`, with the domain still the pin key
-/// (`connect_silent_challenge`'s wasm arm above), but the cut is unconditional
-/// so a future caller inherits the same guarantee. Everything from the
-/// authority's own end onward — path, query, fragment — is carried through
-/// unchanged, never re-added.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-pub(crate) fn hint_authority_url(nest_url: &str, reach_ipv4: &str) -> Option<String> {
-    if reach_ipv4.parse::<std::net::Ipv4Addr>().is_err() {
-        return None;
-    }
-    let (scheme, after_scheme) = nest_url.split_once("://")?;
-    let authority = fauna_core::web::generic_authority(nest_url);
-    let stripped = fauna_core::web::strip_userinfo(authority);
-    let (_, port) = fauna_core::web::split_host_port(stripped);
-    let host = match port {
-        Some(p) => format!("{reach_ipv4}:{p}"),
-        None => reach_ipv4.to_string(),
-    };
-    let rest = &after_scheme[authority.len()..];
-    Some(format!("{scheme}://{host}{rest}"))
-}
-
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn connect_silent_challenge(
     nest_url: &str,
@@ -363,8 +300,8 @@ pub(crate) async fn connect_silent_challenge(
     // The hint moves the SOCKET and nothing else — the wasm twin of the native
     // arm's resolve override, and the same split the pre-claim path already
     // makes (`WsNestApi::dial_url` to connect, `expected_root_for(&resolved)` to
-    // decide identity). `dial` is what `connect` opens; `nest_url` — the domain
-    // — stays the pin key.
+    // decide identity). `dial.dial_url()` is what `connect` opens;
+    // `dial.pin_key()` — the domain, by construction — is the pin key.
     //
     // Keying the pin on the dial URL instead is what the first draft did, and it
     // made "the domain is tried first" buy nothing here: the ordering argument
@@ -372,16 +309,18 @@ pub(crate) async fn connect_silent_challenge(
     // pinned the IP authority was a first contact at a key that had never been
     // pinned — a box answering at a recycled address chose the account's handle,
     // domain and tier and minted its bearer, with the domain's pin never
-    // consulted.
+    // consulted. The
+    // `ReachDial` type now makes that swap unspellable: its only constructors
+    // key on the domain (`fauna_core::web::ReachDial`, unit-tested there).
     //
     // One key per box is also why there is nothing to carry over when the hint
     // is dropped: the hint dial and the later domain dial resolve the *same* pin
     // (`security.md` § Transport trust), so the switch is silent by construction
     // rather than by a copy between two authorities.
     let dial = reach_ipv4
-        .and_then(|ip| hint_authority_url(nest_url, ip))
-        .unwrap_or_else(|| nest_url.to_string());
-    match fauna_rpc_wasm::AnonymousWsRpcClient::connect(&dial) {
+        .and_then(|ip| fauna_core::web::ReachDial::over_hint(nest_url, ip))
+        .unwrap_or_else(|| fauna_core::web::ReachDial::domain(nest_url));
+    match fauna_rpc_wasm::AnonymousWsRpcClient::connect(dial.dial_url()) {
         // The browser can't read the served cert's SPKI, so the machine's wasm
         // path runs the web TOFU-pin model instead of the native channel
         // binding: possession-verify the verify reply's proof and check it
@@ -393,7 +332,7 @@ pub(crate) async fn connect_silent_challenge(
             fauna_client_core::nest_trust::run_pinned_silent_challenge(
                 &c,
                 secret,
-                nest_url,
+                dial.pin_key(),
                 &fauna_client_core::nest_trust::LocalStoragePinStore,
             )
             .await
@@ -603,15 +542,22 @@ mod reach_hint_address_tests {
     //!
     //! Natively that is free — `connect_resolving` takes the URL and the socket
     //! address as separate arguments, so nothing keyed by the URL can move. On
-    //! wasm the authority itself has to change, so the two travel in one string
-    //! and keeping them apart is a discipline rather than a signature. The first
-    //! draft did not keep them apart: it shadowed `nest_url` with the dial URL
-    //! and handed that to `run_pinned_silent_challenge` as the pin key, making a
-    //! hint dial a first contact at a never-pinned key.
-    //! The last test here reads that arm's source, because the wasm arm compiles
-    //! only under `target_arch = "wasm32"` and no test in this workspace can
-    //! execute it.
-    use super::{hint_authority_url, hint_socket_addr};
+    //! wasm the authority itself has to change, and the first draft let the two
+    //! travel in one string: it shadowed `nest_url` with the dial URL and handed
+    //! that to `run_pinned_silent_challenge` as the pin key, making a hint dial
+    //! a first contact at a never-pinned key.
+    //! The wasm arm now takes a `fauna_core::web::ReachDial`, whose only
+    //! constructors key on the domain, so the swap has no spelling; its own
+    //! tests are native unit tests in `fauna-core`, and the source-reading pin
+    //! that held the arm while the key was a convention is retired. The address
+    //! math the wasm dial opens is pinned here through the same type.
+    use super::hint_socket_addr;
+
+    /// The URL the wasm arm's hint dial opens.
+    fn hint_authority_url(nest_url: &str, reach_ipv4: &str) -> Option<String> {
+        fauna_core::web::ReachDial::over_hint(nest_url, reach_ipv4)
+            .map(|dial| dial.dial_url().to_owned())
+    }
 
     const HINT: &str = "203.0.113.7";
 
@@ -766,72 +712,5 @@ mod reach_hint_address_tests {
                 "{plain} must default to the cleartext port"
             );
         }
-    }
-
-    /// A hint dial and a domain dial must resolve the **same** pin key, so the
-    /// account's existing domain pin is what judges whatever answers the hint —
-    /// and so there is nothing to carry over when the hint is dropped.
-    ///
-    /// This is a *source-level* pin, deliberately, and mirrors
-    /// `WsNestApi::the_wasm_core_dials_the_reach_address_and_keys_trust_on_the_identity_url`:
-    /// the defect is a **swap between two strings** in an arm no native test can
-    /// execute. A behavioural test cannot see it; reading the arm can.
-    ///
-    /// If this fails after a refactor, the fix is to keep the dial URL out of
-    /// the identity argument — not to relax the assertion.
-    #[test]
-    fn the_wasm_arm_dials_the_hint_and_pins_on_the_domain() {
-        let src = include_str!("auth.rs");
-        let (_, wasm) = src
-            .split_once(
-                "#[cfg(target_arch = \"wasm32\")]\npub(crate) async fn connect_silent_challenge(",
-            )
-            .expect("the wasm connect_silent_challenge is where the hint dial lives");
-        let wasm = wasm
-            .split_once("\n#[cfg(test)]")
-            .map(|(before, _)| before)
-            .unwrap_or(wasm);
-
-        assert!(
-            wasm.contains("AnonymousWsRpcClient::connect(&dial)"),
-            "the wasm arm must CONNECT to the dial URL — otherwise the hint does \
-             nothing and the app waits on DNS for a box that is already up"
-        );
-        // The PROPERTY, not the spelling the defect happened to use. `nest_url`
-        // is a parameter of this arm, so the honest invariant is that the arm
-        // never rebinds it at all — which catches `= dial`, `= &dial`,
-        // `= dial.as_str()`, `: &str = &dial` and every other shape in one
-        // line. The first draft of this pin matched the single string
-        // `"let nest_url = dial"`, and a one-borrow variant walked straight past
-        // it with all five tests green — guard the property the defect violated,
-        // never the text it was written in.
-        assert!(
-            !wasm.contains("let nest_url"),
-            "the dial URL must never shadow `nest_url`: everything below the \
-             shadow silently becomes the hint's, including the pin key"
-        );
-        let (_, pinned) = wasm
-            .split_once("run_pinned_silent_challenge(")
-            .expect("the wasm arm runs the pinned silent challenge");
-        let args: Vec<&str> = pinned
-            .split_once(')')
-            .map(|(a, _)| a)
-            .unwrap_or(pinned)
-            .split(',')
-            .map(str::trim)
-            .collect();
-        // Deliberately exact: a harmless refactor to `&nest_url` or
-        // `nest_url.as_str()` reds this, and that is the safe direction — the
-        // reader then re-reads the arm and re-affirms the key, which is cheap.
-        // Widening it to "contains nest_url" would accept `hint_authority_url(
-        // nest_url, ip)` as the pin key, which is the defect itself.
-        assert_eq!(
-            args.get(2).copied(),
-            Some("nest_url"),
-            "the third argument is the PIN KEY and must be the domain \
-             `nest_url`, never the dial URL — a hint dial keyed on the dial URL \
-             is a first contact at a key that was never pinned, so the account's \
-             domain pin never gets to refuse an impostor; got {args:?}"
-        );
     }
 }

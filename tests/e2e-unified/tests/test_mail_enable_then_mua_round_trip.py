@@ -98,12 +98,16 @@ from helpers.mail_wire import (
 # renders every enable / credential / one-time-token id — both the PLAIN and the
 # OAUTHBEARER enable paths, proven by the dedicated_mail_nest windows coverage;
 # macos joined once the apple dedicated-nest mint was fixed, and ios rides the same
-# shared FaunaKit surface — see test_addressbook). android doesn't yet. Scope to the
-# implementing clients so --client deselects it on the others instead of failing on
-# the missing enable toggle.
+# shared FaunaKit surface — see test_addressbook). android joined once its mail page
+# gained the enable toggle and credential-mint ids (the same ids `test_mail_settings_controls`
+# drives on android); the dedicated-nest admin-inject preamble is the one the other
+# android-marked dedicated-nest witnesses already use. Marked, not run (no android
+# venue yet). Scope to the implementing clients so --client deselects it on the
+# others instead of failing on the missing enable toggle.
 pytestmark = [
     pytest.mark.tier1,
     pytest.mark.tier_3,
+    pytest.mark.android,
     pytest.mark.linux,
     pytest.mark.web,
     pytest.mark.windows,

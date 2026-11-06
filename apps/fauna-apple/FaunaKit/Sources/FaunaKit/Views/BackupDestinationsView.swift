@@ -197,11 +197,11 @@ public struct BackupDestinationsView: View {
 
     private var destinationList: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if vm.isEmpty {
+            if vm.showsEmptyState {
                 Text(L.backups.backupDestinationsEmpty)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if !vm.isEmpty {
                 ForEach(Array(vm.destinations.enumerated()), id: \.element.destinationId) { index, dest in
                     statusRow(dest, index: index)
                 }
@@ -265,9 +265,10 @@ public struct BackupDestinationsView: View {
                 }
             }
             Spacer(minLength: 8)
-            // Re-seed — on this device's own custodian row only (`reseedRows`).
+            // Re-seed — on this device's own custodian row and on a surviving
+            // nest's row (`reseedRows`); the press carries which row it was.
             if vm.reseedOnRow(dest) {
-                reseedButton
+                reseedButton(source: dest.destinationId)
             }
             Button(L.backups.backupDestinationEditButton) { vm.openEditForm(dest) }
                 .buttonStyle(.borderless)
@@ -382,7 +383,7 @@ public struct BackupDestinationsView: View {
             // after losing the nest): a store no row claims is, after a lost
             // nest, the owner's way back, and freeing it is the other way out.
             if vm.reseedOnOrphanedStore {
-                reseedButton
+                reseedButton(source: nil)
             }
             Button(L.backups.backupDestinationReclaimButton) { vm.armReclaim() }
                 .accessibilityIdentifier(Ids.backupDestinationReclaimButton)
@@ -410,24 +411,40 @@ public struct BackupDestinationsView: View {
     /// reaches the store directly. Disarmed while a restore runs. Deliberately
     /// NO `.faunaGate`, like the reclaim beside it: the gesture's whole setting
     /// is a nest that was lost, and the ceremony reaches the rebuilt one itself.
-    private var reseedButton: some View {
-        Button(L.backups.backupDestinationReseedButton) { vm.armReseed() }
+    private func reseedButton(source: String?) -> some View {
+        Button(L.backups.backupDestinationReseedButton) { Task { await vm.armReseed(source: source) } }
             .disabled(vm.reseedRunning)
             .accessibilityIdentifier(Ids.backupDestinationReseedButton)
-            .automationActivate(Ids.backupDestinationReseedButton) { vm.armReseed() }
+            .automationActivate(Ids.backupDestinationReseedButton) {
+                Task { await vm.armReseed(source: source) }
+            }
     }
 
     /// `backup-destination-reseed-confirm-modal` — the plain confirm pair, the
     /// reclaim modal's idiom. The body states the consequence where the decision
-    /// is made; ui.yaml scopes no id to it.
+    /// is made; ui.yaml scopes no id to it. A pull-back's confirm names the nest
+    /// whose copy it pulls back; the custodian's keeps this device's wording.
+    private var reseedConfirmTitle: String {
+        vm.reseedPulledFromName.map { L.backups.backupReseedPullBackConfirmTitle(name: $0) }
+            ?? L.backups.backupReseedConfirmTitle
+    }
+
     private var reseedConfirm: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(L.backups.backupReseedConfirmTitle)
+            Text(reseedConfirmTitle)
                 .font(.headline)
-            Text(L.backups.backupReseedConfirmBody)
+            Text(vm.reseedPulledFromName.map { L.backups.backupReseedPullBackConfirmBody(name: $0) }
+                ?? L.backups.backupReseedConfirmBody)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // The pull-back preflight's lines: one per reserved set, one for
+            // the covered folders — what the owner is accepting.
+            ForEach(Array(vm.reseedPreflightLines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button(L.backups.backupReseedCancelButton) { vm.cancelReseed() }
                     .accessibilityIdentifier(Ids.backupDestinationReseedCancelButton)
@@ -445,7 +462,7 @@ public struct BackupDestinationsView: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.backupDestinationReseedConfirmModal)
         .automationValue(Ids.backupDestinationReseedConfirmModal,
-                         text: { L.backups.backupReseedConfirmTitle })
+                         text: { reseedConfirmTitle })
     }
 
     /// `backup-reclaim-confirm-modal` — a plain confirm, no re-type. Reclaiming

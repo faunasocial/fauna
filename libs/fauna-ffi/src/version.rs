@@ -10,13 +10,14 @@
 //! `UpdateService.IsNewer`, whose lenient int-tuple treated `1.0.0-beta` as equal
 //! to `1.0.0`). See `libs/fauna-core/src/version.rs`.
 //!
-//! Also the FFI face of the update notice's two shared calls
+//! Also the FFI face of the update notice's asked check
 //! (`installers/README.md` § Knowing a newer version is out):
-//! [`check_for_newer_release`] (the asked check) and [`look_at_sign_in`] (the
-//! once-per-sign-in look), both over `fauna_client::update_look`, plus
+//! [`check_for_newer_release`], over `fauna_client::update_look`, plus
 //! [`release_feed_origin`] — so windows and macOS keep neither a feed URL nor a
-//! round trip of their own. The records crossing the boundary are this
-//! module's own ([`NewerRelease`], [`NewerReleaseCheck`]).
+//! round trip of their own. The once-per-sign-in look is not here: it reads the
+//! signed-in nest through `FfiNestClient::look_for_newer_release_at_sign_in`.
+//! The records crossing the boundary are this module's own ([`NewerRelease`],
+//! [`NewerReleaseCheck`]).
 
 /// UniFFI face of [`fauna_core::version::is_newer`]. Returns `true` when
 /// `candidate` is a strictly newer release than `current`. Both are semver
@@ -52,8 +53,8 @@ pub fn fauna_ffi_terms_url() -> String {
 
 /// The release feed's production origin
 /// ([`fauna_core::version::GITHUB_API_ORIGIN`]) — what [`check_for_newer_release`]
-/// and [`look_at_sign_in`] are called with outside e2e automation, so no app
-/// spells a feed URL of its own. Under e2e, each app's compile-gated
+/// is called with outside e2e automation, so no app spells a feed URL of its
+/// own. Under e2e, each app's compile-gated
 /// `FAUNA_E2E_RELEASE_FEED_URL` seam passes the harness's stub feed instead.
 #[uniffi::export]
 pub fn release_feed_origin() -> String {
@@ -127,31 +128,11 @@ pub async fn check_for_newer_release(feed_origin: String, user_agent: String) ->
     .into()
 }
 
-/// **Interim — the release-host sign-in look macOS and windows still call
-/// until each moves to `FfiNestClient::look_for_newer_release_at_sign_in`,
-/// which reads the signed-in nest and contacts no third party
-/// (`installers/README.md` § Knowing a newer version is out); then this
-/// function is deleted.** Over
-/// [`fauna_client::update_look::look_at_sign_in_over_http`]: the newer release
-/// to paint the same notice for, or `None` — nothing newer, or a failed look
-/// (silent by rule). Same arguments as [`check_for_newer_release`].
-#[fauna_uniffi_async::export]
-pub async fn look_at_sign_in(feed_origin: String, user_agent: String) -> Option<NewerRelease> {
-    fauna_client::update_look::look_at_sign_in_over_http(
-        &reqwest::Client::new(),
-        &feed_origin,
-        &user_agent,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await
-    .map(NewerRelease::from_tag)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         NewerRelease, NewerReleaseCheck, check_for_newer_release, fauna_ffi_build_version,
-        fauna_ffi_terms_url, is_newer, look_at_sign_in, release_feed_origin,
+        fauna_ffi_terms_url, is_newer, release_feed_origin,
     };
 
     #[test]
@@ -220,19 +201,6 @@ mod tests {
         assert_eq!(
             check_for_newer_release(closed_origin().await, "fauna-test/0".into()).await,
             NewerReleaseCheck::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn the_sign_in_look_names_a_newer_release_and_is_silent_on_failure() {
-        let newer = serve_once(r#"{"tag_name":"v9.9.9"}"#).await;
-        assert_eq!(
-            look_at_sign_in(newer, "fauna-test/0".into()).await,
-            Some(NewerRelease::from_tag("v9.9.9".into()))
-        );
-        assert_eq!(
-            look_at_sign_in(closed_origin().await, "fauna-test/0".into()).await,
-            None
         );
     }
 

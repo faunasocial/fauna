@@ -109,7 +109,6 @@ def test_profile_edit_sets_and_clears_avatar_and_banner(
     text-only baseline once both are cleared.
     """
     app = logged_in_app
-    app.profile.require_avatar_banner_upload_supported()
     if not TEST_IMAGE.exists():
         pytest.skip(f"test fixture missing: {TEST_IMAGE}")
 
@@ -183,8 +182,6 @@ def test_profile_header_paints_the_stored_avatar_and_banner(logged_in_app):
     elements are gone. Every wait polls the painted state (convention 14).
     """
     app = logged_in_app
-    app.profile.require_avatar_banner_upload_supported()
-    app.profile.require_header_pictures_supported()
     if not TEST_IMAGE.exists():
         pytest.skip(f"test fixture missing: {TEST_IMAGE}")
 
@@ -224,6 +221,10 @@ def test_profile_header_paints_the_stored_avatar_and_banner(logged_in_app):
 
 
 @pytest.mark.feature("profile")
+# The viewer is a second seat (`room_seats.launch_seat`), whose launch waits on
+# the REAL conversations backend — started on macOS/iOS only under this marker
+# (`_apply_real_conversations_env`); tui/linux/web run real regardless.
+@pytest.mark.real_conversations
 def test_own_profile_posts_tab_lists_your_posts_newest_first(
     logged_in_app, nest_instance, test_user, request
 ):
@@ -240,7 +241,6 @@ def test_own_profile_posts_tab_lists_your_posts_newest_first(
     from helpers.room_seats import launch_seat, seat_app_path, teardown_seats
 
     app = logged_in_app
-    app.profile.require_posts_tab_supported()
 
     first = f"first post {uuid.uuid4().hex[:8]}"
     second = f"second post {uuid.uuid4().hex[:8]}"
@@ -251,8 +251,13 @@ def test_own_profile_posts_tab_lists_your_posts_newest_first(
     app.profile.navigate()
     app.profile.open_posts_tab()
     seen = app.profile.wait_for_post_cards([second, first])
-    assert len(seen) == 2 and second in seen[0] and first in seen[1], (
-        f"the own Posts tab should list exactly the two posts, newest first; "
+    # The session-scoped user's tab also carries posts earlier tests made, so
+    # assert this test's two cards by marker and their relative order, not a
+    # card count or absolute indices.
+    at_second = next((i for i, t in enumerate(seen) if second in t), -1)
+    at_first = next((i for i, t in enumerate(seen) if first in t), -1)
+    assert 0 <= at_second < at_first, (
+        f"the own Posts tab should list both posts, newest first; "
         f"got {seen!r}, error={app.profile.error_text()!r}"
     )
 
@@ -275,7 +280,9 @@ def test_own_profile_posts_tab_lists_your_posts_newest_first(
         viewer.app.profile.navigate_to_actor(test_user["actor_id_hex"])
         viewer.app.profile.open_posts_tab()
         theirs = viewer.app.profile.wait_for_post_cards([second, first])
-        assert len(theirs) == 2 and second in theirs[0] and first in theirs[1], (
+        t_second = next((i for i, t in enumerate(theirs) if second in t), -1)
+        t_first = next((i for i, t in enumerate(theirs) if first in t), -1)
+        assert 0 <= t_second < t_first, (
             f"another user opening the author's profile should see the same two "
             f"posts, newest first; got {theirs!r}, "
             f"error={viewer.app.profile.error_text()!r}"
@@ -649,7 +656,6 @@ def test_other_profile_request_contact_lands_a_knock(logged_in_app, nest_instanc
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     app = logged_in_app
-    app.profile.require_request_contact_supported()
     app.profile.require_state_protocol_actor_nav_supported()
 
     other = create_actor_and_register(
@@ -811,7 +817,6 @@ def test_activating_a_post_author_opens_the_authors_profile(logged_in_app, test_
     cross-nest witness is the two-nest journey's.
     """
     app = logged_in_app
-    app.feed.require_author_line_opens_profile()
 
     body = f"author line {uuid.uuid4().hex[:8]}"
     app.feed.navigate()
@@ -831,7 +836,7 @@ def test_activating_a_post_author_opens_the_authors_profile(logged_in_app, test_
 
 
 @pytest.mark.feature("profile")
-def test_state_protocol_actor_nav_carries_the_home(logged_in_app, nest_instance):
+def test_state_protocol_actor_nav_carries_the_home(logged_in_app, nest_instance, request):
     """The nav patch's profile entry carries the open target's optional
     `home_nest_url` (`profile.md` § Layout & flow → *Reaching another actor's
     profile*; ui.yaml `profile.home_nest_url`): the hint seeds the page's
@@ -839,9 +844,10 @@ def test_state_protocol_actor_nav_carries_the_home(logged_in_app, nest_instance)
     naming the viewer's own nest is this nest. No profile is stored for the
     actor, so the header read gives no better answer and the hint stands.
     """
+    from helpers.app_surface import app_name
+
     app = logged_in_app
     app.profile.require_state_protocol_actor_nav_supported()
-    app.feed.require_author_line_opens_profile()  # the same tui-first slice
     other = create_actor_and_register(
         nest_instance["port"],
         base_url=nest_instance["url"],
@@ -859,7 +865,12 @@ def test_state_protocol_actor_nav_carries_the_home(logged_in_app, nest_instance)
     )
 
     app.contacts.navigate()
-    app.profile.navigate_to_actor(other_id, home_nest_url=nest_instance["url"])
+    # The viewer's own nest is the URL its app holds: web is single-origin, so
+    # that is the SPA proxy in front of the nest, not the nest's own address.
+    own_nest = (
+        request.getfixturevalue("spa_url") if app_name(app.driver) == "web" else nest_instance["url"]
+    )
+    app.profile.navigate_to_actor(other_id, home_nest_url=own_nest)
     assert app.profile.wait_for_viewed_actor(other_id) == other_id
     home = app.profile.wait_for_home_nest_url(None)
     assert home is None, (

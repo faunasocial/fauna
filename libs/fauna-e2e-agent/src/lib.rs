@@ -64,6 +64,94 @@ use std::time::{Duration, Instant};
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 mod stall;
 
+/// What holds thread `tid` of ANOTHER process `pid`, as the same report this
+/// agent appends to a stalled-loop timeout: the thread's state and CPU across
+/// two samples, then its symbolized native frames.
+///
+/// For a host that runs no agent of ours — the windows app, a C# process —
+/// whose stall is judged from outside. The FlaUI bridge decides the verdict
+/// from its own readings of the app and, on the app-side verdict only, runs
+/// the `fauna-e2e-stall-capture` helper binary, which calls this
+/// (`e2e-conventions.md` convention 11). Windows only; elsewhere the text says
+/// the stack is UNMEASURED.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn capture_thread_of_process(pid: u32, tid: u32) -> String {
+    stall::capture_foreign(pid, tid)
+}
+
+/// The env seed that breaks an app's start on purpose: `exit` makes
+/// [`fault_at_launch`] end the process, `block` makes it park the calling thread
+/// for good. The forced `FAULTED` launch and the forced blocked launch of
+/// convention 6's launch-timeout rider (`e2e-self-diagnosing-failures.md` § The
+/// convention; `tests/test_launch_timeout_forced_local.py`). The name is ungated
+/// vocabulary; only the read is gated.
+pub const FAULT_AT_LAUNCH_ENV: &str = "FAUNA_E2E_FAULT_AT_LAUNCH";
+
+/// What a launch broken by `FAUNA_E2E_FAULT_AT_LAUNCH=exit` exits with: non-zero,
+/// and a code no real failure of these apps reports. The same 73 as windows'
+/// `App.xaml.cs::E2eFaultAtLaunchExitCode`, so the forced pair reads alike on
+/// every app.
+pub const FAULT_AT_LAUNCH_EXIT_CODE: i32 = 73;
+
+/// Ends the process with [`FAULT_AT_LAUNCH_EXIT_CODE`] (`exit`), or parks the
+/// calling thread for good (`block` — a launch that asks for no CPU, which the
+/// rider must read as the app's own and never as `STARVED`), when the launch
+/// asked for it. The host calls it on its main thread right after installing
+/// its log, so the broken launch has a record, and before anything else starts.
+/// Compiled out of a release artifact (convention 15) — the release twin below
+/// is a no-op — so it is artifact-set wiring, never a knob.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn fault_at_launch() {
+    match std::env::var(FAULT_AT_LAUNCH_ENV).as_deref() {
+        Ok("exit") => {
+            tracing::error!(target: "fauna_e2e_agent", "{FAULT_AT_LAUNCH_ENV}=exit: ending this launch on purpose");
+            std::process::exit(FAULT_AT_LAUNCH_EXIT_CODE);
+        }
+        Ok("block") => {
+            tracing::error!(target: "fauna_e2e_agent", "{FAULT_AT_LAUNCH_ENV}=block: parking this launch for good on purpose");
+            loop {
+                std::thread::park();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The no-op release twin of [`fault_at_launch`]: the hosts call it ungated.
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+pub fn fault_at_launch() {}
+
+/// The env seed that crashes an app at its next test-agent `reset` on purpose:
+/// `abort` makes [`fault_at_reset`] end the process with `SIGABRT` (a Rust
+/// `abort()`, what `panic = "abort"` and a double panic end in). The forced death
+/// of convention 6's close rider (`e2e-self-diagnosing-failures.md` § The
+/// convention; `tests/test_app_death_at_close_forced_local.py`): an app that dies
+/// between a test's last step and the harness's close, which the close must read
+/// as a crash. An abort, never a panic, because a host may run its reset arm off
+/// the main thread, where an unwinding panic ends one thread and not the app.
+/// The name is ungated vocabulary; only the read is gated.
+pub const FAULT_AT_RESET_ENV: &str = "FAUNA_E2E_FAULT_AT_RESET";
+
+/// Aborts the process (`abort`) when the launch asked for it, logging first so the
+/// death has a record. The host calls it at the head of its `reset` / `logout`
+/// arm. Compiled out of a release artifact (convention 15) — the release twin below
+/// is a no-op — so it is artifact-set wiring, never a knob.
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn fault_at_reset() {
+    if std::env::var(FAULT_AT_RESET_ENV).as_deref() == Ok("abort") {
+        tracing::error!(target: "fauna_e2e_agent", "{FAULT_AT_RESET_ENV}=abort: aborting this launch at its reset on purpose");
+        // The message reaches stderr even if the log's writer is buffered.
+        eprintln!(
+            "[fauna] FATAL {FAULT_AT_RESET_ENV}=abort: aborting this launch at its reset on purpose"
+        );
+        std::process::abort();
+    }
+}
+
+/// The no-op release twin of [`fault_at_reset`]: the hosts call it ungated.
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+pub fn fault_at_reset() {}
+
 /// One step of a scoped query: `(container-id, index)` — the wire form of
 /// `drivers/scope.py`'s `post-card[2]/quoted-post` syntax.
 pub type ScopeStep = (String, usize);
@@ -657,6 +745,28 @@ pub const FAMILY_NOTIFY_CHECK_NOW: &str = "family_notify_check_now";
 /// loudly (convention 11) instead of reading a silent "no fold-ins yet" and
 /// hanging.
 pub const MLS_FOLDED_COMMITS_KEY: &str = "mls_folded_commits";
+
+/// The state key carrying **every chat channel this device has bound a thread
+/// to**, a sorted array of channel hex ids — read straight off the shared
+/// backend (`FaunaMlsBackend::bound_channels`; the JSON shape is derived once in
+/// `fauna_conversations::state_json::mls_bound_channels_json`).
+///
+/// **The witness the thread list cannot give.** A direct thread born from a
+/// Welcome and holding no message yet is bound — its channel is polled — but
+/// listed on no rail (`docs/goal/behavior/archive-import.md` § Linking and
+/// merging (phase two), ruling 1), so `data.conversation_threads` never shows
+/// it. A second device of the account restores such a channel from the replica
+/// at launch and binds it then (`devices.md` § Cross-device MLS group-state
+/// sync), so "the channel is in this list" is the second device's restore
+/// witness: a test that must have that device restore BEFORE the first device
+/// decrypts the channel's first message waits on this, never a clock.
+///
+/// **Contract, identical on every app.** `[]` for an app with no conversations
+/// session yet; a channel appears once bound and stays for the session. As with
+/// [`MLS_FOLDED_COMMITS_KEY`], `[]` and an absent key are different answers: an
+/// app without the leg publishes nothing, and the consumer refuses loudly
+/// (convention 11).
+pub const MLS_BOUND_CHANNELS_KEY: &str = "mls_bound_channels";
 
 /// The state key carrying the **client receive loop's cycle counters** —
 /// `{"started": N, "completed": M}`, read straight off the shared session
@@ -1339,6 +1449,15 @@ pub struct ElementReq {
 
 pub enum ElementKind {
     Text,
+    /// Every match's text in one reply — `GET /element/texts`, replying
+    /// `{"texts": [...]}`, the bulk twin of [`ElementKind::Text`] that the
+    /// windows bridge also serves (`PlatformDriver.get_texts`). It must answer
+    /// exactly what `Text` at each `index` would, in the same order and of the
+    /// same length, but with one find instead of one per element: a
+    /// per-element loop over N rows costs N whole-tree walks, which made a full
+    /// admin Logs page take longer to read than the test's wait budget. Zero
+    /// matches is `[]`, never an error. Ignores `index`/`arg`.
+    Texts,
     Visible,
     Enabled,
     Count,
@@ -1362,6 +1481,20 @@ pub enum ElementKind {
     /// `{error: …}` (absent element / no scrollable ancestor / unsupported
     /// client) — never a silent no-op.
     ScrollIntoView,
+    /// Targeted scroll to the BOTTOM EDGE: place the (indexed, scoped) element
+    /// so that `arg` (a fraction, 0–1, of its own height) shows above its
+    /// scroll container's bottom edge — its top at the viewport's bottom minus
+    /// that much — by driving the container's real scroll position, then
+    /// measure. Replies `{found: true, fraction: <measured visible fraction of
+    /// its height>}` or `{error: …}` (absent element / no scrollable ancestor /
+    /// unsupported client) — never a silent no-op. The measured fraction may
+    /// exceed the target when the list cannot scroll far enough (too little
+    /// content above the element); the caller asserts on it. The
+    /// `POST /element/scroll-to-bottom-fraction` contract, generalising the
+    /// flaui bridge's measured `/element/scroll-into-view-fraction`
+    /// (`e2e-conventions.md` § Driver primitives → *Placing an element at a
+    /// measured fraction*).
+    ScrollToBottomFraction,
     /// Press one named key in the (indexed, scoped) element — `arg` is the key,
     /// in the web `KeyboardEvent.key` spelling (`"ArrowLeft"`, `"Home"`, …).
     /// Replies `{ok: true}` once the key's effect has landed, or `{error: …}`
@@ -1440,8 +1573,9 @@ pub struct LivenessStamp {
     /// Milliseconds since `origin`, stamped by the host's main loop. `0` means
     /// "never beaten" — the host has not adopted this yet.
     beat_ms: AtomicU64,
-    /// The kernel task id of the thread that beat last. `0` = never beaten, or
-    /// an OS with no capture (see [`stall`]).
+    /// The OS's id for the thread that beat last (Linux's task id, Windows'
+    /// thread id). `0` = never beaten, or an OS with no capture (see
+    /// [`stall`]).
     beater_tid: AtomicI32,
     origin: Instant,
 }
@@ -1489,7 +1623,7 @@ impl LivenessStamp {
             .store(stall::current_tid(), Ordering::Relaxed);
     }
 
-    /// The kernel task id of the thread that last beat, if any — the thread
+    /// The OS's id for the thread that last beat, if any — the thread
     /// [`stall::capture`] samples when this stamp goes stale.
     pub(crate) fn beater_tid(&self) -> i32 {
         self.beater_tid.load(Ordering::Relaxed)
@@ -1842,6 +1976,7 @@ fn handle(request: &mut tiny_http::Request, hooks: &AgentHooks) -> (u16, Value) 
     let started = Instant::now();
     let served = match (method.as_str(), path) {
         ("GET", "/element/text") => element(hooks, req(ElementKind::Text, String::new())),
+        ("GET", "/element/texts") => element(hooks, req(ElementKind::Texts, String::new())),
         ("GET", "/element/visible") => element(hooks, req(ElementKind::Visible, String::new())),
         ("GET", "/element/enabled") => element(hooks, req(ElementKind::Enabled, String::new())),
         ("GET", "/element/count") => element(hooks, req(ElementKind::Count, String::new())),
@@ -1855,6 +1990,14 @@ fn handle(request: &mut tiny_http::Request, hooks: &AgentHooks) -> (u16, Value) 
         ("POST", "/element/select") => element(hooks, req(ElementKind::Select, str_field("value"))),
         ("POST", "/element/scroll-into-view") => {
             element(hooks, req(ElementKind::ScrollIntoView, String::new()))
+        }
+        ("POST", "/element/scroll-to-bottom-fraction") => {
+            let fraction = body
+                .get("fraction")
+                .and_then(Value::as_f64)
+                .map(|f| f.to_string())
+                .unwrap_or_default();
+            element(hooks, req(ElementKind::ScrollToBottomFraction, fraction))
         }
         ("POST", "/element/key") => element(hooks, req(ElementKind::Key, str_field("key"))),
         ("POST", "/window/close") => element(hooks, req(ElementKind::WindowClose, String::new())),
@@ -2702,7 +2845,7 @@ mod tests {
         let hb = UiThreadHeartbeat::new();
         assert_eq!(hb.beater_tid(), 0, "an unbeaten stamp names no thread");
         hb.beat();
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", windows)) {
             assert!(hb.beater_tid() > 0, "a beat must name its own thread");
         }
     }

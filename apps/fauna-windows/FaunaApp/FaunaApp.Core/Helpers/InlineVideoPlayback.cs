@@ -53,17 +53,23 @@ public abstract record PlaybackMedia
         internal void Release() => (Reader as IDisposable)?.Dispose();
     }
 
-    /// <summary>A sealed <c>Video</c>'s plaintext, opened by the manager: no URL can serve
-    /// it, so it plays from memory — whole blob, no <c>Range</c> (the ruling's sealed
-    /// arm).</summary>
-    public sealed record Opened(string Hash, byte[] Bytes, string ContentType) : PlaybackMedia;
+    /// <summary>Bytes the app holds, played from memory — whole blob, no <c>Range</c>:
+    /// a sealed <c>Video</c>'s plaintext opened by the manager (<see cref="HeldVideo.Sealed"/>),
+    /// or a plain <c>Video</c> of a post homed on another nest, fetched whole through the
+    /// post-blob plane (<see cref="HeldVideo.Home"/>). No URL serves either. The arm is
+    /// carried from the resolve that chose it, never re-derived. Internal because the
+    /// generated <see cref="HeldVideo"/> is.</summary>
+    internal sealed record Opened(string Hash, byte[] Bytes, string ContentType, HeldVideo Held)
+        : PlaybackMedia;
 
-    /// <summary>The <c>source</c> attribute: the nest-relative path a stream reads, or
-    /// <c>sealed:&lt;hash&gt;</c> for opened bytes, which have none.</summary>
+    /// <summary>The <c>source</c> attribute: the nest-relative path a stream reads, or for
+    /// held bytes, which have none, the shared <c>held_video_source</c> spelling —
+    /// <c>sealed:&lt;hash&gt;</c> or <c>home:&lt;hash&gt;</c> (render-model.md § D6c →
+    /// <i>Inline playback</i>, the held-bytes <c>source</c> ruling).</summary>
     public string Source => this switch
     {
         Streamed streamed => streamed.Path,
-        Opened opened => "sealed:" + opened.Hash,
+        Opened opened => FaunaFeedMethods.HeldVideoSource(opened.Held, opened.Hash),
         _ => "",
     };
 }
@@ -154,8 +160,9 @@ public sealed class VideoPlaybackMachine
 /// <c>%3B</c> inside a value. The FlaUI bridge reads one key back
 /// (<c>tests/e2e-unified/flaui-bridge/PackedAttr.cs</c> — mirrored there, since the bridge
 /// links no app code), so a test's <c>get_attr(id, key)</c> reads the same on windows as on
-/// every other app. Keys are lowercase kebab; a pack holds two or more pairs (one value
-/// needs no packing, and the bridge reads a single pair as a bare value).
+/// every other app. Keys are lowercase kebab or snake, starting with a letter; a pack holds
+/// two or more pairs (one value needs no packing, and the bridge reads a single pair as a
+/// bare value).
 /// </summary>
 public static class AutomationAttributePack
 {
@@ -179,9 +186,10 @@ internal static class VideoPlaybackResolver
     /// (<see cref="INestHttpClient.NestUrl"/> — the blob route is unauthenticated by design,
     /// and a proxied path arrives already carrying the playback ticket
     /// <c>playback_source</c> minted, so the reader needs no bearer either way); a sealed
-    /// item goes through the same fetch + <c>OpenMediaBytes</c> a sealed image does
-    /// (<see cref="PostMediaOpen"/>'s rule: <c>null</c> from the open means it did not open,
-    /// and ciphertext never reaches a decoder). <c>null</c> is nothing playable —
+    /// item, and a <c>Video</c> of a post homed on another nest, go through the same fetch
+    /// + <c>OpenMediaBytes</c> a sealed image does (<see cref="PostMediaOpen"/>'s rule:
+    /// <c>null</c> from the open means it did not open, and ciphertext never reaches a
+    /// decoder). <c>null</c> is nothing playable —
     /// <c>Unplayable</c> (a refused ticket included), no session yet, a path that is not
     /// this nest's, or a reader or fetch that failed — which the element shows as
     /// <c>error</c>.
@@ -198,24 +206,30 @@ internal static class VideoPlaybackResolver
     /// <c>FfiRangedNestReader.Open</c>, or a fake in the unit tests.</param>
     internal static async Task<PlaybackMedia?> ResolveAsync(
         INestHttpClient? nest, IFfiFeedManager? manager, RenderBlock block, CancellationToken ct = default,
-        Func<string, string, IFfiRangedNestReader>? openReader = null)
+        Func<string, string, IFfiRangedNestReader>? openReader = null,
+        IFfiPostBlobHosts? hosts = null,
+        FfiPostBlobHome? home = null)
     {
         if (nest is null || manager is null) return null;
         try
         {
             switch (await manager.PlaybackSource(block))
             {
-                // Both `Url` arms — a public `Video`'s blob route and a `ProxiedVideo`'s
-                // ticketed proxy path — take this one branch: one reader, one byte source.
+                // The reader dials only THIS nest, which holds none of a foreign post's
+                // bytes: a `Video` of a post homed elsewhere comes WHOLE through the plane,
+                // the home passed unchanged, and plays from memory as a sealed one does —
+                // never this nest's route for its hash (feed-read-model.md § A post homed
+                // on another nest, the video leg).
+                case PlaybackSource.Url when home is not null && block is RenderBlock.Video video:
+                    return await FetchAndOpenAsync(nest, manager, video.hash, HeldVideo.Home, hosts, home, ct);
+                // Every other `Url` — a public `Video`'s blob route here, and a
+                // `ProxiedVideo`'s ticketed path, which is this nest's proxy whatever the
+                // post's home — takes one branch: one reader, one byte source.
                 case PlaybackSource.Url url:
                     return await OpenStreamedAsync(
                         nest.NestUrl, url.url, openReader ?? FfiRangedNestReader.Open, ct);
                 case PlaybackSource.Sealed sealedItem:
-                    var fetched = await nest.GetBlobAsync(sealedItem.hash, ct);
-                    var opened = manager.OpenMediaBytes(sealedItem.hash, fetched);
-                    return opened is null
-                        ? null
-                        : new PlaybackMedia.Opened(sealedItem.hash, opened, ContentTypeOf(opened));
+                    return await FetchAndOpenAsync(nest, manager, sealedItem.hash, HeldVideo.Sealed, hosts, home, ct);
                 default:
                     return null;
             }
@@ -226,6 +240,26 @@ internal static class VideoPlaybackResolver
             System.Diagnostics.Debug.WriteLine($"VideoPlaybackResolver: {block} did not resolve: {ex}");
             return null;
         }
+    }
+
+    /// <summary>
+    /// The whole blob <paramref name="hash"/>, through the shared plane from the post's own
+    /// home (<paramref name="home"/> passed unchanged; <c>null</c> = this nest), then through
+    /// <c>OpenMediaBytes</c> — which opens a sealed item and hands a plain blob back as it
+    /// came — to play from memory. A post homed elsewhere with no plane built has nothing
+    /// to read: never this nest's route for its hash. <paramref name="held"/> is the arm
+    /// the caller's resolve chose, carried onto <see cref="PlaybackMedia.Opened"/>.
+    /// </summary>
+    private static async Task<PlaybackMedia?> FetchAndOpenAsync(
+        INestHttpClient nest, IFfiFeedManager manager, string hash, HeldVideo held,
+        IFfiPostBlobHosts? hosts, FfiPostBlobHome? home, CancellationToken ct)
+    {
+        if (home is not null && hosts is null) return null;
+        var fetched = hosts is not null
+            ? await hosts.Get(home, hash)
+            : await nest.GetBlobAsync(hash, ct);
+        var opened = manager.OpenMediaBytes(hash, fetched);
+        return opened is null ? null : new PlaybackMedia.Opened(hash, opened, ContentTypeOf(opened), held);
     }
 
     /// <summary>

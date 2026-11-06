@@ -19,7 +19,7 @@ UI-side or nest-side is read back over the wire with the actor's own key
 ``fauna.auth.account_locked``. The door's whole contract — nothing kept — is read
 off the app's credential store at rest, before and after.
 
-tier_3: needs a real ``fauna-nest`` binary. tui leads; the other six join in
+tier_3: needs a real ``fauna-nest`` binary. tui led; the other six joined in
 their trickle-down legs.
 """
 from __future__ import annotations
@@ -28,7 +28,6 @@ import pytest
 
 from clients._ws_rpc_core import RpcCallError
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.app_surface import skip_unbuilt
 from helpers.recovery_restore import point_the_restore_at, qualified_account
 from helpers.registry_store import read_store_map
 from helpers.waiting import wait_until
@@ -59,13 +58,10 @@ def _open_the_door_on_a_fresh_app(app, nest_instance) -> None:
     """Factory-reset to a device that holds nothing and open the lock door."""
     app.driver.reset()
     app.onboarding.navigate_to_status()
-    if not app.is_visible("emergency-lockout-entry-button"):
-        skip_unbuilt(
-            app.driver,
-            surface="emergency-lockout-entry-button",
-            detail="ui/sessions.md § The signed-out door; tui leads and the other six follow in batched trickle-down",
-            tracked="docs/goal/ui/sessions.md § Implementation status today",
-        )
+    assert app.is_visible("emergency-lockout-entry-button"), (
+        "the signed-out door paints no emergency-lockout-entry-button — every "
+        "app has built it"
+    )
     point_the_restore_at(app, nest_instance)
     app.onboarding.open_emergency_lockout_entry()
 
@@ -130,6 +126,7 @@ def test_the_door_locks_an_account_from_a_device_that_holds_nothing(
     )
 
 
+@pytest.mark.feature("sessions")
 def test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked(
     succeedable_app, nest_instance
 ):
@@ -153,7 +150,10 @@ def test_a_recovery_phrase_is_not_a_secret_key_and_nothing_is_locked(
         DOOR_OUTCOME_S,
         diagnose=lambda: "a recovery phrase must refuse on error-message, not sit silent",
     )
-    assert app.is_visible("sessions-lockout-button"), (
+    # Scrolled into view first: the door is a form taller than a small window,
+    # its lock button sits at the bottom, and the refusal opens above it — a
+    # bare read on windows (UIA IsOffscreen) answers "one scroll away" as "gone".
+    assert app.driver.is_visible_scrolled("sessions-lockout-button"), (
         "the user stays on the door to paste the right thing"
     )
     assert S.onboarding.emergency_lockout.invalid_secret in (app.error_text() or "")

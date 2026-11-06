@@ -25,6 +25,8 @@ import time
 
 import pytest
 
+from helpers import budgets
+
 from .helpers import (
     browser_session,
     docker_build,
@@ -125,16 +127,65 @@ def test_docker_browser_onboarding(nest):
     url = nest["nest_url"]
 
     with browser_session() as page:
+        # Convention 6: a blank or stuck SPA says WHY in the failure — the
+        # console errors and failed requests are what a misbundle leaves behind.
+        console_errors: list[str] = []
+        failed_requests: list[str] = []
+        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: console_errors.append(f"pageerror: {e}"))
+        page.on("requestfailed", lambda r: failed_requests.append(f"{r.url} ({r.failure})"))
+        page.on("response", lambda r: failed_requests.append(f"{r.url} → {r.status}") if r.status >= 400 else None)
+
         # The bundled SPA is served by the image over the self-signed cert.
-        page.goto(f"{url}/app/onboarding", wait_until="networkidle")
+        # `domcontentloaded`, not `networkidle`: the SPA keeps sockets open, so
+        # "idle" is a timing fact; the testid waits below are the state waits.
+        page.goto(f"{url}/app/onboarding", wait_until="domcontentloaded",
+                  timeout=int(budgets.UI_SETTLE_S * 1000))
+
+        # A shipped build seals the identity store, so a fresh browser lands on
+        # the unlock page's CREATE mode before onboarding (apps/web.md § Identity store
+        # at rest — unlock comes before launch routing). Setting the
+        # passphrase also proves the bundled wasm seal chunk ran in-image.
+        try:
+            page.locator('[data-testid="unlock-confirm-input"]').wait_for(
+                state="visible", timeout=int(budgets.SPA_FIRST_PAINT_S * 1000)
+            )
+        except Exception as e:
+            pytest.fail(
+                f"the unlock page's confirm input never became visible on {page.url} "
+                f"({type(e).__name__}); console errors={console_errors[:10]}; "
+                f"failed requests={failed_requests[:10]}"
+            )
+        page.fill('[data-testid="unlock-passphrase-input"]', "docker smoke passphrase")
+        page.fill('[data-testid="unlock-confirm-input"]', "docker smoke passphrase")
+        page.click('[data-testid="unlock-submit-button"]')
 
         # Identity: create a fresh Ed25519 identity. The secret rendering proves
         # the bundled wasm keygen executed inside the image.
-        page.click('[data-testid="create-identity-button"]')
+        create = page.locator('[data-testid="create-identity-button"]')
+        try:
+            create.wait_for(state="visible", timeout=30000)
+        except Exception:
+            painted = page.eval_on_selector_all(
+                "[data-testid]", "els => els.map(e => e.getAttribute('data-testid'))"
+            )
+            error = page.locator('[data-testid="error-message"]')
+            error_text = error.first.inner_text() if error.count() else "<none>"
+            pytest.fail(
+                "the image's SPA never painted create-identity-button on "
+                f"{page.url}: error-message={error_text!r}; painted testids={painted[:40]}; "
+                f"body={page.inner_text('body')[:400]!r}; console errors={console_errors[:10]}; "
+                f"failed requests={failed_requests[:10]}"
+            )
+        create.click()
         expect(page.locator('[data-testid="secret-key-display"]')).to_be_visible(
             timeout=15000
         )
         page.click('[data-testid="identity-continue-button"]')
+
+        # The recovery kit follows the identity step (onboarding.md § 1
+        # Identity); skipping it is one click and never blocks onboarding.
+        page.click('[data-testid="recovery-kit-skip-button"]')
 
         # Cross-stage navigation works: the wizard advances to handle entry.
         expect(page.locator('[data-testid="handle-input"]')).to_be_visible(

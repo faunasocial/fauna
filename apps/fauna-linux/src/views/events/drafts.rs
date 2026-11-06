@@ -241,10 +241,10 @@ fn restore_on_launch(sync: Arc<EventDraftsSync>, runtime: &tokio::runtime::Handl
 ///
 /// Two guards, for two different races:
 ///
-/// * `current.is_empty()` is what makes an async restore safe *within* one
-///   session: the load normally lands long before the first keystroke, but a
-///   slow nest could otherwise drop a stale draft on top of text the user is
-///   typing right now.
+/// * The shared FILL rule (`EventDrafts::fill`) is what makes an async restore
+///   safe *within* one session: the load retries a read lost to the transport
+///   for minutes, so it can land after the first keystroke, and a stale draft
+///   must never drop on top of text the user is typing right now.
 /// * `launched_for` is the **identity** seam, and the empty-compose guard is no
 ///   substitute for it — a rail freshly installed for the incoming actor has an
 ///   empty compose by construction, so it *passes*. `start` replaces the rail
@@ -266,11 +266,10 @@ fn install_restored(draft: EventDrafts, launched_for: &Arc<EventDraftsSync>) {
         }
         {
             let mut current = rail.current.borrow_mut();
-            if !current.is_empty() {
+            if !current.fill(draft.clone()) {
                 tracing::debug!("event drafts: compose already in progress, restore skipped");
                 return;
             }
-            *current = draft.clone();
         }
         // The form may already be on screen — the user can open New Event
         // before a slow load returns. Painting it here is what makes the

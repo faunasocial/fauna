@@ -269,6 +269,73 @@ public class LocationsViewModelTests
         Assert.NotNull(vm.ErrorMessage);   // unreachable helper → user-visible, not silent
         Assert.Single(vm.Locations);         // but the optimistic row still renders
     }
+
+    // ── Free up space (on-demand-files.md § The free-up-space gesture where the OS
+    //    offers none) — the shared rule and texts over the real FFI model ──
+
+    /// <summary>An on-demand row carries the verb, reading the agent's bytes; no sweep has
+    /// run, so no outcome line. A press reaches the agent's <c>FreeLocationSpace</c> and the
+    /// row repaints from what the agent then reports — never from a guess.</summary>
+    [Fact]
+    public async Task FreeSpace_OnDemandRow_OffersTheVerb_AndThePressRepaintsTheAgentsOutcome()
+    {
+        var fake = new FakeLocationControlChannel();
+        fake.Seed(@"C:\Users\alice\Docs", "documents", "on-demand");
+        fake.SeedSpace(@"C:\Users\alice\Docs", 100, 300);
+        var vm = Vm(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var before = Assert.Single(vm.Locations).FreeSpace;
+        Assert.NotNull(before);
+        Assert.Equal("idle", before!.State);
+        Assert.Contains("100", before.OnDeviceLine);
+        Assert.Contains("300", before.OnDeviceLine);
+        Assert.Null(before.ResultLine);
+        Assert.False(string.IsNullOrWhiteSpace(before.ButtonLabel));
+        Assert.DoesNotContain("devices.", before.ButtonLabel); // resolved, not a key
+
+        await vm.FreeLocationSpaceAsync(@"C:\Users\alice\Docs");
+
+        Assert.Contains(@"free-space:C:\Users\alice\Docs", fake.Calls);
+        var after = Assert.Single(vm.Locations).FreeSpace;
+        Assert.NotNull(after);
+        Assert.NotNull(after!.ResultLine);
+        Assert.Contains("1", after.ResultLine);
+        Assert.StartsWith("0", after.OnDeviceLine);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    /// <summary>A resident row keeps every byte by the user's choice: no verb.</summary>
+    [Fact]
+    public async Task FreeSpace_AlwaysRow_OffersNoVerb()
+    {
+        var fake = new FakeLocationControlChannel();
+        fake.Seed(@"C:\Users\alice\Docs", "documents", "always");
+        fake.SeedSpace(@"C:\Users\alice\Docs", 100, 300);
+        var vm = Vm(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Null(Assert.Single(vm.Locations).FreeSpace);
+    }
+
+    /// <summary>An agent that refuses (or cannot be reached) is said on the error line, and
+    /// the row keeps showing what the agent holds.</summary>
+    [Fact]
+    public async Task FreeSpace_Refused_SurfacesTheError()
+    {
+        var fake = new FakeLocationControlChannel();
+        fake.Seed(@"C:\Users\alice\Docs", "documents", "on-demand");
+        fake.SeedSpace(@"C:\Users\alice\Docs", 100, 300);
+        var vm = Vm(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        fake.Reachable = false;
+        await vm.FreeLocationSpaceAsync(@"C:\Users\alice\Docs");
+
+        Assert.NotNull(vm.ErrorMessage);
+        Assert.Null(Assert.Single(vm.Locations).FreeSpace!.ResultLine);
+    }
 }
 
 /// <summary>
@@ -326,7 +393,7 @@ internal sealed class FakeLocationControlChannel : ILocationControlChannel
 
         _locations.RemoveAll(f => f.Path == path);
         // The agent's windows fresh-binding default (user ruling 2026-09-26).
-        _locations.Add(new Location(path, folder, folderId, InMemoryLocationControlChannel.FreshBindingMode));
+        _locations.Add(new Location(path, folder, folderId, LocationBindingsController.FreshBindingMode));
         return Task.CompletedTask;
     }
 
@@ -357,8 +424,20 @@ internal sealed class FakeLocationControlChannel : ILocationControlChannel
         Calls.Add("list");
         if (!Reachable) throw new InvalidOperationException("agent unreachable");
         IReadOnlyList<FfiAgentLocation> list = _locations
-            .Select(f => AgentLocation(
-                f.Path, f.Folder, f.FolderId, f.Mode, RevokedFolders.Contains(f.Folder)))
+            .Select(f =>
+            {
+                var row = AgentLocation(
+                    f.Path, f.Folder, f.FolderId, f.Mode, RevokedFolders.Contains(f.Folder));
+                return _space.TryGetValue(f.Path, out var space)
+                    ? row with
+                    {
+                        totalBytes = space.Total,
+                        // The agent reports bytes here for an on-demand binding alone.
+                        onDeviceBytes = f.Mode == "on-demand" ? space.OnDevice : null,
+                        freeSpace = space.Run,
+                    }
+                    : row;
+            })
             .ToList();
         return Task.FromResult(list);
     }
@@ -378,5 +457,50 @@ internal sealed class FakeLocationControlChannel : ILocationControlChannel
         if (!Reachable) throw new InvalidOperationException("agent unreachable");
         var applied = RemainingHeldAfterApply == 0 ? 1ul : 0ul;
         return Task.FromResult(HeldDeletesApplied(applied, RemainingHeldAfterApply, RemainingHeldAfterApply > 0));
+    }
+
+    /// <summary>Whether the agent's re-read of the group sets' review lists reports that
+    /// what the page shows moved (<c>RefreshSetConflicts</c>'s answer).</summary>
+    public bool SetConflictsMoved { get; set; }
+
+    /// <summary>Refuse every <i>use the other version</i> on a group set's row, as the agent
+    /// refuses one whose retained bytes are gone or whose disk moved off the tracked head.</summary>
+    public bool RefuseRestore { get; set; }
+
+    public Task<bool> RefreshSetConflictsAsync(FfiLocationBindingsModel model)
+    {
+        Calls.Add("set-conflicts");
+        if (!Reachable) throw new InvalidOperationException("agent unreachable");
+        return Task.FromResult(SetConflictsMoved);
+    }
+
+    public Task RestoreRetainedVersionAsync(string folderId, long conflictId)
+    {
+        Calls.Add($"restore:{folderId}#{conflictId}");
+        if (!Reachable) throw new InvalidOperationException("agent unreachable");
+        if (RefuseRestore) throw new InvalidOperationException("the retained version is gone");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>The free-up-space readings the agent reports per path: bytes on this device,
+    /// the location's recorded total, and the latest sweep.</summary>
+    private readonly Dictionary<string, (ulong OnDevice, ulong Total, FfiFreeSpaceRun? Run)> _space = new();
+
+    /// <summary>Give the bound folder at <paramref name="path"/> <paramref name="onDevice"/>
+    /// of <paramref name="total"/> bytes on this device.</summary>
+    public void SeedSpace(string path, ulong onDevice, ulong total) =>
+        _space[path] = (onDevice, total, null);
+
+    /// <summary>The agent's sweep, settled at once: one file of the bytes on this device is
+    /// freed. Refused for a resident folder, as the agent refuses it.</summary>
+    public Task FreeLocationSpaceAsync(string path)
+    {
+        Calls.Add($"free-space:{path}");
+        if (!Reachable) throw new InvalidOperationException("agent unreachable");
+        if (_locations.FirstOrDefault(f => f.Path == path) is not { Mode: "on-demand" })
+            throw new InvalidOperationException("always-resident: there is nothing to free");
+        var (onDevice, total, _) = _space.GetValueOrDefault(path);
+        _space[path] = (0, total, new FfiFreeSpaceRun(false, onDevice > 0 ? 1ul : 0ul, onDevice, 0, 0));
+        return Task.CompletedTask;
     }
 }

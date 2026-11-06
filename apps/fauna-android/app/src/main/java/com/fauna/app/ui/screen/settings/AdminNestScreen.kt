@@ -22,6 +22,7 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
@@ -1613,7 +1614,10 @@ private fun ReportsQueueSection(
                 key(row.reportId) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            AdminNestVM.reportLine(row) { resolveLocalized(context, it).orEmpty() },
+                            AdminNestVM.reportLine(
+                                row,
+                                relativeTime = { ms -> ValueFormat.relativeTime(context, ms) },
+                            ) { resolveLocalized(context, it).orEmpty() },
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_ITEM),
                         )
@@ -1841,7 +1845,10 @@ private fun FactoryResetSection(onFactoryReset: () -> Unit) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showDialog = false }) {
+                TextButton(
+                    onClick = { showDialog = false },
+                    modifier = Modifier.testTag(Ids.ADMIN_FACTORY_RESET_CANCEL_BUTTON),
+                ) {
                     Text(stringResource(R.string.admin_settings_page_factory_reset_cancel))
                 }
             },

@@ -114,9 +114,7 @@ async fn start_nest() -> Nest {
             ..Default::default()
         },
         backup_service: Some(backup_svc),
-        sync: fauna_nest::state::SyncState {
-            chunk_resolver: resolver,
-        },
+        sync: fauna_nest::state::SyncState::with_resolver(resolver),
         ..base
     });
     let app = fauna_nest::build_router(Arc::clone(&state));

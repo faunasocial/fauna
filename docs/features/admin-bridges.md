@@ -65,38 +65,38 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
-| linux | ⚠ partial | 0.1.4-dev+db13d1ca.dirty standalone |
-| windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
-| macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
-| ios |  no run recorded | |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.5-dev+37e2409c standalone |
+| windows | ✅ full | 0.1.5-dev+de363e06.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+3ef45f1b standalone |
+| ios | ✅ full | 0.1.5-dev+662ece79 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+b5779216.dirty standalone |
+| tui | ✅ full | 0.1.4-dev+b5779216.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 1 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_mda_card_names_mail_and_calendar` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mda_rotation_hides_dkim_warning` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_mda_card_names_mail_and_calendar` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mda_rotation_hides_dkim_warning` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_request_enrollment_auto_approves_when_mail_enabled` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_list_then_approve_flow` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_reject_flow` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_non_admin_denied` | nest (linux): passed, nest (macos): passed |
-| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_rekey_rotation.py::test_admin_revoke_re_keys_mta_hands_free` | nest (linux): failed |
+| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_rekey_rotation.py::test_admin_revoke_re_keys_mta_hands_free` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_revoked_keyfile_re_keys_in_process` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
-| 5 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_rejecting_a_pending_bridge_asks_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 8 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on` | nest (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_cancelling_a_rotation_leaves_the_helper_approved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 10 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_dav_only_nest_approves_the_mda_and_holds_the_mta` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_non_mail_helpers_always_wait_for_the_admin` | nest (linux): passed |
-| 12 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_revoking_a_helper_closes_its_connection_and_refuses_its_key` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mta_rotation_leaves_the_dns_page_signing_record_unchanged` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 14 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_a_pending_helper_is_given_nothing_to_serve_until_approved` | nest (linux): passed |
-| 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_off_re_key_comes_back_pending` | nest (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_approved_row_shows_name_and_when_approved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_rejecting_a_pending_bridge_asks_first` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on` | nest (linux): passed, nest (macos): passed |
+| 9 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_cancelling_a_rotation_leaves_the_helper_approved` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_dav_only_nest_approves_the_mda_and_holds_the_mta` | nest (linux): passed, nest (macos): passed |
+| 11 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_non_mail_helpers_always_wait_for_the_admin` | nest (linux): passed, nest (macos): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_revoking_a_helper_closes_its_connection_and_refuses_its_key` | nest (linux): passed, nest (macos): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_mta_rotation_leaves_the_dns_page_signing_record_unchanged` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 14 | nest | `tests/e2e-unified/tests/api/test_bridge_service_user_authority.py::test_a_pending_helper_is_given_nothing_to_serve_until_approved` | nest (linux): passed, nest (macos): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_off_re_key_comes_back_pending` | nest (linux): passed, nest (macos): passed |
+| 16 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_approved_row_shows_name_and_when_approved` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_pending_card_shows_when_it_first_asked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_mail_flows_after_the_mta_is_re_keyed` | nest (linux): passed, nest (macos): passed |
 <!-- features-render:end -->

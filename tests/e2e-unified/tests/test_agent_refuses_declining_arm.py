@@ -154,3 +154,39 @@ def test_accept_recipient_refuses_when_no_chip_commits(logged_in_app):
     assert "conversations_accept_recipient" in surfaced, (
         f"the refusal must NAME the command it refused (convention 6). Got {surfaced!r}"
     )
+
+
+@pytest.mark.windows
+def test_a_throwing_seam_refuses_instead_of_acking_green(logged_in_app):
+    """A seam that THROWS is convention 11's third clause: it must surface.
+
+    `conversations_inject_send_failure` with no `thread_id` makes the windows seam
+    (`ConversationsCommands.InjectSendFailure` → `RequireThreadId`) throw an
+    `ArgumentException`. Until 2026-11-06 the windows arm, like five siblings
+    (`conversations_create_mls_group`, `conversations_inject_page_error`,
+    `conversations_enable_real_faunamls`, `feed_inject_posts`,
+    `feed_inject_error`), caught that throw into `Debug.WriteLine` and acked green.
+    All six now report it through `ReportCommandFailure`. Windows-marked: the
+    other apps' arms for this command are not pinned against a throwing seam here.
+    """
+    app = logged_in_app
+
+    assert not app.has_error(), (
+        "a pre-existing error would make the assertion below vacuous. "
+        f"Current text: {app.error_text()!r}"
+    )
+
+    surfaced = refusal_from(app, "conversations_inject_send_failure", {"reason": "x"})
+
+    assert surfaced, (
+        "conversations_inject_send_failure's seam threw (no `thread_id`) and the "
+        "arm acked green — a SWALLOWED THROW, which e2e-conventions.md § "
+        "convention 11 forbids: the missing effect would surface later as an "
+        "unrelated assertion naming neither the command nor the throw."
+    )
+    assert "conversations_inject_send_failure" in surfaced, (
+        f"the refusal must NAME the command that failed (convention 6). Got {surfaced!r}"
+    )
+    assert "thread_id" in surfaced, (
+        f"the refusal must carry the seam's own reason (convention 6). Got {surfaced!r}"
+    )

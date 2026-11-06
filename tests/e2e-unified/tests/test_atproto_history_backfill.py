@@ -17,7 +17,8 @@ large back-catalogue is still unbuilt (`atproto-pds-bridge.md` § Implementation
 status today), and a post above the floor reaches the repo through the
 ordinary projection loop.
 
-tui first; the other apps gain their markers in the cross-app lift.
+tui first, then linux and web, the apple apps and windows; android follows in its
+own queue.
 """
 import time
 import urllib.error
@@ -27,9 +28,10 @@ import pytest
 from conftest import get_available_apps
 from helpers.atproto_hosted_world import HANDLE_DOMAIN, hosted_world
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
+              pytest.mark.macos, pytest.mark.ios, pytest.mark.windows]
 
-HISTORY_APPS = ("tui",)
+HISTORY_APPS = ("tui", "linux", "web", "macos", "ios", "windows")
 
 # Written before hosting, so it sits below the floor a forward-only consent
 # would set — only the opt-in can publish it.

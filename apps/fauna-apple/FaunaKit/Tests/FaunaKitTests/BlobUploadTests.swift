@@ -95,3 +95,122 @@ import Foundation
     #expect(body.range(of: payload.primary.sidecarCbor) != nil)
     #expect(body.range(of: payload.primary.bytes) != nil)
 }
+
+// MARK: - Echo check (`security.md` § Signed-envelope shape, client-computed media hash)
+
+/// The content hash the shared check computes over `bytes`, read off its own
+/// mismatch error (`blob upload hash mismatch: nest echoed …, local <hash>`).
+private func localHash(of bytes: Data) throws -> String {
+    do {
+        _ = try verifyBlobUploadEcho(echoed: "", bytes: bytes)
+    } catch {
+        let text = "\(error)"
+        if let range = text.range(of: "local ") {
+            return String(text[range.upperBound...].prefix(64))
+        }
+    }
+    throw CocoaError(.coderReadCorrupt)
+}
+
+@Test func checkedBlobResponseReturnsTheLocallyComputedHash() throws {
+    let bytes = Data("public attachment bytes".utf8)
+    let local = try localHash(of: bytes)
+    #expect(local.count == 64)
+    let reply = Data("{\"hash\":\"\(local.uppercased())\"}".utf8)
+    #expect(try checkedBlobResponse(reply: reply, primaryBytes: bytes).hash == local)
+}
+
+@Test func checkedBlobResponseRefusesAnEchoNamingAnotherBlob() {
+    let bytes = Data("public attachment bytes".utf8)
+    let other = String(repeating: "ab", count: 32)
+    let reply = Data("{\"hash\":\"\(other)\"}".utf8)
+    #expect(throws: (any Error).self) {
+        _ = try checkedBlobResponse(reply: reply, primaryBytes: bytes)
+    }
+}
+
+// MARK: - Echo check at the call site (`APIClient`'s primary blob POSTs)
+//
+// The pins above hold `checkedBlobResponse` on its own; these hold that
+// `uploadBlob(data:audience:)` and `uploadPreparedBlob` route the primary
+// POST's reply through it. The client is built on the internal
+// `init(nodeUrl:session:)` seam with a `URLProtocol` stub answering the blob
+// POST — the twin of windows' `DirectNestClient` handler seam and android's
+// `ApiClientPublicUploadEchoTest` interceptor fake.
+
+/// Answers every request to a registered host with that host's canned JSON
+/// body. Keyed by host so parallel tests never read each other's reply.
+private final class BlobEchoStub: URLProtocol {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var replies: [String: Data] = [:]
+
+    static func register(_ reply: Data) -> URL {
+        let host = "blob-\(UUID().uuidString.lowercased()).stub.invalid"
+        lock.lock(); replies[host] = reply; lock.unlock()
+        return URL(string: "https://\(host)/")!
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let host = request.url?.host ?? ""
+        Self.lock.lock(); let reply = Self.replies[host]; Self.lock.unlock()
+        guard let reply, let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
+            return
+        }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: reply)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// An authed `APIClient` whose residual-HTTP leg answers every POST with
+/// `{"hash": echoed}`.
+private func stubbedClient(echoing echoed: String) -> APIClient {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [BlobEchoStub.self]
+    let url = BlobEchoStub.register(Data("{\"hash\":\"\(echoed)\"}".utf8))
+    let api = APIClient(nodeUrl: url, session: URLSession(configuration: config))
+    api.token = "stub-bearer"
+    api.tokenExpiresAt = Date().addingTimeInterval(3600)
+    return api
+}
+
+@Test func uploadBlobRefusesAnEchoNamingAnotherBlob() async {
+    let api = stubbedClient(echoing: String(repeating: "ab", count: 32))
+    await #expect(throws: (any Error).self) {
+        _ = try await api.uploadBlob(data: Data("public attachment bytes".utf8),
+                                     audience: .publicPost)
+    }
+}
+
+@Test func uploadBlobReturnsTheLocallyComputedHash() async throws {
+    let raw = Data("public attachment bytes".utf8)
+    let primary = try processAndSealUpload(raw: raw, audience: .publicPost).primary.bytes
+    let local = try localHash(of: primary)
+    let api = stubbedClient(echoing: local.uppercased())
+    #expect(try await api.uploadBlob(data: raw, audience: .publicPost).hash == local)
+}
+
+#if !FAUNA_KIDS
+@Test func uploadPreparedBlobRefusesAnEchoNamingAnotherBlob() async {
+    let api = stubbedClient(echoing: String(repeating: "cd", count: 32))
+    let primary = ComposeUploadPart(sidecarCbor: Data([0xa0]), bytes: Data("prepared bytes".utf8))
+    await #expect(throws: (any Error).self) {
+        _ = try await api.uploadPreparedBlob(primary: primary, thumbnail: nil)
+    }
+}
+
+@Test func uploadPreparedBlobReturnsTheLocallyComputedHash() async throws {
+    let primary = ComposeUploadPart(sidecarCbor: Data([0xa0]), bytes: Data("prepared bytes".utf8))
+    let local = try localHash(of: primary.bytes)
+    let api = stubbedClient(echoing: local.uppercased())
+    #expect(try await api.uploadPreparedBlob(primary: primary, thumbnail: nil) == local)
+}
+#endif

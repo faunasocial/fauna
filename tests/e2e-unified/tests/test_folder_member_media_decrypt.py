@@ -84,7 +84,10 @@ from helpers.folder_content import (
     atomic_write,
     await_agent_upload,
     bind_location_under_set,
+    custody_hold_applied,
     engine_restart_count,
+    hold_custody_reread,
+    release_custody_reread,
 )
 from helpers.folder_share import (
     SHARE_ROSTER_S as _SHARE_ROSTER_S,
@@ -144,7 +147,7 @@ def _owner_actor_hex(owner_app) -> str:
 
     ``folder_share_owner_app`` yields ``(app, nest)`` and keeps its actor dict
     private; linux reports ``session.actor_id`` in its state JSON
-    (``apps/fauna-linux/src/main.rs``), which is the same value the fixture wrote
+    (``apps/fauna-linux/src/lib.rs``), which is the same value the fixture wrote
     with ``set_state``."""
     actor_hex = owner_app.driver.get_state("session.actor_id")
     assert isinstance(actor_hex, str) and len(actor_hex) == 64, (
@@ -693,7 +696,7 @@ def test_member_re_ingests_custody_across_owner_rotation_and_decrypts_gen2(
     API that produces this precondition; the gesture must be the real one.
     """
     from tests.api import conv_api
-    from common.auth import register_handled_actor
+    from helpers.admin_wire import admit_adult
 
     owner_app, nest, _owner = folder_share_owner_app
     member_app, member = media_member.app, media_member.actor
@@ -718,9 +721,7 @@ def test_member_re_ingests_custody_across_owner_rotation_and_decrypts_gen2(
     print(_member_client_probe(member_app, "pre-rotation (known good)"))
 
     # ── A third actor joins the set's group, then is evicted ──────────────
-    third = register_handled_actor(
-        nest["port"], handle="third" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN
-    )
+    third = admit_adult(nest, "third" + secrets.token_hex(3), domain=MAIL_PRIMARY_DOMAIN, token=True)
     third_secret = third["signing_key"].encode()
     stored = conv_api.keypackage_upload(
         nest["port"], third, conv_api.mint_key_packages(third_secret, 2)
@@ -1027,6 +1028,10 @@ def test_a_removed_member_cannot_open_what_is_added_afterwards(
     [
         "tui",
         "linux",
+        # macOS as the owner: the second person's writer grant goes through its
+        # member row's role select. `real_sync_agent`: macOS spawns an agent only
+        # under it, and the owner's bound folder is what seals the file.
+        pytest.param("macos", marks=[pytest.mark.macos, pytest.mark.real_sync_agent]),
         # windows as the owner (both agent markers: see the removal test above).
         pytest.param(
             "windows",
@@ -1136,7 +1141,7 @@ def test_a_second_share_keeps_the_first_members_access_and_everything_readable(
     sb.accept_pending_share(0)
 
     def _second_row_listed():
-        if any(set_name in sb.folder_title(k) for k in range(sb.folder_count())):
+        if any(set_name in t for t in sb.folder_titles()):
             return True
         sb.navigate_devices()
         sb.navigate_folders()
@@ -1165,4 +1170,141 @@ def test_a_second_share_keeps_the_first_members_access_and_everything_readable(
     # The download clears its own stale file (`MediaActions.download_open_item`).
     _member_opens_and_reads(
         first_app, first_app.driver, _FILE_NAME, _FILE_BYTES
+    )
+
+
+# ── the owner's own status across a removal: Keys pending, then caught up ────
+#
+# Two budgets, both polled to a deadline (convention 14). The first covers the
+# custody nudge → the agent's walk and re-resolve (bounded by its 30 s resolve
+# timeout) → the app's 10 s status poll. The second covers the release: the
+# next resident tick's row read (the harness's 30 s `FAUNA_E2E_RESCAN_MS`) wakes
+# the custody task, or at worst the 300 s backstop does, then the status poll.
+_KEYS_PENDING_S = 120.0
+_KEYS_CAUGHT_UP_S = 360.0
+
+
+@pytest.mark.parametrize(
+    "folder_share_owner_app",
+    [
+        "tui",
+        "linux",
+        # macOS spawns an agent only under `real_sync_agent` (as the sibling
+        # parametrization above); its e2e child inherits the hold variable and
+        # writes the hold's log line into the launch's `app.err`.
+        pytest.param("macos", marks=[pytest.mark.macos, pytest.mark.real_sync_agent]),
+        # windows spawns its agent detached, so it needs both agent markers (as
+        # the sibling parametrization above).
+        pytest.param(
+            "windows",
+            marks=[
+                pytest.mark.windows,
+                pytest.mark.real_sync_agent,
+                pytest.mark.isolated_sync_agent,
+            ],
+        ),
+    ],
+    indirect=True,
+)
+@pytest.mark.real_conversations
+@pytest.mark.timeout(900)
+@pytest.mark.feature("share-a-folder")
+def test_after_a_removal_the_sync_status_reads_keys_pending_until_the_agent_catches_up(
+    request, folder_share_owner_app, tmp_path
+):
+    """After you remove someone from a folder, the folder's sync status reads
+    *Keys pending* until your own sync agent has picked up the folder's new key,
+    then reads *Running* again (`ui/folders.md` § Sharing a folder (cross-user)
+    — a removal the owner's local agent has not yet caught up with surfaces in
+    the app; the reading is `sync-agent.md` § Local agent health's fourth value).
+
+    A live agent closes that window within one walk of the custody nudge — far
+    too fast to assert on — so the owner's agent is held from re-reading custody
+    across the removal by its compile-gated e2e custody hold
+    (``content_keys::custody_reread_held``; :func:`hold_custody_reread`): it
+    keeps the generation it holds while the folder list it reads carries the
+    floor the rotation raised, which is exactly the state an agent whose walk
+    has not landed the new key is in. A stopped agent could not stand in: *Not
+    running* outranks *Keys pending*, and a restart re-reads custody at once.
+
+    Both people on the roster are headless — only the owner's status is under
+    test; two of them so the folder is still shared after the removal (the
+    realistic case, and the one the removal test above runs).
+    """
+    owner_app, nest, _owner = folder_share_owner_app
+    driver = owner_app.driver
+    request.addfinalizer(lambda: release_custody_reread(owner_app))
+    request.addfinalizer(lambda: print(agent_diagnosis(owner_app, "owner")))
+
+    def _status() -> str | None:
+        return driver.get_text("sync-agent-status")
+
+    def _diagnose() -> str:
+        return (
+            f"sync-agent-status={_status()!r}; hold adopted by the agent="
+            f"{custody_hold_applied(owner_app)}; error={owner_app.error_text()!r}\n"
+            + agent_diagnosis(owner_app, "owner")
+        )
+
+    # ── A shared folder, bound on the owner's device and keyed ────────────
+    set_name = f"keys-pending-{secrets.token_hex(4)}"
+    ob = owner_app.backups
+    ob.navigate_folders()
+    ob.create_folder_via_wizard(set_name)
+    leaves = _headless_member(nest, "leaves")
+    stays = _headless_member(nest, "stays")
+    _share_through_owner_ui(owner_app, set_name, leaves, want=1)
+    owner_folder = tmp_path / "owner-bound"
+    owner_folder.mkdir()
+    bind_location_under_set(owner_app, set_name, owner_folder, seat="owner")
+    # The agent sealed a file under the set's key: it holds the current
+    # generation, so the status below starts from a caught-up agent.
+    atomic_write(owner_folder / _FILE_NAME, _FILE_BYTES)
+    await_agent_upload(owner_app, _FILE_NAME, seat="owner")
+    # The second person last, as in the removal test above: the share leaves
+    # the folder's roster open for the removal gesture.
+    row = _share_through_owner_ui(owner_app, set_name, stays, want=2)
+    wait_until(
+        lambda: _status() == "Running",
+        _KEYS_PENDING_S,
+        interval=0.5,
+        diagnose=lambda: "the owner's caught-up agent never read Running before "
+        "the removal, so nothing below is about the removal: " + _diagnose(),
+    )
+
+    # ── Hold the agent, then remove one person through the owner's controls
+    hold_custody_reread(owner_app)
+    ob.remove_shared_member(_roster_index(ob, leaves["handle"], row=row), row=row)
+    wait_until(
+        lambda: ob.shared_member_count() == 1,
+        _SHARE_ROSTER_S,
+        diagnose=lambda: f"the removal never landed; error={owner_app.error_text()!r}",
+    )
+    assert stays["handle"] in ob.member_handle(0, row=row), (
+        "the removal must leave exactly the other person on the roster — if it "
+        f"removed them instead, the rotation below is not this removal's (saw "
+        f"{ob.member_handle(0, row=row)!r})"
+    )
+
+    # ── The status reads Keys pending while the agent has not caught up ───
+    wait_until(
+        lambda: _status() == "Keys pending",
+        _KEYS_PENDING_S,
+        interval=0.5,
+        diagnose=lambda: "the owner's status never read Keys pending after the "
+        "removal raised the folder's key floor: " + _diagnose(),
+    )
+    assert custody_hold_applied(owner_app), (
+        "Keys pending read while the agent never logged keeping a held custody "
+        "reading — the window this asserts was not the hold's: " + _diagnose()
+    )
+
+    # ── Released, the agent picks up the new key and the status clears ────
+    release_custody_reread(owner_app)
+    wait_until(
+        lambda: _status() == "Running",
+        _KEYS_CAUGHT_UP_S,
+        interval=0.5,
+        diagnose=lambda: "the owner's status never cleared from Keys pending once "
+        "the agent was free to re-read custody: " + _diagnose(),
     )

@@ -36,6 +36,120 @@ pub struct PeerFiles {
     siblings: Arc<SiblingChannels>,
     seat: Arc<RwLock<Weak<RelaySeat>>>,
     folder_dbs: Arc<FolderDbs>,
+    bound: BoundLegRecorder,
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    serve_fault: Arc<ServeFault>,
+}
+
+/// **Test-only** (`testing.md` convention 15): the serve door's fault arm —
+/// what `RequestMethod::ArmPeerServeFault` arms. Armed with `n`, the door
+/// forges the next `n` distinct chunk bodies it answers by flipping one byte,
+/// and keeps forging each of those keys the same way at every later want (a
+/// ranged body is re-read per slice, so a forgery that changed between slices
+/// would be a different fault). The witness of *"a tampered piece from a
+/// sibling is refused"* (`p2p.md` § Wormability posture, rule 4) needs a
+/// sibling that serves one, and no real seat ever does.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Default)]
+pub struct ServeFault {
+    state: Mutex<ServeFaultState>,
+}
+
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Default)]
+struct ServeFaultState {
+    remaining: u32,
+    forged: std::collections::HashSet<[u8; 32]>,
+}
+
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+impl ServeFault {
+    /// Forge the next `bodies` distinct bodies served (adds to what is armed).
+    pub fn arm(&self, bodies: u32) {
+        let mut state = self.state.lock().expect("serve fault");
+        state.remaining = state.remaining.saturating_add(bodies);
+    }
+
+    /// `body` as the door answers it under `store_key`.
+    fn apply(&self, store_key: [u8; 32], mut body: Vec<u8>) -> Vec<u8> {
+        let mut state = self.state.lock().expect("serve fault");
+        let forge = if state.forged.contains(&store_key) {
+            true
+        } else if state.remaining > 0 && !body.is_empty() {
+            state.remaining -= 1;
+            state.forged.insert(store_key);
+            true
+        } else {
+            false
+        };
+        if forge && let Some(first) = body.first_mut() {
+            *first ^= 0x01;
+        }
+        body
+    }
+}
+
+/// What the account runtime's transport factory last bound on this agent —
+/// written at each bind, read by the e2e probe arm (`crate::peer_probe`) to
+/// dial as this device outside the runtime's passes.
+///
+/// The transport is held **weakly**: the runtime's node owns the endpoint and
+/// dropping it closes the listener (wormability rule 5, no listener when off),
+/// so a record must never keep a torn-down endpoint alive. A dead reference
+/// reads as "not bound".
+#[derive(Clone, Default)]
+pub struct BoundLegRecorder(Arc<Mutex<Option<BoundLeg>>>);
+
+#[derive(Clone)]
+#[cfg_attr(
+    not(any(test, debug_assertions, feature = "test-helpers")),
+    allow(dead_code)
+)]
+struct BoundLeg {
+    transport: Weak<dyn fauna_transport::PeerTransport>,
+    bound_addrs: Vec<std::net::SocketAddr>,
+    node_id: [u8; 32],
+    device_authorization: fauna_core::encoding::EmbedAsBytes,
+}
+
+/// The bound leg as the probe arm uses it — the live transport, where it
+/// listens, and the witness it admits under.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub struct LiveLeg {
+    pub transport: Arc<dyn fauna_transport::PeerTransport>,
+    pub bound_addrs: Vec<std::net::SocketAddr>,
+    pub node_id: [u8; 32],
+    pub device_authorization: fauna_core::encoding::EmbedAsBytes,
+}
+
+impl BoundLegRecorder {
+    /// Record a bind (the factory's act, once per bind).
+    pub fn record(
+        &self,
+        transport: &Arc<dyn fauna_transport::PeerTransport>,
+        bound_addrs: &[std::net::SocketAddr],
+        node_id: [u8; 32],
+        device_authorization: fauna_core::encoding::EmbedAsBytes,
+    ) {
+        *self.0.lock().expect("bound leg") = Some(BoundLeg {
+            transport: Arc::downgrade(transport),
+            bound_addrs: bound_addrs.to_vec(),
+            node_id,
+            device_authorization,
+        });
+    }
+
+    /// The leg bound now, or `None` when none was, or its endpoint is gone.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn live(&self) -> Option<LiveLeg> {
+        let held = self.0.lock().expect("bound leg").clone()?;
+        Some(LiveLeg {
+            transport: held.transport.upgrade()?,
+            bound_addrs: held.bound_addrs,
+            node_id: held.node_id,
+            device_authorization: held.device_authorization,
+        })
+    }
 }
 
 /// The running engines' state DBs by folder (`FolderRef` wire string) — what
@@ -89,6 +203,25 @@ impl FolderDbs {
         .await?
     }
 
+    /// The chunk store keys this agent's engine indexed for `relative_path` in
+    /// `folder`, in file order — empty for a folder no engine here runs. The
+    /// e2e probe arm's way to name a file's chunks (`crate::peer_probe`).
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub async fn held_store_keys(
+        &self,
+        folder: &str,
+        relative_path: &str,
+    ) -> anyhow::Result<Vec<[u8; 32]>> {
+        let Some(path) = self.db_path(folder) else {
+            return Ok(Vec::new());
+        };
+        let relative_path = relative_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            fauna_sync_engine::db::SyncDb::open(&path)?.held_store_keys(&relative_path)
+        })
+        .await?
+    }
+
     /// One retained manifest's self-verified bytes, or `None`.
     async fn manifest(&self, folder: &str, hash: [u8; 32]) -> Option<Vec<u8>> {
         let path = self.db_path(folder)?;
@@ -129,7 +262,21 @@ impl PeerFiles {
             siblings: SiblingChannels::new(),
             seat: Arc::new(RwLock::new(Weak::new())),
             folder_dbs: Arc::new(FolderDbs::default()),
+            bound: BoundLegRecorder::default(),
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            serve_fault: Arc::default(),
         }
+    }
+
+    /// The serve door's fault arm ([`ServeFault`]).
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    pub fn serve_fault(&self) -> &ServeFault {
+        &self.serve_fault
+    }
+
+    /// Where the transport factory records each bind ([`BoundLegRecorder`]).
+    pub fn bound_leg(&self) -> BoundLegRecorder {
+        self.bound.clone()
     }
 
     /// The registry every running engine of this agent puts its state DB in.
@@ -150,6 +297,7 @@ impl PeerFiles {
             chunks: tally.chunks,
             bytes: tally.bytes,
             to_nest: tally.to_nest,
+            refused: tally.refused,
         }
     }
 
@@ -161,14 +309,25 @@ impl PeerFiles {
     /// The peer leg's half, for the account runtime's transport factory.
     pub fn binding(&self) -> PeerFileSync {
         let seat = Arc::clone(&self.seat);
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        let serve_fault = Arc::clone(&self.serve_fault);
         PeerFileSync {
             file_chunks: Arc::new(move |folder: String, store_key: [u8; 32]| {
                 let seat = seat.read().expect("peer files seat").upgrade();
+                // What the door answers: the body as served, or — armed in a
+                // test build only — its forgery ([`ServeFault`]).
+                #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+                let answer = {
+                    let serve_fault = Arc::clone(&serve_fault);
+                    move |body: Option<Vec<u8>>| body.map(|b| serve_fault.apply(store_key, b))
+                };
+                #[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+                let answer = |body: Option<Vec<u8>>| body;
                 Box::pin(async move {
-                    match seat {
+                    answer(match seat {
                         Some(seat) => seat.serve_peer(&folder, store_key).await,
                         None => None,
-                    }
+                    })
                 })
             }),
             folder_changes: {
@@ -199,6 +358,25 @@ impl Default for PeerFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fault arm forges exactly the next `n` distinct keys, the same way
+    /// at every later want of them, and nothing else.
+    #[test]
+    fn the_serve_fault_forges_the_next_bodies_consistently_and_nothing_else() {
+        let fault = ServeFault::default();
+        let body = vec![7u8; 16];
+        assert_eq!(fault.apply([1; 32], body.clone()), body, "unarmed");
+        fault.arm(1);
+        let forged = fault.apply([2; 32], body.clone());
+        assert_ne!(forged, body);
+        assert_eq!(forged[1..], body[1..], "one byte flipped");
+        assert_eq!(fault.apply([3; 32], body.clone()), body, "only one armed");
+        assert_eq!(
+            fault.apply([2; 32], body.clone()),
+            forged,
+            "the same forgery at every later slice of the key"
+        );
+    }
 
     /// The folder doors read the registered folder's DB; a folder no engine
     /// runs, or one whose engine stopped, answers an empty page — and a stale

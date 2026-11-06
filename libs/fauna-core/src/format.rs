@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
 use crate::localized::LocalizedText;
-use crate::obligation::{ContentFloor, ContentPolicy, GUARDIAN_FLOOR_CATEGORIES};
+use crate::obligation::{ContentPolicy, GUARDIAN_FLOOR_CATEGORIES};
 
 /// Result of a 3-way merge attempt.
 pub enum MergeResult {
@@ -321,77 +321,18 @@ mod reach_policy_format_tests {
         );
     }
 
-    // --- content-floor catalog (family-safety.md § Content policy, Slice C) ---
-
-    /// The content-floor picker catalog is the ratified `inherit / collapse /
-    /// block`, default first, each option's value the canonical wire spelling.
-    /// (`Unknown` is a deserialize-only catch-all, never a picker option.)
+    /// The content-policy summary shows one line per category the guardian's
+    /// document has a rule for (a category with none adds nothing over the
+    /// ward's own preferences), in the canonical category order; an empty
+    /// policy renders no content lines.
     #[test]
-    fn content_floor_options_are_the_ratified_values_in_order() {
-        let values: Vec<String> = content_floor_options()
-            .into_iter()
-            .map(|o| o.value)
-            .collect();
-        assert_eq!(values, ["inherit", "collapse", "block"]);
-        assert_eq!(content_floor_options()[0].label.key, "family.value_inherit");
-        assert_eq!(
-            content_floor_options()[1].label.key,
-            "family.value_collapse"
-        );
-        assert_eq!(content_floor_options()[2].label.key, "family.value_block");
-    }
-
-    /// `family-safety.md` § Content policy — *"A rule value a client cannot parse
-    /// renders fail-closed (`block`)"*. The same safety rule as the reach knobs,
-    /// this knob's strict option is `block`.
-    #[test]
-    fn a_content_floor_value_a_client_cannot_parse_fails_closed_to_block() {
-        for junk in ["", "hologram", "INHERIT", "Collapse", "quarantine", "9"] {
-            assert_eq!(
-                content_floor_label(junk).key,
-                "family.value_block",
-                "content floor {junk:?} must fail closed to block"
-            );
-        }
-        // Only the exact wire spellings reach the non-strict labels.
-        assert_eq!(content_floor_label("inherit").key, "family.value_inherit");
-        assert_eq!(content_floor_label("collapse").key, "family.value_collapse");
-        assert_eq!(content_floor_label("block").key, "family.value_block");
-    }
-
-    /// Round-trip: every catalog value labels as itself.
-    #[test]
-    fn every_content_floor_value_round_trips_through_its_label() {
-        for opt in content_floor_options() {
-            assert_eq!(content_floor_label(&opt.value), opt.label);
-        }
-    }
-
-    /// `FAIL_CLOSED` matches the wire-parse degrade and is never the permissive
-    /// `inherit` (index 0 of the catalog).
-    #[test]
-    fn the_content_floor_fail_closed_matches_the_wire_parse_and_is_never_inherit() {
-        use crate::obligation::ContentFloor;
-        assert_eq!(ContentFloor::FAIL_CLOSED, ContentFloor::Block);
-        assert_eq!(ContentFloor::from_wire("hologram"), ContentFloor::Unknown);
-        assert_ne!(ContentFloor::FAIL_CLOSED, ContentFloor::Inherit);
-        assert_eq!(ContentFloor::ORDER[0], ContentFloor::Inherit);
-    }
-
-    /// The content-policy summary shows **only the non-inherit floors** (an
-    /// `inherit` category adds nothing over the ward's own preferences, so it is
-    /// not a rule to render), in the canonical category order, with the value
-    /// fail-closed.
-    #[test]
-    fn content_policy_summary_renders_only_non_inherit_floors_in_order() {
-        use crate::obligation::{ContentFloor, ContentPolicy};
-        let policy = ContentPolicy {
-            nsfw: ContentFloor::Block,
-            spam: ContentFloor::Inherit,
-            phishing: ContentFloor::Collapse,
-            commercial: ContentFloor::Inherit,
-            document: None,
-        };
+    fn content_policy_summary_renders_only_ruled_categories_in_order() {
+        use crate::content_policy::ContentVerdict;
+        use crate::obligation::ContentPolicy;
+        let policy = ContentPolicy::category_rules(&[
+            ("phishing", ContentVerdict::Collapse),
+            ("nsfw", ContentVerdict::Block),
+        ]);
         let lines = content_policy_summary(&policy);
         let labels: Vec<&str> = lines.iter().map(|l| l.label.key.as_str()).collect();
         assert_eq!(
@@ -403,35 +344,40 @@ mod reach_policy_format_tests {
         );
         let values: Vec<&str> = lines.iter().map(|l| l.value.key.as_str()).collect();
         assert_eq!(values, ["family.value_block", "family.value_collapse"]);
-        // A floor invents no reason.
-        assert!(lines.iter().all(|l| l.reason.is_none()));
 
-        // An all-inherit policy (the default) renders no content lines.
         assert!(content_policy_summary(&ContentPolicy::default()).is_empty());
     }
 
-    /// The guardian's rule document reads like the floors it supersedes: a
-    /// category rule is its category's line (the strictest of it and a floor
-    /// still set), a keywords rule a line named by its kind, and a document
-    /// this build cannot apply reads as `block` on all four categories.
+    /// The guardian's rule document: a category rule is its category's line
+    /// (the strictest of its rules), a keywords rule a line named by its kind,
+    /// and a document this build cannot apply reads as `block` on all four
+    /// categories.
     #[test]
     fn content_policy_summary_reads_the_guardians_rule_document() {
         use crate::content_policy::{
             BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, Publisher,
             REASON_DEFAULT_KEY, ScorerKind, scorer_factor,
         };
-        use crate::obligation::{ContentFloor, ContentPolicy};
-        let rule = |factor: &str, verdict| ContentRule {
+        use crate::obligation::ContentPolicy;
+        let rule = |factor: &str, verdict, reason: &str| ContentRule {
             factor: factor.into(),
             min_permille: 500,
             verdict,
             reason_code: "rule-1".into(),
-            reason: [(REASON_DEFAULT_KEY.to_string(), "Not here".to_string())].into(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), reason.to_string())].into(),
             extra: Default::default(),
         };
         let mut document = ContentPolicyDocument::empty();
-        document.rules.push(rule("spam", ContentVerdict::Collapse));
-        document.rules.push(rule("nsfw", ContentVerdict::Block));
+        document
+            .rules
+            .push(rule("spam", ContentVerdict::Collapse, "Quietly"));
+        document
+            .rules
+            .push(rule("nsfw", ContentVerdict::Block, "Not here"));
+        // Two rules on one category: the stricter binds, with its reason.
+        document
+            .rules
+            .push(rule("spam", ContentVerdict::Block, "No spam"));
         document.scorers.push(BundledScorer {
             name: "keywords".into(),
             kind: ScorerKind::Keywords,
@@ -441,10 +387,9 @@ mod reach_policy_format_tests {
         document.rules.push(rule(
             &scorer_factor(&Publisher::Guardian, "keywords"),
             ContentVerdict::Block,
+            "Not here",
         ));
         let policy = ContentPolicy {
-            // A floor still set beside the document: the stricter binds.
-            spam: ContentFloor::Block,
             document: Some(document),
             ..Default::default()
         };
@@ -462,8 +407,7 @@ mod reach_policy_format_tests {
             ]
         );
         // nest-rules.md § The shared rule editor → The reason is the member's
-        // to read: a line a rule makes carries its reason; the spam line, made
-        // by the stricter floor over a collapsing rule, carries none.
+        // to read: a line carries the reason of the rule that made it.
         let reasons: Vec<Option<&str>> = lines
             .iter()
             .map(|l| {
@@ -473,7 +417,10 @@ mod reach_policy_format_tests {
                     .map(String::as_str)
             })
             .collect();
-        assert_eq!(reasons, [Some("Not here"), None, Some("Not here")]);
+        assert_eq!(
+            reasons,
+            [Some("Not here"), Some("No spam"), Some("Not here")]
+        );
 
         let unreadable = ContentPolicy {
             document: Some(ContentPolicyDocument::unreadable()),
@@ -1739,6 +1686,39 @@ pub fn device_display_identities<'a>(
         .collect()
 }
 
+/// The names **one owner's own Devices roster** renders, one per input row, in
+/// order — rule (c) of `devices.md` § Device names. A row whose name no other
+/// row of the list shares renders that name alone; every row whose name another
+/// row renders identically renders `name · code`, the code being the device's
+/// hex id elided to the width [`device_display_identities`] uses — the narrowest
+/// that tells every device in the list apart. Two phones of one platform read
+/// `fauna-ios · 3f3f3f3f3f3f…` and `fauna-ios · 8c8c8c8c8c8c…`, with no user
+/// action.
+///
+/// `rows` is `(name, device_id_hex)`, the name already opened (a sealed label
+/// rendered, a machine-authored one read as it rests) — this sees no seal. An
+/// **empty** name stays empty: it is a row the reader could not name at all
+/// (`DevicesMachine::render_devices`' keyless degrade), each app paints its own
+/// unnamed-row form for it, and there is no name to tell apart.
+///
+/// Like [`device_display_identities`] it takes the whole list on purpose —
+/// "another row shares this name" is a property of the set.
+pub fn device_roster_names<'a>(rows: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    let rows: Vec<(&str, &str)> = rows.into_iter().collect();
+    let width = distinguishing_id_width(rows.iter().map(|(_, hex)| *hex));
+    rows.iter()
+        .map(|(name, hex)| {
+            let alike =
+                !name.is_empty() && rows.iter().filter(|(other, _)| other == name).count() > 1;
+            if alike {
+                format!("{name} · {}", elide_hex(hex, width))
+            } else {
+                (*name).to_string()
+            }
+        })
+        .collect()
+}
+
 /// The narrowest elision width (from [`SHORT_ID_WIDTH`], in steps of 4) at which
 /// every id in `hexes` is distinct, capped at the longest id present.
 ///
@@ -1814,6 +1794,25 @@ pub fn hex_short(bytes: &[u8]) -> String {
 /// *string* to 12 chars + `…`. See `docs/goal/behavior/value-formatting.md`.
 pub fn hex_full(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Percent-encode `s` byte by byte: ASCII alphanumerics and every byte for which
+/// `keep` answers true pass through, all others become `%XX` (uppercase hex).
+/// The ONE encoder behind five hand-copied loops that differed only in which
+/// punctuation they let through (`app_route`'s path and segment, `folder_keys`'
+/// path component, `fauna-protocol`'s query value, `fauna-bridge-atproto`'s
+/// audience) — each caller still owns its own pass-through set, which is the
+/// part that genuinely differs per grammar.
+pub fn percent_encode_except(s: &str, keep: impl Fn(u8) -> bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || keep(b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// The decode counterpart to [`hex_full`] — any even-length hex string (either
@@ -2786,6 +2785,50 @@ pub fn contact_status_label(status: &str) -> LocalizedText {
     }
 }
 
+/// The order the contacts roster groups its rows by relationship status
+/// (contacts.md § Where logic lives → Roster status grouping): confirmed
+/// contacts first, then accepted, then pending, then blocked. The one owner of
+/// the order every app's roster paints — it was hand-written in android, apple
+/// and web. Apps read it through [`contact_roster_group_order`], which also
+/// places statuses this list does not name.
+pub const CONTACT_STATUS_GROUP_ORDER: [&str; 4] = ["confirmed", "accepted", "pending", "blocked"];
+
+/// The roster's status groups, in paint order, for the statuses its contacts
+/// carry (`statuses` — one entry per contact, the nest's order, duplicates
+/// expected): every [`CONTACT_STATUS_GROUP_ORDER`] status at least one contact
+/// holds, in that order, then every other status — a newer nest's relationship
+/// this build does not name, linux's outbound `sent` — in first-seen order, so
+/// no contact falls out of the roster for want of a group. A status no contact
+/// holds makes no group. Each app paints one section per entry, headed by
+/// [`contact_status_label`], holding that status's rows in their own order.
+pub fn contact_roster_group_order(statuses: &[String]) -> Vec<String> {
+    let mut groups: Vec<String> = CONTACT_STATUS_GROUP_ORDER
+        .iter()
+        .filter(|known| statuses.iter().any(|s| s == *known))
+        .map(|known| known.to_string())
+        .collect();
+    for s in statuses {
+        if !groups.contains(s) {
+            groups.push(s.clone());
+        }
+    }
+    groups
+}
+
+/// The roster's rows in paint order: `items` grouped by the status `status_of`
+/// reads off each, in [`contact_roster_group_order`]'s order, each group's rows
+/// in their given order. The one owner of the grouping loop the Rust-side apps
+/// (tui, linux) each hand-wrote; a caller paints a section heading wherever
+/// the returned status differs from the previous row's.
+pub fn contact_roster_paint_order<T>(items: &[T], status_of: impl Fn(&T) -> &str) -> Vec<&T> {
+    let statuses: Vec<String> = items.iter().map(|c| status_of(c).to_string()).collect();
+    let mut out = Vec::with_capacity(items.len());
+    for status in contact_roster_group_order(&statuses) {
+        out.extend(items.iter().filter(|c| status_of(c) == status));
+    }
+    out
+}
+
 /// Map a conversation thread's raw `label` to its display string, as a
 /// [`LocalizedText`] each app resolves through its own i18n pipeline. A thread
 /// whose label is empty or whitespace-only carries the canonical
@@ -3172,7 +3215,7 @@ pub fn unknown_sender_options() -> Vec<ReachPolicyOption> {
 /// Resolve a picker catalog's `label`s for display, in order — the
 /// `into_iter().map(|o| o.label.resolve(lookup)).collect()` that tui's
 /// `family.rs` and linux's `views/family.rs` each wrote independently for
-/// [`unknown_sender_options`]/[`feed_sources_options`]/[`content_floor_options`]
+/// [`unknown_sender_options`]/[`feed_sources_options`]
 /// (`&F` reborrows so `lookup` need not be `Copy`, matching
 /// [`LocalizedText::resolve`]'s own generic-over-lookup design — every native
 /// Rust client (a GUI toolkit's `ComboRow`/`StringList`, a terminal select) that
@@ -3321,22 +3364,19 @@ pub fn reach_policy_summary(
     ]
 }
 
-/// i18n label key for a [`ContentFloor`] value (`family.value_*`). `Unknown`
-/// (a value this client cannot parse) shares `block`'s key — the fail-closed
-/// render rule (`family-safety.md` § Content policy). Its own separate map (not
-/// reusing the reach-knob maps) because a content floor's value set is
-/// `inherit / collapse / block`, disjoint from the reach knobs.
-fn content_floor_label_key(value: ContentFloor) -> &'static str {
-    match value {
-        ContentFloor::Inherit => "family.value_inherit",
-        ContentFloor::Collapse => "family.value_collapse",
-        ContentFloor::Block | ContentFloor::Unknown => "family.value_block",
-    }
+/// The summary value label for a guardian rule's render verdict
+/// (`family.value_collapse` / `family.value_block`).
+fn content_verdict_label(verdict: crate::content_policy::ContentVerdict) -> LocalizedText {
+    LocalizedText::key(match verdict {
+        crate::content_policy::ContentVerdict::Collapse => "family.value_collapse",
+        crate::content_policy::ContentVerdict::Block => "family.value_block",
+    })
 }
 
-/// i18n label key for a content-floor **category** name (`family.policy_content_*_label`),
-/// used both by the guardian editor's four selects and the ward's summary. Any
-/// name outside the four negative canonicals maps to a neutral flagged label.
+/// i18n label key for a guardian content **category** name
+/// (`family.policy_content_*_label`), used by the ward's summary and Guardian
+/// Notify's lines. Any name outside the four negative canonicals maps to a
+/// neutral flagged label.
 fn content_category_label_key(category: &str) -> &'static str {
     match category {
         "nsfw" => "family.policy_content_nsfw_label",
@@ -3347,60 +3387,22 @@ fn content_category_label_key(category: &str) -> &'static str {
     }
 }
 
-/// The canonical content-floor picker options (`inherit / collapse / block`, in
-/// [`ContentFloor::ORDER`]), wire value + i18n label key. The guardian's four
-/// per-category content selects (`family-policy-content-*-select`) render this one
-/// catalog, so their value list cannot drift from what `fauna.family.policy.update`
-/// accepts. Mirrors [`unknown_sender_options`] (`family-safety.md` § Content policy).
-pub fn content_floor_options() -> Vec<ReachPolicyOption> {
-    ContentFloor::ORDER
-        .into_iter()
-        .map(|v| ReachPolicyOption {
-            value: v.as_str().to_string(),
-            label: LocalizedText::key(content_floor_label_key(v)),
-        })
-        .collect()
-}
-
-/// [`content_floor_options`] resolved to display labels via `lookup`.
-pub fn content_floor_option_labels<F, S>(lookup: F) -> Vec<String>
-where
-    F: Fn(&str) -> Option<S>,
-    S: AsRef<str>,
-{
-    resolve_option_labels(content_floor_options(), lookup)
-}
-
-/// The localized label for a stored content-floor wire value, looked up via
-/// [`ContentFloor::from_wire`] — so an unrecognized value renders **`block`**,
-/// this knob's strict option, never the permissive `inherit`. See
-/// [`unknown_sender_label`] for the shared safety rule.
-pub fn content_floor_label(value: &str) -> LocalizedText {
-    LocalizedText::key(content_floor_label_key(ContentFloor::from_wire(value)))
-}
-
 /// The ward-side read-only summary lines for a guardian **content policy**
 /// (`family-safety.md` § Content policy — *"the ward's read-only policy summary
-/// renders the content rules exactly as it renders the reach knobs"*). One line per
-/// category whose floor is **not `inherit`**, in the canonical
-/// [`GUARDIAN_FLOOR_CATEGORIES`] order — an `inherit` category adds nothing over the
-/// ward's own preferences, so it is not a rule to display. Each value fails closed to
-/// `block` via [`content_floor_label`]. Appended after the reach-knob summary by
-/// `ReachPolicy::summary_lines()` (`fauna-protocol`).
+/// renders the content rules exactly as it renders the reach knobs"*), read off
+/// the guardian's rule document (`nest-rules.md` § The shared rule editor (b)).
+/// One line per canonical category the document has a rule for, in
+/// [`GUARDIAN_FLOOR_CATEGORIES`] order, valued at the strictest of its rules —
+/// a category with no rule adds nothing over the ward's own preferences, so it
+/// is not a line — then a line per keywords, labeler or prompt rule, named by
+/// its kind. A document this build cannot apply binds as `block` on all four
+/// categories (`rules_from_guardian_policy`), so it reads that way. Appended
+/// after the reach-knob summary by `ReachPolicy::summary_lines()`
+/// (`fauna-protocol`).
 ///
-/// The guardian's rule document (`nest-rules.md` § The shared rule editor (b))
-/// reads the same way: a category rule is a line for its category — the
-/// strictest of it and any floor still set, as the engine folds them — and a
-/// keywords, labeler or prompt rule is a line named by its kind. A document
-/// this build cannot apply binds as `block` on all four categories
-/// (`rules_from_guardian_policy`), so it reads that way.
-///
-/// A line a document rule makes carries that rule's reason, as the engine's
-/// guardian arm does: a category line the strictest document rule's for its
-/// category when no floor is stricter (a rule and a floor at one strictness
-/// show the rule's — a reason beats none), a kind-named line its rule's; a
-/// line a floor alone makes, and every line of an unreadable document, carries
-/// none.
+/// A line carries its rule's reason, as the engine's guardian arm does: a
+/// category line the strictest rule's for its category, a kind-named line its
+/// rule's; every line of an unreadable document carries none.
 pub fn content_policy_summary(policy: &ContentPolicy) -> Vec<PolicySummaryLine> {
     use crate::content_policy::{ContentVerdict, Publisher, ScorerKind};
     let guardian = Publisher::Guardian;
@@ -3431,18 +3433,17 @@ pub fn content_policy_summary(policy: &ContentPolicy) -> Vec<PolicySummaryLine> 
                 .collect::<std::collections::HashMap<_, _>>(),
         )
     };
-    let value = |rank: u8| content_floor_label(if rank >= 2 { "block" } else { "collapse" });
+    let value = |rank: u8| {
+        content_verdict_label(if rank >= 2 {
+            ContentVerdict::Block
+        } else {
+            ContentVerdict::Collapse
+        })
+    };
     let mut lines: Vec<PolicySummaryLine> = GUARDIAN_FLOOR_CATEGORIES
         .into_iter()
         .filter_map(|c| {
-            let floor = match policy.floor_for(c) {
-                ContentFloor::Inherit => 0,
-                ContentFloor::Collapse => 1,
-                ContentFloor::Block | ContentFloor::Unknown => 2,
-            };
-            let strictest = floor
-                .max(category_rank(c))
-                .max(if unapplied { 2 } else { 0 });
+            let strictest = category_rank(c).max(if unapplied { 2 } else { 0 });
             // The last of equal rank, as the engine's fold keeps it.
             let reason = rules
                 .iter()
@@ -4822,6 +4823,46 @@ mod value_format_tests {
     }
 
     #[test]
+    fn device_roster_names_tell_alike_names_apart_and_leave_lone_names_bare() {
+        let a = hex_full(&[0x3fu8; 32]);
+        let b = hex_full(&[0x8cu8; 32]);
+        let c = hex_full(&[0x11u8; 32]);
+        // Two phones of one platform, and a renamed third device.
+        let names = device_roster_names([
+            ("fauna-ios", a.as_str()),
+            ("fauna-ios", b.as_str()),
+            ("my-laptop", c.as_str()),
+        ]);
+        assert_eq!(names[0], format!("fauna-ios · {}", short_id(&a)));
+        assert_eq!(names[1], format!("fauna-ios · {}", short_id(&b)));
+        assert_ne!(names[0], names[1], "two alike phones must read apart");
+        assert_eq!(names[2], "my-laptop", "a lone name renders alone");
+
+        // A lone row keeps its bare name, machine-authored or not.
+        assert_eq!(
+            device_roster_names([("fauna-tui", a.as_str())]),
+            vec!["fauna-tui".to_string()]
+        );
+        // An unnamed row stays unnamed — the app paints its own form for it.
+        assert_eq!(
+            device_roster_names([("", a.as_str()), ("", b.as_str())]),
+            vec![String::new(), String::new()]
+        );
+    }
+
+    #[test]
+    fn device_roster_names_widen_the_code_as_far_as_the_list_demands() {
+        let mut near = [0x01u8; 32];
+        near[7] = 0x02;
+        let a = hex_full(&[0x01u8; 32]);
+        let near = hex_full(&near);
+        let names =
+            device_roster_names([("fauna-linux", a.as_str()), ("fauna-linux", near.as_str())]);
+        assert_ne!(names[0], names[1]);
+        assert_eq!(names[0], "fauna-linux · 0101010101010101\u{2026}");
+    }
+
+    #[test]
     fn author_display_label_prefers_handle_else_full_hex() {
         let author = [0x01u8, 0x23, 0xab];
         // Handle present and non-empty: used verbatim.
@@ -4883,6 +4924,16 @@ mod value_format_tests {
             hex_full(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab]),
             "0123456789ab"
         );
+    }
+
+    #[test]
+    fn percent_encode_except_passes_alphanumerics_and_the_callers_set_only() {
+        let keep = |b: u8| matches!(b, b'-' | b'/');
+        assert_eq!(
+            percent_encode_except("a-b/c d~é", keep),
+            "a-b/c%20d%7E%C3%A9"
+        );
+        assert_eq!(percent_encode_except("", keep), "");
     }
 
     #[test]
@@ -6006,6 +6057,60 @@ mod value_format_tests {
         assert_eq!(fallback.resolve(|_| None::<&str>), "Sent");
         // An empty status resolves to empty (no spurious capitalization).
         assert_eq!(contact_status_label("").resolve(|_| None::<&str>), "");
+    }
+
+    #[test]
+    fn contact_roster_groups_follow_the_canonical_order() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // The four canonical statuses come out confirmed → accepted → pending
+        // → blocked whatever order the roster arrived in (the nest sends
+        // `created_at` order), each once.
+        assert_eq!(
+            contact_roster_group_order(&s(&[
+                "pending",
+                "blocked",
+                "confirmed",
+                "accepted",
+                "pending"
+            ])),
+            s(&["confirmed", "accepted", "pending", "blocked"])
+        );
+        // A status with no contact makes no group.
+        assert_eq!(
+            contact_roster_group_order(&s(&["blocked", "accepted"])),
+            s(&["accepted", "blocked"])
+        );
+        // A status this build does not name (a newer nest's relationship, or
+        // linux's outbound `sent`) still gets its group, after the canonical
+        // four, in first-seen order — a hard-coded four-status list dropped
+        // such a contact from the roster entirely. Empty groups as its own.
+        assert_eq!(
+            contact_roster_group_order(&s(&["later", "pending", "sent", "later", ""])),
+            s(&["pending", "later", "sent", ""])
+        );
+        assert!(contact_roster_group_order(&[]).is_empty());
+        assert_eq!(
+            CONTACT_STATUS_GROUP_ORDER,
+            ["confirmed", "accepted", "pending", "blocked"]
+        );
+    }
+
+    #[test]
+    fn contact_roster_paint_order_groups_rows_in_the_shared_order() {
+        let rows = [
+            ("a", "later"),
+            ("b", "accepted"),
+            ("c", "confirmed"),
+            ("d", "accepted"),
+            ("e", "later"),
+        ];
+        let painted: Vec<&str> = contact_roster_paint_order(&rows, |r| r.1)
+            .iter()
+            .map(|r| r.0)
+            .collect();
+        // Canonical statuses first, an unknown one after, rows in given order.
+        assert_eq!(painted, ["c", "b", "d", "a", "e"]);
+        assert!(contact_roster_paint_order(&[] as &[(&str, &str)], |r| r.1).is_empty());
     }
 
     #[test]

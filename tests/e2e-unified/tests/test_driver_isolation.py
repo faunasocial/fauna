@@ -102,6 +102,47 @@ def test_macos_launch_root_derives_a_bindable_sync_agent_socket():
         Path(probe).rmdir()
 
 
+def test_macos_driver_publishes_the_sync_agent_socket_only_for_a_real_agent_launch():
+    """The macos driver names its agent's socket under the HOME its launch
+    relocated — and only for a launch that spawns a real agent.
+
+    The app's child agent inherits the launch HOME and binds
+    ``<HOME>/Library/Application Support/Fauna/sync-agent.sock``
+    (``fauna_ipc::unix_transport::macos_socket_path``). A launch without
+    ``FAUNA_E2E_REAL_SYNC_AGENT`` spawns none, so a seat reading the plane
+    there must get ``None`` (no reading) rather than a socket nobody binds.
+    """
+    from drivers.macos import _AGENT_SOCKET_RELPATH, MacosInProcessDriver
+
+    driver = MacosInProcessDriver()
+    assert driver.sync_agent_socket is None
+
+    driver._home = "/tmp/fauna-e2e-macos-agent-x/home"
+    driver._real_sync_agent = False
+    assert driver.sync_agent_socket is None
+
+    driver._real_sync_agent = True
+    assert driver.sync_agent_socket == os.path.join(driver._home, _AGENT_SOCKET_RELPATH)
+
+
+def test_tui_driver_publishes_the_darwin_sync_agent_socket_under_its_relocated_home(
+    monkeypatch,
+):
+    """tui's darwin arm: the e2e direct-spawned agent binds under the HOME
+    ``build_launch_env`` relocated, the same derivation as the macos driver's —
+    so the device-to-device journey's tui pair on darwin can read its plane."""
+    from drivers import tui
+
+    monkeypatch.setattr(tui.sys, "platform", "darwin")
+    driver = tui.TuiDriver()
+    assert driver.sync_agent_socket is None
+
+    driver._resolved_home = "/tmp/fauna-e2e-tui-agent-x/home"
+    assert driver.sync_agent_socket == os.path.join(
+        driver._resolved_home, tui._AGENT_SOCKET_RELPATH
+    )
+
+
 def test_linux_driver_publishes_the_sync_agent_socket_its_launch_env_makes(tmp_path):
     """The linux driver names the agent socket its own launch made private.
 

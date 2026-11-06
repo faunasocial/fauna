@@ -1,7 +1,7 @@
 import { asset } from '$app/paths';
-import { registerIdentityStoreChunk } from './identity-store';
+import { joinChunk } from './chunk-join';
 import { sharedAccountPort } from './account-runtime';
-import type { DevicesMachine, SharedRpcPort } from '../../static/fauna_wasm_folders.js';
+import type { DevicesMachine, RowReadErrors, SharedRpcPort } from '../../static/fauna_wasm_folders.js';
 import type { LocalizedText } from '#lib/i18n/localized';
 import type {
   CustodyFacetView,
@@ -38,9 +38,8 @@ export function ensureFoldersWasm(): Promise<void> {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_folders.js');
       await mod.default(asset('fauna_wasm_folders_bg.wasm'));
-      // The identity store's key, if this page holds it, goes in before
-      // anything reads the registry through this chunk (identity-store.ts).
-      registerIdentityStoreChunk(mod);
+      // Its tracing to the ring, its identity-store doors (chunk-join.ts).
+      joinChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -323,6 +322,13 @@ export function versionRetentionEditFromBounds(
   ) as VersionRetentionEdit;
 }
 
+/** The error texts a folder row's background reads put up (`ui/folders.md` §
+ *  Errors & edge cases). Built here so the class comes from the module holding
+ *  the wasm memory; the rule is `fauna_devices_machine::RowReadErrors`. */
+export function createRowReadErrors(): RowReadErrors {
+  return new (wasm().RowReadErrors)();
+}
+
 /** Project a device roster (`foldersMembers`) into the rows the device-place
  *  editor paints, in roster order, each seat NAMED from `devices` — the page
  *  snapshot's already-unsealed device list. Every user-chosen device label
@@ -421,6 +427,27 @@ export async function custodyFacetLoad(
     secretHex,
     sharedAccountPort(secretHex),
   )) as CustodyFacetView | null;
+}
+
+/** Test-only: move the trust facet's render clock in THIS chunk's runtime, where
+ *  [`custodyFacetLoad`] judges a receipt's freshness (`#lib/trust-clock-e2e`;
+ *  testing.md § convention 14 — a fake clock, never a sleep).
+ *
+ *  The export exists only in the `wasm-folders-test` chunk flavor (gated on this
+ *  crate's `test-helpers` feature — testing.md § convention 15), so it is reached
+ *  off the module record and THROWS on a production bundle rather than no-op'ing
+ *  (convention 11). */
+export async function foldersTrustSetClockOffsetForTest(offsetSecs: number): Promise<void> {
+  await ensureFoldersWasm();
+  const fn = (wasm() as unknown as Record<string, unknown>).trustSetClockOffsetForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'trustSetClockOffsetForTest is absent from the folders chunk: this SPA is running ' +
+        'the PRODUCTION wasm flavor, which compiles the e2e seams out. Build with ' +
+        '`just web-test`.',
+    );
+  }
+  (fn as (offsetSecs: number) => void)(offsetSecs);
 }
 
 /**

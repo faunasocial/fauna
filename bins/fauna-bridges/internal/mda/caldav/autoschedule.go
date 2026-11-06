@@ -206,14 +206,16 @@ func (b *Backend) fanOutScheduling(
 //     outcome (an external address, a mail-enabled Fauna handle on the peer, or any
 //     discovery/KP miss) → email rail. This is the same email-vs-sealed decision the
 //     native app send path makes — one source of truth (priority #2/#4).
-//   - local domain, EMAIL-ENABLED nest, resolve_recipient Resolved/Forward →
-//     email rail (the attendee has a mailbox or an admin forwarder; the
-//     in-domain seal / forward path delivers it, same as before).
+//   - local domain, EMAIL-ENABLED nest, resolve_recipient Forward, or Resolved to
+//     an owner holding a recipient key → email rail (the attendee has an admin
+//     forwarder or a mailbox; the in-domain seal / forward path delivers it, same
+//     as before). Resolved to an owner with no key is a handle with no mailbox.
 //   - local domain, EMAIL-DISABLED nest (a CalDAV-only deployment) → skip
 //     resolve_recipient entirely (the canonical `<handle>@<domain>` alias every
 //     CalDAV-enabled actor holds for AUTH would Resolve, but no MTA/INBOX
 //     delivers there) and classify by Fauna reachability below.
-//   - local domain, no mail route (Reject/Discard) OR email-disabled nest, AND
+//   - local domain, no mail route (Reject/Discard, or that keyless owner) OR
+//     email-disabled nest, AND
 //     actor.by_handle resolves the local part to a Fauna actor with a fetchable
 //     key package → same-nest mailbox-less sealed rail (peerDomain empty).
 //   - anything else (unknown local handle, no key package, or any RPC error)
@@ -226,8 +228,9 @@ func (b *Backend) fanOutScheduling(
 // connect fast → email; the probe is best-effort and off the committed-PUT fan-out
 // path — the same cost the native app send path already pays. A local
 // EMAIL-ENABLED nest runs resolve_recipient first so the common mail-enabled local
-// attendee costs one read; its two extra reads (by_handle + keypackage.fetch) fire
-// only for a local address with no mail route. On an email-disabled nest
+// attendee costs two reads (it and the owner's key row); the two extra reads
+// (by_handle + keypackage.fetch) fire only for a local address with no mail route.
+// On an email-disabled nest
 // resolve_recipient is skipped — the canonical alias is an AUTH identity there, not
 // a deliverable mailbox.
 func (b *Backend) classifyAutoScheduleRecipients(
@@ -296,12 +299,23 @@ func (b *Backend) classifyAutoScheduleRecipients(
 			// the attendee's receive switch — apply to the iMIP delivery that
 			// follows.
 			resolved, err := wsrpc.ResolveRecipientOwner(ctx, client, local, domain, sess.AuthedDomain())
-			if err != nil ||
-				resolved.Outcome == wsrpc.ResolveResolved ||
-				resolved.Outcome == wsrpc.ResolveForward {
+			if err != nil || resolved.Outcome == wsrpc.ResolveForward {
 				b.logger.Debug("caldav auto-schedule: → email rail (resolve_recipient)", "addr", addr, "outcome", resolved.Outcome, "err", err)
 				emailRail = append(emailRail, addr)
 				continue
+			}
+			if resolved.Outcome == wsrpc.ResolveResolved {
+				// Resolved names an owner, not a mailbox: a registered handle is its
+				// actor's address on every active local domain, mail enabled or not
+				// (mail-aliases.md § Resolution order step 2). Only a provisioned
+				// recipient key makes the mailbox real; a successor between keys
+				// still has one, and the MTA tempfails until the key arrives.
+				row, err := wsrpc.FetchRecipientKeyRow(ctx, client, resolved.ActorID, false)
+				if err != nil || row.Mail != nil || row.SuccessionPending {
+					b.logger.Debug("caldav auto-schedule: → email rail (mailbox)", "addr", addr, "succession_pending", row.SuccessionPending, "err", err)
+					emailRail = append(emailRail, addr)
+					continue
+				}
 			}
 		}
 		// No mail route (or an email-disabled nest where the canonical alias is

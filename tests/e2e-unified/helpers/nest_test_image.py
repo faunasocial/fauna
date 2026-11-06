@@ -260,3 +260,20 @@ def collect_old_tags(keep: str, run=subprocess.run,
         print(f"[nest-test-image] collected {len(removed)} old keyed tag(s): "
               f"{', '.join(removed)}", file=sys.stderr)
     return removed
+
+
+def main(argv: list[str]) -> int:
+    """``--gc``: run the GC rule with no tag to keep but its own — the
+    development machines' disk ladder runs it as part of its housekeeping rung
+    (``docs/goal/architecture/fleet-disk.md`` § The ladder) on every pass,
+    not only after a build. The tags it removed are named on stderr, as after
+    a build; nothing removed prints nothing."""
+    if argv != ["--gc"]:
+        print("usage: nest_test_image.py --gc", file=sys.stderr)
+        return 2
+    collect_old_tags(keep="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

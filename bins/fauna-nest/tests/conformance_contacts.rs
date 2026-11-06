@@ -213,6 +213,212 @@ async fn knocks_accept_creates_contact_and_clears_knock() {
     );
 }
 
+// ── the accept makes the edge mutual ───────────────────────────
+//
+// `docs/goal/ui/contacts.md` § Persistence → *The accept makes the edge
+// mutual*: accepting a knock also writes the requester's `(requester,
+// acceptor) accepted` edge, under four fail-closed guards — a knock on file,
+// a local requester, no guardian `contact_approval` over the requester, and
+// insert-only over any edge of the requester's own.
+
+/// Accept `requester`'s knock as `acceptor` over `fauna.knocks.accept`.
+async fn accept_as(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    acceptor: [u8; 32],
+    requester: &[u8; 32],
+) {
+    let _: KnockActionReply = decode(
+        &dispatch(
+            router,
+            state.clone(),
+            acceptor,
+            "fauna.knocks.accept",
+            peer_action(&hex::encode(requester)),
+        )
+        .await
+        .expect("accept ok"),
+    )
+    .unwrap();
+}
+
+async fn status_of(state: &Arc<AppState>, actor: &[u8; 32], peer: &[u8; 32]) -> Option<String> {
+    state.db.get_contact_status(actor, peer).await.unwrap()
+}
+
+#[tokio::test]
+async fn knocks_accept_writes_the_requesters_edge_when_a_knock_is_on_file() {
+    let (router, state) = router_with_db().await;
+    let acceptor = [11u8; 32];
+    let requester = [22u8; 32];
+    state
+        .db
+        .create_user_with_handle(&requester, "free", "req", None)
+        .await
+        .unwrap();
+    state
+        .db
+        .push_knock(&acceptor, &requester, b"n", "knock", &[])
+        .await
+        .unwrap();
+
+    accept_as(&router, &state, acceptor, &requester).await;
+
+    assert_eq!(
+        status_of(&state, &acceptor, &requester).await.as_deref(),
+        Some("accepted")
+    );
+    assert_eq!(
+        status_of(&state, &requester, &acceptor).await.as_deref(),
+        Some("accepted"),
+        "the requester's knock is their consent: their edge is written too"
+    );
+    assert!(
+        state.db.poll_knocks(&acceptor).await.unwrap().is_empty(),
+        "knock cleared"
+    );
+}
+
+#[tokio::test]
+async fn knocks_accept_without_a_knock_writes_no_requester_edge() {
+    let (router, state) = router_with_db().await;
+    let acceptor = [11u8; 32];
+    let requester = [22u8; 32];
+    state
+        .db
+        .create_user_with_handle(&requester, "free", "req", None)
+        .await
+        .unwrap();
+
+    accept_as(&router, &state, acceptor, &requester).await;
+
+    assert_eq!(
+        status_of(&state, &acceptor, &requester).await.as_deref(),
+        Some("accepted"),
+        "a bare accept stays the one-sided add"
+    );
+    assert_eq!(
+        status_of(&state, &requester, &acceptor).await,
+        None,
+        "a bare accept proves nothing about the other side's wish"
+    );
+}
+
+#[tokio::test]
+async fn knocks_accept_never_overwrites_the_requesters_edge() {
+    for existing in ["blocked", "pending"] {
+        let (router, state) = router_with_db().await;
+        let acceptor = [11u8; 32];
+        let requester = [22u8; 32];
+        state
+            .db
+            .create_user_with_handle(&requester, "free", "req", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_contact(&requester, &acceptor, existing)
+            .await
+            .unwrap();
+        state
+            .db
+            .push_knock(&acceptor, &requester, b"n", "knock", &[])
+            .await
+            .unwrap();
+
+        accept_as(&router, &state, acceptor, &requester).await;
+
+        assert_eq!(
+            status_of(&state, &requester, &acceptor).await.as_deref(),
+            Some(existing),
+            "the requester's own `{existing}` edge outranks their older request"
+        );
+    }
+}
+
+#[tokio::test]
+async fn knocks_accept_writes_no_edge_for_a_supervised_requester() {
+    let (router, state) = router_with_db().await;
+    let acceptor = [11u8; 32];
+    let requester = [22u8; 32];
+    let guardian = [33u8; 32];
+    state
+        .db
+        .create_user_with_handle(&guardian, "free", "parent", None)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_user_with_handle(&requester, "free", "kid", Some(guardian.as_slice()))
+        .await
+        .unwrap();
+    let policy = state
+        .db
+        .get_guardian_policy(&requester)
+        .await
+        .unwrap()
+        .expect("a ward has a policy row");
+    assert!(
+        state
+            .db
+            .update_guardian_policy(
+                &requester,
+                true,
+                &policy.unknown_sender_mail,
+                policy.federation_contact,
+                &policy.feed_sources,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    state
+        .db
+        .push_knock(&acceptor, &requester, b"n", "knock", &[])
+        .await
+        .unwrap();
+
+    accept_as(&router, &state, acceptor, &requester).await;
+
+    assert_eq!(
+        status_of(&state, &acceptor, &requester).await.as_deref(),
+        Some("accepted")
+    );
+    assert_eq!(
+        status_of(&state, &requester, &acceptor).await,
+        None,
+        "a ward under contact_approval gets edges from the guardian only"
+    );
+}
+
+#[tokio::test]
+async fn knocks_accept_writes_no_edge_for_a_requester_this_nest_does_not_register() {
+    let (router, state) = router_with_db().await;
+    let acceptor = [11u8; 32];
+    let requester = [22u8; 32];
+    state
+        .db
+        .push_knock(&acceptor, &requester, b"n", "knock", &[])
+        .await
+        .unwrap();
+
+    accept_as(&router, &state, acceptor, &requester).await;
+
+    assert_eq!(
+        status_of(&state, &acceptor, &requester).await.as_deref(),
+        Some("accepted")
+    );
+    assert_eq!(
+        status_of(&state, &requester, &acceptor).await,
+        None,
+        "a requester with no users row here is another nest's to record"
+    );
+}
+
 // ── the knock doorbell goes with its knock ─────────────────────
 //
 // `behavior/notifications.md` § Retention, rule 3: dismiss and block delete

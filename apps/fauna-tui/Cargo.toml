@@ -10,11 +10,6 @@ license.workspace = true
 # second, unattested public surface. This makes the refusal mechanical.
 publish = false
 
-[build-dependencies]
-# The one derivation of `FAUNA_BUILD_COMMIT` — the commit the Status page's
-# `status-build-sha` names (`ui/status.md` § State & data shape, the build leg).
-fauna-build-commit = { path = "../../libs/fauna-build-commit" }
-
 [features]
 # ── the flavor split (`dynamic-features.md` § Platform-family surface excision) ─
 # An app binary IS a flavor root, so the switch belongs here rather than on a
@@ -138,6 +133,9 @@ e2e-agent = [
     # release-profile e2e escape hatch; a plain debug build already reaches it
     # via `debug_assertions`.
     "fauna-client-account-runtime/e2e-agent",
+    # The `fake` payment provider in the provider form's kind select — compiled
+    # out of a production build (`fauna-payments` src/lib.rs, the module gate).
+    "fauna-client-payments?/test-helpers",
     # The FAUNA_E2E_REGION_REGISTRY seed — the synthetic authority a tier_3
     # region journey trusts (`fauna_client_region::effective_registry`).
     "fauna-client-region/e2e-agent",
@@ -213,9 +211,16 @@ e2e-agent = [
     "fauna-ws-substrate/test-helpers",
 ]
 
+# The app is the library; the binary only expands the build-commit stamp, so a
+# commit recompiles the thin bin alone (`src/lib.rs`'s crate doc). The unit
+# tests live with the modules in the lib; the app has no doc examples.
+[lib]
+doctest = false
+
 [[bin]]
 name = "fauna-tui"
 path = "src/main.rs"
+test = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
@@ -223,6 +228,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [dependencies]
+# The one derivation of `FAUNA_BUILD_COMMIT`, the `commit!()` macro — the
+# commit the Status page's `status-build-sha` names (`ui/status.md` § State &
+# data shape, the build leg).
+fauna-build-commit = { path = "../../libs/fauna-build-commit" }
 # Shared string table generated from i18n/strings/en.yaml (`just i18n-generate`).
 # tui consumes the shared crate directly — no per-app generated strings file
 # (priority #2). linux joined it 2026-08-19, re-exporting this crate as its own
@@ -465,7 +474,7 @@ fauna-client-folders = { path = "../../libs/fauna-client-folders", features = [
 ] }
 # Contacts is transport-only (`contacts.md` § Where logic lives): the thin
 # knocks/contacts client, the knock-payload writer, and the inbox-send kind.
-fauna-client-contacts = { path = "../../libs/fauna-client-contacts" }
+fauna-client-contacts = { path = "../../libs/fauna-client-contacts", features = ["native"] }
 # The profile page (`ui/profile.md` § Where logic lives): the typed `fauna.profile.*`
 # get/set surface + the shared `build_edited_profile`/`decode_profile` sign+decode,
 # and the `fauna.subscriptions.*` offers-browse/subscribe surface (offers.list,
@@ -556,8 +565,14 @@ fauna-client-mail-settings = { path = "../../libs/fauna-client-mail-settings", f
 # `rpc-glue` is the native `build_archive_import_machine` binding over our own
 # `NestClient` + the app's sync device id, consumed directly like the mail
 # machines above (priority #2, no FFI hop). tui is the LEAD app (2026-09-08).
+# `conversations-sink` adds the `Archive` rail's thread source
+# (`threads::ArchiveThreads`), registered on the conversations session at login;
+# `feed-sink` the folded archive comments' source (`comments::ArchiveComments`),
+# registered on the feed manager.
 fauna-archive-import-machine = { path = "../../libs/fauna-archive-import-machine", features = [
     "rpc-glue",
+    "conversations-sink",
+    "feed-sink",
 ] }
 # The Spam page's distributed-report-sharing half — `report_share.{set,status}`.
 # Deliberately NOT on `MailSpamMachine`: `report-sharing.md` § Implementation

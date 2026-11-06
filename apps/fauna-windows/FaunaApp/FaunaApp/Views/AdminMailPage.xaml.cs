@@ -135,6 +135,15 @@ public sealed partial class AdminMailPage : Page
         EnabledToggle.IsOn = _vm.MailEnabled;
         AutoEnableNewUsersToggle.IsOn = _vm.AutoEnableMailForNewUsers;
         _syncing = false;
+        // A box that cannot run mail: the enable toggle is disabled with state
+        // "unavailable" under its notice; mail already on keeps the toggle live so it
+        // can still be turned off (the VM reads the shared snapshot's bool).
+        var refused = _vm.MailEnableRefused;
+        EnabledToggle.IsEnabled = !refused;
+        EnabledSubtitle.Visibility = refused ? Visibility.Collapsed : Visibility.Visible;
+        UnavailableNotice.Visibility = refused ? Visibility.Visible : Visibility.Collapsed;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            EnabledToggle, _vm.MailEnabledToggleState);
 
         RenderHealth();
 
@@ -164,6 +173,10 @@ public sealed partial class AdminMailPage : Page
         // ── Deployment-baseline publish outcome (empty until the admin publishes) ──
         // `Published` comes straight from the shared BaselinePublishValues, so the
         // client just picks the message + interpolates.
+        // The same button reads the confirm sentence while the shared arm holds it.
+        PublishSpamBaselineButton.Content = Strings.Get(_vm.PublishSpamBaselineArmed
+            ? "admin/mail_page/publish_spam_baseline_confirm"
+            : "admin/mail_page/publish_spam_baseline_button");
         var bp = _vm.BaselinePublish;
         if (bp is null)
         {
@@ -260,6 +273,94 @@ public sealed partial class AdminMailPage : Page
         AliasReservedInput.Text = string.Join("\n", al.ReservedLocalParts);
         AliasSubaddressingToggle.IsOn = al.SubaddressingEnabled;
         AliasWildcardPrefixToggle.IsOn = al.WildcardPrefixEnabled;
+
+        // ── DMARC reports ──
+        var dm = _vm.Dmarc;
+        DmarcRufPublishToggle.IsOn = dm.RufPublish;
+        PopulateSelect(DmarcFoModeSelect, FaunaClientMailSettingsMethods.DmarcForensicModeOptions(), dm.FoMode, failClosed: "0", rawValueName: true);
+        DmarcAggregateRetentionInput.Text = dm.AggregateRetentionDays.ToString();
+        DmarcForensicRetentionInput.Text = dm.ForensicRetentionDays.ToString();
+        DmarcOutboundAggregateToggle.IsOn = dm.OutboundAggregateEnabled;
+        RenderDmarcForensicRetentionWarning();
+
+        // ── Secrets: each rotate button reads its confirm sentence while the shared arm
+        // holds it; the last rotation's outcome line shows once a rotation ran. ──
+        ListUnsubscribeSecretRotateButton.Content = Strings.Get(_vm.ListUnsubscribeSecretRotateArmed
+            ? "admin/mail_page/list_unsubscribe_secret_rotate_confirm"
+            : "admin/mail_page/list_unsubscribe_secret_rotate");
+        ForwardSrsSecretRotateButton.Content = Strings.Get(_vm.ForwardSrsSecretRotateArmed
+            ? "admin/mail_page/forward_srs_secret_rotate_confirm"
+            : "admin/mail_page/forward_srs_secret_rotate");
+        SecretRotationResult.Text = _vm.SecretRotationLine ?? "";
+        SecretRotationResult.Visibility = _vm.SecretRotationLine is null
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+
+        // ── Microsoft registration for the Outlook import (read back via setup.status) ──
+        var ms = _vm.Microsoft;
+        MicrosoftClientIdInput.Text = ms.ClientId;
+        MicrosoftTenantInput.Text = ms.Tenant;
+        MicrosoftStatus.Text = Strings.Get(ms.IsDefault
+            ? "admin/mail_page/microsoft_using_default"
+            : "admin/mail_page/microsoft_using_own");
+    }
+
+    // The forensic-retention warning follows the typed window: shown while it is past the
+    // 30-day default, decided by shared Rust (dmarc_forensic_retention_warns), not by a
+    // `> 30` restated here. An unparseable edit reads as the persisted value.
+    private void RenderDmarcForensicRetentionWarning()
+    {
+        if (_vm is null) return;
+        var days = ParseUint(DmarcForensicRetentionInput.Text, _vm.Dmarc.ForensicRetentionDays);
+        DmarcForensicRetentionWarning.Visibility = FaunaClientMailSettingsMethods.DmarcForensicRetentionWarns(days)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void DmarcForensicRetentionInput_TextChanged(object sender, TextChangedEventArgs e)
+        => RenderDmarcForensicRetentionWarning();
+
+    // ── DMARC group Save → full PUT. Starts from the persisted values so every record
+    // tag the page does not edit is carried through unchanged. ──
+    private async void DmarcSaveButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        var p = _vm.Dmarc;
+        var values = p with
+        {
+            RufPublish = DmarcRufPublishToggle.IsOn,
+            FoMode = SelectedValue(DmarcFoModeSelect) ?? p.FoMode,
+            AggregateRetentionDays = ParseUint(DmarcAggregateRetentionInput.Text, p.AggregateRetentionDays),
+            ForensicRetentionDays = ParseUint(DmarcForensicRetentionInput.Text, p.ForensicRetentionDays),
+            OutboundAggregateEnabled = DmarcOutboundAggregateToggle.IsOn,
+        };
+        await _vm.SaveDmarcAsync(values);
+        RenderState();
+    }
+
+    // ── Secrets: same-button two-press over the shared Press; the second press rotates
+    // and the re-read disarms. ──
+    private async void ListUnsubscribeSecretRotateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.PressListUnsubscribeSecretRotateAsync();
+        RenderState();
+    }
+
+    private async void ForwardSrsSecretRotateButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.PressForwardSrsSecretRotateAsync();
+        RenderState();
+    }
+
+    // ── Microsoft registration Save → SetMicrosoftRegistration with the two drafts as
+    // typed; the shared machine checks them and refuses a bad pair onto error-message. ──
+    private async void MicrosoftSaveButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.SetMicrosoftRegistrationAsync(MicrosoftClientIdInput.Text ?? "", MicrosoftTenantInput.Text ?? "");
+        RenderState();
     }
 
     /// <summary>Paint the mail health readout (<c>mail-deliverability.md</c> § The mail
@@ -288,6 +389,28 @@ public sealed partial class AdminMailPage : Page
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
             HealthDelistLink, health.DelistUrl ?? "");
         HealthDelistLink.Visibility = health.DelistUrl is null ? Visibility.Collapsed : Visibility.Visible;
+        RenderSenderDashboardLinks();
+    }
+
+    // One link per receiver from the shared sender_dashboard_links() (Gmail, then
+    // Outlook); each opens its URL and publishes it as its `href` (HelpText), as the
+    // delist link does. Static: built once, while the panel is empty.
+    private void RenderSenderDashboardLinks()
+    {
+        if (HealthSenderDashboardLinks.Children.Count > 0) return;
+        foreach (var dashboard in FaunaClientMailSettingsMethods.SenderDashboardLinks())
+        {
+            var url = dashboard.url;
+            var button = new HyperlinkButton
+            {
+                Content = Strings.Get(dashboard.labelKey.Replace('.', '/')),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                button, FaunaApp.UiIds.Ids.AdminMailHealthSenderDashboardLink);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, url);
+            button.Click += (_, _) => FaunaApp.Services.UrlOpener.Open(url, "admin-mail");
+            HealthSenderDashboardLinks.Children.Add(button);
+        }
     }
 
     // The readout's removal-page URL; opened by the delist link.
@@ -366,11 +489,11 @@ public sealed partial class AdminMailPage : Page
         RenderState();
     }
 
-    // ── Publish deployment baseline → PublishSpamBaseline (no gather) ──
+    // ── Publish deployment baseline: same-button two-press (shared Press) ──
     private async void PublishSpamBaselineButton_Click(object sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
-        await _vm.PublishSpamBaselineAsync();
+        await _vm.PressPublishSpamBaselineAsync();
         RenderState();
     }
 
@@ -516,12 +639,17 @@ public sealed partial class AdminMailPage : Page
     /// that field's own established default, not necessarily the strictest option
     /// (fcrdns' is the observability-first middle default; delete-nonempty's is the
     /// safer one) — both mirror `admin_policy.rs`'s own `from_wire_or_default`.</summary>
-    private static void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed)
+    private static void PopulateSelect(ComboBox combo, ReachPolicyOption[] options, string selected, string failClosed, bool rawValueName = false)
     {
         combo.Items.Clear();
         foreach (var opt in options)
         {
             var item = new ComboBoxItem { Content = Strings.Resolve(opt.@label), Tag = opt.@value };
+            // A raw-value picker (the `fo=` tags): the FlaUI bridge's select/get_text match
+            // a ComboBoxItem by its Name, so the Name is the wire tag (AdminDnsPage's
+            // per-domain DMARC picker precedent).
+            if (rawValueName)
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.@value);
             combo.Items.Add(item);
             if (opt.@value == selected) combo.SelectedItem = item;
         }

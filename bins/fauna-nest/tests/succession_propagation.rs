@@ -840,6 +840,86 @@ async fn a_pull_from_a_lying_home_nest_records_nothing() {
     assert_eq!(foreign_members(&peer).await, vec![alice]);
 }
 
+/// **The pull reaches every identity in bounded passes**. A local user
+/// follows more fabricated identities than one pass dials — every one homed at
+/// a box that proves its identity and answers "no succession", every one
+/// sorting before alice. The pass must not re-walk the same front of the work
+/// list each hour: alice's succession is learned within the bound
+/// `succession-propagation.md` states, `ceil(identities / 64)` passes when
+/// each anchor answers on its first address.
+#[tokio::test]
+async fn follows_filling_one_pass_do_not_starve_a_later_identity_of_the_pull() {
+    let (home_url, home_router, home) = start_nest().await;
+    let (_peer_url, _peer_router, peer) = start_nest().await;
+    let home_nest_id = home.nest_identity.public_key_bytes();
+
+    let (alice_seed, alice) = identity(0x11);
+    let recovery = RecoveryKey::from_bytes([0x22; 32]);
+    let (successor_seed, successor) = identity(0x33);
+    let (_bob_seed, bob) = identity(0x44);
+
+    account_with_recovery_key(&home_router, &home, &alice_seed, alice, &recovery, "alice").await;
+    seed_peer_residue(&peer, home_nest_id, &home_url, alice, bob).await;
+
+    // More follows than one pass's dial bound (64), each a fabricated author
+    // that sorts before alice. No per-user cap stops a local user adding them.
+    const FILLERS: u8 = 70;
+    for i in 0..FILLERS {
+        let mut author = [0u8; 32];
+        author[2] = i;
+        assert!(author < alice, "every filler must sort before alice");
+        peer.db
+            .upsert_remote_follow(
+                &bob,
+                &author,
+                "followers",
+                &home_nest_id,
+                &home_url,
+                fauna_nest::db::remote_follows::RemoteFollowState::Pending,
+                None,
+                0,
+            )
+            .await
+            .expect("filler follow");
+    }
+
+    let _: SuccessionSubmitReply = common::call(
+        &home_router,
+        &home,
+        [0u8; 32],
+        "fauna.recovery.succession.submit",
+        &SuccessionSubmitRequest {
+            statement: ByteBuf::from(succession_bytes(&recovery, alice, &successor_seed, 2)),
+            extra: Default::default(),
+        },
+    )
+    .await
+    .expect("succession lands on the home nest");
+
+    // 71 identities, one dial each: the bound is ceil(71 / 64) = 2 passes.
+    let bound = (usize::from(FILLERS) + 1).div_ceil(64);
+    let mut learned = 0;
+    for _ in 0..bound {
+        learned += fauna_nest::succession_pull::pull_successions_once(&peer)
+            .await
+            .expect("pull pass runs");
+    }
+    assert_eq!(
+        learned, 1,
+        "alice's succession must be learned within {bound} passes — a pass that \
+         re-walks the work list from the start never reaches her"
+    );
+    assert_eq!(
+        peer.db
+            .succession_for(&alice[..])
+            .await
+            .unwrap()
+            .unwrap()
+            .new_actor_id,
+        successor.to_vec()
+    );
+}
+
 // ── a planted address must not deny succession ─────────────────────
 //
 // The anchor IDENTITY is pinned (oldest row, then the write-once

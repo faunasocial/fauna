@@ -11,6 +11,17 @@ use rusqlite::OptionalExtension;
 /// (`apps/common.md` § Registration, the per-actor cap ruling).
 pub const MAX_PUSH_SUBSCRIPTIONS_PER_ACTOR: i64 = 16;
 
+/// Longest `endpoint` subscribe accepts, in bytes. Browser and UnifiedPush
+/// relay URLs are a few hundred bytes; an `apns` token is 512.
+pub const MAX_PUSH_ENDPOINT_BYTES: usize = 2048;
+/// Longest `device_id` subscribe accepts, in bytes.
+pub const MAX_PUSH_DEVICE_ID_BYTES: usize = 128;
+/// Longest `key_p256dh`: base64url of a 65-byte uncompressed P-256 point (87
+/// unpadded, 88 padded).
+pub const MAX_PUSH_KEY_P256DH_BYTES: usize = 88;
+/// Longest `key_auth`: base64url of a 16-byte secret (22 unpadded, 24 padded).
+pub const MAX_PUSH_KEY_AUTH_BYTES: usize = 24;
+
 /// A single push subscription row.
 pub struct PushSubscription {
     pub id: i64,

@@ -24,6 +24,7 @@ landed, so everything it receives arrives by relay.
 import contextlib
 import secrets
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from common import register_user, set_folder_residency, sync_status, user_create
 from common.accounts import actor_id_hex
 from common.auth import UNBINDING_MAX_DEVICES, _user_call, set_tier_caps
 from helpers import sync_seats
+from helpers.set_names import item_in_set
 from helpers.waiting import wait_until
 
 pytestmark = [
@@ -40,6 +42,20 @@ pytestmark = [
     # tui leads (the shared engine runs in every desktop app's agent); the other
     # desktops join through the same `make_seat("native")` seam.
     pytest.mark.tui,
+    pytest.mark.macos,
+    pytest.mark.linux,
+]
+
+# This journey's own owed legs, in `sync_seats.UNBUILT_MODES`' shape: tui,
+# macOS and linux run it; the windows native leg below lands with its app's
+# trickle-down, and landing deletes its entry.
+OWED_SEATS: dict = {
+    "win32": {"native": "the windows leg of `local-folder-sync` has not landed"},
+}
+
+_SEAT_PAIRS = [
+    pytest.param(pair, id=sync_seats.seat_set_param_id(pair))
+    for pair in sync_seats.seat_sets_for_platform(sys.platform, unbuilt=OWED_SEATS)
 ]
 
 # Ceilings a green run never pays (convention 14).
@@ -48,9 +64,10 @@ WINDOW = 180.0
 
 
 @pytest.mark.timeout(int(2 * STARTUP_WINDOW + 3 * WINDOW + 120))
+@pytest.mark.parametrize("seat_pair", _SEAT_PAIRS)
 @pytest.mark.feature("local-folder-sync")
 def test_a_second_device_receives_a_metadata_only_folders_file_from_the_first(
-    nest_instance, request
+    nest_instance, request, seat_pair
 ):
     """Seat ``a`` writes a file into a metadata-only folder; seat ``b``, started
     afterwards, receives its bytes — which only ``a``'s agent could have served."""
@@ -79,9 +96,11 @@ def test_a_second_device_receives_a_metadata_only_folders_file_from_the_first(
     body = f"bytes that live on the first device alone {secrets.token_hex(16)}\n".encode()
     tmp = Path(tempfile.mkdtemp(prefix=f"fauna-{folder}-"))
 
+    modes = dict(zip(sync_seats.seat_names(len(seat_pair)), seat_pair))
+
     def seat(seat_name: str):
         return sync_seats.make_seat(
-            "tui",
+            modes[seat_name],
             name=seat_name,
             run_token=run_token,
             root=tmp / seat_name,
@@ -96,7 +115,7 @@ def test_a_second_device_receives_a_metadata_only_folders_file_from_the_first(
         items = _user_call(
             port, secret_key, "fauna.media.list", {"limit": 1000, "cursor_version": 2}, url
         ).get("items", [])
-        return [item for item in items if item.get("folder") == folder]
+        return [item for item in items if item_in_set(item, folder)]
 
     try:
         with contextlib.ExitStack() as stack:

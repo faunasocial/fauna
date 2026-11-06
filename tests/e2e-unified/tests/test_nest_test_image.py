@@ -14,6 +14,7 @@ tier_1: git only, no docker daemon, no build.
 
 import datetime
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -21,6 +22,10 @@ import pytest
 from helpers import nest_test_image as nti
 
 pytestmark = pytest.mark.tier_1
+
+#: What the docker daemon says on stderr for an absent image — the only answer
+#: `helpers._image_created` reads as "absent" (any other failure is asked again).
+_NO_SUCH_IMAGE = "Error: No such image: fauna-nest-test:src-0123456789abcdef"
 
 
 def _git(repo, *args):
@@ -127,10 +132,13 @@ def test_the_real_dockerignore_keeps_what_the_dockerfile_copies():
     root = Path(__file__).resolve().parents[3]
     rules = nti.dockerignore_rules(root)
     for kept in ("libs/fauna-core/Cargo.toml", "bins/fauna-nest/src/main.rs",
-                 "apps/fauna-linux/Cargo.toml", "Dockerfile", "Cargo.lock"):
+                 "apps/fauna-linux/Cargo.toml", "Dockerfile", "Cargo.lock",
+                 "apps/fauna-web/static/manifest.json"):
         assert not nti.is_ignored(kept, rules), kept
     for dropped in ("docs/goal/README.md", "tests/e2e-unified/conftest.py",
-                    "apps/fauna-android/build.gradle.kts", ".claude/rules/e2e.md"):
+                    "apps/fauna-android/build.gradle.kts", ".claude/rules/e2e.md",
+                    "apps/fauna-web/static/fauna_wasm_onnx.js",
+                    "apps/fauna-web/static/fauna_wasm_media_panic_witness_bg.wasm"):
         assert nti.is_ignored(dropped, rules), dropped
 
 
@@ -149,6 +157,10 @@ def helpers(monkeypatch, tmp_path):
     return dh
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="build_lock is a no-op without fcntl: no tier_4 docker venue runs on Windows",
+)
 def test_two_concurrent_callers_get_one_build(helpers, monkeypatch, tmp_path):
     """Both find the tag absent; the lock lets one build, and the other — which
     waited — finds the tag and reuses it. Without the lock both would build."""
@@ -164,7 +176,8 @@ def test_two_concurrent_callers_get_one_build(helpers, monkeypatch, tmp_path):
                     both_checked.set()
                 present = state["present"]
             return subprocess.CompletedProcess(argv, 0 if present else 1,
-                                               "2026-10-20T00:00:00Z" if present else "", "")
+                                               "2026-10-20T00:00:00Z" if present else "",
+                                               "" if present else _NO_SUCH_IMAGE)
         if "rev-parse" in argv:
             return subprocess.CompletedProcess(argv, 0, "f" * 40 + "\n", "")
         if "buildx" in argv:
@@ -198,7 +211,7 @@ def test_the_build_runs_inside_a_build_slot(helpers, monkeypatch, tmp_path):
     def fake_run(argv, *a, **kw):
         calls.append(list(argv))
         if "inspect" in argv:
-            return subprocess.CompletedProcess(argv, 1, "", "")
+            return subprocess.CompletedProcess(argv, 1, "", _NO_SUCH_IMAGE)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(helpers.subprocess, "run", fake_run)

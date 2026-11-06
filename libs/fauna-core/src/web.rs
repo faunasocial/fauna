@@ -289,6 +289,137 @@ pub fn authority_of(nest_url: &str) -> String {
     strip_userinfo(&s[..end]).to_string()
 }
 
+/// The URL a reach hint dials in a browser: `nest_url` with its host swapped
+/// for the hint's IP, port and scheme untouched.
+///
+/// A browser exposes no resolver seam, so unlike the native resolve override
+/// the *authority* has to change, which is why web needs the IP bridge cert
+/// (`onboarding-provisioning.md` § Reach hint). What must **not** move with it
+/// is the identity key: this URL reaches the socket and nothing else. `None`
+/// for a hint that is not a bare IPv4 literal, exactly as natively: a malformed
+/// hint is no fallback, never a different dial.
+///
+/// Shared by the launch machine's hint dial and the wasm session's reach table,
+/// so the two can never name different URLs for one hint.
+///
+/// Composes [`generic_authority`], then [`strip_userinfo`], then
+/// [`split_host_port`] for the port, rather than a private `/`-only split. The
+/// authority ends at the first of `/ \ ? #`, and any `userinfo@` is dropped
+/// before the port is read, so a `?`/`#`-bearing `nest_url` can no longer have
+/// its query or fragment read as a userinfo/host pair and swapped for the real
+/// host, nor keep a stale userinfo that silently defeats the hint
+/// (`security.md` § Transport trust). Everything from
+/// the authority's own end onward (path, query, fragment) is carried through
+/// unchanged, never re-added.
+pub fn reach_authority_url(nest_url: &str, reach_ipv4: &str) -> Option<String> {
+    if reach_ipv4.parse::<std::net::Ipv4Addr>().is_err() {
+        return None;
+    }
+    let (scheme, after_scheme) = nest_url.split_once("://")?;
+    let authority = generic_authority(nest_url);
+    let stripped = strip_userinfo(authority);
+    let (_, port) = split_host_port(stripped);
+    let host = match port {
+        Some(p) => format!("{reach_ipv4}:{p}"),
+        None => reach_ipv4.to_string(),
+    };
+    let rest = &after_scheme[authority.len()..];
+    Some(format!("{scheme}://{host}{rest}"))
+}
+
+/// One browser dial that may move a nest's authority: the URL the socket opens
+/// and the URL the nest's identity is judged on, kept apart by type.
+///
+/// **The invariant: the pin key is always the domain.** A dial over a reach
+/// hint opens `https://{ip}` and is judged against the domain's pin, so a box
+/// answering at a recycled address faces the pin the account already holds;
+/// keying it on the dial URL would make it a first contact at a key never
+/// pinned (`transport-trust.md` § Transport trust, the reach hint keys on the
+/// domain). The fields are private and the only constructors are
+/// [`ReachDial::domain`] (dial and key one URL) and [`ReachDial::over_hint`]
+/// (dial the hint authority, key on the domain), so a swap of the two has no
+/// spelling. Every wasm call site that moves the authority — the launch's
+/// silent challenge, the session's mint, the session's bearer socket — takes
+/// one (`onboarding-provisioning.md` § Reach hint → *The web session's half*
+/// → *Trust*).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReachDial {
+    dial_url: String,
+    pin_key: String,
+}
+
+impl ReachDial {
+    /// A dial of the domain itself: the socket and the identity on one URL.
+    pub fn domain(nest_url: &str) -> Self {
+        Self {
+            dial_url: nest_url.to_owned(),
+            pin_key: nest_url.to_owned(),
+        }
+    }
+
+    /// A dial over the reach hint: the socket at [`reach_authority_url`], the
+    /// identity on `nest_url`. `None` for a hint that names no dial (not a bare
+    /// IPv4 literal, or a URL with no scheme), never a different dial.
+    pub fn over_hint(nest_url: &str, reach_ipv4: &str) -> Option<Self> {
+        Some(Self {
+            dial_url: reach_authority_url(nest_url, reach_ipv4)?,
+            pin_key: nest_url.to_owned(),
+        })
+    }
+
+    /// The URL the socket opens.
+    pub fn dial_url(&self) -> &str {
+        &self.dial_url
+    }
+
+    /// The URL the nest's identity is judged on: always the domain.
+    pub fn pin_key(&self) -> &str {
+        &self.pin_key
+    }
+
+    /// Whether this dial moved the authority off the domain.
+    pub fn is_over_hint(&self) -> bool {
+        self.dial_url != self.pin_key
+    }
+}
+
+/// The reach table's key for a nest URL: the host, lowercased, no port — the
+/// domain a hint stands in for. `None` when the URL names no host. The wasm
+/// twin of `fauna_ws_substrate::reach_hint::host_key_of_url`, which reads the
+/// same key off a parsed `http::Uri`.
+pub fn reach_host_key(nest_url: &str) -> Option<String> {
+    let authority = strip_userinfo(generic_authority(nest_url));
+    let (host, _) = split_host_port(authority);
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The socket a reach hint stands for: `reach_ipv4` at `nest_url`'s own port
+/// (`onboarding-provisioning.md` § Reach hint) — the URL's explicit port, else
+/// 443 for a TLS scheme and 80 for anything else. `None` for a hint that is not
+/// an IPv4 address, which then dials nothing.
+///
+/// Shared by the launch machine's hint dial and the sync agent's reach table,
+/// so the two processes can never name different sockets for one hint.
+pub fn reach_socket_addr(nest_url: &str, reach_ipv4: &str) -> Option<std::net::SocketAddr> {
+    let ip: std::net::Ipv4Addr = reach_ipv4.parse().ok()?;
+    let authority = authority_of(nest_url);
+    let port = authority
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(
+            // `authority_of` strips four schemes, so a portless `wss://` URL
+            // reaches here too and is a TLS URL like `https://` — defaulting it
+            // to 80 would dial the wrong port. Not live (the launch path stores
+            // `https://{domain}`), fixed at the seam so it cannot become live.
+            if nest_url.starts_with("https://") || nest_url.starts_with("wss://") {
+                443
+            } else {
+                80
+            },
+        );
+    Some(std::net::SocketAddr::from((ip, port)))
+}
+
 /// Strip a leading `scheme://` — **any** scheme, unlike [`authority_of`]'s
 /// fixed `http(s)`/`ws(s)` set — and return the authority: the substring up to
 /// the first WHATWG authority terminator ([`authority_len`]: `/ \ ? #`). Input
@@ -301,7 +432,7 @@ pub fn authority_of(nest_url: &str) -> String {
 /// and why each one needs the any-scheme, four-terminator cut is
 /// `security.md` § Transport trust's job to keep current, not this doc's —
 /// restating it here already drifted stale once, when
-/// `fauna_launch_machine::auth::hint_authority_url` joined the family
+/// the launch machine's hint-dial URL helper (now `ReachDial::over_hint`) joined the family
 /// without this comment naming it.
 pub fn generic_authority(url: &str) -> &str {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -312,7 +443,7 @@ pub fn generic_authority(url: &str) -> &str {
 /// shared so `generic_authority`'s six callers — `format::url_host_opt`,
 /// `resolve::parse_node_address`, `data::url_host`,
 /// `fauna_onboarding_machine::helpers::nest_host`,
-/// `fauna_launch_machine::auth::hint_authority_url` and
+/// `ReachDial::over_hint` (pinned from `fauna_launch_machine::auth`) and
 /// `fauna_provisioning::probe::split_host_port` — pin the same terminator
 /// set from their own test modules instead of each keeping a narrower private
 /// copy (`security.md` § Transport trust ). Every URL
@@ -495,9 +626,113 @@ pub fn percent_decode(s: &str, plus_as_space: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Strict percent-decoding: every `%XX` back to its byte, no `+` handling.
+/// `None` on a truncated or non-hex escape, or a result that is not UTF-8
+/// (the lenient [`percent_decode`] passes such input through instead). Hex
+/// case is accepted either way; callers that need the exact emitted grammar
+/// re-encode and compare.
+pub fn percent_decode_strict(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = (*bytes.get(i + 1)? as char).to_digit(16)?;
+            let lo = (*bytes.get(i + 2)? as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_strict_decodes_and_rejects_bad_escapes() {
+        assert_eq!(
+            percent_decode_strict("a%20b%2Fc%2f").as_deref(),
+            Some("a b/c/")
+        );
+        assert_eq!(percent_decode_strict("a+b").as_deref(), Some("a+b"));
+        assert_eq!(percent_decode_strict("%4"), None);
+        assert_eq!(percent_decode_strict("%zz"), None);
+        assert_eq!(percent_decode_strict("%+f"), None);
+        assert_eq!(percent_decode_strict("%ff"), None); // not UTF-8
+        assert_eq!(percent_decode_strict("%C3%A9").as_deref(), Some("é"));
+    }
+
+    /// **The domain's dial opens and is judged on one URL.**
+    #[test]
+    fn a_domain_reach_dial_dials_and_pins_the_domain() {
+        let dial = ReachDial::domain("https://box.example.com:8443/rpc");
+        assert_eq!(dial.dial_url(), "https://box.example.com:8443/rpc");
+        assert_eq!(dial.pin_key(), "https://box.example.com:8443/rpc");
+        assert!(!dial.is_over_hint());
+    }
+
+    /// **The hint's dial opens the hint authority and is judged on the
+    /// domain**: the swap that once made a hint dial a first contact at a
+    /// never-pinned key has no constructor that spells it.
+    #[test]
+    fn a_hint_reach_dial_dials_the_hint_and_pins_the_domain() {
+        let dial = ReachDial::over_hint("https://box.example.com:8443/rpc", "203.0.113.7")
+            .expect("an IPv4 hint names a dial");
+        assert_eq!(dial.dial_url(), "https://203.0.113.7:8443/rpc");
+        assert_eq!(dial.pin_key(), "https://box.example.com:8443/rpc");
+        assert!(dial.is_over_hint());
+        assert_eq!(
+            Some(dial.dial_url().to_owned()),
+            reach_authority_url("https://box.example.com:8443/rpc", "203.0.113.7"),
+            "one rewrite for every caller"
+        );
+    }
+
+    /// **A malformed hint is no dial**, never a dial of something else.
+    #[test]
+    fn a_malformed_hint_makes_no_reach_dial() {
+        for bad in [
+            "box.attacker.example",
+            "203.0.113.7:443",
+            "::1",
+            "",
+            "0x7f000001",
+        ] {
+            assert_eq!(
+                ReachDial::over_hint("https://box.example.com", bad),
+                None,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(ReachDial::over_hint("no-scheme", "203.0.113.7"), None);
+    }
+
+    #[test]
+    fn the_reach_host_key_is_the_domain_lowercased_and_port_free() {
+        for (url, key) in [
+            ("https://Nest.Example", Some("nest.example")),
+            ("https://nest.example:8443/x", Some("nest.example")),
+            ("wss://user:pw@NEST.example:443", Some("nest.example")),
+            ("http://203.0.113.9:3000", Some("203.0.113.9")),
+            ("https://", None),
+        ] {
+            assert_eq!(reach_host_key(url).as_deref(), key, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_reach_authority_url_moves_the_host_alone() {
+        assert_eq!(
+            reach_authority_url("https://nest.example:8443/p?q#f", "203.0.113.9").as_deref(),
+            Some("https://203.0.113.9:8443/p?q#f")
+        );
+        assert_eq!(reach_authority_url("https://nest.example", "nope"), None);
+    }
 
     #[test]
     fn reserved_labels_case_insensitive() {

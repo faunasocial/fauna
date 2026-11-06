@@ -36,6 +36,10 @@ pub use cert_binding::{
 };
 pub use client::{AnonymousNestClient, FirstContactOutcome};
 pub use error::AnonClientError;
+/// The session connector's reach table (`fauna_ws_substrate::reach_hint`),
+/// re-exported so the launch machine — which reaches the substrate only
+/// through this crate — can install the hint its silent challenge dialled.
+pub use fauna_ws_substrate::reach_hint;
 pub use principal_client::{PRINCIPAL_WS_PATH, PrincipalNestClient};
 pub use tls_verify::{CaptureHandle, CapturedCert};
 pub use token_client::TokenNestClient;

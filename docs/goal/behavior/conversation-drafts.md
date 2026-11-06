@@ -13,7 +13,7 @@ Authority: what a conversation compose draft keeps and how it survives — the p
 
 ## Section map
 
-- **§ Persistence** — the drafts bullets, in their original order: *Per-thread `ComposeState`* (v2 and its implementation status), *Only user-authored input rests*, *A restore FILLS*, *A restore that FILLS a recipient picker owes it a probe*, *A restore the outgoing account started fills nothing after an identity change*, *A restored draft's attachment is a handle, not a file*, and `new_thread_compose` (v1).
+- **§ Persistence** — the drafts bullets, in their original order: *Per-thread `ComposeState`* (v2 and its implementation status), *Only user-authored input rests*, *A restore FILLS*, *A launch load lost to the transport is retried*, *A per-thread draft rests under its conversation's stable key*, *A restore that FILLS a recipient picker owes it a probe*, *A restore the outgoing account started fills nothing after an identity change*, *A restored draft's attachment is a handle, not a file*, and `new_thread_compose` (v1).
 
 ## Persistence
 
@@ -124,6 +124,53 @@ Authority: what a conversation compose draft keeps and how it survives — the p
   `a_restore_never_clears_a_live_new_thread_draft`,
   `a_restore_never_overwrites_a_live_per_thread_draft`, and
   `a_restore_still_fills_an_open_but_untouched_composer` for the other half.
+- **A launch load lost to the transport is retried, not abandoned until the
+  next launch (ruled 2026-10-29).** The launch `fauna.drafts.get` carries the
+  kind's 5 s deadline, and the save gate (`DraftsSync`) stays shut until a load
+  succeeds — so a single slow answer at launch (a loaded box, a reconnect, the
+  first boot after a web reload) used to leave the whole session showing no
+  draft from the user's other devices and saving none of its own. `DraftsSync::load`
+  therefore retries a *transport* failure on a bounded backoff
+  (`LAUNCH_LOAD_RETRY_DELAYS`, about three minutes) before returning it; a seal
+  failure is returned at once, since the same bytes fail the same way. A retried
+  restore lands late, which is safe only because the restore FILLS — this rail's
+  (the bullet above), and since 2026-10-29 the posts rail's (`ui/feed.md`
+  § Persistence) and the events rail's (`ui/events.md` § Persistence) too — so
+  every rail's launch load retries; a new rail owes the same rule before it may
+  load through `DraftsSync::load`. Because the load can
+  now run for minutes, no app awaits it on a path that holds a page or a build
+  back — web fires it from the manager build without awaiting it. Pinned by
+  `libs/fauna-client-drafts/src/sync.rs`:
+  `a_launch_load_lost_to_the_transport_is_retried_until_it_lands`,
+  `a_launch_load_gives_up_after_the_schedule_with_the_gate_still_shut`,
+  `a_seal_failure_is_returned_at_once`; witnessed end to end by drafts-survive
+  14 (`test_a_draft_from_another_device_never_overwrites_what_you_are_typing`),
+  whose held restore outlives the deadline.
+- **A per-thread draft rests under its conversation's stable key, never the
+  device-local thread id (ruled 2026-10-29).** A `ThreadId` is the counter
+  `t-N` each device assigns in whatever order its threads materialize, so a
+  draft rested under it landed in whichever conversation *another* device —
+  or this one after a relaunch — happened to number the same: the user's words
+  to one person in another person's composer, one tap from a wrong-recipient
+  send. The at-rest key is the thread's routing key (`ThreadKey`), which every
+  device of the user agrees on: the MLS channel for a FaunaMls thread, the
+  participants/subject/reference key for mail. Three consequences. A thread
+  with no portable key yet — a FaunaMls thread whose group has not bound its
+  channel — stays off the blob. A restored draft whose conversation this device
+  does not hold yet is **parked, not dropped**, and filled under the FILL rule
+  above the moment the conversation materializes. And every snapshot re-emits
+  the parked drafts, or this device's first autosave would erase the other
+  device's draft from the plane. Only the at-rest form changed: the in-memory
+  store and the content index still key on local ids. The blob shape changed
+  outright, with no read-fallback for `thread_id` entries, inside the 0.1.x
+  compat-free window
+  ([`../architecture/version-compatibility.md`](../architecture/version-compatibility.md)
+  § Dimension 2, the fifth exception). Pinned by
+  `libs/fauna-conversations/src/store/drafts.rs`:
+  `a_restore_fills_the_same_conversation_under_a_different_local_id`,
+  `a_parked_draft_fills_when_its_thread_lands`,
+  `a_snapshot_re_emits_a_parked_draft`; and in the manager by
+  `a_restored_draft_follows_its_conversation_not_the_local_thread_id`.
 - **A restore that FILLS a recipient picker owes it a probe (ruled 2026-09-21).**
   What rests of the picker is the user-authored half — `raw_input` and the
   committed `chips` — while `resolve_state` rests `Idle`, because a probe cannot

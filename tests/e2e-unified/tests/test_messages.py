@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import require_surface
 
 pytestmark = [pytest.mark.tier1, pytest.mark.tier_3]
 
@@ -59,13 +59,11 @@ class TestStateMessages:
         """
         state = app.driver.get_state()
         assert state is not None, "State protocol returned None -- agent may not be running"
-        if "messages" not in state:
-            skip_unbuilt(
-                app.driver,
-                surface="the state protocol's `messages` field",
-                detail="the unified message display system is not yet serialized into state on any client",
-                tracked="test_messages.py module docstring",
-            )
+        require_surface(app.driver, "state-protocol-messages-field")
+        assert "messages" in state, (
+            "the state protocol has no `messages` key on an app whose registry "
+            f"entry lists it. Available keys: {list(state.keys())}"
+        )
         messages = state["messages"]
         assert isinstance(messages, dict), f"messages should be a dict, got {type(messages)}"
         for level in ("error", "warning", "info"):

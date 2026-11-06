@@ -8,7 +8,7 @@
 //!
 //! | key | value |
 //! |---|---|
-//! | `self` | the account's ONE [`MailStateRow`] — the MSEK, the succession burns, the rotation sentinel, the three flags, the row's own stamp |
+//! | `self` | the account's ONE [`MailStateRow`] — the MSEK, the succession burns, the rotation sentinel, the `mail_enabled` flag (and the two retired DAV-flag slots), the row's own stamp |
 //! | `credential/<credential_id>` | one [`MailCredential`], the value naming its key |
 //! | `generation/<fingerprint>` | one retired MSEK generation — a [`PriorMsekRetirement`] (the MSEK and its retirement instant), keyed by its [`MsekFingerprint`] in lowercase hex |
 //!
@@ -26,13 +26,13 @@
 //! **The joins.** [`MailStateRow::merge`] runs the MSEK and burn halves
 //! [`MailConfig::merge`] runs — the same functions — on the MSEK's own stamp
 //! (`msek_at`), the sentinel latest-wins on ITS own stamp
-//! (`pending_rotation_at`), then the three flags as ONE latest-wins record on
-//! `updated_at`, `mail_enabled` present-wins; each stamp advances only on a
+//! (`pending_rotation_at`), then the `mail_enabled` flag latest-wins on
+//! `updated_at`, present-wins; each stamp advances only on a
 //! write that changes its half ([`MailStateRow::written_over`], the door's
 //! rule), and the sentinel is cleared only by a clear naming its
 //! MSEK′ ([`MailStateRow::rotation_cleared`]). [`MailConfig::merge`] decides
-//! the recreatable FIVE (the credential list and the sentinel ride with the
-//! flags there) on its caller-supplied record instants, the one ruled
+//! the recreatable THREE (the credential list and the sentinel ride with the
+//! flag there) on its caller-supplied record instants, the one ruled
 //! divergence between the two. [`MailCredential::merge`] ORs the two monotone markers and takes
 //! the remainder on the row's stamp. A generation row is immutable once
 //! written: its MSEK is its key's preimage, and two devices recording one
@@ -173,11 +173,20 @@ pub struct MailStateRow {
     pub pending_rotation_at: Timestamp,
     /// [`MailConfig::mail_enabled`].
     pub mail_enabled: Option<bool>,
-    /// [`MailConfig::caldav_enabled`].
-    pub caldav_enabled: bool,
-    /// [`MailConfig::carddav_enabled`].
-    pub carddav_enabled: bool,
-    /// The flags' stamp — what the three flags' latest-wins decision compares.
+    /// The retired per-account CalDAV flag's at-rest slot. The flag itself
+    /// was retired on 2026-10-26 in favour of the deployment's toggle
+    /// (`mail-credentials.md` § Trigger taxonomy, *The calendar-only
+    /// credential*): nothing reads it, every write of this build sets it
+    /// `false`, and the join ORs it. The slot stays only because every state row
+    /// written before then carries the key, and this row decodes strictly —
+    /// dropping it would refuse the one row that holds the account's MSEK.
+    #[serde(rename = "caldav_enabled")]
+    pub retired_caldav_enabled: bool,
+    /// The retired per-account CardDAV flag's slot — as
+    /// [`Self::retired_caldav_enabled`].
+    #[serde(rename = "carddav_enabled")]
+    pub retired_carddav_enabled: bool,
+    /// The flags' stamp — what the `mail_enabled` latest-wins decision compares.
     pub updated_at: Timestamp,
 }
 
@@ -185,8 +194,8 @@ impl MailStateRow {
     /// **The state row's join** (`config-dissolution.md` § *The mail plane*):
     /// the MSEK present-wins / rotation-LWW on `msek_at` and the burn
     /// min-union — the functions [`MailConfig::merge`] runs; the sentinel
-    /// latest-wins on `pending_rotation_at`; the three flags as ONE
-    /// latest-wins decision on `updated_at`, `mail_enabled` present-wins.
+    /// latest-wins on `pending_rotation_at`; `mail_enabled` latest-wins on
+    /// `updated_at`, present-wins; the retired DAV slots OR (never read).
     /// Each joined stamp is its half's winner's.
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
@@ -211,13 +220,9 @@ impl MailStateRow {
             self.pending_rotation.clone()
         };
         let (win, lose) = if crate::latest_wins::theirs_wins(
-            &(self.mail_enabled, self.caldav_enabled, self.carddav_enabled),
+            &self.mail_enabled,
             self.updated_at,
-            &(
-                other.mail_enabled,
-                other.caldav_enabled,
-                other.carddav_enabled,
-            ),
+            &other.mail_enabled,
             other.updated_at,
         ) {
             (other, self)
@@ -232,8 +237,10 @@ impl MailStateRow {
             pending_rotation_at: self.pending_rotation_at.max(other.pending_rotation_at),
             // Present-wins, the winner's own value first ([`MailConfig::merge`]'s rule).
             mail_enabled: win.mail_enabled.or(lose.mail_enabled),
-            caldav_enabled: win.caldav_enabled,
-            carddav_enabled: win.carddav_enabled,
+            // Never read; OR keeps the join a lattice over a row written
+            // before the retirement (idempotent on its own `true`).
+            retired_caldav_enabled: self.retired_caldav_enabled || other.retired_caldav_enabled,
+            retired_carddav_enabled: self.retired_carddav_enabled || other.retired_carddav_enabled,
             updated_at: self.updated_at.max(other.updated_at),
         }
     }
@@ -254,14 +261,13 @@ impl MailStateRow {
                 }),
             pending_rotation_at: at,
             mail_enabled: config.mail_enabled,
-            caldav_enabled: config.caldav_enabled,
-            carddav_enabled: config.carddav_enabled,
+            retired_caldav_enabled: false,
+            retired_carddav_enabled: false,
             updated_at: at,
         }
     }
 
-    /// **A write of the flags alone** — the three flags and `mail_enabled` as
-    /// `config` holds them, with the key material AND the rotation sentinel
+    /// **A write of the flag alone** — `mail_enabled` as `config` holds it, with the key material AND the rotation sentinel
     /// left OUT: `msek` absent, the burns empty, `pending_rotation` absent. The
     /// shape every flag write takes; [`Self::written_over`] reads an absent
     /// MSEK or sentinel as no change, so a flag flip made from a replica that
@@ -311,18 +317,12 @@ impl MailStateRow {
             Some(s) if base.pending_rotation.as_ref() != Some(s) => (Some(s.clone()), at),
             _ => (base.pending_rotation.clone(), base.pending_rotation_at),
         };
-        let flags = (
-            self.mail_enabled.or(base.mail_enabled),
-            self.caldav_enabled,
-            self.carddav_enabled,
-        );
-        let updated_at = if flags == (base.mail_enabled, base.caldav_enabled, base.carddav_enabled)
-        {
+        let mail_enabled = self.mail_enabled.or(base.mail_enabled);
+        let updated_at = if mail_enabled == base.mail_enabled {
             base.updated_at
         } else {
             at
         };
-        let (mail_enabled, caldav_enabled, carddav_enabled) = flags;
         Self {
             msek,
             msek_at,
@@ -333,8 +333,8 @@ impl MailStateRow {
             pending_rotation,
             pending_rotation_at,
             mail_enabled,
-            caldav_enabled,
-            carddav_enabled,
+            retired_caldav_enabled: false,
+            retired_carddav_enabled: false,
             updated_at,
         }
     }
@@ -631,8 +631,6 @@ impl MailRows {
             credentials,
             pending_rotation,
             mail_enabled: state.mail_enabled,
-            caldav_enabled: state.caldav_enabled,
-            carddav_enabled: state.carddav_enabled,
             prior_msek_retirements,
             succession_burns: state.succession_burns,
         }
@@ -718,8 +716,6 @@ mod tests {
             credentials: vec![cred("b-mail", 10, 5), cred("a-mail", 20, 5)],
             pending_rotation: None,
             mail_enabled: Some(true),
-            caldav_enabled: true,
-            carddav_enabled: false,
             prior_msek_retirements: vec![PriorMsekRetirement {
                 msek: SecretArray32::new([2; 32]),
                 retired_at_unix: 100,
@@ -890,6 +886,28 @@ mod tests {
         );
     }
 
+    /// A state row written before the per-account DAV flags retired
+    /// (2026-10-26) carries them — set, too, on a DAV-minted account — and
+    /// still decodes strictly: the row holds the account's MSEK.
+    #[test]
+    fn a_state_row_written_with_the_retired_dav_flags_still_decodes() {
+        let older = MailStateRow {
+            retired_caldav_enabled: true,
+            retired_carddav_enabled: true,
+            ..MailStateRow::from_config(&sample(), Timestamp(5))
+        };
+        let bytes = crate::encoding::canonical_encode(&older).unwrap();
+        let MailRecord::State(decoded) = decode_mail_row(STATE_KEY, &bytes).unwrap() else {
+            panic!("the state key decodes a state row");
+        };
+        assert_eq!(decoded.msek, older.msek, "the MSEK is read");
+        assert_eq!(
+            decoded.merge(&decoded),
+            decoded,
+            "the join stays idempotent"
+        );
+    }
+
     /// A recreatable-half write carries no key material and no sentinel — its
     /// MSEK absent at the zero stamp, its burns empty — so the join keeps the
     /// stored MSEK on the stored key stamp and the stored burns, whatever the
@@ -903,7 +921,6 @@ mod tests {
         };
         // A replica that never saw the MSEK flips a flag.
         let stale = MailConfig {
-            caldav_enabled: false,
             mail_enabled: Some(false),
             ..MailConfig::default()
         };
@@ -914,8 +931,7 @@ mod tests {
         let joined = stored.merge(&intent);
         assert_eq!(joined.msek, stored.msek, "the MSEK survives");
         assert_eq!(joined.succession_burns, stored.succession_burns);
-        assert!(!joined.caldav_enabled, "the newer flags win");
-        assert_eq!(joined.mail_enabled, Some(false));
+        assert_eq!(joined.mail_enabled, Some(false), "the newer flag wins");
     }
 
     /// The composite a replica holding only `s` reads.
@@ -942,12 +958,11 @@ mod tests {
         let base = MailStateRow {
             msek: Some(k1.clone()),
             mail_enabled: Some(true),
-            caldav_enabled: true,
             ..MailStateRow::default()
         };
         let base = door_write(&MailStateRow::default(), &base, 5);
-        // Device A swaps in k2 at t7; device B, which has not merged it, flips
-        // CalDAV off at t8.
+        // Device A swaps in k2 at t7; device B, which has not merged it, turns
+        // mail off at t8.
         let a = door_write(
             &base,
             &MailStateRow {
@@ -958,14 +973,18 @@ mod tests {
         );
         assert_eq!(a.msek.as_ref(), Some(&k2), "A's swap committed on A");
         let b_view = MailConfig {
-            caldav_enabled: false,
+            mail_enabled: Some(false),
             ..view(&base)
         };
         let b = door_write(&base, &MailStateRow::recreatable_of(&b_view), 8);
         assert_eq!(a.merge(&b), b.merge(&a), "the join commutes");
         let converged = a.merge(&b);
         assert_eq!(converged.msek.as_ref(), Some(&k2), "the swap survives");
-        assert!(!converged.caldav_enabled, "B's newer flag still wins");
+        assert_eq!(
+            converged.mail_enabled,
+            Some(false),
+            "B's newer flag still wins"
+        );
     }
 
     /// The sentinel twin: a stale replica that never saw a rotation's
@@ -978,7 +997,6 @@ mod tests {
             &MailStateRow {
                 msek: Some(k1),
                 mail_enabled: Some(true),
-                caldav_enabled: true,
                 ..MailStateRow::default()
             },
             5,
@@ -994,7 +1012,7 @@ mod tests {
             7,
         );
         let b_view = MailConfig {
-            caldav_enabled: false,
+            mail_enabled: Some(false),
             ..view(&base)
         };
         let b = door_write(&base, &MailStateRow::recreatable_of(&b_view), 8);
@@ -1005,7 +1023,11 @@ mod tests {
             Some(k2),
             "the sentinel survives"
         );
-        assert!(!converged.caldav_enabled, "B's newer flag still wins");
+        assert_eq!(
+            converged.mail_enabled,
+            Some(false),
+            "B's newer flag still wins"
+        );
     }
 
     /// The sentinel's clear names the MSEK′ it clears: a clear naming another,

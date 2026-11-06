@@ -97,6 +97,82 @@ func TestResolveBuildsRecordOpener(t *testing.T) {
 	}
 }
 
+// TestResolveDerivesPerKindKeysAndOpensEachKind pins the calendar and card key
+// split's bridge leg (`owner-key-material.md` § Path B-sibling-5 / -6): AUTH
+// derives the session's calendar and card seal keys from the session MSEK
+// (equal to what the shared Rust derives from that MSEK), a record sealed to
+// each opens through the session opener by its envelope kind, and a calendar
+// record sealed to the MAIL key opens under nothing — the mail ring never
+// trials a calendar record.
+func TestResolveDerivesPerKindKeysAndOpensEachKind(t *testing.T) {
+	leaf := faunaFfi.GenerateX25519Keypair()
+	snapshotPlaintext, err := faunaFfi.EncodeMlsSnapshotPlaintextV1([]faunaFfi.X25519Keypair{leaf})
+	if err != nil {
+		t.Fatalf("EncodeMlsSnapshotPlaintextV1: %v", err)
+	}
+	snapshotBlob, err := faunaFfi.SealMlsSnapshotBlob(snapshotPlaintext, fixtureActorID, fixtureMSEK)
+	if err != nil {
+		t.Fatalf("SealMlsSnapshotBlob: %v", err)
+	}
+	caller := &mockCaller{
+		validateRecipientActor: fixtureActorID,
+		wrappedBlob:            mustReadFixture(t, "wrapped_msek.bin"),
+		mlsPubkey:              fixtureMLSPubkey,
+		indexKey:               fixtureIndexKey,
+		mlsSnapshotBlob:        snapshotBlob,
+	}
+	sess, err := testAuthMiddleware(caller).resolve(context.Background(),
+		fixtureLocalPart, fixtureDomain, "default", string(fixturePlainPassword), "203.0.113.7")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	defer sess.Close()
+
+	want, err := faunaFfi.DeriveRecipientDavMaterial(fixtureMSEK)
+	if err != nil {
+		t.Fatalf("DeriveRecipientDavMaterial: %v", err)
+	}
+	if string(sess.CalendarPubkey()) != string(want.CalendarPubkey) ||
+		string(sess.CalendarMlkemEk()) != string(want.CalendarMlkemEk) {
+		t.Fatal("the session's calendar key is not the one its MSEK derives")
+	}
+	if string(sess.CardPubkey()) != string(want.CardPubkey) ||
+		string(sess.CardMlkemEk()) != string(want.CardMlkemEk) {
+		t.Fatal("the session's card key is not the one its MSEK derives")
+	}
+
+	opener := sess.RecordOpener()
+	for _, tc := range []struct {
+		name   string
+		kind   mailfauna.RecordKind
+		pubkey []byte
+		ek     []byte
+	}{
+		{"calendar", mailfauna.RecordKindCalendar, sess.CalendarPubkey(), sess.CalendarMlkemEk()},
+		{"card", mailfauna.RecordKindCard, sess.CardPubkey(), sess.CardMlkemEk()},
+	} {
+		sealed, err := mailfauna.SealRecordHybrid(tc.kind, []byte(tc.name+" body"), tc.pubkey, tc.ek)
+		if err != nil {
+			t.Fatalf("SealRecordHybrid(%s): %v", tc.name, err)
+		}
+		pt, err := mailfauna.OpenStoredRecord(opener, sealed)
+		if err != nil {
+			t.Fatalf("open %s record: %v", tc.name, err)
+		}
+		if string(pt) != tc.name+" body" {
+			t.Fatalf("open %s record = %q", tc.name, pt)
+		}
+	}
+
+	calendarToMailKey, err := mailfauna.SealRecordHybrid(mailfauna.RecordKindCalendar, []byte("x"), leaf.Pubkey, nil)
+	if err != nil {
+		t.Fatalf("SealRecordHybrid: %v", err)
+	}
+	if _, err := mailfauna.OpenStoredRecord(opener, calendarToMailKey); err == nil {
+		t.Fatal("a calendar record sealed to the mail key opened; the mail ring must never open a calendar record")
+	}
+}
+
 // TestResolveNoSnapshotLeavesNilOpener pins the snapshot-less arm: AUTH still
 // succeeds (the MUA must complete the well-known-URL dance) and the opener is
 // nil — per-record opens surface the missing-snapshot error at call time.

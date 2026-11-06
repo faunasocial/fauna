@@ -34,7 +34,7 @@ extending ``test_folder_agent_content_sync.py``'s two-seat ground:
    transfer surface reports the pull honestly.
 
 Device ids: the two fixtures carry DISTINCT ids by construction
-(``_E2E_LOGIN_DEVICE_ID`` vs ``_E2E_SHARE_RECIPIENT_DEVICE_ID``) — the
+(``e2e_login_device_id`` vs ``_E2E_SHARE_RECIPIENT_DEVICE_ID``) — the
 lesson: same-id seats classify each other's rows as their own echo and the
 file silently never arrives.
 """
@@ -64,6 +64,7 @@ from helpers.folder_content import (
 from helpers.folder_content import (
     bind_location_under_set as _bind_location_under_set,
 )
+from helpers.macos_firewall import seat_firewall_note
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -74,9 +75,9 @@ pytestmark = [
     # item 9, the same trap on the ceremony's own journey).
     pytest.mark.tui,
     pytest.mark.linux,
-    # macOS joined 2026-09-25 as the MEMBER seat of a tui owner (see
-    # `_OWNER_APPS`); `--app macos,tui` drives it, `--app macos` alone has no
-    # owner to pair with and collects nothing.
+    # macOS joined 2026-09-25 as the MEMBER seat of a tui owner, and on
+    # 2026-10-24 as an OWNER seat too (`_OWNER_APPS`, `_MIXED_PAIRS`):
+    # `--app macos` drives macOS × macOS, `--app macos,tui` adds both mixed arms.
     pytest.mark.macos,
     # windows joined 2026-10-10 as an OWNER and a MEMBER seat (it has
     # `folder-member-role-select`, and its TestAgent carries the three serve /
@@ -103,17 +104,21 @@ _SUPPORTED_APPS = ("tui", "linux", "macos", "windows")
 
 #: The apps that can be the OWNER seat of this journey: the choreography has
 #: the owner promote the member to **writer** (readers never bind engines),
-#: which needs `folder-member-role-select`. macOS has no owner-side
-#: promote-to-writer UI yet — the id is declared debt there — so it takes the
-#: MEMBER seat of a tui owner instead, the same pairing
-#: `test_macos_writer_member_decrypts_owner_upload` already runs on macOS. Grow
-#: this the day macOS (or another leg) gains the control, and its own leg is
-#: then also proven as the SERVING seat.
-_OWNER_APPS = ("tui", "linux", "windows")
+#: which needs `folder-member-role-select`. Every supported app now carries it
+#: (macOS since the shared FaunaKit `FolderSharingViews` grant surface), so
+#: each app's leg is proven as the SERVING seat as well as the member one.
+_OWNER_APPS = ("tui", "linux", "macos", "windows")
 
 #: The owner a supported app that cannot own drives its member seat against —
 #: the lead app, which is also the one macOS can host next to macOS.
 _LEAD_OWNER_APP = "tui"
+
+#: Mixed (owner, member) pairs run beside the same-app ones, both directions:
+#: macOS's member seat was first proven under a tui owner and keeps that arm,
+#: and its serving half is witnessed against the lead app's member too — the
+#: cross-app pairing a defect in shared glue would otherwise hide behind a
+#: same-app arm whose two sides break alike.
+_MIXED_PAIRS = (("tui", "macos"), ("macos", "tui"))
 
 
 def _share_plane_seat_pairs():
@@ -134,6 +139,11 @@ def _share_plane_seat_pairs():
             pairs.append((app, app))
         elif _LEAD_OWNER_APP in available:
             pairs.append((_LEAD_OWNER_APP, app))
+    pairs.extend(
+        (owner, member)
+        for owner, member in _MIXED_PAIRS
+        if owner in available and member in available
+    )
     return pairs
 
 # The scan cadence is no per-folder choice since phase 5 (2026-08-20): every
@@ -197,6 +207,41 @@ def _transfer_surface_readout(driver) -> str:
     return "; ".join(parts)
 
 
+def _await_member_page_clean_after_restart(member_app) -> None:
+    """The member's page holds no error, read off a refresh that reached the
+    restarted nest.
+
+    A Folders refresh that ran with the nest DOWN honestly committed "Failed to
+    load devices: …connection…lost" — a page error that is the nest's absence,
+    not the peer pull's, and that clears only on the next refresh to reach the
+    restarted nest (whose reconnect backs off up to a minute). So the no-error
+    verdict is read off a refresh that BEGAN after the restart and committed
+    (convention 14), revisiting until one reaches the nest; an error the pull
+    left behind still stands.
+    """
+    md = member_app.driver
+    mb = member_app.backups
+
+    def _member_page_clean() -> bool:
+        baseline = devices_refresh_baseline(md)
+        md.set_state(_FEED_NAV)
+        mb.navigate_folders()
+        await_devices_refresh_after(
+            md, baseline, budget_s=_FOLDERS_REFRESH_S, what="the post-restart Folders revisit"
+        )
+        return not member_app.has_error()
+
+    wait_until(
+        _member_page_clean,
+        _PEER_BARRIER_S,
+        interval=2.0,
+        diagnose=lambda: (
+            "[member] the peer pull surfaced an error that outlived the nest's "
+            f"restart: {member_app.error_text()!r}"
+        ),
+    )
+
+
 def _await_member_file(member_folder, filename, expected, member_app):
     """Deadline-poll until the member's bound folder holds ``filename`` ==
     ``expected`` (convention 14 — the shared ``wait_until``)."""
@@ -216,6 +261,7 @@ def _await_member_file(member_folder, filename, expected, member_app):
             "so the failing links are: the member's cached dial row, the "
             "dial/admission, the tail-page pull, or the ingest door. "
             f"app error: {member_app.error_text()!r}\n"
+            + seat_firewall_note(member_app.driver, "member")
             + _agent_diagnosis(member_app, "member")
         ),
     )
@@ -306,7 +352,7 @@ def _share_and_reach_peer_barrier(
     # away and back after each miss (the proven pattern in the content-sync
     # twin) — polling without the toggle reads an empty list forever.
     def _accepted_set_listed():
-        titles = [mb.folder_title(i) for i in range(mb.folder_count())]
+        titles = mb.folder_titles()
         if any(set_name in title for title in titles):
             return True
         mb.navigate_devices()
@@ -436,6 +482,11 @@ def _share_and_reach_peer_barrier(
             + "\n"
             + share_ingest_reading(owner_app.driver, "owner")
             + "\n"
+            # A held inbound flow reads exactly like a dead listener from the
+            # dialer's side (`iroh connect: timed out` every pass, both seats):
+            # name the firewall's verdict on each seat's binaries when it is ON.
+            + seat_firewall_note(md, "member")
+            + seat_firewall_note(owner_app.driver, "owner")
             + _agent_diagnosis(member_app, "member")
             + "\n"
             + _agent_diagnosis(owner_app, "owner")
@@ -521,42 +572,7 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
         # same data dir, no factory reset.
         start_nest_in_place(nest)
 
-    # The Folders visit above ran with the nest DOWN, so its own refresh
-    # honestly committed "Failed to load devices: …connection…lost" — a page
-    # error that is the nest's absence, not the peer pull's, and that clears
-    # only on the next refresh to reach the restarted nest (whose reconnect
-    # backs off up to a minute). So the no-error verdict is read off a refresh
-    # that BEGAN after the restart and committed (convention 14), revisiting
-    # until one reaches the nest; an error the pull left behind still stands.
-    def _member_page_clean() -> bool:
-        baseline = devices_refresh_baseline(md)
-        md.set_state(_FEED_NAV)
-        mb.navigate_folders()
-        await_devices_refresh_after(
-            md, baseline, budget_s=_FOLDERS_REFRESH_S, what="the post-restart Folders revisit"
-        )
-        return not member_app.has_error()
-
-    wait_until(
-        _member_page_clean,
-        _PEER_BARRIER_S,
-        interval=2.0,
-        diagnose=lambda: (
-            "[member] the peer pull surfaced an error that outlived the nest's "
-            f"restart: {member_app.error_text()!r}"
-        ),
-    )
-
-
-#: Apps whose seat publishes the serve tally and takes the serve hold
-#: (`offline_share_hold_serves`, `share_serve_tally`) — the OWNER seat's
-#: doors, so this reads the owner app. macOS binds the plane as a member
-#: (`_SUPPORTED_APPS`) but has not wired the three FFI test doors into its own
-#: agent dispatcher, and could not be the owner here yet (`_OWNER_APPS`); it
-#: joins this and `_PROBE_APPS` together with that. windows joined 2026-10-10
-#: with its TestAgent arms; the remaining native legs (iOS, android) join once
-#: they bind the plane at all.
-_SERVE_HOLD_APPS = ("tui", "linux", "windows")
+    _await_member_page_clean_after_restart(member_app)
 
 
 @pytest.mark.parametrize(
@@ -595,15 +611,9 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
     5. the owner answered each of ``a``, ``b`` and ``c`` exactly once, and
        ``a``, which arrived before the cut, was never asked for again.
     """
-    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.app_surface import app_name, require_surface
 
-    if app_name(folder_share_owner_app[0].driver) not in _SERVE_HOLD_APPS:
-        skip_unbuilt(
-            folder_share_owner_app[0].driver,
-            surface="offline_share_hold_serves / share_serve_tally",
-            detail="the serve hold and the serve tally have no agent arm on this app",
-            tracked="p2p.md § Implementation status today (the resumed-transfer paragraph)",
-        )
+    require_surface(folder_share_owner_app[0].driver, "share-serve-tally")
 
     owner_app, member_app, nest, owner_folder, member_folder, _set_name = (
         _share_and_reach_peer_barrier(
@@ -693,15 +703,13 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
         finally:
             start_nest_in_place(nest)
 
-    assert not member_app.has_error(), (
-        f"[member] the resumed pull surfaced an error: {member_app.error_text()!r}"
-    )
+    _await_member_page_clean_after_restart(member_app)
 
 
 #: Apps whose seat carries the share probe (`offline_share_probe_set`, one
 #: shared call: `share_probe::probe_set_from_args`). Same joining rule as
 #: `_SERVE_HOLD_APPS`.
-_PROBE_APPS = ("tui", "linux", "windows")
+_PROBE_APPS = ("tui", "linux", "macos", "windows")
 
 
 def _share_plane_seat_trios():
@@ -831,7 +839,8 @@ def test_a_person_the_folder_was_never_shared_with_gets_nothing_readable(
 
     assert stranger_report.get("dialed"), (
         "[stranger] the probe never reached the owner's listener, so it proves "
-        f"nothing about the serve door: {stranger_report!r}"
+        f"nothing about the serve door: {stranger_report!r}\n"
+        + seat_firewall_note(owner_app.driver, "owner")
     )
     assert not stranger_report.get("admitted") and stranger_report.get("admit_error"), (
         f"[stranger] the owner admitted a non-member: {stranger_report!r}"

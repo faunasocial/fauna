@@ -52,13 +52,6 @@ impl ProfileState {
             &self.private_form().labels,
         )
     }
-
-    /// The viewer's nickname for the viewed person, when one is set — the
-    /// header's primary line.
-    pub(super) fn viewed_nickname(&self) -> Option<String> {
-        let actor = self.viewing.as_deref()?;
-        self.overlays.as_ref()?.nickname(actor)
-    }
 }
 
 pub(super) fn field(state: &ProfileState, field: &ProfileField) -> Option<String> {

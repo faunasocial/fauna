@@ -62,9 +62,29 @@ internal static class PostMediaOpen
         IFfiFeedManager? manager,
         string hash,
         CancellationToken ct = default,
-        Func<byte[], bool>? detect = null)
+        Func<byte[], bool>? detect = null,
+        IFfiPostBlobHosts? hosts = null,
+        FfiPostBlobHome? home = null)
     {
-        var (fetched, headerAssertsC2pa) = await nest.GetBlobWithC2paAsync(hash, ct);
+        byte[] fetched;
+        bool headerAssertsC2pa;
+        if (hosts is not null)
+        {
+            // The shared post-blob plane (`fauna_client::post_blob`): the post's own
+            // home, passed unchanged, picks the host; a foreign home carries no bearer,
+            // the pin graduates once per home, and the bytes are checked against their
+            // content address before they are returned. The `x-c2pa` pre-filter is the
+            // plane's HEAD, taken only when the GET succeeded.
+            fetched = await hosts.Get(home, hash);
+            // A failed probe costs the badge, never the image (the verdict below fails
+            // closed the same way).
+            try { headerAssertsC2pa = await hosts.HeadHasC2pa(home, hash); }
+            catch (Exception) { headerAssertsC2pa = false; }
+        }
+        else
+        {
+            (fetched, headerAssertsC2pa) = await nest.GetBlobWithC2paAsync(hash, ct);
+        }
         var opened = manager is null ? fetched : manager.OpenMediaBytes(hash, fetched);
 
         if (opened is null || !headerAssertsC2pa) return (opened, false);

@@ -30,7 +30,7 @@ nest and gets the registered handle back:
   the linux app's ``AccountLoaded`` / ``IdentityRefreshed`` write it to
   ``AppState.handle`` (`apps/fauna-linux/src/app.rs:2761`, `:2785`) → the test
   agent's state provider serializes it as ``session.handle``
-  (`apps/fauna-linux/src/main.rs:4862`) → ``driver.get_state("session.handle")``.
+  (`apps/fauna-linux/src/lib.rs:4862`) → ``driver.get_state("session.handle")``.
 
 So the derivation is not a new seam bolted onto the product: it is the wizard's
 shipped "you're already registered on {domain} as {old_handle}" path, read at

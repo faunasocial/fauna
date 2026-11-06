@@ -65,6 +65,15 @@ internal fun NestRulesCard(summary: NestRulesSummary) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.SETTINGS_NEST_RULES_VERSION),
             )
+            // The whole document's note, unscoped — a rule's own sits in its item.
+            summary.notAppliedSentence?.let { why ->
+                Text(
+                    localized(why).orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.SETTINGS_NEST_RULES_INERT_NOTICE),
+                )
+            }
             for (rule in summary.rules) {
                 Column(modifier = Modifier.padding(vertical = 4.dp)) {
                     Text(ruleLine(rule), modifier = Modifier.testTag(Ids.SETTINGS_NEST_RULES_ITEM))
@@ -82,8 +91,11 @@ internal fun NestRulesCard(summary: NestRulesSummary) {
     }
 }
 
+/** One rule as both rules surfaces list it — this one and the joining surface
+ *  ([com.fauna.app.ui.screen.onboarding.NestRulesJoining]): verdict, level where
+ *  the rule has one, and the nest's own reason verbatim. */
 @Composable
-private fun ruleLine(rule: NestRuleLine): String {
+internal fun ruleLine(rule: NestRuleLine): String {
     val verdict = localized(rule.verdict).orEmpty()
     val level = rule.level
     return if (level != null) {

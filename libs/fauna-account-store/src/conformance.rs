@@ -90,6 +90,7 @@ macro_rules! store_conformance_suite {
             the_version_pair_rises_per_key_and_compares_as_numbers,
             a_lost_seq_race_lands_no_state_entry_on_either_plane,
             an_entry_moved_since_the_read_refuses_the_pair_on_either_plane,
+            a_group_cache_write_lands_the_cell_and_no_journal_row,
             a_second_handle_sees_the_first_handles_commits,
             relay_rows_are_swept_by_the_generation_their_header_names,
             relay_retire_shadowed_deletes_only_the_other_items_at_the_coordinate,
@@ -849,6 +850,51 @@ pub mod cases {
             first.state_get("k", "self").await.unwrap().unwrap().value,
             b"second"
         );
+    }
+
+    /// The group plane's fold cache (`group-set.md` decision 5, rule (ii)):
+    /// a cache write sets the cell — a tombstoned value included, the "no
+    /// row" a fold may answer — under the same version check as the paired
+    /// write, and lands no journal row.
+    pub async fn a_group_cache_write_lands_the_cell_and_no_journal_row<M: Medium>() {
+        let medium = M::fresh();
+        let b = medium.open().await;
+        let group = |entry_version: u64, value: &[u8], tombstone: bool| StateEntry {
+            scope: "state".into(),
+            kind: "g".into(),
+            entry_version,
+            tombstone,
+            ..entry("g", "self", value)
+        };
+        assert_eq!(
+            b.group_state_cache_put(&group(1, b"winner", false))
+                .await
+                .unwrap(),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            b.group_state_cache_put(&group(1, b"stale", false))
+                .await
+                .unwrap(),
+            InsertOutcome::EntryMoved,
+            "a version that is not the stored one plus one"
+        );
+        assert_eq!(
+            b.group_state_cache_put(&group(2, b"cleared", true))
+                .await
+                .unwrap(),
+            InsertOutcome::Inserted
+        );
+        let held = b
+            .group_state_get("state", "g", "self")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (held.value.as_slice(), held.tombstone),
+            (&b"cleared"[..], true)
+        );
+        assert_eq!(b.max_writer_seq(&writer(7)).await.unwrap(), None);
     }
 
     /// Two handles on one medium are two connections to one store: what one

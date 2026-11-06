@@ -484,6 +484,8 @@ private fun MainPostContent(
             }
             Icon(Icons.Default.ChatBubbleOutline, stringResource(R.string.common_reply), modifier = Modifier.size(20.dp))
         }
+        // The same per-emoji reaction pills the list card paints, unscoped here.
+        PostReactionPills(post, vm)
     }
 }
 

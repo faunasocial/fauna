@@ -31,6 +31,11 @@ pub enum FakeCall {
     RequestP2pOff {
         device_id: String,
     },
+    /// `fauna.sync.devices.rename` — the sealed name as the machine minted it.
+    RenameDevice {
+        device_id: String,
+        label_sealed: Vec<u8>,
+    },
     DeleteFolder {
         name: String,
     },
@@ -119,6 +124,7 @@ pub struct FakeDevicesNestApi {
     /// `Some` overrides the next write of the matching kind with an error.
     remove_device_response: Mutex<Option<Result<(), DevicesApiError>>>,
     request_p2p_off_response: Mutex<Option<Result<(), DevicesApiError>>>,
+    rename_device_response: Mutex<Option<Result<(), DevicesApiError>>>,
     delete_folder_response: Mutex<Option<Result<(), DevicesApiError>>>,
     resolve_conflict_response: Mutex<Option<Result<(), DevicesApiError>>>,
     set_paths_response: Mutex<Option<Result<(), DevicesApiError>>>,
@@ -166,11 +172,18 @@ impl FakeDevicesNestApi {
     pub fn fail_lists(&self, err: DevicesApiError) {
         *self.list_response.lock().unwrap() = Some(err);
     }
+    /// Undo [`Self::fail_lists`]: the `list_*` reads answer again.
+    pub fn heal_lists(&self) {
+        *self.list_response.lock().unwrap() = None;
+    }
     pub fn set_request_p2p_off_response(&self, r: Result<(), DevicesApiError>) {
         *self.request_p2p_off_response.lock().unwrap() = Some(r);
     }
     pub fn set_remove_device_response(&self, r: Result<(), DevicesApiError>) {
         *self.remove_device_response.lock().unwrap() = Some(r);
+    }
+    pub fn set_rename_device_response(&self, r: Result<(), DevicesApiError>) {
+        *self.rename_device_response.lock().unwrap() = Some(r);
     }
     pub fn set_delete_folder_response(&self, r: Result<(), DevicesApiError>) {
         *self.delete_folder_response.lock().unwrap() = Some(r);
@@ -276,6 +289,34 @@ impl DevicesNestApi for FakeDevicesNestApi {
             .unwrap()
             .clone()
             .unwrap_or(Ok(()))
+    }
+
+    /// Records the call and, on success, rests the seal on the fake's own row
+    /// the way the nest does (plaintext emptied), so a `refresh` after it
+    /// reads the new name back.
+    async fn rename_device(
+        &self,
+        device_id: &str,
+        label_sealed: Vec<u8>,
+    ) -> Result<(), DevicesApiError> {
+        self.calls.lock().unwrap().push(FakeCall::RenameDevice {
+            device_id: device_id.to_string(),
+            label_sealed: label_sealed.clone(),
+        });
+        self.rename_device_response
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Ok(()))?;
+        let mut devices = self.devices.lock().unwrap();
+        let Some(row) = devices.iter_mut().find(|d| d.device_id == device_id) else {
+            return Err(DevicesApiError::NotFound {
+                detail: "device not found".into(),
+            });
+        };
+        row.label = String::new();
+        row.label_sealed = Some(fauna_protocol::ByteBuf::from(label_sealed));
+        Ok(())
     }
 
     async fn remove_device(&self, device_id: &str) -> Result<(), DevicesApiError> {

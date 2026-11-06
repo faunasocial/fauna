@@ -167,6 +167,14 @@ const MARKER_PREFIX: &str = "# Fauna SSH door: ";
 /// <domain>` entry appended to `config`, replacing the entry an earlier door
 /// for the same domain left (a re-created box mints a fresh key). The entry
 /// names the key by its absolute path.
+///
+/// On windows, which has no mode bits, the same two guarantees are an
+/// owner-only DACL (`fauna_ipc::win_acl::restrict_to_owner`) on the key file,
+/// set before its bytes are written, and on the directory when this creates it.
+/// Inheritance alone is not enough: a key takes whatever its directory hands
+/// down, and the Windows OpenSSH client refuses one that names anyone but its
+/// owner, SYSTEM or Administrators — measured on a directory that handed down
+/// `OWNER RIGHTS` (`installers/vps.md` § The SSH door → *The key*).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install_key(
     ssh_dir: &std::path::Path,
@@ -189,6 +197,8 @@ pub fn install_key(
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700))?;
         }
+        #[cfg(windows)]
+        restrict_to_owner(ssh_dir)?;
     }
 
     let mut n = 1u32;
@@ -212,6 +222,15 @@ pub fn install_key(
             Err(e) => return Err(e),
         }
     };
+    // The windows twin of the `0o600` the open above sets on unix, made before
+    // a byte of the key is written; a file that could not be narrowed is
+    // removed empty, never left holding the key under its inherited ACL.
+    #[cfg(windows)]
+    if let Err(e) = restrict_to_owner(&key_path) {
+        drop(file);
+        let _ = std::fs::remove_file(&key_path);
+        return Err(e);
+    }
     file.write_all(key.private_openssh.as_bytes())?;
     file.sync_all()?;
 
@@ -221,6 +240,13 @@ pub fn install_key(
         key_path,
         command: format!("ssh {domain}"),
     })
+}
+
+/// [`fauna_ipc::win_acl::restrict_to_owner`] as an `io::Error`, the error type
+/// [`install_key`] speaks.
+#[cfg(windows)]
+fn restrict_to_owner(path: &std::path::Path) -> std::io::Result<()> {
+    fauna_ipc::win_acl::restrict_to_owner(path).map_err(|e| std::io::Error::other(format!("{e:#}")))
 }
 
 /// `config` with this domain's earlier door entry (from its marker line to the
@@ -285,6 +311,14 @@ fn write_host_entry(
         if let Ok(meta) = std::fs::metadata(&target) {
             // Keep the admin's own mode on a config they already had.
             f.set_permissions(meta.permissions())?;
+        }
+        // A config this writes fresh is owner-only, as the unix `0o600` above
+        // makes it. One the admin already had is replaced by a file that takes
+        // its directory's ACL — not yet a copy of the old file's own, the one
+        // place this falls short of the unix arm's kept mode.
+        #[cfg(windows)]
+        if std::fs::metadata(&target).is_err() {
+            restrict_to_owner(&tmp)?;
         }
         f.write_all(kept.as_bytes())?;
         f.sync_all()?;
@@ -377,16 +411,27 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    fn mode(p: &Path) -> u32 {
+    /// Owner-only, as the platform spells it: `unix_mode` on unix; on windows,
+    /// which has no mode bits, a DACL that names the current user alone
+    /// (`fauna_ipc::win_acl`). Until 2026-11-05 this helper answered `0o600` on
+    /// windows unread, so the asserts below passed there whatever the file's ACL
+    /// was — and a key inheriting `OWNER RIGHTS` from its directory went out
+    /// unseen until the Windows OpenSSH client refused it.
+    fn assert_owner_only(p: &Path, unix_mode: u32) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, unix_mode, "{}", p.display());
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = p;
-            0o600
+            let _ = unix_mode;
+            assert!(
+                fauna_ipc::win_acl::is_owner_only(p).unwrap(),
+                "{} grants someone besides its owner",
+                p.display()
+            );
         }
     }
 
@@ -398,8 +443,9 @@ mod tests {
         let got = install_key(&ssh, "door.example.org", &k).unwrap();
         assert_eq!(got.key_path, ssh.join("fauna-door.example.org"));
         assert_eq!(got.command, "ssh door.example.org");
-        assert_eq!(mode(&ssh), 0o700);
-        assert_eq!(mode(&got.key_path), 0o600);
+        assert_owner_only(&ssh, 0o700);
+        assert_owner_only(&got.key_path, 0o600);
+        assert_owner_only(&ssh.join("config"), 0o600);
         assert_eq!(
             std::fs::read_to_string(&got.key_path).unwrap(),
             *k.private_openssh
@@ -423,6 +469,9 @@ mod tests {
 
         let first = install_key(&ssh, "a.example", &mint("a.example")).unwrap();
         assert_eq!(first.key_path, ssh.join("fauna-a.example-2"));
+        // An existing directory keeps its own ACL (as unix keeps an existing
+        // directory's mode), but the key in it is still the owner's alone.
+        assert_owner_only(&first.key_path, 0o600);
         assert_eq!(
             std::fs::read_to_string(ssh.join("fauna-a.example")).unwrap(),
             "the admin's own file"

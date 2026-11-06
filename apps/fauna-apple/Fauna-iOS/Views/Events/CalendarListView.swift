@@ -244,6 +244,12 @@ struct CalendarListView: View {
             .onChange(of: reloadToken) {
                 vm.selectedEvent = nil
             }
+            // The test agent's `nav_back` (the back gesture): pop the pushed
+            // detail, exactly as the nav-bar back does.
+            .onChange(of: appState.navBackGeneration) {
+                guard appState.selectedTab == "more", appState.moreSelectedView == "events" else { return }
+                vm.selectedEvent = nil
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     HStack(spacing: 2) {

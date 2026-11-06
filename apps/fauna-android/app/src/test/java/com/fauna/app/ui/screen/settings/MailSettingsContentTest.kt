@@ -383,6 +383,14 @@ class MailSettingsContentTest {
         assert(resumed)
     }
 
+    /** mail-settings.md § Architectural rules 5: with a rotation unfinished the
+     *  rotate-keys button is disabled so a second one cannot start. */
+    @Test
+    fun anUnfinishedRotationDisablesTheRotateKeysButton() {
+        render(credentials = listOf(cred("k1")), pendingRotation = PendingRotationStatus(credentialsRemaining = listOf("a")))
+        composeTestRule.onNodeWithTag("mail-settings-rotate-keys-button").performScrollTo().assertIsNotEnabled()
+    }
+
     @Test
     fun disableMailRequiresConfirm() {
         // Flipping the enabled-toggle off opens the destructive confirm dialog;
@@ -523,5 +531,12 @@ class MailSettingsContentTest {
         render(enabled = true, servingEnabled = true, onSetServingEnabled = { set = it })
         composeTestRule.onNodeWithTag("mail-settings-serve-here-toggle").performScrollTo().performClick()
         assertEquals(false, set)
+    }
+
+    @Test
+    fun serveHereToggleReportsItsStateToTheDriver() {
+        render(enabled = true, servingEnabled = false)
+        composeTestRule.onNodeWithTag("mail-settings-serve-here-toggle").performScrollTo()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "off"))
     }
 }
